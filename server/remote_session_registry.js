@@ -15,10 +15,20 @@ class RemoteSessionRegistry {
         this.openRequestTtlMs = Number.isSafeInteger(options.openRequestTtlMs)
             && options.openRequestTtlMs > 0
             ? options.openRequestTtlMs : this.tombstoneTtlMs;
+        this.cleanupRetryInitialMs = Number.isSafeInteger(options.cleanupRetryInitialMs)
+            && options.cleanupRetryInitialMs > 0 ? options.cleanupRetryInitialMs : 500;
+        this.cleanupRetryMaxMs = Number.isSafeInteger(options.cleanupRetryMaxMs)
+            && options.cleanupRetryMaxMs >= this.cleanupRetryInitialMs
+            ? options.cleanupRetryMaxMs : Math.max(5000, this.cleanupRetryInitialMs);
         this.maximumTombstones = Number.isSafeInteger(options.maximumTombstones)
             && options.maximumTombstones > 0 ? options.maximumTombstones : 4096;
         this.maximumOpenRequests = Number.isSafeInteger(options.maximumOpenRequests)
-            && options.maximumOpenRequests > 0 ? options.maximumOpenRequests : 4096;
+            && options.maximumOpenRequests > 0
+            ? options.maximumOpenRequests : this.maximumTombstones;
+        if (this.maximumTombstones < this.maximumOpenRequests) {
+            throw new RangeError(
+                'maximumTombstones must be at least maximumOpenRequests');
+        }
         // `now` is retained as the deterministic-test alias. Production passes
         // an explicitly monotonic provider so wall-clock corrections cannot
         // extend or shorten a strict network lease.
@@ -132,6 +142,10 @@ class RemoteSessionRegistry {
             degradedEndpoints: new Set(),
             teardownId: null,
             teardownReason: null,
+            teardownDispatchStarted: false,
+            cleanupDispatchAttempts: 0,
+            cleanupLastDispatchAt: null,
+            cleanupNextRetryAt: null,
             sceneRunId: null,
             activeUploadIds: new Set(),
             openRequestId: requestId,
@@ -413,6 +427,10 @@ class RemoteSessionRegistry {
         session.phase = 'Terminating';
         session.teardownId = this.idFactory();
         session.teardownReason = String(reason || 'closed').slice(0, 128);
+        session.teardownDispatchStarted = false;
+        session.cleanupDispatchAttempts = 0;
+        session.cleanupLastDispatchAt = null;
+        session.cleanupNextRetryAt = null;
         session.graceDeadlineAt = null;
         session.graceDeadlineEpochMs = null;
         session.openingDeadlineAt = null;
@@ -432,6 +450,45 @@ class RemoteSessionRegistry {
         session.phase = 'CleanupPending';
         session.updatedAt = now;
         return { ok: true, session };
+    }
+
+    recordCleanupDispatch(remoteSessionId, teardownId, now = this.now()) {
+        const session = this.get(remoteSessionId);
+        if (!session || typeof teardownId !== 'string' || !teardownId
+            || session.teardownId !== teardownId
+            || (session.phase !== 'Terminating' && session.phase !== 'CleanupPending')
+            || !Number.isFinite(now)) {
+            return { ok: false, error: 'invalid_teardown_dispatch' };
+        }
+        const previousAttempts = Number.isSafeInteger(session.cleanupDispatchAttempts)
+            && session.cleanupDispatchAttempts >= 0 ? session.cleanupDispatchAttempts : 0;
+        session.cleanupDispatchAttempts = Math.min(
+            Number.MAX_SAFE_INTEGER, previousAttempts + 1);
+        session.cleanupLastDispatchAt = now;
+        const exponent = Math.min(30, session.cleanupDispatchAttempts - 1);
+        const retryDelay = Math.min(
+            this.cleanupRetryMaxMs,
+            this.cleanupRetryInitialMs * (2 ** exponent));
+        session.cleanupNextRetryAt = now + retryDelay;
+        session.updatedAt = now;
+        return { ok: true, session, retryDelay };
+    }
+
+    dueCleanupRetries(now = this.now()) {
+        const due = [];
+        for (const session of this.sessions.values()) {
+            if ((session.phase !== 'Terminating' && session.phase !== 'CleanupPending')
+                || !session.teardownId
+                || !Number.isSafeInteger(session.cleanupDispatchAttempts)
+                || session.cleanupDispatchAttempts < 1) {
+                continue;
+            }
+            if (!Number.isFinite(session.cleanupNextRetryAt)
+                || now >= session.cleanupNextRetryAt) {
+                due.push(session);
+            }
+        }
+        return due;
     }
 
     acknowledgeCleanup(remoteSessionId, teardownId, targetEndpointId, result, now = this.now()) {
@@ -566,11 +623,31 @@ class RemoteSessionRegistry {
     }
 
     #trimTombstones(now) {
+        // OPEN and CLOSE insertion order may differ. Retain terminal evidence
+        // referenced by every live idempotency record instead of assuming the
+        // two FIFO maps will evict matching transactions in lockstep.
+        this.#trimOpenRequests(now);
+        const retainedRequestSessions = new Set();
+        for (const request of this.openRequests.values()) {
+            retainedRequestSessions.add(request.remoteSessionId);
+        }
         for (const [id, session] of this.tombstones) {
-            if (now - session.closedAt >= this.tombstoneTtlMs) this.tombstones.delete(id);
+            if (now - session.closedAt >= this.tombstoneTtlMs
+                && !retainedRequestSessions.has(id)) {
+                this.tombstones.delete(id);
+            }
         }
         while (this.tombstones.size > this.maximumTombstones) {
-            this.tombstones.delete(this.tombstones.keys().next().value);
+            let evicted = false;
+            for (const id of this.tombstones.keys()) {
+                if (retainedRequestSessions.has(id)) continue;
+                this.tombstones.delete(id);
+                evicted = true;
+                break;
+            }
+            // Constructor validation guarantees that retained request IDs can
+            // pin at most maximumTombstones distinct terminal sessions.
+            if (!evicted) break;
         }
     }
 }

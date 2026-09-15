@@ -201,12 +201,31 @@ private:
     void restoreProjectCanvas(ClientWorkspace& workspace);
     void terminateProjectRemoteSession(const QString& targetEndpointId,
                                        bool attemptRemote);
+    bool hasPendingOutgoingSessionClose(
+        const QString& targetEndpointId,
+        const QString& remoteSessionId = QString()) const;
+    void rememberPendingOutgoingSessionClose(
+        const QString& targetEndpointId,
+        const QString& remoteSessionId,
+        quint64 generation);
+    bool retryPendingOutgoingSessionClose(const QString& targetEndpointId,
+                                          const QString& reason);
+    bool hasCancelledInitialOpenForTarget(
+        const QString& targetEndpointId) const;
+    bool finalizePendingOutgoingSessionClose(
+        const QString& targetEndpointId,
+        const QString& remoteSessionId,
+        quint64 generation,
+        bool allowReplacementOpen);
     void handleRemoteSessionReady(const QJsonObject& envelope, bool resumed);
     void handleRemoteSessionSnapshot(const QJsonObject& envelope);
     void handleRemoteSessionLeaseState(const QJsonObject& envelope);
     void handleRemoteSessionTerminating(const QJsonObject& envelope);
     void handleRemoteRendererTeardownSettled(const QString& remoteSessionId,
                                              bool success);
+    void enqueueRendererTeardown(const QString& remoteSessionId);
+    void startNextPendingRendererTeardown(
+        const QString& excludedRemoteSessionId = QString());
     void beginTerminalIncomingCacheCleanup(const QString& reasonCode);
     void finishTerminalIncomingCacheCleanupIfReady();
     void handleRemoteSessionClosed(const QJsonObject& envelope);
@@ -214,7 +233,8 @@ private:
     void updateRemoteClientAvailability(const QString& targetEndpointId,
                                         const QString& status);
     void clearRemoteSessionRuntimeState(const QString& targetEndpointId,
-                                        bool connectionLost);
+                                        bool connectionLost,
+                                        bool teardownPending = false);
     void clearDeletedProjectFromWorkspace(const QString& targetEndpointId);
     void destroyWorkspaceCanvasIfUnused(const QString& targetEndpointId);
     void updateWorkspaceCapabilities(const QString& targetEndpointId);
@@ -297,8 +317,44 @@ private:
     QHash<QString, QString> m_remoteSessionOpenTargetByRequestId;
     QSet<QString> m_remoteSessionOpenPendingTargets;
     QSet<QString> m_remoteSessionOpenSuppressedTargets;
-    QSet<QString> m_cancelledInitialOpenTargets;
+    // An explicit selection made while the previous session is still being
+    // torn down is durable until exactly one replacement OPEN is dispatched.
+    // This is intentionally separate from discovery and Project state.
+    QSet<QString> m_remoteSessionOpenDesiredTargets;
+    // A session closed specifically by WorkspaceManager's inactivity deadline
+    // gets one automatic foreground reopen when UI activity resumes. Other
+    // terminal causes never populate this set.
+    QSet<QString> m_inactivityExpiredSessionTargets;
+    // Cancellation is correlated to the exact OPEN request and, once known,
+    // the exact session. A target-only flag can incorrectly cancel a later
+    // user-initiated OPEN for the same device.
+    QHash<QString, QString> m_cancelledInitialOpenTargetByRequestId;
+    QHash<QString, QString> m_cancelledInitialOpenSessionByTarget;
     QSet<QString> m_locallyTerminatingRemoteSessions;
+
+    struct PendingOutgoingSessionClose {
+        QString remoteSessionId;
+        quint64 generation = 0;
+        // A CLOSE must be retried once on every authenticated transport. The
+        // RemoteSession generation alone does not change on reconnect.
+        quint64 closeDispatchedOnConnectionGeneration = 0;
+    };
+    struct OutgoingSessionCloseRequest {
+        QString targetEndpointId;
+        QString remoteSessionId;
+        quint64 generation = 0;
+    };
+    // Keyed by the peer endpoint so a late Active/Resumed event for the same
+    // RemoteSession can never restore command-capable state after local close.
+    QHash<QString, PendingOutgoingSessionClose>
+        m_pendingOutgoingSessionCloses;
+    QHash<QString, OutgoingSessionCloseRequest>
+        m_outgoingSessionCloseRequestById;
+    // Last authenticated outgoing identity remains available across a
+    // transport reconnect, allowing replayed old tombstones to be rejected
+    // even before the current session has been rebound into the coordinator.
+    QHash<QString, QString> m_currentOutgoingSessionIdByTarget;
+    QHash<QString, quint64> m_currentOutgoingSessionGenerationByTarget;
 
     struct PendingTeardownAck {
         QString teardownId;
@@ -313,8 +369,14 @@ private:
         QString ownerEndpointId;
         QString teardownId;
         quint64 generation = 0;
+        bool rendererTeardownStarted = false;
     };
     QHash<QString, PendingRendererTeardown> m_pendingRendererTeardowns;
+    // RemoteSceneController owns one target-wide renderer graph. This shared
+    // FIFO serializes protocol teardown, transport-terminal cleanup, and clean
+    // shutdown instead of letting those independent callers race admission.
+    QList<QString> m_pendingRendererTeardownOrder;
+    QString m_activeRendererTeardownSessionId;
     QHash<QString, PendingTeardownAck> m_pendingTeardownAcks;
     QSet<QString> m_terminalRendererPendingSessionIds;
     QSet<QString> m_terminalIncomingSessionFilter;

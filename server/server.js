@@ -3,7 +3,7 @@ const { v4: uuidv4 } = require('uuid');
 const crypto = require('node:crypto');
 const { loadServerConfig } = require('./config');
 const { PROTOCOL_VERSION, createChallenge, verifyAuthResponse } = require('./device_auth');
-const { RemoteSessionRegistry } = require('./remote_session_registry');
+const { RemoteSessionRegistry, TERMINAL_PHASES } = require('./remote_session_registry');
 const { ProtocolMetrics } = require('./protocol_metrics');
 const { isAllowedMediaExtension } = require('./media_format_contract');
 const {
@@ -342,7 +342,12 @@ class MouffetteServer {
             openTimeoutMs: this.config.remoteSessionOpenTimeoutMs,
             openRequestTtlMs: this.config.remoteSessionOpenRequestTtlMs,
             tombstoneTtlMs: this.config.remoteSessionTombstoneTtlMs,
+            cleanupRetryInitialMs: this.config.remoteSessionTeardownRetryInitialMs,
+            cleanupRetryMaxMs: this.config.remoteSessionTeardownRetryMaxMs,
+            // A retained OPEN request must never have a larger cardinality
+            // budget than the terminal proof used to answer its replay.
             maximumTombstones: this.MAX_REMOTE_SCENE_TOMBSTONES,
+            maximumOpenRequests: this.MAX_REMOTE_SCENE_TOMBSTONES,
             monotonicNow: this.monotonicNow,
             epochNow: this.epochNow,
         });
@@ -1800,13 +1805,83 @@ class MouffetteServer {
                 ownerId, opened.error, opened.error, message, target.endpointId);
         }
 
+        // An OPEN requestId is idempotent for its whole retention window. If
+        // that exact request already reached teardown, replay its authoritative
+        // terminal result to the owner; never turn the old transaction into a
+        // fresh offer to the target.
+        if (opened.replay && TERMINAL_PHASES.has(opened.session.phase)) {
+            this.bindTerminalDelivery(opened.session, owner);
+            if (opened.session.phase === 'Closed') {
+                this.sendRemoteSessionStateToEndpoint(
+                    opened.session, 'remote_session_terminating', owner.endpointId, {
+                        phase: 'CleanupPending',
+                        replay: true,
+                        requestId: message.requestId,
+                    });
+                return this.sendRemoteSessionStateToEndpoint(
+                    opened.session, 'remote_session_closed', owner.endpointId, {
+                        cleanupState: 'confirmed',
+                        replay: true,
+                        requestId: message.requestId,
+                    });
+            }
+            return this.sendRemoteSessionStateToEndpoint(
+                opened.session, 'remote_session_terminating', owner.endpointId, {
+                    replay: true,
+                    requestId: message.requestId,
+                });
+        }
+
+        // OPEN is not a substitute for the proof-bearing Resume transition.
+        // Never relay a replay whose owner transport tuple belongs to the
+        // displaced socket: Qt (correctly) rejects that envelope, which would
+        // otherwise leave a cancelled request fenced forever.
+        if (opened.replay && opened.session.phase === 'Grace') {
+            return this.sendRemoteSessionError(
+                ownerId, 'The existing session requires resume proof',
+                'session_requires_resume', {
+                    ...message,
+                    remoteSessionId: opened.session.remoteSessionId,
+                }, target.endpointId);
+        }
+
         if (opened.session.phase === 'Active' && opened.replay) {
+            if (opened.session.ownerConnectionGeneration
+                !== owner.connectionGeneration) {
+                return this.sendRemoteSessionError(
+                    ownerId, 'The existing session requires resume proof',
+                    'session_requires_resume', {
+                        ...message,
+                        remoteSessionId: opened.session.remoteSessionId,
+                    }, target.endpointId);
+            }
             const payload = this.remoteSessionPayload(
                 opened.session, 'remote_session_opened');
             payload.requestId = message.requestId;
             payload.resumeToken = opened.session.resumeToken;
             payload.snapshot = opened.session.initialSnapshot;
             return this.sendToEndpoint(owner.endpointId, payload);
+        }
+
+        if (opened.replay && opened.session.phase === 'Opening'
+            && opened.session.ownerConnectionGeneration
+                !== owner.connectionGeneration) {
+            // Opening has no resume proof and cannot migrate transports. Make
+            // its teardown monotonic before answering the replacement socket;
+            // a later OPEN remains blocked until target cleanup commits.
+            const abandoned = this.remoteSessions.terminate(
+                opened.session.remoteSessionId,
+                'open_owner_transport_replaced');
+            if (abandoned.ok && !abandoned.replay) {
+                this.beginRemoteSessionTeardown(
+                    abandoned.session, message.requestId);
+            }
+            return this.sendRemoteSessionError(
+                ownerId, 'The previous opening is being cleaned up',
+                'session_cleanup_pending', {
+                    ...message,
+                    remoteSessionId: opened.session.remoteSessionId,
+                }, target.endpointId);
         }
 
         const offer = this.remoteSessionPayload(
@@ -1988,32 +2063,59 @@ class MouffetteServer {
 
     handleRemoteSessionClose(clientId, message) {
         const client = this.clients.get(clientId);
+        if (!client || !client.authenticated) {
+            return this.sendRemoteSessionError(clientId,
+                'Only an authenticated session party may close it',
+                'not_a_session_party', message);
+        }
+        const latestConnectionGeneration =
+            this.connectionGenerationByEndpoint.get(client.endpointId);
+        if (message.connectionGeneration !== client.connectionGeneration
+            || (Number.isSafeInteger(latestConnectionGeneration)
+                && client.connectionGeneration !== latestConnectionGeneration)) {
+            return this.sendRemoteSessionError(clientId,
+                'Stale connection generation', 'stale_connection_generation', message);
+        }
+
         const session = this.remoteSessions.get(message.remoteSessionId);
         const tombstone = !session
             ? this.remoteSessions.getTombstone(message.remoteSessionId) : null;
-        const tombstoneParty = client && tombstone
-            && (tombstone.ownerEndpointId === client.endpointId
-                || tombstone.targetEndpointId === client.endpointId);
-        if (tombstoneParty) {
-            if (message.connectionGeneration !== client.connectionGeneration) {
-                return this.sendRemoteSessionError(clientId,
-                    'Stale connection generation', 'stale_connection_generation', message);
-            }
-            if (message.generation !== tombstone.generation) {
-                return this.sendRemoteSessionError(clientId,
-                    'Stale remote session generation',
-                    'stale_remote_session_generation', message);
-            }
+        if (!session && !tombstone) {
+            return this.sendRemoteSessionError(clientId,
+                'Unknown remote session', 'unknown_remote_session', message);
+        }
+        const correlatedSession = session || tombstone;
+        const role = correlatedSession.ownerEndpointId === client.endpointId
+            ? 'owner'
+            : (correlatedSession.targetEndpointId === client.endpointId ? 'target' : null);
+        if (!role) {
+            return this.sendRemoteSessionError(clientId,
+                'Only an authenticated session party may close it',
+                'not_a_session_party', message);
+        }
+        if (message.generation !== correlatedSession.generation) {
+            return this.sendRemoteSessionError(clientId,
+                'Stale remote session generation',
+                'stale_remote_session_generation', message);
+        }
+
+        if (tombstone) {
             if (!this.terminalRuntimeMatches(tombstone, client)) {
                 return this.sendRemoteSessionError(clientId,
                     'Terminal session belongs to another process',
                     'invalid_resume_proof', message);
             }
-            this.bindTerminalDelivery(tombstone, client);
+            if (!this.bindTerminalDelivery(tombstone, client)) {
+                return this.sendRemoteSessionError(clientId,
+                    'Stale terminal delivery generation',
+                    'stale_connection_generation', message);
+            }
             this.sendRemoteSessionStateToEndpoint(
                 tombstone, 'remote_session_terminating', client.endpointId, {
                     phase: 'CleanupPending',
                     replay: true,
+                    requestId: this.isValidOpaqueId(message.requestId)
+                        ? message.requestId : undefined,
                 });
             this.sendRemoteSessionStateToEndpoint(
                 tombstone, 'remote_session_closed', client.endpointId, {
@@ -2024,38 +2126,44 @@ class MouffetteServer {
                 });
             return;
         }
-        const isParty = client && session
-            && (session.ownerEndpointId === client.endpointId
-                || session.targetEndpointId === client.endpointId);
-        if (!isParty) {
-            return this.sendRemoteSessionError(clientId,
-                'Only an authenticated session party may close it',
-                'not_a_session_party', message);
-        }
-        if (message.connectionGeneration !== client.connectionGeneration) {
-            return this.sendRemoteSessionError(clientId,
-                'Stale connection generation', 'stale_connection_generation', message);
-        }
-        if (message.generation !== session.generation) {
-            return this.sendRemoteSessionError(clientId,
-                'Stale remote session generation',
-                'stale_remote_session_generation', message);
-        }
-        if ((session.phase === 'Terminating' || session.phase === 'CleanupPending')
-            && !this.terminalRuntimeMatches(session, client)) {
-            return this.sendRemoteSessionError(clientId,
-                'Terminal session belongs to another process',
-                'invalid_resume_proof', message);
-        }
-        const roleConnectionGeneration = client.endpointId === session.ownerEndpointId
-            ? session.ownerConnectionGeneration : session.targetConnectionGeneration;
-        if (session.phase !== 'Terminating' && session.phase !== 'CleanupPending'
-            && roleConnectionGeneration !== client.connectionGeneration) {
-            return this.sendRemoteSessionError(clientId,
-                'Stale session transport generation',
-                'stale_connection_generation', message);
-        }
-        if (session.phase !== 'Terminating' && session.phase !== 'CleanupPending') {
+
+        const terminalPhase = session.phase === 'Terminating'
+            || session.phase === 'CleanupPending';
+        if (terminalPhase) {
+            if (!this.terminalRuntimeMatches(session, client)) {
+                return this.sendRemoteSessionError(clientId,
+                    'Terminal session belongs to another process',
+                    'invalid_resume_proof', message);
+            }
+            if (!this.bindTerminalDelivery(session, client)) {
+                return this.sendRemoteSessionError(clientId,
+                    'Stale terminal delivery generation',
+                    'stale_connection_generation', message);
+            }
+        } else {
+            const expectedRuntimeId = role === 'owner'
+                ? session.ownerRuntimeId : session.targetRuntimeId;
+            if (client.runtimeId !== expectedRuntimeId) {
+                return this.sendRemoteSessionError(clientId,
+                    'Remote session belongs to another process',
+                    'invalid_resume_proof', message);
+            }
+            const roleConnectionGeneration = role === 'owner'
+                ? session.ownerConnectionGeneration : session.targetConnectionGeneration;
+            // CLOSE is the sole non-resume command allowed to advance from a
+            // replacement transport. The authenticated endpoint and runtime
+            // must match exactly and the server-issued connection generation
+            // must move forward; the command-capable binding stays immutable.
+            if (client.connectionGeneration < roleConnectionGeneration) {
+                return this.sendRemoteSessionError(clientId,
+                    'Stale session transport generation',
+                    'stale_connection_generation', message);
+            }
+            if (!this.bindTerminalDelivery(session, client)) {
+                return this.sendRemoteSessionError(clientId,
+                    'Stale terminal delivery generation',
+                    'stale_connection_generation', message);
+            }
             const lease = this.remoteSessions.validateLease(session.remoteSessionId);
             if (!lease.ok) {
                 if (lease.terminalTransition && lease.session) {
@@ -2069,8 +2177,7 @@ class MouffetteServer {
         }
         const teardownReason = message.reason === 'clean_shutdown'
             ? 'clean_shutdown'
-            : (client.endpointId === session.ownerEndpointId
-                ? 'explicit_disconnect' : 'peer_close');
+            : (role === 'owner' ? 'explicit_disconnect' : 'peer_close');
         const terminating = this.remoteSessions.terminate(
             session.remoteSessionId, teardownReason);
         if (!terminating.ok) {
@@ -2084,8 +2191,8 @@ class MouffetteServer {
             this.bindTerminalDelivery(terminating.session, client);
             for (const endpointId of [terminating.session.ownerEndpointId,
                                     terminating.session.targetEndpointId]) {
-                this.sendRemoteSessionStateToEndpoint(
-                    terminating.session, 'remote_session_terminating', endpointId, {
+                this.dispatchRemoteSessionTeardownState(
+                    terminating.session, endpointId, {
                         replay: true,
                         requestId: this.isValidOpaqueId(message.requestId)
                             ? message.requestId : undefined,
@@ -2161,6 +2268,9 @@ class MouffetteServer {
             const expectedRuntime = session.ownerTerminalRuntimeId
                 || session.ownerRuntimeId;
             if (expectedRuntime !== client.runtimeId) return null;
+            if (Number.isSafeInteger(session.ownerTerminalConnectionGeneration)
+                && client.connectionGeneration
+                    < session.ownerTerminalConnectionGeneration) return null;
             session.ownerTerminalConnectionGeneration = client.connectionGeneration;
             session.ownerTerminalRuntimeId = client.runtimeId;
             return 'owner';
@@ -2170,6 +2280,9 @@ class MouffetteServer {
                 || session.targetRuntimeId;
             if (expectedRuntime !== client.runtimeId
                 && options.allowTargetRuntimeRestart !== true) return null;
+            if (Number.isSafeInteger(session.targetTerminalConnectionGeneration)
+                && client.connectionGeneration
+                    < session.targetTerminalConnectionGeneration) return null;
             session.targetTerminalConnectionGeneration = client.connectionGeneration;
             session.targetTerminalRuntimeId = client.runtimeId;
             return 'target';
@@ -2231,11 +2344,23 @@ class MouffetteServer {
         // A restarted target is rebound explicitly by the startup-cleanup
         // replay path before reaching this helper.
         if (!client || !this.terminalRuntimeMatches(session, client)) return false;
-        this.bindTerminalDelivery(session, client);
+        if (!this.bindTerminalDelivery(session, client)) return false;
         return this.sendToEndpoint(endpointId, {
             ...this.remoteSessionPayload(session, type, endpointId),
             ...extra,
         });
+    }
+
+    dispatchRemoteSessionTeardownState(session, endpointId, extra = {},
+                                       now = this.remoteSessions.now()) {
+        const delivered = this.sendRemoteSessionStateToEndpoint(
+            session, 'remote_session_terminating', endpointId, extra);
+        if (session && endpointId === session.targetEndpointId
+            && this.remoteSessions.get(session.remoteSessionId) === session) {
+            this.remoteSessions.recordCleanupDispatch(
+                session.remoteSessionId, session.teardownId, now);
+        }
+        return delivered;
     }
 
     sendRemoteSessionClosedToParties(session, extra = {}) {
@@ -2263,8 +2388,8 @@ class MouffetteServer {
             if (!this.bindTerminalDelivery(session, client, {
                 allowTargetRuntimeRestart: !isOwner,
             })) continue;
-            if (this.sendRemoteSessionStateToEndpoint(
-                    session, 'remote_session_terminating', client.endpointId,
+            if (this.dispatchRemoteSessionTeardownState(
+                    session, client.endpointId,
                     { replay: true })) ++replayed;
         }
 
@@ -2340,8 +2465,8 @@ class MouffetteServer {
             session, session.teardownReason || 'session_terminating');
         this.abortUploadsForRemoteSession(session, session.teardownReason || 'session_terminating');
         for (const endpointId of [session.ownerEndpointId, session.targetEndpointId]) {
-            this.sendRemoteSessionStateToEndpoint(
-                session, 'remote_session_terminating', endpointId, {
+            this.dispatchRemoteSessionTeardownState(
+                session, endpointId, {
                     requestId: this.isValidOpaqueId(requestId) ? requestId : undefined,
                 });
         }
@@ -2349,6 +2474,29 @@ class MouffetteServer {
         this.updateCleanupPendingMetric(session.remoteSessionId);
         this.broadcastClientList();
         return true;
+    }
+
+    retryPendingRemoteSessionTeardowns(now = this.remoteSessions.now()) {
+        // Terminating is intentionally short-lived, but healing an interrupted
+        // first dispatch here keeps terminal intent fail-closed and durable for
+        // the lifetime of this server process.
+        for (const session of this.remoteSessions.sessions.values()) {
+            if ((session.phase === 'Terminating' || session.phase === 'CleanupPending')
+                && session.teardownDispatchStarted !== true) {
+                this.beginRemoteSessionTeardown(session);
+            }
+        }
+
+        let attempts = 0;
+        for (const session of this.remoteSessions.dueCleanupRetries(now)) {
+            ++attempts;
+            this.dispatchRemoteSessionTeardownState(
+                session, session.targetEndpointId, {
+                    phase: 'CleanupPending',
+                    replay: true,
+                }, now);
+        }
+        return attempts;
     }
 
     updateCleanupPendingMetric(correlationId = '') {
@@ -2387,6 +2535,7 @@ class MouffetteServer {
             }
             this.beginRemoteSessionTeardown(session);
         }
+        this.retryPendingRemoteSessionTeardowns(now);
         this.sweepExpiredClientTransports(now);
         this.sweepSceneRuns(this.epochNow());
     }
@@ -2628,13 +2777,17 @@ class MouffetteServer {
         if (this.isValidOpaqueId(message.requestId)) applied.requestId = message.requestId;
         client.ws.send(JSON.stringify(applied));
 
-        // Broadcast updated client list
-        this.broadcastClientList();
         // A terminal result may have been emitted while either party's control
-        // transport was absent. Replay it after authoritative registration.
+        // transport was absent. Replay it after authoritative registration and
+        // before the discovery broadcast. WebSocket ordering makes the
+        // subsequent client_list a reconciliation barrier for every terminal
+        // state that existed when this snapshot was accepted.
         // The target may use a new runtime solely to finish startup cache
         // cleanup; an owner receives catch-up only in its original process.
         this.replayTerminalStateForClient(client);
+        // Broadcast updated client list only after terminal catch-up has been
+        // enqueued on the registering socket.
+        this.broadcastClientList();
     }
 
     handleEndpointDisable(clientId) {

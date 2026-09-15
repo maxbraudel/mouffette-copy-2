@@ -202,6 +202,24 @@ bool SceneRunCoordinator::removeSession(const QJsonObject& envelope,
     return true;
 }
 
+bool SceneRunCoordinator::discardSessionAfterAuthoritativeRejection(
+    const QString& remoteSessionId)
+{
+    if (remoteSessionId.isEmpty()
+        || m_remoteSessions->byId(remoteSessionId).remoteSessionId.isEmpty()) {
+        return false;
+    }
+    m_remoteSessions->remove(remoteSessionId);
+    for (auto it = m_runsById.begin(); it != m_runsById.end();) {
+        if (it->remoteSessionId == remoteSessionId) {
+            it = m_runsById.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    return true;
+}
+
 void SceneRunCoordinator::clearSessions()
 {
     m_remoteSessions->clear();

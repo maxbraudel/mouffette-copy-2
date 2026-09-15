@@ -41,9 +41,13 @@ AppPanel {
             readonly property bool canActivate: selectable
             readonly property bool ongoingProject: hasProject && !root.sceneMode
             readonly property bool availableBadge: badgeValue.trim().toUpperCase() === "AVAILABLE"
+            readonly property bool twoLineLayout: root.sceneMode && secondaryValue.length > 0
+            readonly property real mainLineTopMargin: twoLineLayout
+                                                       ? 7
+                                                       : Math.round((height - 22) / 2)
 
             width: list.width
-            height: root.sceneMode && secondaryValue.length > 0 ? 66 : 48
+            height: twoLineLayout ? 66 : 48
             enabled: canActivate
             hoverEnabled: true
             padding: 0
@@ -62,7 +66,7 @@ AppPanel {
                     anchors.right: trailingContent.left
                     anchors.rightMargin: 10
                     anchors.top: parent.top
-                    anchors.topMargin: 7
+                    anchors.topMargin: row.mainLineTopMargin
                     height: 22
                     text: row.primaryValue
                     color: Theme.text
@@ -76,7 +80,7 @@ AppPanel {
                     anchors.right: parent.right
                     anchors.rightMargin: 12
                     anchors.top: parent.top
-                    anchors.topMargin: 7
+                    anchors.topMargin: row.mainLineTopMargin
                     height: 22
                     spacing: 8
 

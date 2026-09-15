@@ -57,6 +57,11 @@ public:
                        quint64 localConnectionGeneration = 0);
     bool removeSession(const QJsonObject& closedEnvelope,
                        quint64 localConnectionGeneration = 0);
+    // Used only after an authenticated server error proves that the retained
+    // local session no longer exists or belongs to this runtime. This cannot
+    // manufacture a wire-level Closed acknowledgement.
+    bool discardSessionAfterAuthoritativeRejection(
+        const QString& remoteSessionId);
     void clearSessions();
 
     SessionBinding sessionForPeer(const QString& peerEndpointId) const;

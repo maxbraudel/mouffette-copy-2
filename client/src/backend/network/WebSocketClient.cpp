@@ -911,14 +911,26 @@ bool WebSocketClient::openRemoteSession(const QString& targetEndpointId,
 {
     if (!isConnected() || targetEndpointId.isEmpty() || targetEndpointId == m_endpointId) return false;
     const QString correlationId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    if (!replayRemoteSessionOpen(targetEndpointId, correlationId)) return false;
+    if (requestId) *requestId = correlationId;
+    return true;
+}
+
+bool WebSocketClient::replayRemoteSessionOpen(
+    const QString& targetEndpointId,
+    const QString& requestId)
+{
+    if (!isConnected() || targetEndpointId.isEmpty()
+        || targetEndpointId == m_endpointId
+        || !isCanonicalUuid(requestId)) {
+        return false;
+    }
     QJsonObject message{
         {QStringLiteral("type"), QStringLiteral("remote_session_open")},
         {QStringLiteral("targetEndpointId"), targetEndpointId},
-        {QStringLiteral("requestId"), correlationId}
+        {QStringLiteral("requestId"), requestId}
     };
-    if (!sendControlMessage(message)) return false;
-    if (requestId) *requestId = correlationId;
-    return true;
+    return sendControlMessage(message);
 }
 
 bool WebSocketClient::acceptRemoteSessionOffer(const QJsonObject& offer)
@@ -1025,17 +1037,45 @@ bool WebSocketClient::closeRemoteSession(const QString& remoteSessionId,
     if (binding.remoteSessionId.isEmpty()
         || (binding.ownerEndpointId != m_endpointId
             && binding.targetEndpointId != m_endpointId)) return false;
-    const QString correlationId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    return closeRemoteSessionByIdentity(
+        binding.remoteSessionId, binding.generation, requestId, reason);
+}
+
+bool WebSocketClient::closeRemoteSessionByIdentity(
+    const QString& remoteSessionId,
+    quint64 generation,
+    QString* requestId,
+    const QString& reason)
+{
+    if (!isConnected() || !isUploadOpaqueId(remoteSessionId)
+        || generation < 1 || generation > 9007199254740991ULL) {
+        return false;
+    }
+    const QString correlationId =
+        QUuid::createUuid().toString(QUuid::WithoutBraces);
     QJsonObject message{
         {QStringLiteral("type"), QStringLiteral("remote_session_close")},
-        {QStringLiteral("remoteSessionId"), binding.remoteSessionId},
-        {QStringLiteral("generation"), static_cast<double>(binding.generation)},
+        {QStringLiteral("remoteSessionId"), remoteSessionId},
+        {QStringLiteral("generation"), static_cast<double>(generation)},
         {QStringLiteral("requestId"), correlationId},
         {QStringLiteral("reason"), reason.left(128)}
     };
     if (!sendControlMessage(message)) return false;
     if (requestId) *requestId = correlationId;
     return true;
+}
+
+bool WebSocketClient::discardRemoteSessionAfterAuthoritativeRejection(
+    const QString& remoteSessionId)
+{
+    if (!m_sceneRuns) return false;
+    const bool removed =
+        m_sceneRuns->discardSessionAfterAuthoritativeRejection(
+            remoteSessionId);
+    if (removed) {
+        m_targetSnapshotSequenceBySession.remove(remoteSessionId);
+    }
+    return removed;
 }
 
 bool WebSocketClient::acknowledgeRemoteSessionTeardown(
@@ -1886,6 +1926,9 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
                     {QStringLiteral("requestId"),
                      message.value(QStringLiteral("requestId"))},
                     {QStringLiteral("remoteSessionId"), binding.remoteSessionId},
+                    {QStringLiteral("generation"),
+                     static_cast<double>(binding.generation)},
+                    {QStringLiteral("ownerEndpointId"), binding.ownerEndpointId},
                     {QStringLiteral("targetEndpointId"), binding.targetEndpointId}
                 };
                 emit remoteSessionError(failure);

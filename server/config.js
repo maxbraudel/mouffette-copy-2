@@ -14,6 +14,8 @@ const DECLARATIONS = Object.freeze({
     MOUFFETTE_REMOTE_SESSION_OPEN_TIMEOUT_MS: { type: 'int', default: 3000, min: 250, max: 30000 },
     MOUFFETTE_REMOTE_SESSION_OPEN_REQUEST_TTL_MS: { type: 'int', default: 300000, min: 1000, max: 86400000 },
     MOUFFETTE_REMOTE_SESSION_TOMBSTONE_TTL_MS: { type: 'int', default: 300000, min: 1000, max: 86400000 },
+    MOUFFETTE_REMOTE_SESSION_TEARDOWN_RETRY_INITIAL_MS: { type: 'int', default: 500, min: 100, max: 60000 },
+    MOUFFETTE_REMOTE_SESSION_TEARDOWN_RETRY_MAX_MS: { type: 'int', default: 5000, min: 100, max: 300000 },
     MOUFFETTE_SCENE_PREPARE_TIMEOUT_MS: { type: 'int', default: 15000, min: 1000, max: 120000 },
     MOUFFETTE_SCENE_ACTIVATION_LEAD_MS: { type: 'int', default: 500, min: 500, max: 10000 },
     MOUFFETTE_SCENE_MAX_CLOCK_SKEW_MS: { type: 'int', default: 50, min: 0, max: 250 },
@@ -142,6 +144,14 @@ function loadServerConfig(options = {}) {
             values.MOUFFETTE_PEER_LEASE_TIMEOUT_MS)) {
         throw new Error('MOUFFETTE_REMOTE_SESSION_TOMBSTONE_TTL_MS must cover the open and lease timeouts');
     }
+    if (values.MOUFFETTE_REMOTE_SESSION_OPEN_REQUEST_TTL_MS
+        > values.MOUFFETTE_REMOTE_SESSION_TOMBSTONE_TTL_MS) {
+        throw new Error('MOUFFETTE_REMOTE_SESSION_OPEN_REQUEST_TTL_MS must not exceed MOUFFETTE_REMOTE_SESSION_TOMBSTONE_TTL_MS');
+    }
+    if (values.MOUFFETTE_REMOTE_SESSION_TEARDOWN_RETRY_MAX_MS
+        < values.MOUFFETTE_REMOTE_SESSION_TEARDOWN_RETRY_INITIAL_MS) {
+        throw new Error('MOUFFETTE_REMOTE_SESSION_TEARDOWN_RETRY_MAX_MS must be at least the initial teardown retry delay');
+    }
     if (values.MOUFFETTE_SCENE_MAX_CLOCK_SKEW_MS
         >= values.MOUFFETTE_SCENE_ACTIVATION_LEAD_MS) {
         throw new Error('MOUFFETTE_SCENE_MAX_CLOCK_SKEW_MS must be smaller than activation lead');
@@ -174,6 +184,10 @@ function loadServerConfig(options = {}) {
         remoteSessionOpenTimeoutMs: values.MOUFFETTE_REMOTE_SESSION_OPEN_TIMEOUT_MS,
         remoteSessionOpenRequestTtlMs: values.MOUFFETTE_REMOTE_SESSION_OPEN_REQUEST_TTL_MS,
         remoteSessionTombstoneTtlMs: values.MOUFFETTE_REMOTE_SESSION_TOMBSTONE_TTL_MS,
+        remoteSessionTeardownRetryInitialMs:
+            values.MOUFFETTE_REMOTE_SESSION_TEARDOWN_RETRY_INITIAL_MS,
+        remoteSessionTeardownRetryMaxMs:
+            values.MOUFFETTE_REMOTE_SESSION_TEARDOWN_RETRY_MAX_MS,
         scenePrepareTimeoutMs: values.MOUFFETTE_SCENE_PREPARE_TIMEOUT_MS,
         sceneActivationLeadMs: values.MOUFFETTE_SCENE_ACTIVATION_LEAD_MS,
         sceneMaxClockSkewMs: values.MOUFFETTE_SCENE_MAX_CLOCK_SKEW_MS,

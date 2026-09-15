@@ -143,6 +143,67 @@ function addAuthenticationCandidate(server, connectionId, keyPair, runtimeId,
     };
 }
 
+// Production construction keeps terminal proof capacity at least as large as
+// retained OPEN replay capacity. Both intentionally share one static bound.
+{
+    const server = new MouffetteServer({ port: 0, metricLogger: () => {} });
+    assert.equal(server.remoteSessions.maximumOpenRequests,
+        server.remoteSessions.maximumTombstones);
+    assert.ok(server.remoteSessions.maximumTombstones
+        >= server.remoteSessions.maximumOpenRequests);
+    assert.throws(() => new RemoteSessionRegistry({
+        maximumTombstones: 1,
+        maximumOpenRequests: 2,
+    }), /maximumTombstones must be at least maximumOpenRequests/);
+}
+
+// OPEN and CLOSE use different insertion timelines. Capacity pressure must not
+// evict a tombstone still referenced by a retained idempotency record merely
+// because an older, unreferenced session happened to close later.
+{
+    let sequence = 0;
+    const registry = new RemoteSessionRegistry({
+        maximumTombstones: 1,
+        maximumOpenRequests: 1,
+        openRequestTtlMs: 1000,
+        tombstoneTtlMs: 1000,
+        now: () => 100,
+        idFactory: () => `retention-${++sequence}`,
+    });
+    const evictedRequestBinding = {
+        ...binding('old-owner', 'old-target'),
+        requestId: 'old-open-request',
+    };
+    const retainedRequestBinding = {
+        ...binding('new-owner', 'new-target'),
+        requestId: 'retained-open-request',
+    };
+    const oldSession = registry.open(evictedRequestBinding).session;
+    const retainedSession = registry.open(retainedRequestBinding).session;
+    const close = (session) => {
+        const terminating = registry.terminate(
+            session.remoteSessionId, 'test_cleanup', 100).session;
+        registry.markCleanupPending(
+            session.remoteSessionId, terminating.teardownId, 100);
+        const closed = registry.acknowledgeCleanup(
+            session.remoteSessionId, terminating.teardownId,
+            session.targetEndpointId, committedCleanup(), 100);
+        assert.equal(closed.ok, true);
+    };
+
+    close(retainedSession);
+    close(oldSession);
+    assert.equal(registry.getTombstone(oldSession.remoteSessionId), null);
+    assert.equal(registry.getTombstone(retainedSession.remoteSessionId), retainedSession);
+
+    const replay = registry.open(retainedRequestBinding);
+    assert.equal(replay.replay, true);
+    assert.equal(replay.requestReplay, true);
+    assert.equal(replay.session.remoteSessionId, retainedSession.remoteSessionId);
+    assert.equal(registry.sessions.size, 0,
+        'a retained terminal OPEN request must never create a replacement session');
+}
+
 // One installation may expose several independently addressable endpoints.
 // Only an exact endpoint duplicate is subject to the active lease exclusion.
 {
@@ -838,6 +899,62 @@ function messages(socket, type) {
         'late_close', clock).replay, true);
 }
 
+// Cleanup delivery retries use the same immutable teardown transaction. The
+// delay doubles up to a cap, while the owner/target index remains fail-closed
+// until the target commits its acknowledgement.
+{
+    let clock = 80_000;
+    let sequence = 0;
+    const registry = new RemoteSessionRegistry({
+        leaseTimeoutMs: 3000,
+        cleanupRetryInitialMs: 100,
+        cleanupRetryMaxMs: 250,
+        now: () => clock,
+        idFactory: () => `cleanup-retry-${++sequence}`,
+    });
+    const opened = registry.open(binding());
+    const terminating = registry.terminate(
+        opened.session.remoteSessionId, 'explicit_disconnect', clock);
+    const teardownId = terminating.session.teardownId;
+    const firstDispatch = registry.recordCleanupDispatch(
+        opened.session.remoteSessionId, teardownId, clock);
+    assert.equal(firstDispatch.ok, true);
+    assert.equal(firstDispatch.retryDelay, 100);
+    assert.equal(registry.markCleanupPending(
+        opened.session.remoteSessionId, teardownId, clock).ok, true);
+
+    clock = 80_099;
+    assert.equal(registry.dueCleanupRetries(clock).length, 0);
+    clock = 80_100;
+    assert.deepEqual(registry.dueCleanupRetries(clock), [opened.session]);
+    const secondDispatch = registry.recordCleanupDispatch(
+        opened.session.remoteSessionId, teardownId, clock);
+    assert.equal(secondDispatch.retryDelay, 200);
+
+    clock = 80_299;
+    assert.equal(registry.dueCleanupRetries(clock).length, 0);
+    clock = 80_300;
+    assert.equal(registry.dueCleanupRetries(clock).length, 1);
+    const thirdDispatch = registry.recordCleanupDispatch(
+        opened.session.remoteSessionId, teardownId, clock);
+    assert.equal(thirdDispatch.retryDelay, 250,
+        'the exponential retry delay is capped');
+    assert.equal(opened.session.teardownId, teardownId);
+    assert.equal(opened.session.generation, 1);
+    assert.equal(registry.forOwnerTarget('A', 'B'), opened.session,
+        'retry scheduling must retain the owner/target exclusion index');
+    assert.equal(registry.open(binding()).error, 'session_cleanup_pending');
+
+    clock = 80_550;
+    assert.equal(registry.dueCleanupRetries(clock).length, 1);
+    assert.equal(registry.acknowledgeCleanup(
+        opened.session.remoteSessionId, teardownId, 'B', committedCleanup(), clock).ok,
+    true);
+    assert.equal(registry.dueCleanupRetries(clock).length, 0,
+        'a committed cleanup removes all future retry work');
+    assert.equal(registry.forOwnerTarget('A', 'B'), null);
+}
+
 // Grace does not mask a second peer whose still-open socket stopped sending
 // heartbeats earlier. The earliest per-party lastContact deadline wins.
 {
@@ -1025,6 +1142,392 @@ function messages(socket, type) {
     assert.equal(Object.hasOwn(staleAck, 'resumeToken'), false);
 }
 
+// A same-runtime authenticated transport replacement may close the exact
+// non-terminal session without resuming command authority. The active binding
+// remains immutable; only terminal delivery advances to the new transport.
+{
+    let monotonic = 300_000;
+    let epoch = Date.now();
+    const server = new MouffetteServer({
+        port: 0,
+        metricLogger: () => {},
+        monotonicNow: () => monotonic,
+        epochNow: () => epoch,
+    });
+    const keys = crypto.generateKeyPairSync('ed25519');
+    const runtimeId = crypto.randomUUID();
+    const replacement = addAuthenticationCandidate(
+        server, 'replacement-owner', keys, runtimeId, epoch);
+    const oldSocket = addAuthenticatedClient(
+        server, 'old-owner-transport', replacement.endpointId);
+    const oldClient = server.clients.get('old-owner-transport');
+    oldClient.runtimeId = runtimeId;
+    oldClient.lastHeartbeatAt = epoch;
+    oldClient.lastHeartbeatMonotonicAt = monotonic;
+    server.connectionGenerationByEndpoint.set(replacement.endpointId, 1);
+    const targetSocket = addAuthenticatedClient(
+        server, 'replacement-close-target', 'B');
+    const session = server.remoteSessions.open({
+        ownerEndpointId: replacement.endpointId,
+        targetEndpointId: 'B',
+        ownerRuntimeId: runtimeId,
+        targetRuntimeId: 'runtime-B',
+        ownerConnectionGeneration: 1,
+        targetConnectionGeneration: 1,
+    }).session;
+
+    monotonic += 1;
+    epoch += 1;
+    server.handleAuthResponse('replacement-owner', replacement.response, {
+        monotonicMs: monotonic,
+        epochMs: epoch,
+    });
+    assert.equal(replacement.client.authenticated, true);
+    assert.equal(replacement.client.connectionGeneration, 2);
+    assert.equal(server.clients.has('old-owner-transport'), false);
+    assert.equal(oldSocket.readyState, WebSocket.CLOSED);
+    assert.equal(session.phase, 'Grace');
+
+    const close = {
+        remoteSessionId: session.remoteSessionId,
+        generation: session.generation,
+        connectionGeneration: 2,
+        requestId: 'same-runtime-rebound-close',
+    };
+    server.handleRemoteSessionClose('old-owner-transport', {
+        ...close,
+        connectionGeneration: 1,
+        requestId: 'retired-transport-close',
+    });
+    assert.equal(session.phase, 'Grace',
+        'a retired transport cannot mutate the session');
+    server.handleRemoteSessionClose('replacement-owner', {
+        ...close,
+        connectionGeneration: 1,
+        requestId: 'old-generation-close',
+    });
+    const stale = messages(replacement.ws, 'error').at(-1);
+    assert.equal(stale.code, 'stale_connection_generation');
+    assert.equal(stale.requestId, 'old-generation-close');
+    assert.equal(stale.remoteSessionId, session.remoteSessionId);
+    assert.equal(session.phase, 'Grace');
+
+    server.handleRemoteSessionClose('replacement-owner', close);
+    assert.equal(session.phase, 'CleanupPending');
+    assert.equal(session.ownerConnectionGeneration, 1,
+        'CLOSE recovery must not grant command authority to the new transport');
+    assert.equal(session.ownerTerminalConnectionGeneration, 2);
+    assert.equal(session.ownerTerminalRuntimeId, runtimeId);
+    const terminal = messages(
+        replacement.ws, 'remote_session_terminating').at(-1);
+    assert.equal(terminal.requestId, close.requestId);
+    assert.equal(terminal.connectionGeneration, 2);
+    assert.equal(terminal.ownerConnectionGeneration, 2);
+    assert.equal(terminal.targetConnectionGeneration, 1);
+    assert.equal(messages(targetSocket, 'remote_session_terminating').length, 1);
+}
+
+// Matching the endpoint is insufficient: a replacement process cannot close a
+// non-terminal session that belongs to another runtime.
+{
+    const context = serverSessionContext('different-runtime-close');
+    const owner = context.server.clients.get('owner-connection');
+    owner.runtimeId = 'different-runtime';
+    owner.connectionGeneration = 2;
+    context.server.connectionGenerationByEndpoint.set('A', 2);
+    context.server.handleRemoteSessionClose('owner-connection', {
+        remoteSessionId: context.session.remoteSessionId,
+        generation: context.session.generation,
+        connectionGeneration: 2,
+        requestId: 'different-runtime-close-request',
+    });
+    const rejected = messages(context.ownerSocket, 'error').at(-1);
+    assert.equal(rejected.code, 'invalid_resume_proof');
+    assert.equal(rejected.requestId, 'different-runtime-close-request');
+    assert.equal(rejected.remoteSessionId, context.session.remoteSessionId);
+    assert.equal(context.session.phase, 'Active');
+    assert.equal(context.session.ownerTerminalConnectionGeneration, undefined);
+    assert.equal(messages(context.targetSocket, 'remote_session_terminating').length, 0);
+}
+
+// Once a CLOSED tombstone expires, CLOSE returns a correlated authoritative
+// absence instead of leaving the caller waiting for a terminal replay forever.
+{
+    let clock = 400_000;
+    let sequence = 0;
+    const server = new MouffetteServer({ port: 0, metricLogger: () => {} });
+    server.remoteSessions = new RemoteSessionRegistry({
+        leaseTimeoutMs: 3000,
+        tombstoneTtlMs: 100,
+        now: () => clock,
+        idFactory: () => `expired-close-${++sequence}`,
+    });
+    const ownerSocket = addAuthenticatedClient(server, 'expired-close-owner', 'A');
+    addAuthenticatedClient(server, 'expired-close-target', 'B');
+    const session = server.remoteSessions.open(binding()).session;
+    const terminating = server.remoteSessions.terminate(
+        session.remoteSessionId, 'explicit_disconnect', clock);
+    server.remoteSessions.markCleanupPending(
+        session.remoteSessionId, terminating.session.teardownId, clock);
+    server.remoteSessions.acknowledgeCleanup(
+        session.remoteSessionId, terminating.session.teardownId,
+        'B', committedCleanup(), clock);
+    clock += 100;
+    server.remoteSessions.tick(clock);
+    assert.equal(server.remoteSessions.getTombstone(session.remoteSessionId), null);
+
+    server.handleRemoteSessionClose('expired-close-owner', {
+        remoteSessionId: session.remoteSessionId,
+        generation: session.generation,
+        connectionGeneration: 1,
+        requestId: 'expired-tombstone-close',
+    });
+    const absent = messages(ownerSocket, 'error').at(-1);
+    assert.equal(absent.code, 'unknown_remote_session');
+    assert.equal(absent.scope, 'remote_session');
+    assert.equal(absent.requestId, 'expired-tombstone-close');
+    assert.equal(absent.remoteSessionId, session.remoteSessionId);
+}
+
+// If the initial target delivery is missed, the lease sweep replays only the
+// teardown envelope. Destructive server-side teardown remains one-shot and the
+// session cannot be replaced until the target ACK is committed.
+{
+    let clock = 200_000;
+    const context = serverSessionContext('server-cleanup-retry');
+    context.server.remoteSessions.now = () => clock;
+    context.server.remoteSessions.cleanupRetryInitialMs = 100;
+    context.server.remoteSessions.cleanupRetryMaxMs = 250;
+    context.targetSocket.readyState = WebSocket.CLOSED;
+    const closeMessage = {
+        remoteSessionId: context.session.remoteSessionId,
+        generation: context.session.generation,
+        connectionGeneration: 1,
+        requestId: 'retry-close-request',
+    };
+
+    context.server.handleRemoteSessionClose('owner-connection', closeMessage);
+    const teardownId = context.session.teardownId;
+    assert.equal(context.session.phase, 'CleanupPending');
+    assert.equal(context.session.cleanupDispatchAttempts, 1,
+        'a failed target send still advances the retry backoff');
+    assert.equal(messages(context.targetSocket, 'remote_session_terminating').length, 0);
+    assert.equal(context.beginCommits(), 1);
+    assert.equal(context.server.remoteSessions.forOwnerTarget('A', 'B'), context.session);
+
+    clock = 200_099;
+    context.server.sweepRemoteSessionLeases(clock);
+    assert.equal(context.session.cleanupDispatchAttempts, 1);
+    context.targetSocket.readyState = WebSocket.OPEN;
+    clock = 200_100;
+    context.server.sweepRemoteSessionLeases(clock);
+    const replay = messages(
+        context.targetSocket, 'remote_session_terminating').at(-1);
+    assert.equal(replay.replay, true);
+    assert.equal(replay.phase, 'CleanupPending');
+    assert.equal(replay.remoteSessionId, context.session.remoteSessionId);
+    assert.equal(replay.teardownId, teardownId);
+    assert.equal(replay.generation, context.session.generation);
+    assert.equal(context.session.cleanupDispatchAttempts, 2);
+    assert.equal(context.beginCommits(), 1,
+        'retry delivery must not re-run scene/upload/removal teardown');
+    assert.equal(messages(context.ownerSocket, 'remote_session_terminating').length, 1,
+        'periodic retries are sent only to the ACK-authoritative target');
+
+    context.server.handleRemoteSessionTeardownAck('target-connection', {
+        remoteSessionId: context.session.remoteSessionId,
+        generation: context.session.generation,
+        connectionGeneration: 1,
+        teardownId,
+        ...committedCleanup(),
+    });
+    assert.equal(context.server.remoteSessions.get(context.session.remoteSessionId), null);
+    assert.equal(context.server.remoteSessions.forOwnerTarget('A', 'B'), null);
+    const targetRetryCount = messages(
+        context.targetSocket, 'remote_session_terminating').length;
+    clock = 210_000;
+    context.server.sweepRemoteSessionLeases(clock);
+    assert.equal(messages(context.targetSocket, 'remote_session_terminating').length,
+        targetRetryCount, 'no teardown retry survives a committed ACK');
+}
+
+// Replaying the exact OPEN request after it entered teardown returns only the
+// old terminal transaction to the owner. It must never emit a terminal-phase
+// offer to the target; a genuinely new requestId can open after cleanup.
+{
+    const server = new MouffetteServer({ port: 0, metricLogger: () => {} });
+    const ownerSocket = addAuthenticatedClient(server, 'open-replay-owner', 'A');
+    const targetSocket = addAuthenticatedClient(server, 'open-replay-target', 'B');
+    const openMessage = {
+        targetEndpointId: 'B',
+        connectionGeneration: 1,
+        requestId: 'terminal-open-request',
+    };
+    server.handleRemoteSessionOpen('open-replay-owner', openMessage);
+    const oldSession = server.remoteSessions.forOwnerTarget('A', 'B');
+    assert.ok(oldSession);
+    assert.equal(messages(targetSocket, 'remote_session_offer').length, 1);
+
+    server.handleRemoteSessionClose('open-replay-owner', {
+        remoteSessionId: oldSession.remoteSessionId,
+        generation: oldSession.generation,
+        connectionGeneration: 1,
+        requestId: 'close-terminal-open-request',
+    });
+    assert.equal(oldSession.phase, 'CleanupPending');
+    const offerCount = messages(targetSocket, 'remote_session_offer').length;
+    server.handleRemoteSessionOpen('open-replay-owner', openMessage);
+    assert.equal(messages(targetSocket, 'remote_session_offer').length, offerCount,
+        'a CleanupPending request replay must not emit another offer');
+    const cleanupReplay = messages(
+        ownerSocket, 'remote_session_terminating').at(-1);
+    assert.equal(cleanupReplay.replay, true);
+    assert.equal(cleanupReplay.requestId, openMessage.requestId);
+    assert.equal(cleanupReplay.remoteSessionId, oldSession.remoteSessionId);
+
+    server.handleRemoteSessionTeardownAck('open-replay-target', {
+        remoteSessionId: oldSession.remoteSessionId,
+        generation: oldSession.generation,
+        connectionGeneration: 1,
+        teardownId: oldSession.teardownId,
+        ...committedCleanup(),
+    });
+    const closedCount = messages(ownerSocket, 'remote_session_closed').length;
+    server.handleRemoteSessionOpen('open-replay-owner', openMessage);
+    assert.equal(messages(targetSocket, 'remote_session_offer').length, offerCount,
+        'a Closed request replay must not emit another offer');
+    assert.equal(messages(ownerSocket, 'remote_session_closed').length, closedCount + 1);
+    const closedReplay = messages(ownerSocket, 'remote_session_closed').at(-1);
+    assert.equal(closedReplay.replay, true);
+    assert.equal(closedReplay.requestId, openMessage.requestId);
+    assert.equal(closedReplay.remoteSessionId, oldSession.remoteSessionId);
+
+    server.handleRemoteSessionOpen('open-replay-owner', {
+        ...openMessage,
+        requestId: 'fresh-open-request',
+    });
+    const freshSession = server.remoteSessions.forOwnerTarget('A', 'B');
+    assert.ok(freshSession);
+    assert.notEqual(freshSession.remoteSessionId, oldSession.remoteSessionId);
+    assert.equal(messages(targetSocket, 'remote_session_offer').length, offerCount + 1);
+}
+
+// OPEN replay never migrates a non-terminal command binding to a replacement
+// transport. Grace requires the proof-bearing Resume path; an abandoned
+// Opening is terminalized because no resume token was ever delivered.
+{
+    const server = new MouffetteServer({ port: 0, metricLogger: () => {} });
+    const ownerSocket = addAuthenticatedClient(
+        server, 'replay-phase-owner', 'A');
+    const targetSocket = addAuthenticatedClient(
+        server, 'replay-phase-target', 'B');
+    const openMessage = {
+        targetEndpointId: 'B',
+        connectionGeneration: 1,
+        requestId: 'grace-replay-request',
+    };
+    server.handleRemoteSessionOpen('replay-phase-owner', openMessage);
+    const session = server.remoteSessions.forOwnerTarget('A', 'B');
+    assert.ok(session);
+    assert.equal(server.remoteSessions.accept({
+        remoteSessionId: session.remoteSessionId,
+        targetEndpointId: 'B',
+        targetRuntimeId: 'runtime-B',
+        generation: 1,
+        connectionGeneration: 1,
+    }).ok, true);
+    server.remoteSessions.markDisconnected('A');
+    assert.equal(session.phase, 'Grace');
+
+    const initialOfferCount = messages(
+        targetSocket, 'remote_session_offer').length;
+    server.clients.get('replay-phase-owner').connectionGeneration = 2;
+    server.handleRemoteSessionOpen('replay-phase-owner', {
+        ...openMessage,
+        connectionGeneration: 2,
+    });
+    const graceError = messages(ownerSocket, 'error').at(-1);
+    assert.equal(graceError.code, 'session_requires_resume');
+    assert.equal(graceError.requestId, openMessage.requestId);
+    assert.equal(graceError.remoteSessionId, session.remoteSessionId);
+    assert.equal(session.phase, 'Grace');
+    assert.equal(messages(targetSocket, 'remote_session_offer').length,
+        initialOfferCount, 'Grace replay must never be relayed as an offer');
+}
+
+{
+    const server = new MouffetteServer({ port: 0, metricLogger: () => {} });
+    const ownerSocket = addAuthenticatedClient(
+        server, 'abandoned-opening-owner', 'A');
+    const targetSocket = addAuthenticatedClient(
+        server, 'abandoned-opening-target', 'B');
+    const openMessage = {
+        targetEndpointId: 'B',
+        connectionGeneration: 1,
+        requestId: 'abandoned-opening-request',
+    };
+    server.handleRemoteSessionOpen('abandoned-opening-owner', openMessage);
+    const session = server.remoteSessions.forOwnerTarget('A', 'B');
+    assert.ok(session);
+    assert.equal(session.phase, 'Opening');
+    const initialOfferCount = messages(
+        targetSocket, 'remote_session_offer').length;
+    const initialOpeningCount = messages(
+        ownerSocket, 'remote_session_opening').length;
+
+    server.clients.get('abandoned-opening-owner').connectionGeneration = 2;
+    server.handleRemoteSessionOpen('abandoned-opening-owner', {
+        ...openMessage,
+        connectionGeneration: 2,
+    });
+    assert.equal(session.phase, 'CleanupPending');
+    assert.equal(session.teardownDispatchStarted, true);
+    const cleanupError = messages(ownerSocket, 'error').at(-1);
+    assert.equal(cleanupError.code, 'session_cleanup_pending');
+    assert.equal(cleanupError.requestId, openMessage.requestId);
+    assert.equal(cleanupError.remoteSessionId, session.remoteSessionId);
+    assert.equal(messages(targetSocket, 'remote_session_offer').length,
+        initialOfferCount,
+        'an Opening from an old transport must not be offered again');
+    assert.equal(messages(ownerSocket, 'remote_session_opening').length,
+        initialOpeningCount,
+        'the replacement transport must not receive stale Opening state');
+}
+
+// Defensive race coverage: even if an Active session has not yet observed the
+// old socket departure, duplicate OPEN cannot bypass Resume on generation 2.
+{
+    const server = new MouffetteServer({ port: 0, metricLogger: () => {} });
+    const ownerSocket = addAuthenticatedClient(
+        server, 'active-replay-owner', 'A');
+    addAuthenticatedClient(server, 'active-replay-target', 'B');
+    const openMessage = {
+        targetEndpointId: 'B',
+        connectionGeneration: 1,
+        requestId: 'active-replay-request',
+    };
+    server.handleRemoteSessionOpen('active-replay-owner', openMessage);
+    const session = server.remoteSessions.forOwnerTarget('A', 'B');
+    assert.equal(server.remoteSessions.accept({
+        remoteSessionId: session.remoteSessionId,
+        targetEndpointId: 'B',
+        targetRuntimeId: 'runtime-B',
+        generation: 1,
+        connectionGeneration: 1,
+    }).ok, true);
+    server.clients.get('active-replay-owner').connectionGeneration = 2;
+    server.handleRemoteSessionOpen('active-replay-owner', {
+        ...openMessage,
+        connectionGeneration: 2,
+    });
+    const error = messages(ownerSocket, 'error').at(-1);
+    assert.equal(error.code, 'session_requires_resume');
+    assert.equal(error.requestId, openMessage.requestId);
+    assert.equal(error.remoteSessionId, session.remoteSessionId);
+    assert.equal(messages(ownerSocket, 'remote_session_opened').length, 0);
+    assert.equal(session.phase, 'Active');
+}
+
 // Both roles can recover terminal delivery after a same-process transport
 // replacement. Each recipient gets its current top-level/local-role transport
 // generation, while the immutable command tuple and peer generation remain
@@ -1041,12 +1544,19 @@ function messages(socket, type) {
 
     const ownerClient = context.server.clients.get('owner-connection');
     ownerClient.connectionGeneration = 2;
+    const ownerReconciliationStart = context.ownerSocket.messages.length;
     context.server.handleEndpointSnapshot('owner-connection', {
         connectionGeneration: 2,
         machineName: 'Owner rebound', platform: 'test', instanceOrdinal: 1,
         screens: [], systemUI: [],
         volumePercent: 50,
     });
+    assert.deepEqual(context.ownerSocket.messages
+        .slice(ownerReconciliationStart).map(message => message.type), [
+        'endpoint_snapshot_applied',
+        'remote_session_terminating',
+        'client_list',
+    ], 'live terminal catch-up must precede the registering socket client list');
     const ownerTerminal = messages(
         context.ownerSocket, 'remote_session_terminating').at(-1);
     assert.equal(ownerTerminal.replay, true);
@@ -1057,12 +1567,19 @@ function messages(socket, type) {
 
     const targetClient = context.server.clients.get('target-connection');
     targetClient.connectionGeneration = 2;
+    const targetReconciliationStart = context.targetSocket.messages.length;
     context.server.handleEndpointSnapshot('target-connection', {
         connectionGeneration: 2,
         machineName: 'Target rebound', platform: 'test', instanceOrdinal: 1,
         screens: [], systemUI: [],
         volumePercent: 50,
     });
+    assert.deepEqual(context.targetSocket.messages
+        .slice(targetReconciliationStart).map(message => message.type), [
+        'endpoint_snapshot_applied',
+        'remote_session_terminating',
+        'client_list',
+    ], 'target cleanup replay must precede its registering socket client list');
     const targetTerminal = messages(
         context.targetSocket, 'remote_session_terminating').at(-1);
     assert.equal(targetTerminal.replay, true);
@@ -1091,12 +1608,20 @@ function messages(socket, type) {
 
     ownerClient.connectionGeneration = 3;
     const closedCount = messages(context.ownerSocket, 'remote_session_closed').length;
+    const tombstoneReconciliationStart = context.ownerSocket.messages.length;
     context.server.handleEndpointSnapshot('owner-connection', {
         connectionGeneration: 3,
         machineName: 'Owner rebound again', platform: 'test', instanceOrdinal: 1,
         screens: [], systemUI: [],
         volumePercent: 50,
     });
+    assert.deepEqual(context.ownerSocket.messages
+        .slice(tombstoneReconciliationStart).map(message => message.type), [
+        'endpoint_snapshot_applied',
+        'remote_session_terminating',
+        'remote_session_closed',
+        'client_list',
+    ], 'the full tombstone replay must precede the registering socket client list');
     assert.equal(messages(context.ownerSocket, 'remote_session_closed').length,
         closedCount + 1);
     const replayedClosed = messages(
@@ -1112,12 +1637,18 @@ function messages(socket, type) {
         context.ownerSocket, 'remote_session_terminating').length;
     const closedCountBeforeForeignRuntime = messages(
         context.ownerSocket, 'remote_session_closed').length;
+    const emptyReconciliationStart = context.ownerSocket.messages.length;
     context.server.handleEndpointSnapshot('owner-connection', {
         connectionGeneration: 4,
         machineName: 'Different owner process', platform: 'test', instanceOrdinal: 1,
         screens: [], systemUI: [],
         volumePercent: 50,
     });
+    assert.deepEqual(context.ownerSocket.messages
+        .slice(emptyReconciliationStart).map(message => message.type), [
+        'endpoint_snapshot_applied',
+        'client_list',
+    ], 'without a runtime-matching terminal state the barrier contains no replay');
     assert.equal(messages(context.ownerSocket, 'remote_session_terminating').length,
         terminalCountBeforeForeignRuntime);
     assert.equal(messages(context.ownerSocket, 'remote_session_closed').length,

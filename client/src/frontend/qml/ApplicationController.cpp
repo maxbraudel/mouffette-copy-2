@@ -229,6 +229,19 @@ void ApplicationController::initializeBackend()
             this, &ApplicationController::hideRequested);
     connect(m_runtime.get(), &ApplicationRuntime::activeWorkspaceChanged,
             this, [this]() { refreshActiveWorkspace(); });
+    if (WorkspaceManager* workspaces = m_runtime->getWorkspaceManager()) {
+        connect(workspaces, &WorkspaceManager::workspaceDeleted,
+                this, [this](const QString& endpointId) {
+            ClientWorkspaceViewModel* removed = m_workspaces.take(endpointId);
+            if (!removed) return;
+            removed->setCanvas(nullptr);
+            if (m_activeWorkspace == removed) {
+                m_activeWorkspace = nullptr;
+                emit activeWorkspaceChanged();
+            }
+            removed->deleteLater();
+        });
+    }
 
     m_clientsModel->setClients(m_runtime->displayClients());
     m_sceneActivitiesModel->setSource(m_runtime->getSceneActivityModel());

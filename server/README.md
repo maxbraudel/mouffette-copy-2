@@ -45,12 +45,37 @@ An owner opens `remote_session_open` with `targetEndpointId`. The server returns
 incoming session at most. Heartbeats maintain a strict 3-second lease; a resume
 at or after the deadline is terminal. Session teardown remains pending until the
 target confirms that its scene stopped, uploads aborted, and cache was
-quarantined.
+quarantined. Until that acknowledgement is committed, the server retains the
+session binding and replays the same teardown transaction to the target with a
+bounded exponential backoff.
+
+Configuration enforces that the retained OPEN-request window never exceeds the
+terminal-tombstone window. Production also gives terminal tombstones at least
+the same cardinality budget as retained OPEN requests. Tombstones referenced by
+retained requests are pinned against expiry and capacity eviction, so
+idempotent request replay cannot outlive its terminal evidence.
 
 Session messages are `remote_session_open`, `remote_session_resume`,
 `remote_session_close`, and `remote_session_teardown_ack`. Server results are
 `remote_session_opened`, `remote_session_resumed`, `remote_session_lease_state`,
 `remote_session_terminating`, and `remote_session_closed`.
+
+An authenticated replacement transport from the same endpoint and runtime may
+close the exact live session generation without first resuming it. This advances
+only terminal-state delivery to the current connection generation; it never
+rebinds command authority. A different runtime or an older transport generation
+is rejected.
+
+Replaying an OPEN request also never migrates command authority. `Grace`
+requires the proof-bearing Resume path; an `Opening` stranded on an older owner
+transport is moved into cleanup instead of being re-offered with a stale
+transport tuple.
+
+After an authenticated `endpoint_snapshot` is accepted, its
+`endpoint_snapshot_applied` response and every replayable terminal session state
+are enqueued before the following `client_list` on that same WebSocket. That
+ordered list is a terminal-reconciliation barrier, not a session inventory:
+discovery remains presence-only.
 
 ## Uploads
 

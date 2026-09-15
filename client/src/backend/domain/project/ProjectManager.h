@@ -79,8 +79,9 @@ public:
     void processDeadlines(qint64 nowMs = -1);
     void checkpointVisibleProjects(qint64 nowMs = -1);
 
-    // Merges live discovery with durable projects strictly by endpointId. Online
-    // clients are emitted in discovery order, followed by offline projects.
+    // Pure projection of live discovery with durable projects, strictly by
+    // endpointId. Deadline mutation belongs exclusively to processDeadlines().
+    // Online clients are emitted in discovery order, followed by offline projects.
     QList<ProjectClientEntry> mergeDiscoveredClients(const QList<ClientInfo>& discovered,
                                                       qint64 nowMs = -1);
 

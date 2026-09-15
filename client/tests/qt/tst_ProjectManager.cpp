@@ -241,6 +241,41 @@ private slots:
         QVERIFY(persisted.isEmpty());
     }
 
+    void discoveryProjectionCannotReenterDeadlineDeletion()
+    {
+        QTemporaryDir temporary;
+        ProjectStore store(temporary.filePath(QStringLiteral("projects.json")));
+        ProjectManager manager(&store);
+        manager.stopAutomaticTimersForTesting();
+
+        constexpr int projectCount = 24;
+        for (int index = 0; index < projectCount; ++index) {
+            const QString endpointId = QStringLiteral("device-%1").arg(index);
+            QVERIFY(!createProject(
+                manager, target(endpointId, QStringLiteral("Studio %1").arg(index)),
+                ProjectLifecycleState::Hidden, 100).isEmpty());
+        }
+
+        int callbackDepth = 0;
+        int maximumCallbackDepth = 0;
+        int deletedCount = 0;
+        connect(&manager, &ProjectManager::projectDeleted,
+                this, [&](const QString&, const QString&) {
+            ++callbackDepth;
+            maximumCallbackDepth = qMax(maximumCallbackDepth, callbackDepth);
+            ++deletedCount;
+            // List refreshes are legitimate observers of deletion. They must
+            // never recursively execute more lifecycle transitions.
+            manager.mergeDiscoveredClients({}, 300'100);
+            --callbackDepth;
+        });
+
+        manager.processDeadlines(300'100);
+        QCOMPARE(deletedCount, projectCount);
+        QCOMPARE(manager.projectCount(), 0);
+        QCOMPARE(maximumCallbackDepth, 1);
+    }
+
     void cleanShutdownHideIsIdempotentAndUsesOneTimestamp()
     {
         QTemporaryDir temporary;

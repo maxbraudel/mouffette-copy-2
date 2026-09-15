@@ -103,6 +103,11 @@ public:
     // exposed in generic logs or durable project state.
     bool openRemoteSession(const QString& targetEndpointId,
                            QString* requestId = nullptr);
+    // Replays an OPEN whose exact request identifier was locally cancelled
+    // before any session identity arrived. Server idempotency turns this into
+    // an authoritative Ready, terminal replay, or correlated error.
+    bool replayRemoteSessionOpen(const QString& targetEndpointId,
+                                 const QString& requestId);
     // Accepts a server-authenticated offer as the target. The accepted
     // snapshot is the most recently published complete endpoint snapshot.
     bool acceptRemoteSessionOffer(const QJsonObject& offer);
@@ -117,6 +122,16 @@ public:
     bool closeRemoteSession(const QString& remoteSessionId,
                             QString* requestId = nullptr,
                             const QString& reason = QStringLiteral("explicit_disconnect"));
+    // Retries a locally retained, authenticated session identity after the
+    // transport lease has cleared the in-memory coordinator. The server still
+    // validates endpoint, runtime, transport and session generation.
+    bool closeRemoteSessionByIdentity(
+        const QString& remoteSessionId,
+        quint64 generation,
+        QString* requestId = nullptr,
+        const QString& reason = QStringLiteral("explicit_disconnect"));
+    bool discardRemoteSessionAfterAuthoritativeRejection(
+        const QString& remoteSessionId);
     bool acknowledgeRemoteSessionTeardown(const QString& remoteSessionId,
                                           const QString& teardownId,
                                           bool sceneStopped,

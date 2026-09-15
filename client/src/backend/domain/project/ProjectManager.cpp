@@ -503,7 +503,6 @@ QList<ProjectClientEntry> ProjectManager::mergeDiscoveredClients(const QList<Cli
                                                                   qint64 atMs)
 {
     const qint64 current = atMs >= 0 ? atMs : nowMs();
-    processDeadlines(current);
 
     QList<ProjectClientEntry> result;
     QSet<QString> seen;

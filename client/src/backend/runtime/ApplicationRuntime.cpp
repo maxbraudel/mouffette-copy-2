@@ -92,6 +92,30 @@ bool readSafePositiveJsonInteger(const QJsonValue& value, quint64* output)
     return true;
 }
 
+bool isCommandReadyBinding(
+    const WebSocketClient* client,
+    const RemoteSessionCoordinator::Binding& binding)
+{
+    if (!client || !client->isConnected()
+        || binding.phase != QLatin1String("Active")) {
+        return false;
+    }
+    const QString localEndpointId = client->endpointId();
+    quint64 bindingConnectionGeneration = 0;
+    if (binding.ownerEndpointId == localEndpointId) {
+        bindingConnectionGeneration = binding.ownerConnectionGeneration;
+    } else if (binding.targetEndpointId == localEndpointId) {
+        bindingConnectionGeneration = binding.targetConnectionGeneration;
+    } else {
+        return false;
+    }
+    // An Active lease belongs to the authenticated transport tuple on which
+    // it was granted. Retaining it during reconnect is useful for RESUME, but
+    // it cannot authorize UI commands on an older or unauthenticated socket.
+    return bindingConnectionGeneration > 0
+        && bindingConnectionGeneration == client->connectionGeneration();
+}
+
 ProjectManager::TimingPolicy projectTimingPolicyFromConfig() {
     ProjectManager::TimingPolicy timing;
     timing.projectHiddenRetentionMs =
@@ -187,11 +211,10 @@ constexpr qreal Z_SCENE_OVERLAY = 12000.0; // above all scene content
 void ApplicationRuntime::setRemoteConnectionStatus(const QString& status, bool propagateLoss) {
     const QString up = status.toUpper();
     m_remoteStatusText = up;
-    if (up == "CONNECTED") {
-        m_remoteClientConnected = true;
-    } else if (up == "DISCONNECTED" || up.startsWith("CONNECTING") || up == "ERROR") {
-        m_remoteClientConnected = false;
-    }
+    // This flag represents command-capable Active state, not mere device
+    // discovery. AVAILABLE, RECONNECTING and every terminal state must clear
+    // it even when the previous projection was CONNECTED.
+    m_remoteClientConnected = up == QLatin1String("CONNECTED");
     m_remoteBusy = up.startsWith("CONNECTING") || up.startsWith("RECONNECTING");
 
     refreshOverlayActionsState(up == "CONNECTED", propagateLoss);
@@ -281,21 +304,31 @@ ApplicationRuntime::ApplicationRuntime(const RuntimeProfileContext& runtimeProfi
                 m_workspaceManager->setWorkspaceVisible(target, atMs);
             }
         }
-        // Only the foreground project is automatically reopened after its
-        // inactivity deadline. Other projects wait until the user opens them.
-        if (m_navigationManager && m_navigationManager->isOnScreenView()
+
+        // Inactivity CLOSE is intentionally reversible while its Project and
+        // foreground page still exist. Reuse the normal desired-OPEN fence:
+        // if the former CLOSE is pending, Closed will consume this intent;
+        // if it already committed, ensureRemoteSessionForClient opens now.
+        const QString foregroundTarget = m_activeWorkspaceEndpointId;
+        const bool reopenForeground =
+            m_inactivityExpiredSessionTargets.contains(foregroundTarget)
+            && !foregroundTarget.isEmpty()
+            && m_navigationManager
+            && m_navigationManager->isOnScreenView()
             && m_projectManager
-            && m_projectManager->hasProjectForTarget(m_activeWorkspaceEndpointId)
-            && m_workspaceManager
-            && m_workspaceManager->remoteSessionState(m_activeWorkspaceEndpointId)
-                == WorkspaceManager::RemoteSessionState::Absent) {
-            for (const ClientInfo& client : std::as_const(m_discoveredClients)) {
-                if (client.endpointId() == m_activeWorkspaceEndpointId) {
-                    m_remoteSessionOpenSuppressedTargets.remove(
-                        m_activeWorkspaceEndpointId);
-                    ensureRemoteSessionForClient(client);
-                    break;
+            && m_projectManager->hasProjectForTarget(foregroundTarget);
+        m_inactivityExpiredSessionTargets.clear();
+        if (reopenForeground) {
+            m_remoteSessionOpenDesiredTargets.insert(foregroundTarget);
+            m_remoteSessionOpenSuppressedTargets.remove(foregroundTarget);
+            for (const ClientInfo& discovered :
+                 std::as_const(m_discoveredClients)) {
+                if (discovered.endpointId() != foregroundTarget
+                    || !discovered.isOnline()) {
+                    continue;
                 }
+                ensureRemoteSessionForClient(discovered);
+                break;
             }
         }
         refreshProjectClientList();
@@ -316,6 +349,9 @@ ApplicationRuntime::ApplicationRuntime(const RuntimeProfileContext& runtimeProfi
     });
     connect(m_workspaceManager, &WorkspaceManager::remoteSessionCloseDue,
             this, [this](const QString& targetEndpointId) {
+        // This signal is emitted only by the hidden-workspace inactivity
+        // deadline. Remember its cause separately from generic CLOSE intent.
+        m_inactivityExpiredSessionTargets.insert(targetEndpointId);
         terminateProjectRemoteSession(targetEndpointId, true);
     });
 
@@ -326,7 +362,16 @@ ApplicationRuntime::ApplicationRuntime(const RuntimeProfileContext& runtimeProfi
         connect(m_projectManager, &ProjectManager::projectDeleted,
                 this, [this](const QString&, const QString& targetEndpointId) {
             const bool wasSelected = m_activeWorkspaceEndpointId == targetEndpointId;
+            // Project lifetime never owns the wire session lifetime. Enforce
+            // the invariant here as well as in the explicit-delete action so
+            // timer-driven deletion cannot leave an outgoing session behind.
+            m_remoteSessionOpenDesiredTargets.remove(targetEndpointId);
+            m_inactivityExpiredSessionTargets.remove(targetEndpointId);
             clearDeletedProjectFromWorkspace(targetEndpointId);
+            // Cleanup the canvas/FileWatcher graph before the project-less
+            // workspace can make destroyWorkspaceCanvasIfUnused() detach it.
+            // The RemoteSession close itself is independent of that workspace.
+            terminateProjectRemoteSession(targetEndpointId, true);
             if (wasSelected) showClientListView();
         });
         connect(m_projectManager, &ProjectManager::projectsChanged,
@@ -457,6 +502,40 @@ ApplicationRuntime::ApplicationRuntime(const RuntimeProfileContext& runtimeProfi
         connect(m_webSocketClient, &WebSocketClient::serverRestarted,
                 m_sceneActivityModel, [this](const QString&, const QString&) {
             if (m_sceneActivityModel) m_sceneActivityModel->clear();
+            const QString selectedTarget = m_activeWorkspaceEndpointId;
+            const bool preserveSelectedOpenIntent =
+                !selectedTarget.isEmpty()
+                && m_navigationManager
+                && m_navigationManager->isOnScreenView()
+                && m_remoteSessionOpenDesiredTargets.contains(selectedTarget);
+            // RemoteSession identifiers are scoped to a server boot. No
+            // terminal tombstone for the old boot can arrive afterwards.
+            const QList<QString> abandonedCloseTargets =
+                m_pendingOutgoingSessionCloses.keys();
+            m_pendingOutgoingSessionCloses.clear();
+            m_outgoingSessionCloseRequestById.clear();
+            m_currentOutgoingSessionIdByTarget.clear();
+            m_currentOutgoingSessionGenerationByTarget.clear();
+            m_remoteSessionOpenDesiredTargets.clear();
+            if (preserveSelectedOpenIntent) {
+                m_remoteSessionOpenDesiredTargets.insert(selectedTarget);
+            }
+            m_cancelledInitialOpenTargetByRequestId.clear();
+            m_cancelledInitialOpenSessionByTarget.clear();
+            m_locallyTerminatingRemoteSessions.clear();
+            // expireLease() ran synchronously before serverRestarted and
+            // converted every incoming binding into the local terminal-cleanup
+            // FIFO. Protocol acknowledgements, however, are scoped to the old
+            // boot and must never be replayed to the replacement server.
+            m_pendingTeardownAcks.clear();
+            m_pendingRendererTeardowns.clear();
+            if (m_workspaceManager) {
+                for (const QString& target : abandonedCloseTargets) {
+                    m_workspaceManager->setRemoteSessionState(
+                        target, WorkspaceManager::RemoteSessionState::Absent);
+                    updateWorkspaceCapabilities(target);
+                }
+            }
         });
         connect(m_webSocketClient, &WebSocketClient::remoteSessionOpened,
                 this, [this](const QJsonObject& envelope) {
@@ -480,6 +559,28 @@ ApplicationRuntime::ApplicationRuntime(const RuntimeProfileContext& runtimeProfi
             this, [this]() {
         m_transportOutageNotified = false;
         retryPendingTeardownAcks();
+        // A CLOSE acknowledged only by silence on the former socket is not a
+        // commit. Retry its immutable session identity once on this newly
+        // authenticated transport, even though lease expiry may have cleared
+        // the coordinator binding.
+        const QList<QString> pendingCloseTargets =
+            m_pendingOutgoingSessionCloses.keys();
+        for (const QString& target : pendingCloseTargets) {
+            retryPendingOutgoingSessionClose(
+                target, QStringLiteral("transport_reauthenticated"));
+        }
+        // A user can leave the initial loading page before Opening returns a
+        // session identity. If that socket then disappears, a target-only
+        // cancellation must not fence the device forever. Replay the exact
+        // idempotency key on the authenticated replacement transport; the
+        // resulting Ready/terminal/error retires only that cancelled attempt.
+        const auto cancelledWithoutIdentity =
+            m_cancelledInitialOpenTargetByRequestId;
+        for (auto it = cancelledWithoutIdentity.cbegin();
+             it != cancelledWithoutIdentity.cend(); ++it) {
+            if (hasPendingOutgoingSessionClose(it.value())) continue;
+            m_webSocketClient->replayRemoteSessionOpen(it.value(), it.key());
+        }
     });
     connect(m_webSocketClient, &WebSocketClient::transportConnected,
             m_incomingSessionOrphanWatchdog,
@@ -584,6 +685,13 @@ ApplicationRuntime::ApplicationRuntime(const RuntimeProfileContext& runtimeProfi
         }
         m_remoteSessionOpenPendingTargets.clear();
         m_remoteSessionOpenTargetByRequestId.clear();
+        // Keep pending outgoing close intents across a same-boot transport
+        // outage. The server will replay/resume that exact session and the
+        // close is retried before any replacement OPEN is allowed.
+        for (auto it = m_pendingOutgoingSessionCloses.begin();
+             it != m_pendingOutgoingSessionCloses.end(); ++it) {
+            it->closeDispatchedOnConnectionGeneration = 0;
+        }
         m_locallyTerminatingRemoteSessions.clear();
         m_pendingTeardownAcks.clear();
         m_discoveredClients.clear();
@@ -815,29 +923,45 @@ QList<ClientInfo> ApplicationRuntime::buildDisplayClientList(const QList<ClientI
             client.setStatus(status);
             client.setAvailabilityStatus(status);
         } else {
-            static const QSet<QString> allowedStatuses = {
-                QStringLiteral("Available"),
-                QStringLiteral("Connecting"),
-                QStringLiteral("Connected"),
-                QStringLiteral("Reconnecting"),
-                QStringLiteral("Disconnecting"),
-                QStringLiteral("Unreachable")
-            };
-            QString status = client.availabilityStatus().trimmed();
-            if (status.compare(QStringLiteral("active"), Qt::CaseInsensitive) == 0) {
-                status = QStringLiteral("Connected");
-            } else if (status.compare(QStringLiteral("opening"), Qt::CaseInsensitive) == 0) {
-                status = QStringLiteral("Connecting");
-            } else if (status.compare(QStringLiteral("grace"), Qt::CaseInsensitive) == 0) {
+            // Discovery answers only the presence question. Session badges
+            // are projected here from the authenticated binding plus local
+            // intent, so a stale status copied into ClientInfo can never win.
+            const RemoteSessionCoordinator* coordinator = m_webSocketClient
+                ? m_webSocketClient->remoteSessionCoordinator() : nullptr;
+            const RemoteSessionCoordinator::Binding binding = coordinator
+                ? coordinator->outgoingForPeer(entry.endpointId)
+                : RemoteSessionCoordinator::Binding();
+            const bool closePending = hasPendingOutgoingSessionClose(
+                entry.endpointId)
+                || hasCancelledInitialOpenForTarget(entry.endpointId)
+                || (!binding.remoteSessionId.isEmpty()
+                    && m_locallyTerminatingRemoteSessions.contains(
+                        binding.remoteSessionId));
+            const bool terminalBinding = binding.phase == QLatin1String("Terminating")
+                || binding.phase == QLatin1String("CleanupPending")
+                || binding.phase == QLatin1String("Closed");
+            const bool commandReady = isCommandReadyBinding(
+                m_webSocketClient, binding);
+
+            QString status = QStringLiteral("Available");
+            if (closePending || terminalBinding) {
+                status = m_remoteSessionOpenDesiredTargets.contains(
+                             entry.endpointId)
+                    ? QStringLiteral("Connecting")
+                    : QStringLiteral("Available");
+            } else if (!m_webSocketClient || !m_webSocketClient->isConnected()) {
                 status = QStringLiteral("Reconnecting");
-            } else if (status.compare(QStringLiteral("terminating"), Qt::CaseInsensitive) == 0
-                       || status.compare(QStringLiteral("cleanup_pending"), Qt::CaseInsensitive) == 0) {
-                status = QStringLiteral("Disconnecting");
-            } else if (status.compare(QStringLiteral("cleanup_error"), Qt::CaseInsensitive) == 0) {
-                status = QStringLiteral("Unreachable");
-            }
-            if (!allowedStatuses.contains(status)) {
-                status = QStringLiteral("Available");
+            } else if (m_remoteSessionOpenPendingTargets.contains(
+                           entry.endpointId)
+                       || m_remoteSessionOpenDesiredTargets.contains(
+                           entry.endpointId)
+                       || binding.phase == QLatin1String("Opening")) {
+                status = QStringLiteral("Connecting");
+            } else if (commandReady) {
+                status = QStringLiteral("Connected");
+            } else if (binding.phase == QLatin1String("Active")
+                       || binding.phase == QLatin1String("Grace")) {
+                status = QStringLiteral("Reconnecting");
             }
             client.setStatus(status);
             client.setAvailabilityStatus(status);
@@ -1267,7 +1391,15 @@ void ApplicationRuntime::showScreenView(const ClientInfo& client) {
         && m_activeWorkspaceEndpointId != targetEndpointId
         && m_navigationManager->isOnScreenView()) {
         persistProjectCanvas(m_activeWorkspaceEndpointId);
+        m_remoteSessionOpenDesiredTargets.remove(m_activeWorkspaceEndpointId);
+        m_inactivityExpiredSessionTargets.remove(
+            m_activeWorkspaceEndpointId);
     }
+
+    // Selection is the sole user intent to establish a new session. If an old
+    // session is still being cleaned up this intent is held until its Closed
+    // tombstone arrives, rather than manufacturing a canvas from stale data.
+    m_remoteSessionOpenDesiredTargets.insert(targetEndpointId);
 
     ClientWorkspace* workspacePointer =
         m_workspaceManager->getOrCreateWorkspace(targetEndpointId, selectedClient);
@@ -1297,16 +1429,45 @@ void ApplicationRuntime::showScreenView(const ClientInfo& client) {
     const RemoteSessionCoordinator::Binding retainedBinding = remoteSessionCoordinator
         ? remoteSessionCoordinator->outgoingForPeer(targetEndpointId)
         : RemoteSessionCoordinator::Binding();
-    const bool active = retainedBinding.phase == QLatin1String("Active")
-        && !m_locallyTerminatingRemoteSessions.contains(retainedBinding.remoteSessionId);
-    const bool grace = retainedBinding.phase == QLatin1String("Grace")
-        && !m_locallyTerminatingRemoteSessions.contains(retainedBinding.remoteSessionId);
+    const bool terminalBinding = retainedBinding.phase == QLatin1String("Terminating")
+        || retainedBinding.phase == QLatin1String("CleanupPending")
+        || retainedBinding.phase == QLatin1String("Closed");
+    if (terminalBinding && !retainedBinding.remoteSessionId.isEmpty()
+        && retainedBinding.ownerEndpointId == m_webSocketClient->endpointId()) {
+        rememberPendingOutgoingSessionClose(
+            targetEndpointId, retainedBinding.remoteSessionId,
+            retainedBinding.generation);
+        m_locallyTerminatingRemoteSessions.insert(
+            retainedBinding.remoteSessionId);
+    }
+    const bool closePending = hasPendingOutgoingSessionClose(
+        targetEndpointId)
+        || hasCancelledInitialOpenForTarget(targetEndpointId)
+        || (!retainedBinding.remoteSessionId.isEmpty()
+            && m_locallyTerminatingRemoteSessions.contains(
+                retainedBinding.remoteSessionId));
+    const bool active = !closePending
+        && isCommandReadyBinding(m_webSocketClient, retainedBinding);
+    const bool grace = !closePending && !active
+        && (retainedBinding.phase == QLatin1String("Active")
+            || retainedBinding.phase == QLatin1String("Grace"));
+    if (active || grace) {
+        m_currentOutgoingSessionIdByTarget.insert(
+            targetEndpointId, retainedBinding.remoteSessionId);
+        m_currentOutgoingSessionGenerationByTarget.insert(
+            targetEndpointId, retainedBinding.generation);
+    }
     if (active) {
         m_workspaceManager->setRemoteSessionState(
             targetEndpointId, WorkspaceManager::RemoteSessionState::Active);
+        m_remoteSessionOpenDesiredTargets.remove(targetEndpointId);
     } else if (grace) {
         m_workspaceManager->setRemoteSessionState(
             targetEndpointId, WorkspaceManager::RemoteSessionState::Grace);
+        m_remoteSessionOpenDesiredTargets.remove(targetEndpointId);
+    } else if (closePending) {
+        m_workspaceManager->setRemoteSessionState(
+            targetEndpointId, WorkspaceManager::RemoteSessionState::Closing);
     } else if (!m_remoteSessionOpenPendingTargets.contains(targetEndpointId)) {
         m_workspaceManager->setRemoteSessionState(
             targetEndpointId, WorkspaceManager::RemoteSessionState::Absent);
@@ -1337,11 +1498,14 @@ void ApplicationRuntime::showScreenView(const ClientInfo& client) {
     m_canvasContentEverLoaded = currentWorkspace->canvas != nullptr;
     m_preserveViewportOnReconnect = hasProject;
     updateClientNameDisplay(currentWorkspace->lastClientInfo);
-    m_remoteClientConnected = active || grace;
-    m_remoteVolumePercent = hasProject
+    m_remoteClientConnected = active;
+    m_remoteVolumePercent = active && hasProject
         ? currentWorkspace->lastClientInfo.getVolumePercent() : -1;
     if (active) setRemoteConnectionStatus(QStringLiteral("CONNECTED"), false);
     else if (grace) setRemoteConnectionStatus(QStringLiteral("RECONNECTING..."), false);
+    else if (closePending && selectedClient.isOnline()) {
+        setRemoteConnectionStatus(QStringLiteral("CONNECTING..."), false);
+    }
     else setRemoteConnectionStatus(currentWorkspace->lastClientInfo.isOnline()
         ? QStringLiteral("AVAILABLE") : QStringLiteral("DISCONNECTED"), false);
 
@@ -1371,24 +1535,35 @@ void ApplicationRuntime::showClientListView() {
     // Each client maintains its own upload state that should survive navigation
     
     const QString leavingTarget = m_activeWorkspaceEndpointId;
+    if (!leavingTarget.isEmpty()) {
+        m_remoteSessionOpenDesiredTargets.remove(leavingTarget);
+        m_inactivityExpiredSessionTargets.remove(leavingTarget);
+    }
     if (!leavingTarget.isEmpty() && m_projectManager
         && !m_projectManager->hasProjectForTarget(leavingTarget)
         && m_remoteSessionOpenPendingTargets.contains(leavingTarget)) {
-        m_cancelledInitialOpenTargets.insert(leavingTarget);
         RemoteSessionCoordinator* coordinator = m_webSocketClient
             ? m_webSocketClient->remoteSessionCoordinator() : nullptr;
         const RemoteSessionCoordinator::Binding opening = coordinator
             ? coordinator->outgoingForPeer(leavingTarget)
             : RemoteSessionCoordinator::Binding();
         if (!opening.remoteSessionId.isEmpty() && m_webSocketClient) {
-            m_webSocketClient->closeRemoteSession(
-                opening.remoteSessionId, nullptr,
-                QStringLiteral("initial_open_cancelled"));
+            m_cancelledInitialOpenSessionByTarget.insert(
+                leavingTarget, opening.remoteSessionId);
+            rememberPendingOutgoingSessionClose(
+                leavingTarget, opening.remoteSessionId,
+                opening.generation);
+            m_locallyTerminatingRemoteSessions.insert(
+                opening.remoteSessionId);
+            retryPendingOutgoingSessionClose(
+                leavingTarget, QStringLiteral("initial_open_cancelled"));
         }
         m_remoteSessionOpenPendingTargets.remove(leavingTarget);
         for (auto it = m_remoteSessionOpenTargetByRequestId.begin();
              it != m_remoteSessionOpenTargetByRequestId.end();) {
             if (it.value() == leavingTarget) {
+                m_cancelledInitialOpenTargetByRequestId.insert(
+                    it.key(), leavingTarget);
                 it = m_remoteSessionOpenTargetByRequestId.erase(it);
             } else {
                 ++it;
@@ -1441,6 +1616,205 @@ void ApplicationRuntime::updateRemoteClientAvailability(const QString& targetEnd
     refreshProjectClientList();
 }
 
+bool ApplicationRuntime::hasPendingOutgoingSessionClose(
+    const QString& targetEndpointId,
+    const QString& remoteSessionId) const
+{
+    const auto it = m_pendingOutgoingSessionCloses.constFind(targetEndpointId);
+    if (it == m_pendingOutgoingSessionCloses.cend()) return false;
+    return remoteSessionId.isEmpty() || it->remoteSessionId == remoteSessionId;
+}
+
+bool ApplicationRuntime::hasCancelledInitialOpenForTarget(
+    const QString& targetEndpointId) const
+{
+    if (targetEndpointId.isEmpty()) return false;
+    if (m_cancelledInitialOpenSessionByTarget.contains(targetEndpointId)) {
+        return true;
+    }
+    for (auto it = m_cancelledInitialOpenTargetByRequestId.cbegin();
+         it != m_cancelledInitialOpenTargetByRequestId.cend(); ++it) {
+        if (it.value() == targetEndpointId) return true;
+    }
+    return false;
+}
+
+void ApplicationRuntime::rememberPendingOutgoingSessionClose(
+    const QString& targetEndpointId,
+    const QString& remoteSessionId,
+    quint64 generation)
+{
+    if (targetEndpointId.isEmpty() || remoteSessionId.isEmpty()) return;
+    auto it = m_pendingOutgoingSessionCloses.find(targetEndpointId);
+    if (it != m_pendingOutgoingSessionCloses.end()
+        && it->remoteSessionId != remoteSessionId) {
+        // The server must not create a replacement while the former session
+        // still owns the directional index. Keep the older close fence; the
+        // unexpected session is fail-closed by its Ready handler.
+        qWarning() << "Ignored overlapping outgoing RemoteSession close intent"
+                   << targetEndpointId << it->remoteSessionId
+                   << remoteSessionId;
+        return;
+    }
+    if (it == m_pendingOutgoingSessionCloses.end()) {
+        PendingOutgoingSessionClose pending;
+        pending.remoteSessionId = remoteSessionId;
+        pending.generation = generation;
+        m_pendingOutgoingSessionCloses.insert(targetEndpointId, pending);
+        return;
+    }
+    if (generation > it->generation) {
+        it->generation = generation;
+        it->closeDispatchedOnConnectionGeneration = 0;
+    }
+}
+
+bool ApplicationRuntime::retryPendingOutgoingSessionClose(
+    const QString& targetEndpointId,
+    const QString& reason)
+{
+    auto it = m_pendingOutgoingSessionCloses.find(targetEndpointId);
+    if (it == m_pendingOutgoingSessionCloses.end()
+        || it->remoteSessionId.isEmpty() || !m_webSocketClient) {
+        return false;
+    }
+
+    RemoteSessionCoordinator* coordinator =
+        m_webSocketClient->remoteSessionCoordinator();
+    const RemoteSessionCoordinator::Binding binding = coordinator
+        ? coordinator->outgoingForPeer(targetEndpointId)
+        : RemoteSessionCoordinator::Binding();
+    if (!binding.remoteSessionId.isEmpty()
+        && binding.remoteSessionId != it->remoteSessionId) {
+        return false;
+    }
+    if (binding.remoteSessionId == it->remoteSessionId
+        && binding.generation > it->generation) {
+        it->generation = binding.generation;
+        it->closeDispatchedOnConnectionGeneration = 0;
+    }
+    const quint64 connectionGeneration =
+        m_webSocketClient->connectionGeneration();
+    if (!binding.remoteSessionId.isEmpty()
+        && (binding.phase == QLatin1String("Terminating")
+        || binding.phase == QLatin1String("CleanupPending")
+        || binding.phase == QLatin1String("Closed"))) {
+        it->closeDispatchedOnConnectionGeneration = connectionGeneration;
+        return true;
+    }
+    if (connectionGeneration > 0
+        && it->closeDispatchedOnConnectionGeneration
+            == connectionGeneration) {
+        return true;
+    }
+    QString requestId;
+    const bool sent = m_webSocketClient->closeRemoteSessionByIdentity(
+        it->remoteSessionId, it->generation, &requestId, reason);
+    if (sent) {
+        it->closeDispatchedOnConnectionGeneration = connectionGeneration;
+        OutgoingSessionCloseRequest request;
+        request.targetEndpointId = targetEndpointId;
+        request.remoteSessionId = it->remoteSessionId;
+        request.generation = it->generation;
+        m_outgoingSessionCloseRequestById.insert(requestId, request);
+    }
+    return sent;
+}
+
+bool ApplicationRuntime::finalizePendingOutgoingSessionClose(
+    const QString& targetEndpointId,
+    const QString& remoteSessionId,
+    quint64 generation,
+    bool allowReplacementOpen)
+{
+    auto pending = m_pendingOutgoingSessionCloses.find(targetEndpointId);
+    if (pending == m_pendingOutgoingSessionCloses.end()
+        || pending->remoteSessionId != remoteSessionId
+        || (generation > 0 && generation < pending->generation)) {
+        return false;
+    }
+
+    RemoteSessionCoordinator* coordinator = m_webSocketClient
+        ? m_webSocketClient->remoteSessionCoordinator() : nullptr;
+    const RemoteSessionCoordinator::Binding current = coordinator
+        ? coordinator->outgoingForPeer(targetEndpointId)
+        : RemoteSessionCoordinator::Binding();
+    if (!current.remoteSessionId.isEmpty()
+        && current.remoteSessionId != remoteSessionId) {
+        return false;
+    }
+    if (!current.remoteSessionId.isEmpty() && m_webSocketClient) {
+        m_webSocketClient->discardRemoteSessionAfterAuthoritativeRejection(
+            remoteSessionId);
+    }
+    if (m_sceneActivityModel) {
+        m_sceneActivityModel->removeForSession(remoteSessionId);
+    }
+
+    m_pendingOutgoingSessionCloses.erase(pending);
+    m_locallyTerminatingRemoteSessions.remove(remoteSessionId);
+    if (m_currentOutgoingSessionIdByTarget.value(targetEndpointId)
+        == remoteSessionId) {
+        m_currentOutgoingSessionIdByTarget.remove(targetEndpointId);
+        m_currentOutgoingSessionGenerationByTarget.remove(targetEndpointId);
+    }
+    if (m_cancelledInitialOpenSessionByTarget.value(targetEndpointId)
+        == remoteSessionId) {
+        m_cancelledInitialOpenSessionByTarget.remove(targetEndpointId);
+    }
+    for (auto it = m_cancelledInitialOpenTargetByRequestId.begin();
+         it != m_cancelledInitialOpenTargetByRequestId.end();) {
+        if (it.value() == targetEndpointId) {
+            it = m_cancelledInitialOpenTargetByRequestId.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    for (auto it = m_outgoingSessionCloseRequestById.begin();
+         it != m_outgoingSessionCloseRequestById.end();) {
+        if (it->targetEndpointId == targetEndpointId
+            && it->remoteSessionId == remoteSessionId) {
+            it = m_outgoingSessionCloseRequestById.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    m_remoteSessionOpenPendingTargets.remove(targetEndpointId);
+    for (auto it = m_remoteSessionOpenTargetByRequestId.begin();
+         it != m_remoteSessionOpenTargetByRequestId.end();) {
+        if (it.value() == targetEndpointId) {
+            it = m_remoteSessionOpenTargetByRequestId.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
+    clearRemoteSessionRuntimeState(targetEndpointId, false, false);
+    const bool stillSelected = m_activeWorkspaceEndpointId == targetEndpointId
+        && m_navigationManager && m_navigationManager->isOnScreenView();
+    const bool replacementRequested = allowReplacementOpen && stillSelected
+        && m_remoteSessionOpenDesiredTargets.contains(targetEndpointId);
+    if (!replacementRequested) {
+        m_remoteSessionOpenDesiredTargets.remove(targetEndpointId);
+        m_remoteSessionOpenSuppressedTargets.insert(targetEndpointId);
+        return true;
+    }
+
+    m_remoteSessionOpenSuppressedTargets.remove(targetEndpointId);
+    for (const ClientInfo& discovered : std::as_const(m_discoveredClients)) {
+        if (discovered.endpointId() != targetEndpointId
+            || !discovered.isOnline()) {
+            continue;
+        }
+        ClientInfo available = discovered;
+        available.setStatus(QStringLiteral("Available"));
+        available.setAvailabilityStatus(QStringLiteral("Available"));
+        ensureRemoteSessionForClient(available);
+        break;
+    }
+    return true;
+}
+
 void ApplicationRuntime::ensureRemoteSessionForClient(const ClientInfo& client) {
     if (m_cleanShutdownPrepared || m_userDisconnected || !m_webSocketClient) {
         return;
@@ -1455,13 +1829,61 @@ void ApplicationRuntime::ensureRemoteSessionForClient(const ClientInfo& client) 
     const RemoteSessionCoordinator::Binding binding = coordinator
         ? coordinator->outgoingForPeer(targetEndpointId)
         : RemoteSessionCoordinator::Binding();
+    const bool terminalBinding = binding.phase == QLatin1String("Terminating")
+        || binding.phase == QLatin1String("CleanupPending")
+        || binding.phase == QLatin1String("Closed");
+    if (terminalBinding && !binding.remoteSessionId.isEmpty()
+        && binding.ownerEndpointId == m_webSocketClient->endpointId()) {
+        rememberPendingOutgoingSessionClose(
+            targetEndpointId, binding.remoteSessionId, binding.generation);
+        m_locallyTerminatingRemoteSessions.insert(binding.remoteSessionId);
+    }
+    const bool closePending = hasPendingOutgoingSessionClose(targetEndpointId)
+        || hasCancelledInitialOpenForTarget(targetEndpointId)
+        || (!binding.remoteSessionId.isEmpty()
+            && m_locallyTerminatingRemoteSessions.contains(
+                binding.remoteSessionId));
+    if (closePending || terminalBinding) {
+        if (!terminalBinding) {
+            retryPendingOutgoingSessionClose(
+                targetEndpointId, QStringLiteral("local_close_retry"));
+        }
+        if (m_workspaceManager) {
+            m_workspaceManager->setRemoteSessionState(
+                targetEndpointId, WorkspaceManager::RemoteSessionState::Closing);
+            updateWorkspaceCapabilities(targetEndpointId);
+        }
+        const QString status = !client.isOnline()
+            ? QStringLiteral("Disconnected")
+            : (m_remoteSessionOpenDesiredTargets.contains(targetEndpointId)
+                ? QStringLiteral("Connecting")
+                : QStringLiteral("Available"));
+        updateRemoteClientAvailability(targetEndpointId, status);
+        if (m_activeWorkspaceEndpointId == targetEndpointId) {
+            m_remoteClientConnected = false;
+            m_remoteVolumePercent = -1;
+            setRemoteConnectionStatus(
+                status == QLatin1String("Connecting")
+                    ? QStringLiteral("CONNECTING...") : status.toUpper(),
+                false);
+            if (m_uploadManager) m_uploadManager->setTargetClientId(QString());
+        }
+        return;
+    }
     if (!binding.remoteSessionId.isEmpty()) {
+        m_currentOutgoingSessionIdByTarget.insert(
+            targetEndpointId, binding.remoteSessionId);
+        m_currentOutgoingSessionGenerationByTarget.insert(
+            targetEndpointId, binding.generation);
         QString status = QStringLiteral("Disconnecting");
-        if (binding.phase == QLatin1String("Active")) {
+        const bool commandReady = isCommandReadyBinding(
+            m_webSocketClient, binding);
+        if (commandReady) {
             status = QStringLiteral("Connected");
         } else if (binding.phase == QLatin1String("Opening")) {
             status = QStringLiteral("Connecting");
-        } else if (binding.phase == QLatin1String("Grace")) {
+        } else if (binding.phase == QLatin1String("Active")
+                   || binding.phase == QLatin1String("Grace")) {
             status = QStringLiteral("Reconnecting");
         } else if (binding.phase == QLatin1String("Closed")) {
             status = client.isOnline() ? QStringLiteral("Available")
@@ -1471,11 +1893,12 @@ void ApplicationRuntime::ensureRemoteSessionForClient(const ClientInfo& client) 
         if (m_workspaceManager) {
             WorkspaceManager::RemoteSessionState state =
                 WorkspaceManager::RemoteSessionState::Closing;
-            if (binding.phase == QLatin1String("Active")) {
+            if (commandReady) {
                 state = WorkspaceManager::RemoteSessionState::Active;
             } else if (binding.phase == QLatin1String("Opening")) {
                 state = WorkspaceManager::RemoteSessionState::Opening;
-            } else if (binding.phase == QLatin1String("Grace")) {
+            } else if (binding.phase == QLatin1String("Active")
+                       || binding.phase == QLatin1String("Grace")) {
                 state = WorkspaceManager::RemoteSessionState::Grace;
             } else if (binding.phase == QLatin1String("Closed")) {
                 state = WorkspaceManager::RemoteSessionState::Absent;
@@ -1483,31 +1906,31 @@ void ApplicationRuntime::ensureRemoteSessionForClient(const ClientInfo& client) 
             m_workspaceManager->setRemoteSessionState(targetEndpointId, state);
             updateWorkspaceCapabilities(targetEndpointId);
         }
-        const bool commandReady = binding.phase == QLatin1String("Active")
-            && !m_locallyTerminatingRemoteSessions.contains(binding.remoteSessionId);
-        const bool sessionClosable = (binding.phase == QLatin1String("Active")
-                                      || binding.phase == QLatin1String("Grace"))
+        const bool locallyCommandReady = commandReady
             && !m_locallyTerminatingRemoteSessions.contains(binding.remoteSessionId);
         if (m_activeWorkspaceEndpointId == targetEndpointId) {
-            m_remoteClientConnected = binding.phase == QLatin1String("Active")
-                || binding.phase == QLatin1String("Grace");
-            setRemoteConnectionStatus(commandReady ? QStringLiteral("CONNECTED")
-                                                   : status.toUpper(), false);
-            Q_UNUSED(sessionClosable);
-            Q_UNUSED(commandReady);
+            m_remoteClientConnected = locallyCommandReady;
+            setRemoteConnectionStatus(
+                locallyCommandReady ? QStringLiteral("CONNECTED")
+                                    : status.toUpper(),
+                false);
+            if (!locallyCommandReady) m_remoteVolumePercent = -1;
             updateWorkspaceCapabilities(targetEndpointId);
         }
+        m_remoteSessionOpenDesiredTargets.remove(targetEndpointId);
         return;
     }
 
     if (m_remoteSessionOpenPendingTargets.contains(targetEndpointId)) {
+        m_remoteSessionOpenDesiredTargets.remove(targetEndpointId);
         updateRemoteClientAvailability(targetEndpointId, QStringLiteral("Connecting"));
         if (m_activeWorkspaceEndpointId == targetEndpointId && m_uploadManager) {
             m_uploadManager->setTargetClientId(QString());
         }
         return;
     }
-    if (m_remoteSessionOpenSuppressedTargets.contains(targetEndpointId)) {
+    if (m_remoteSessionOpenSuppressedTargets.contains(targetEndpointId)
+        && !m_remoteSessionOpenDesiredTargets.contains(targetEndpointId)) {
         const QString status = client.isOnline()
             ? client.availabilityBadgeText() : QStringLiteral("Disconnected");
         updateRemoteClientAvailability(targetEndpointId, status);
@@ -1517,6 +1940,9 @@ void ApplicationRuntime::ensureRemoteSessionForClient(const ClientInfo& client) 
             if (m_uploadManager) m_uploadManager->setTargetClientId(QString());
         }
         return;
+    }
+    if (m_remoteSessionOpenDesiredTargets.contains(targetEndpointId)) {
+        m_remoteSessionOpenSuppressedTargets.remove(targetEndpointId);
     }
 
     const QString badge = client.availabilityBadgeText();
@@ -1549,6 +1975,7 @@ void ApplicationRuntime::ensureRemoteSessionForClient(const ClientInfo& client) 
     }
     m_remoteSessionOpenPendingTargets.insert(targetEndpointId);
     m_remoteSessionOpenTargetByRequestId.insert(requestId, targetEndpointId);
+    m_remoteSessionOpenDesiredTargets.remove(targetEndpointId);
     updateRemoteClientAvailability(targetEndpointId, QStringLiteral("Connecting"));
     if (m_workspaceManager) {
         m_workspaceManager->setRemoteSessionState(
@@ -1568,6 +1995,17 @@ void ApplicationRuntime::handleRemoteSessionReady(const QJsonObject& envelope,
     if (!m_webSocketClient) return;
     const QString ownerEndpointId = envelope.value(QStringLiteral("ownerEndpointId")).toString();
     const QString targetEndpointId = envelope.value(QStringLiteral("targetEndpointId")).toString();
+    const QString remoteSessionId =
+        envelope.value(QStringLiteral("remoteSessionId")).toString();
+    const QString phase = envelope.value(QStringLiteral("phase")).toString();
+    const bool commandActive = phase == QLatin1String("Active");
+    const bool resumableGrace = resumed && phase == QLatin1String("Grace");
+    // WebSocketClient validates this too, but keep the presentation boundary
+    // fail-closed: a Ready-like envelope only grants commands in Active.
+    if (!commandActive && !resumableGrace) return;
+    quint64 generation = 0;
+    readSafePositiveJsonInteger(
+        envelope.value(QStringLiteral("generation")), &generation);
     const QString localEndpointId = m_webSocketClient->endpointId();
     const QString peerEndpointId = ownerEndpointId == localEndpointId
         ? targetEndpointId
@@ -1578,44 +2016,133 @@ void ApplicationRuntime::handleRemoteSessionReady(const QJsonObject& envelope,
     // the quit request. Never let it resurrect command-capable state while the
     // transport is being drained: include it in the same idempotent close set.
     if (m_cleanShutdownPrepared) {
-        const QString remoteSessionId =
-            envelope.value(QStringLiteral("remoteSessionId")).toString();
         if (!remoteSessionId.isEmpty()) {
             m_locallyTerminatingRemoteSessions.insert(remoteSessionId);
             m_webSocketClient->closeRemoteSession(
                 remoteSessionId, nullptr, QStringLiteral("clean_shutdown"));
             if (targetEndpointId == localEndpointId && m_remoteSceneController) {
                 m_cleanShutdownRendererPendingSessionIds.insert(remoteSessionId);
-                m_remoteSceneController->teardownRemoteSession(remoteSessionId);
+                enqueueRendererTeardown(remoteSessionId);
             }
         }
         return;
     }
 
     const QString requestId = envelope.value(QStringLiteral("requestId")).toString();
-    if (!requestId.isEmpty()) m_remoteSessionOpenTargetByRequestId.remove(requestId);
-    m_remoteSessionOpenPendingTargets.remove(peerEndpointId);
-    m_remoteSessionOpenSuppressedTargets.remove(peerEndpointId);
-    m_locallyTerminatingRemoteSessions.remove(
-        envelope.value(QStringLiteral("remoteSessionId")).toString());
-    if (ownerEndpointId != localEndpointId) {
-        return; // Incoming sessions do not create a local Project.
+    bool cancelledRequest = false;
+    if (ownerEndpointId == localEndpointId && !requestId.isEmpty()) {
+        const auto cancelled =
+            m_cancelledInitialOpenTargetByRequestId.find(requestId);
+        if (cancelled != m_cancelledInitialOpenTargetByRequestId.end()
+            && cancelled.value() == peerEndpointId) {
+            cancelledRequest = true;
+            m_cancelledInitialOpenTargetByRequestId.erase(cancelled);
+        }
     }
-    if (m_cancelledInitialOpenTargets.remove(peerEndpointId)
-        && (!m_projectManager
-            || !m_projectManager->hasProjectForTarget(peerEndpointId))) {
-        m_webSocketClient->closeRemoteSession(
-            envelope.value(QStringLiteral("remoteSessionId")).toString(),
-            nullptr, QStringLiteral("initial_open_cancelled"));
+    bool cancelledSession = false;
+    const auto cancelledBySession =
+        m_cancelledInitialOpenSessionByTarget.find(peerEndpointId);
+    if (ownerEndpointId == localEndpointId
+        && cancelledBySession != m_cancelledInitialOpenSessionByTarget.end()
+        && cancelledBySession.value() == remoteSessionId) {
+        cancelledSession = true;
+        m_cancelledInitialOpenSessionByTarget.erase(cancelledBySession);
+    }
+    if (ownerEndpointId == localEndpointId && !requestId.isEmpty()) {
+        m_remoteSessionOpenTargetByRequestId.remove(requestId);
+    }
+
+    const bool cancelledInitial = ownerEndpointId == localEndpointId
+        && (cancelledRequest || cancelledSession);
+    const bool pendingCloseForPeer = ownerEndpointId == localEndpointId
+        && hasPendingOutgoingSessionClose(peerEndpointId);
+    const bool matchingPendingClose = ownerEndpointId == localEndpointId
+        && hasPendingOutgoingSessionClose(peerEndpointId, remoteSessionId);
+    const bool locallyClosing = cancelledInitial || pendingCloseForPeer
+        || m_locallyTerminatingRemoteSessions.contains(remoteSessionId);
+    if (locallyClosing) {
+        m_remoteSessionOpenPendingTargets.remove(peerEndpointId);
+        m_remoteSessionOpenSuppressedTargets.insert(peerEndpointId);
+        m_locallyTerminatingRemoteSessions.insert(remoteSessionId);
+        if (ownerEndpointId == localEndpointId) {
+            if (!pendingCloseForPeer || matchingPendingClose) {
+                rememberPendingOutgoingSessionClose(
+                    peerEndpointId, remoteSessionId, generation);
+                retryPendingOutgoingSessionClose(
+                    peerEndpointId,
+                    cancelledInitial
+                        ? QStringLiteral("initial_open_cancelled")
+                        : QStringLiteral("local_close_retry"));
+            } else {
+                // A second session for the same peer before the first Closed
+                // violates the one-directional-session invariant. Refuse it
+                // without weakening the original close fence.
+                m_webSocketClient->closeRemoteSession(
+                    remoteSessionId, nullptr,
+                    QStringLiteral("previous_session_cleanup_pending"));
+            }
+            if (m_workspaceManager) {
+                m_workspaceManager->setRemoteSessionState(
+                    peerEndpointId,
+                    WorkspaceManager::RemoteSessionState::Closing);
+            }
+            clearRemoteSessionRuntimeState(peerEndpointId, false, true);
+            const bool reopenDesired =
+                m_remoteSessionOpenDesiredTargets.contains(peerEndpointId);
+            const QString status = reopenDesired
+                ? QStringLiteral("Connecting")
+                : QStringLiteral("Available");
+            updateRemoteClientAvailability(peerEndpointId, status);
+            if (m_activeWorkspaceEndpointId == peerEndpointId) {
+                m_remoteClientConnected = false;
+                m_remoteVolumePercent = -1;
+                setRemoteConnectionStatus(
+                    reopenDesired ? QStringLiteral("CONNECTING...")
+                                  : QStringLiteral("AVAILABLE"),
+                    false);
+            }
+        } else {
+            m_webSocketClient->closeRemoteSession(
+                remoteSessionId, nullptr,
+                QStringLiteral("local_close_pending"));
+        }
         return;
     }
+
+    if (ownerEndpointId != localEndpointId) {
+        // Incoming sessions do not create a local Project and must never
+        // consume or rewrite the independent outgoing intent for this peer.
+        return;
+    }
+    m_remoteSessionOpenPendingTargets.remove(peerEndpointId);
+    m_remoteSessionOpenSuppressedTargets.remove(peerEndpointId);
+    m_remoteSessionOpenDesiredTargets.remove(peerEndpointId);
+    m_locallyTerminatingRemoteSessions.remove(remoteSessionId);
+
+    m_currentOutgoingSessionIdByTarget.insert(
+        peerEndpointId, remoteSessionId);
+    m_currentOutgoingSessionGenerationByTarget.insert(
+        peerEndpointId, generation);
+
+    const auto failCloseOutgoing = [this, &peerEndpointId, &remoteSessionId,
+                                    generation](const QString& reason) {
+        rememberPendingOutgoingSessionClose(
+            peerEndpointId, remoteSessionId, generation);
+        m_locallyTerminatingRemoteSessions.insert(remoteSessionId);
+        m_remoteSessionOpenSuppressedTargets.insert(peerEndpointId);
+        retryPendingOutgoingSessionClose(peerEndpointId, reason);
+        if (m_workspaceManager) {
+            m_workspaceManager->setRemoteSessionState(
+                peerEndpointId,
+                WorkspaceManager::RemoteSessionState::Closing);
+            updateWorkspaceCapabilities(peerEndpointId);
+        }
+    };
 
     ClientWorkspace* session = m_workspaceManager
         ? m_workspaceManager->findWorkspace(peerEndpointId) : nullptr;
     if (!session) {
-        m_webSocketClient->closeRemoteSession(
-            envelope.value(QStringLiteral("remoteSessionId")).toString(),
-            nullptr, QStringLiteral("workspace_gone"));
+        failCloseOutgoing(QStringLiteral("workspace_gone"));
         return;
     }
 
@@ -1641,9 +2168,7 @@ void ApplicationRuntime::handleRemoteSessionReady(const QJsonObject& envelope,
             ? -1 : snapshot.value(QStringLiteral("volumePercent")).toInt(-1);
         if (!validRevision || capturedAtMs < 1
             || volumePercent < -1 || volumePercent > 100) {
-            m_webSocketClient->closeRemoteSession(
-                envelope.value(QStringLiteral("remoteSessionId")).toString(),
-                nullptr, QStringLiteral("invalid_initial_snapshot"));
+            failCloseOutgoing(QStringLiteral("invalid_initial_snapshot"));
             handleRemoteSessionError(QJsonObject{
                 {QStringLiteral("code"), QStringLiteral("invalid_initial_snapshot")},
                 {QStringLiteral("targetEndpointId"), peerEndpointId},
@@ -1663,9 +2188,8 @@ void ApplicationRuntime::handleRemoteSessionReady(const QJsonObject& envelope,
                     capturedAtMs)
                 : QString();
             if (projectId.isEmpty()) {
-                m_webSocketClient->closeRemoteSession(
-                    envelope.value(QStringLiteral("remoteSessionId")).toString(),
-                    nullptr, QStringLiteral("project_persistence_failed"));
+                failCloseOutgoing(
+                    QStringLiteral("project_persistence_failed"));
                 if (m_workspaceManager) {
                     m_workspaceManager->setRemoteSessionState(
                         peerEndpointId,
@@ -1691,9 +2215,14 @@ void ApplicationRuntime::handleRemoteSessionReady(const QJsonObject& envelope,
 
     if (m_workspaceManager) {
         m_workspaceManager->setRemoteSessionState(
-            peerEndpointId, WorkspaceManager::RemoteSessionState::Active);
+            peerEndpointId,
+            commandActive ? WorkspaceManager::RemoteSessionState::Active
+                          : WorkspaceManager::RemoteSessionState::Grace);
     }
-    updateRemoteClientAvailability(peerEndpointId, QStringLiteral("Connected"));
+    updateRemoteClientAvailability(
+        peerEndpointId,
+        commandActive ? QStringLiteral("Connected")
+                      : QStringLiteral("Reconnecting"));
     if (m_activeWorkspaceEndpointId == peerEndpointId) {
         if (!session->canvas) ensureWorkspace(session->lastClientInfo);
         session = m_workspaceManager->findWorkspace(peerEndpointId);
@@ -1714,9 +2243,13 @@ void ApplicationRuntime::handleRemoteSessionReady(const QJsonObject& envelope,
         // volume have all been installed; the initial page transition happened
         // earlier while the workspace intentionally had no canvas.
         m_selectedClient = session->lastClientInfo;
-        m_remoteVolumePercent = session->lastClientInfo.getVolumePercent();
-        m_remoteClientConnected = true;
-        setRemoteConnectionStatus(QStringLiteral("CONNECTED"), false);
+        m_remoteVolumePercent = commandActive
+            ? session->lastClientInfo.getVolumePercent() : -1;
+        m_remoteClientConnected = commandActive;
+        setRemoteConnectionStatus(
+            commandActive ? QStringLiteral("CONNECTED")
+                          : QStringLiteral("RECONNECTING..."),
+            false);
         updateWorkspaceCapabilities(peerEndpointId);
         if (session->canvas && !m_canvasRevealedForCurrentClient) {
             if (m_navigationManager) m_navigationManager->revealCanvas();
@@ -1737,9 +2270,13 @@ void ApplicationRuntime::handleRemoteSessionSnapshot(const QJsonObject& envelope
     if (!m_webSocketClient || !m_projectManager || !m_workspaceManager) return;
     const QString targetEndpointId =
         envelope.value(QStringLiteral("targetEndpointId")).toString();
+    const QString remoteSessionId =
+        envelope.value(QStringLiteral("remoteSessionId")).toString();
     if (envelope.value(QStringLiteral("ownerEndpointId")).toString()
             != m_webSocketClient->endpointId()
         || targetEndpointId.isEmpty()
+        || hasPendingOutgoingSessionClose(targetEndpointId)
+        || m_locallyTerminatingRemoteSessions.contains(remoteSessionId)
         || !m_projectManager->hasProjectForTarget(targetEndpointId)) {
         return;
     }
@@ -1786,6 +2323,54 @@ void ApplicationRuntime::handleRemoteSessionLeaseState(const QJsonObject& envelo
         envelope.value(QStringLiteral("remoteSessionId")).toString();
     const QString phase = envelope.value(QStringLiteral("phase")).toString();
     const QString state = envelope.value(QStringLiteral("state")).toString(phase);
+    quint64 generation = 0;
+    readSafePositiveJsonInteger(
+        envelope.value(QStringLiteral("generation")), &generation);
+    const bool terminalPhase = phase == QLatin1String("Terminating")
+        || phase == QLatin1String("CleanupPending")
+        || phase == QLatin1String("Closed");
+    if (terminalPhase && !remoteSessionId.isEmpty()) {
+        rememberPendingOutgoingSessionClose(
+            targetEndpointId, remoteSessionId, generation);
+        m_locallyTerminatingRemoteSessions.insert(remoteSessionId);
+    }
+    const bool pendingClose = hasPendingOutgoingSessionClose(targetEndpointId)
+        || m_locallyTerminatingRemoteSessions.contains(remoteSessionId);
+    if (pendingClose || terminalPhase) {
+        if (!terminalPhase
+            && hasPendingOutgoingSessionClose(
+                targetEndpointId, remoteSessionId)) {
+            rememberPendingOutgoingSessionClose(
+                targetEndpointId, remoteSessionId, generation);
+            retryPendingOutgoingSessionClose(
+                targetEndpointId, QStringLiteral("late_session_state"));
+        }
+        clearRemoteSessionRuntimeState(targetEndpointId, false, true);
+        bool online = false;
+        for (const ClientInfo& client : std::as_const(m_discoveredClients)) {
+            if (client.endpointId() == targetEndpointId) {
+                online = client.isOnline();
+                break;
+            }
+        }
+        const bool reopenDesired = online
+            && m_remoteSessionOpenDesiredTargets.contains(targetEndpointId);
+        const QString status = !online
+            ? QStringLiteral("Disconnected")
+            : (reopenDesired ? QStringLiteral("Connecting")
+                             : QStringLiteral("Available"));
+        updateRemoteClientAvailability(targetEndpointId, status);
+        if (m_activeWorkspaceEndpointId == targetEndpointId) {
+            m_remoteClientConnected = false;
+            m_remoteVolumePercent = -1;
+            setRemoteConnectionStatus(
+                reopenDesired ? QStringLiteral("CONNECTING...")
+                              : status.toUpper(),
+                false);
+        }
+        return;
+    }
+
     QString status;
     if (phase == QLatin1String("Grace") || state == QLatin1String("Grace")
         || state == QLatin1String("Degraded")
@@ -1798,11 +2383,12 @@ void ApplicationRuntime::handleRemoteSessionLeaseState(const QJsonObject& envelo
         status = QStringLiteral("Disconnecting");
     }
     if (status.isEmpty()) return;
+    m_currentOutgoingSessionIdByTarget.insert(
+        targetEndpointId, remoteSessionId);
+    m_currentOutgoingSessionGenerationByTarget.insert(
+        targetEndpointId, generation);
     updateRemoteClientAvailability(targetEndpointId, status);
     const bool commandReady = status == QLatin1String("Connected")
-        && !m_locallyTerminatingRemoteSessions.contains(remoteSessionId);
-    const bool sessionClosable = (phase == QLatin1String("Active")
-                                  || phase == QLatin1String("Grace"))
         && !m_locallyTerminatingRemoteSessions.contains(remoteSessionId);
     if (m_workspaceManager) {
         WorkspaceManager::RemoteSessionState workspaceState =
@@ -1817,11 +2403,8 @@ void ApplicationRuntime::handleRemoteSessionLeaseState(const QJsonObject& envelo
         updateWorkspaceCapabilities(targetEndpointId);
     }
     if (m_activeWorkspaceEndpointId == targetEndpointId) {
-        m_remoteClientConnected = phase == QLatin1String("Active")
-            || phase == QLatin1String("Grace");
+        m_remoteClientConnected = commandReady;
         setRemoteConnectionStatus(status.toUpper(), false);
-        Q_UNUSED(sessionClosable);
-        Q_UNUSED(commandReady);
         if (status != QLatin1String("Connected")) m_remoteVolumePercent = -1;
     }
 }
@@ -1842,23 +2425,38 @@ void ApplicationRuntime::handleRemoteSessionTerminating(const QJsonObject& envel
     m_locallyTerminatingRemoteSessions.insert(remoteSessionId);
 
     if (ownerEndpointId == m_webSocketClient->endpointId()) {
+        rememberPendingOutgoingSessionClose(
+            targetEndpointId, remoteSessionId, generation);
         if (m_activeWorkspaceEndpointId == targetEndpointId) m_remoteClientConnected = false;
-        updateRemoteClientAvailability(targetEndpointId, QStringLiteral("Disconnecting"));
-        clearRemoteSessionRuntimeState(targetEndpointId, false);
+        clearRemoteSessionRuntimeState(targetEndpointId, false, true);
+        if (m_remoteSessionOpenDesiredTargets.contains(targetEndpointId)) {
+            updateRemoteClientAvailability(
+                targetEndpointId, QStringLiteral("Connecting"));
+            if (m_activeWorkspaceEndpointId == targetEndpointId) {
+                setRemoteConnectionStatus(QStringLiteral("CONNECTING..."), false);
+            }
+        }
         return;
     }
     if (targetEndpointId != m_webSocketClient->endpointId()) return;
 
-    // Duplicate terminal envelopes replay the result already being built or
-    // acknowledged. They must never enter renderer destruction or quarantine
-    // a second time.
+    // Only a fully committed result is retained in this replay table. Failed
+    // attempts remain in the renderer queue and are retried from an external
+    // progress edge (a settled teardown or a bounded server retry).
     const auto acknowledged = m_pendingTeardownAcks.constFind(remoteSessionId);
     if (acknowledged != m_pendingTeardownAcks.cend()) {
         if (acknowledged->teardownId == teardownId) retryPendingTeardownAcks();
         return;
     }
     const auto pending = m_pendingRendererTeardowns.constFind(remoteSessionId);
-    if (pending != m_pendingRendererTeardowns.cend()) return;
+    if (pending != m_pendingRendererTeardowns.cend()) {
+        if (pending->ownerEndpointId == ownerEndpointId
+            && pending->teardownId == teardownId
+            && pending->generation == generation) {
+            startNextPendingRendererTeardown();
+        }
+        return;
+    }
 
     // Target-side commit order is enforced asynchronously: renderer objects
     // are stopped/detached now, but cache quarantine is forbidden until their
@@ -1868,10 +2466,61 @@ void ApplicationRuntime::handleRemoteSessionTerminating(const QJsonObject& envel
     rendererTeardown.teardownId = teardownId;
     rendererTeardown.generation = generation;
     m_pendingRendererTeardowns.insert(remoteSessionId, rendererTeardown);
-    const bool accepted = m_remoteSceneController
-        && m_remoteSceneController->teardownRemoteSession(remoteSessionId);
-    if (!accepted) {
-        handleRemoteRendererTeardownSettled(remoteSessionId, false);
+    enqueueRendererTeardown(remoteSessionId);
+}
+
+void ApplicationRuntime::enqueueRendererTeardown(
+    const QString& remoteSessionId)
+{
+    if (remoteSessionId.isEmpty()) return;
+    if (!m_pendingRendererTeardownOrder.contains(remoteSessionId)) {
+        m_pendingRendererTeardownOrder.append(remoteSessionId);
+    }
+    startNextPendingRendererTeardown();
+}
+
+void ApplicationRuntime::startNextPendingRendererTeardown(
+    const QString& excludedRemoteSessionId)
+{
+    if (!m_remoteSceneController
+        || !m_activeRendererTeardownSessionId.isEmpty()) {
+        return;
+    }
+
+    // Exactly one request owns the asynchronous renderer barrier at a time.
+    // RemoteSceneController can also be busy with a normal STOP or transport
+    // cleanup that is not represented in this map; in that case admission
+    // returns false and its eventual teardownSettled signal re-enters here.
+    for (const QString& remoteSessionId :
+         std::as_const(m_pendingRendererTeardownOrder)) {
+        if (remoteSessionId == excludedRemoteSessionId) continue;
+        const bool requested =
+            m_pendingRendererTeardowns.contains(remoteSessionId)
+            || m_terminalRendererPendingSessionIds.contains(remoteSessionId)
+            || m_cleanShutdownRendererPendingSessionIds.contains(
+                remoteSessionId);
+        if (!requested) continue;
+        auto pending = m_pendingRendererTeardowns.find(remoteSessionId);
+
+        // Mark before calling into the controller so even a future synchronous
+        // implementation of the acceptance path cannot race its settlement.
+        m_activeRendererTeardownSessionId = remoteSessionId;
+        if (pending != m_pendingRendererTeardowns.end()) {
+            pending->rendererTeardownStarted = true;
+        }
+        if (m_remoteSceneController->teardownRemoteSession(remoteSessionId)) {
+            return;
+        }
+
+        // A refusal is admission backpressure, not a terminal cleanup result.
+        // Leave the immutable transaction queued. Do not spin through it (or
+        // manufacture a replayable failure ACK) on the same event-loop edge.
+        m_activeRendererTeardownSessionId.clear();
+        pending = m_pendingRendererTeardowns.find(remoteSessionId);
+        if (pending != m_pendingRendererTeardowns.end()) {
+            pending->rendererTeardownStarted = false;
+        }
+        return;
     }
 }
 
@@ -1921,14 +2570,7 @@ void ApplicationRuntime::beginTerminalIncomingCacheCleanup(const QString& reason
             continue;
         }
         m_terminalRendererPendingSessionIds.insert(binding.remoteSessionId);
-        if (!m_remoteSceneController
-            || !m_remoteSceneController->teardownRemoteSession(
-                binding.remoteSessionId)) {
-            // Keep the id pending and the receiver unadvertised. Clearing it
-            // here would permit cache quarantine without renderer settlement.
-            qCritical() << "Terminal renderer teardown could not start for"
-                        << binding.remoteSessionId;
-        }
+        enqueueRendererTeardown(binding.remoteSessionId);
     }
     // The coordinator can be cleared by the lease timer at the same event-loop
     // edge as the independent watchdog. Its immutable capture still owns the
@@ -1939,12 +2581,7 @@ void ApplicationRuntime::beginTerminalIncomingCacheCleanup(const QString& reason
             continue;
         }
         m_terminalRendererPendingSessionIds.insert(remoteSessionId);
-        if (!m_remoteSceneController
-            || !m_remoteSceneController->teardownRemoteSession(
-                remoteSessionId)) {
-            qCritical() << "Captured orphan renderer teardown could not start for"
-                        << remoteSessionId;
-        }
+        enqueueRendererTeardown(remoteSessionId);
     }
     finishTerminalIncomingCacheCleanupIfReady();
 }
@@ -2022,23 +2659,44 @@ void ApplicationRuntime::handleRemoteRendererTeardownSettled(
     const QString& remoteSessionId,
     bool sceneStopped)
 {
-    if (remoteSessionId.isEmpty()) return;
+    if (remoteSessionId.isEmpty()) {
+        // A normal SceneRun STOP can be the barrier that caused target-side
+        // RemoteSession teardown admission to return false.
+        startNextPendingRendererTeardown();
+        return;
+    }
+    if (m_activeRendererTeardownSessionId == remoteSessionId) {
+        m_activeRendererTeardownSessionId.clear();
+    }
     const bool terminalTransportBarrier =
-        m_terminalRendererPendingSessionIds.remove(remoteSessionId) > 0;
+        m_terminalRendererPendingSessionIds.contains(remoteSessionId);
     const bool cleanShutdownBarrier =
-        m_cleanShutdownRendererPendingSessionIds.remove(remoteSessionId) > 0;
+        m_cleanShutdownRendererPendingSessionIds.contains(remoteSessionId);
+    if (sceneStopped) {
+        m_terminalRendererPendingSessionIds.remove(remoteSessionId);
+        m_cleanShutdownRendererPendingSessionIds.remove(remoteSessionId);
+    }
     const auto pending = m_pendingRendererTeardowns.find(remoteSessionId);
     if (pending == m_pendingRendererTeardowns.end()) {
-        if (terminalTransportBarrier) {
+        if (terminalTransportBarrier && sceneStopped) {
             finishTerminalIncomingCacheCleanupIfReady();
         }
-        if (cleanShutdownBarrier) {
+        if (cleanShutdownBarrier && sceneStopped) {
             finishCleanShutdownIncomingCacheTeardownIfReady();
         }
+        if (!m_terminalRendererPendingSessionIds.contains(remoteSessionId)
+            && !m_cleanShutdownRendererPendingSessionIds.contains(
+                remoteSessionId)) {
+            m_pendingRendererTeardownOrder.removeAll(remoteSessionId);
+        }
+        // A reported renderer failure must not synchronously retry the same
+        // transaction forever. Drain other queued sessions; this one remains
+        // fail-closed for a later external recovery edge/startup cleanup.
+        startNextPendingRendererTeardown(
+            sceneStopped ? QString() : remoteSessionId);
         return;
     }
     const PendingRendererTeardown teardown = pending.value();
-    m_pendingRendererTeardowns.erase(pending);
 
     RemoteCacheStore::CommitResult cacheResult;
     bool uploadsAborted = false;
@@ -2065,10 +2723,25 @@ void ApplicationRuntime::handleRemoteRendererTeardownSettled(
     ack.removedFileCount = removedFileCount;
     ack.errorCode = cacheResult.errorCode;
     ack.quarantinedBytes = cacheResult.quarantinedBytes;
-    m_pendingTeardownAcks.insert(remoteSessionId, ack);
-    retryPendingTeardownAcks();
-
-    if (!ack.sceneStopped || !ack.uploadsAborted || !ack.cacheQuarantined) {
+    const bool committed = ack.sceneStopped && ack.uploadsAborted
+        && ack.cacheQuarantined;
+    if (committed) {
+        m_pendingRendererTeardowns.erase(pending);
+        m_pendingRendererTeardownOrder.removeAll(remoteSessionId);
+        m_pendingTeardownAcks.insert(remoteSessionId, ack);
+        retryPendingTeardownAcks();
+    } else {
+        // A cleanup_error is useful to the server for observability and retry
+        // scheduling, but it is not an idempotent terminal result. Keep the
+        // exact transaction queued and never place it in the replay table.
+        pending->rendererTeardownStarted = false;
+        if (m_webSocketClient && m_webSocketClient->isConnected()) {
+            m_webSocketClient->acknowledgeRemoteSessionTeardown(
+                remoteSessionId, ack.teardownId, ack.sceneStopped,
+                ack.uploadsAborted, ack.cacheQuarantined,
+                ack.removedFileCount, ack.errorCode,
+                ack.quarantinedBytes);
+        }
         if (m_toastSystem) {
             NotificationRequest notification;
             notification.severity = NotificationSeverity::Error;
@@ -2082,12 +2755,23 @@ void ApplicationRuntime::handleRemoteRendererTeardownSettled(
             m_toastSystem->publishNotification(notification);
         }
     }
-    if (cleanShutdownBarrier) {
+    if (cleanShutdownBarrier && sceneStopped) {
         finishCleanShutdownIncomingCacheTeardownIfReady();
     }
-    if (terminalTransportBarrier) {
+    if (terminalTransportBarrier && sceneStopped) {
         finishTerminalIncomingCacheCleanupIfReady();
     }
+    if (!m_pendingRendererTeardowns.contains(remoteSessionId)
+        && !m_terminalRendererPendingSessionIds.contains(remoteSessionId)
+        && !m_cleanShutdownRendererPendingSessionIds.contains(
+            remoteSessionId)) {
+        m_pendingRendererTeardownOrder.removeAll(remoteSessionId);
+    }
+    // An actual failure is excluded from this immediate drain to avoid a local
+    // hot loop. Other queued sessions may progress; this transaction retries
+    // on the next server delivery or after another teardown settles.
+    startNextPendingRendererTeardown(
+        committed ? QString() : remoteSessionId);
 }
 
 void ApplicationRuntime::retryPendingTeardownAcks() {
@@ -2095,6 +2779,12 @@ void ApplicationRuntime::retryPendingTeardownAcks() {
     for (auto it = m_pendingTeardownAcks.cbegin();
          it != m_pendingTeardownAcks.cend(); ++it) {
         const PendingTeardownAck& ack = it.value();
+        if (!ack.sceneStopped || !ack.uploadsAborted
+            || !ack.cacheQuarantined) {
+            qCritical() << "Refusing to replay an uncommitted teardown ACK"
+                        << it.key();
+            continue;
+        }
         m_webSocketClient->acknowledgeRemoteSessionTeardown(
             it.key(), ack.teardownId, ack.sceneStopped, ack.uploadsAborted,
             ack.cacheQuarantined, ack.removedFileCount, ack.errorCode,
@@ -2102,53 +2792,80 @@ void ApplicationRuntime::retryPendingTeardownAcks() {
     }
 }
 
-void ApplicationRuntime::clearRemoteSessionRuntimeState(const QString& targetEndpointId,
-                                                bool connectionLost) {
+void ApplicationRuntime::clearRemoteSessionRuntimeState(
+    const QString& targetEndpointId,
+    bool connectionLost,
+    bool teardownPending) {
     ClientWorkspace* session = m_workspaceManager
         ? m_workspaceManager->findWorkspace(targetEndpointId) : nullptr;
-    if (!session) return;
-    if (session->canvas) {
-        if (connectionLost) session->canvas->handleRemoteConnectionLost();
-        else session->canvas->stopScenesForSourceInvalidation();
-    }
-    session->knownRemoteFileIds.clear();
-    session->expectedProjectFileIds.clear();
-    session->remoteContentClearedOnDisconnect = true;
-    if (session->canvas) {
-        for (CanvasMedia* media : session->canvas->enumerateMediaItems()) {
-            if (media) media->setUploadNotUploaded();
+    bool online = false;
+    for (const ClientInfo& client : std::as_const(m_discoveredClients)) {
+        if (client.endpointId() == targetEndpointId) {
+            online = client.isOnline();
+            break;
         }
     }
-    clearUploadTracking(*session);
-    if (m_workspaceManager) {
-        m_workspaceManager->setRemoteSessionState(
-            targetEndpointId, WorkspaceManager::RemoteSessionState::Absent);
+    if (session) {
+        if (session->canvas) {
+            if (connectionLost) session->canvas->handleRemoteConnectionLost();
+            else session->canvas->stopScenesForSourceInvalidation();
+        }
+        session->knownRemoteFileIds.clear();
+        session->expectedProjectFileIds.clear();
+        session->remoteContentClearedOnDisconnect = true;
+        if (session->canvas) {
+            for (CanvasMedia* media : session->canvas->enumerateMediaItems()) {
+                if (media) media->setUploadNotUploaded();
+            }
+        }
+        clearUploadTracking(*session);
+        if (m_workspaceManager) {
+            m_workspaceManager->setRemoteSessionState(
+                targetEndpointId,
+                teardownPending
+                    ? WorkspaceManager::RemoteSessionState::Closing
+                    : WorkspaceManager::RemoteSessionState::Absent);
+        }
+        if (m_activeWorkspaceEndpointId == targetEndpointId && m_uploadManager) {
+            // RemoteSession terminal envelopes invalidate only their own upload.
+            // onConnectionLost() is transport-wide and would suspend unrelated
+            // concurrent uploads to other devices indefinitely.
+            m_uploadManager->setTargetClientId(QString());
+        }
+        updateWorkspaceCapabilities(targetEndpointId);
+        destroyWorkspaceCanvasIfUnused(targetEndpointId);
+        if (m_activeWorkspaceEndpointId == targetEndpointId) {
+            emit activeWorkspaceChanged(targetEndpointId);
+        }
     }
-    if (m_activeWorkspaceEndpointId == targetEndpointId && m_uploadManager) {
-        // RemoteSession terminal envelopes invalidate only their own upload.
-        // onConnectionLost() is transport-wide and would suspend unrelated
-        // concurrent uploads to other devices indefinitely.
-        m_uploadManager->setTargetClientId(QString());
-    }
+
+    const bool waitingForReplacement = teardownPending && online
+        && m_remoteSessionOpenDesiredTargets.contains(targetEndpointId);
+    const QString status = connectionLost
+        ? QStringLiteral("Unreachable")
+        : (!online ? QStringLiteral("Disconnected")
+                   : (waitingForReplacement ? QStringLiteral("Connecting")
+                                            : QStringLiteral("Available")));
     if (m_activeWorkspaceEndpointId == targetEndpointId) {
         m_remoteClientConnected = false;
         m_remoteVolumePercent = -1;
         setRemoteConnectionStatus(
-            session->lastClientInfo.isOnline()
-                ? QStringLiteral("AVAILABLE") : QStringLiteral("DISCONNECTED"),
+            status == QLatin1String("Connecting")
+                ? QStringLiteral("CONNECTING...") : status.toUpper(),
             false);
     }
-    updateWorkspaceCapabilities(targetEndpointId);
-    destroyWorkspaceCanvasIfUnused(targetEndpointId);
-    if (m_activeWorkspaceEndpointId == targetEndpointId) {
-        emit activeWorkspaceChanged(targetEndpointId);
-    }
+    // This final projection also updates the list when the Project already
+    // removed its runtime workspace before the terminal envelope arrived.
+    updateRemoteClientAvailability(targetEndpointId, status);
 }
 
 void ApplicationRuntime::handleRemoteSessionClosed(const QJsonObject& envelope) {
     if (!m_webSocketClient) return;
     const QString remoteSessionId =
         envelope.value(QStringLiteral("remoteSessionId")).toString();
+    quint64 generation = 0;
+    readSafePositiveJsonInteger(
+        envelope.value(QStringLiteral("generation")), &generation);
     if (m_controlledDisconnectInProgress) {
         m_controlledDisconnectPendingSessionIds.remove(remoteSessionId);
         QTimer::singleShot(
@@ -2157,6 +2874,7 @@ void ApplicationRuntime::handleRemoteSessionClosed(const QJsonObject& envelope) 
     const QString ownerEndpointId = envelope.value(QStringLiteral("ownerEndpointId")).toString();
     const QString targetEndpointId = envelope.value(QStringLiteral("targetEndpointId")).toString();
     m_pendingRendererTeardowns.remove(remoteSessionId);
+    m_pendingRendererTeardownOrder.removeAll(remoteSessionId);
     m_pendingTeardownAcks.remove(remoteSessionId);
     m_locallyTerminatingRemoteSessions.remove(remoteSessionId);
     if (m_incomingSessionOrphanWatchdog
@@ -2166,28 +2884,82 @@ void ApplicationRuntime::handleRemoteSessionClosed(const QJsonObject& envelope) 
     }
     if (ownerEndpointId != m_webSocketClient->endpointId()) return;
 
-    // A terminal lease/peer close is never converted into an implicit new
-    // session when discovery later reports the device again.
-    m_remoteSessionOpenSuppressedTargets.insert(targetEndpointId);
-    clearRemoteSessionRuntimeState(targetEndpointId, false);
-    if (m_activeWorkspaceEndpointId == targetEndpointId) m_remoteClientConnected = false;
-    bool online = false;
-    ClientInfo current;
-    for (const ClientInfo& client : m_discoveredClients) {
-        if (client.endpointId() == targetEndpointId) {
-            current = client;
-            online = client.isOnline();
-            break;
+    const QString knownSessionId =
+        m_currentOutgoingSessionIdByTarget.value(targetEndpointId);
+    const quint64 knownGeneration =
+        m_currentOutgoingSessionGenerationByTarget.value(targetEndpointId, 0);
+    if ((!knownSessionId.isEmpty() && knownSessionId != remoteSessionId)
+        || (knownSessionId == remoteSessionId
+            && knownGeneration > 0 && generation < knownGeneration)) {
+        return;
+    }
+
+    bool matchedPendingClose = false;
+    const auto pending =
+        m_pendingOutgoingSessionCloses.constFind(targetEndpointId);
+    if (pending != m_pendingOutgoingSessionCloses.cend()
+        && pending->remoteSessionId == remoteSessionId
+        && generation >= pending->generation) {
+        matchedPendingClose = true;
+    }
+
+    // A delayed Closed from an older session must never erase a replacement
+    // that is already Opening/Active for the same peer.
+    RemoteSessionCoordinator* coordinator =
+        m_webSocketClient->remoteSessionCoordinator();
+    const RemoteSessionCoordinator::Binding currentBinding = coordinator
+        ? coordinator->outgoingForPeer(targetEndpointId)
+        : RemoteSessionCoordinator::Binding();
+    if (!currentBinding.remoteSessionId.isEmpty()
+        && currentBinding.remoteSessionId != remoteSessionId) {
+        return;
+    }
+    if (matchedPendingClose) {
+        finalizePendingOutgoingSessionClose(
+            targetEndpointId, remoteSessionId, generation, true);
+        return;
+    }
+    if (knownSessionId == remoteSessionId) {
+        m_currentOutgoingSessionIdByTarget.remove(targetEndpointId);
+        m_currentOutgoingSessionGenerationByTarget.remove(targetEndpointId);
+    }
+    for (auto it = m_outgoingSessionCloseRequestById.begin();
+         it != m_outgoingSessionCloseRequestById.end();) {
+        if (it->targetEndpointId == targetEndpointId
+            && it->remoteSessionId == remoteSessionId) {
+            it = m_outgoingSessionCloseRequestById.erase(it);
+        } else {
+            ++it;
         }
     }
-    if (online) {
-        current.setStatus(QStringLiteral("Available"));
-        current.setAvailabilityStatus(QStringLiteral("Available"));
+    if (m_cancelledInitialOpenSessionByTarget.value(targetEndpointId)
+        == remoteSessionId) {
+        m_cancelledInitialOpenSessionByTarget.remove(targetEndpointId);
     }
-    updateRemoteClientAvailability(
-        targetEndpointId, online ? QStringLiteral("Available")
-                               : QStringLiteral("Disconnected"));
+    for (auto it = m_cancelledInitialOpenTargetByRequestId.begin();
+         it != m_cancelledInitialOpenTargetByRequestId.end();) {
+        if (it.value() == targetEndpointId) {
+            it = m_cancelledInitialOpenTargetByRequestId.erase(it);
+        } else {
+            ++it;
+        }
+    }
 
+    m_remoteSessionOpenPendingTargets.remove(targetEndpointId);
+    for (auto it = m_remoteSessionOpenTargetByRequestId.begin();
+         it != m_remoteSessionOpenTargetByRequestId.end();) {
+        if (it.value() == targetEndpointId) {
+            it = m_remoteSessionOpenTargetByRequestId.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    clearRemoteSessionRuntimeState(targetEndpointId, false, false);
+    // A peer/lease-driven terminal close remains quiescent until a later,
+    // explicit selection. Locally initiated close+reopen was handled above by
+    // finalizePendingOutgoingSessionClose().
+    m_remoteSessionOpenDesiredTargets.remove(targetEndpointId);
+    m_remoteSessionOpenSuppressedTargets.insert(targetEndpointId);
 }
 
 void ApplicationRuntime::handleRemoteSessionError(const QJsonObject& envelope) {
@@ -2198,32 +2970,229 @@ void ApplicationRuntime::handleRemoteSessionError(const QJsonObject& envelope) {
     }
     const QString code = envelope.value(QStringLiteral("code")).toString();
     const QString requestId = envelope.value(QStringLiteral("requestId")).toString();
-    QString targetEndpointId =
-        envelope.value(QStringLiteral("targetEndpointId")).toString();
-    if (targetEndpointId.isEmpty() && !requestId.isEmpty()) {
-        targetEndpointId = m_remoteSessionOpenTargetByRequestId.value(requestId);
+    const QString envelopeSessionId =
+        envelope.value(QStringLiteral("remoteSessionId")).toString();
+    const auto publishError = [this, &envelope]() {
+        if (!m_toastSystem) return;
+        NotificationRequest notification;
+        notification.severity = NotificationSeverity::Error;
+        notification.category = QStringLiteral("Remote session");
+        notification.message = envelope.value(QStringLiteral("message"))
+            .toString(QStringLiteral(
+                "The remote session command was rejected."));
+        notification.correlationId =
+            envelope.value(QStringLiteral("messageId")).toString();
+        m_toastSystem->publishNotification(notification);
+    };
+
+    // WebSocketClient installs an authenticated Active binding before it
+    // validates the initial snapshot.  If that second step fails, it emits
+    // this local error after sending a fail-closed CLOSE.  Fence the exact
+    // bound session here: otherwise a click before Closed can reuse the still
+    // Active coordinator binding and expose an empty, command-capable canvas.
+    //
+    // Do not infer the target from the error alone.  The OPEN request,
+    // session identity, generation and both authenticated parties must all
+    // describe the same currently-bound transaction.
+    if (code == QLatin1String("invalid_initial_snapshot")
+        && !requestId.isEmpty() && !envelopeSessionId.isEmpty()
+        && m_webSocketClient) {
+        const auto openRequest =
+            m_remoteSessionOpenTargetByRequestId.constFind(requestId);
+        quint64 errorGeneration = 0;
+        const QString errorOwnerEndpointId =
+            envelope.value(QStringLiteral("ownerEndpointId")).toString();
+        const QString errorTargetEndpointId =
+            envelope.value(QStringLiteral("targetEndpointId")).toString();
+        RemoteSessionCoordinator* coordinator =
+            m_webSocketClient->remoteSessionCoordinator();
+        const RemoteSessionCoordinator::Binding binding = coordinator
+            ? coordinator->byId(envelopeSessionId)
+            : RemoteSessionCoordinator::Binding();
+        const bool exactInvalidSnapshot =
+            openRequest != m_remoteSessionOpenTargetByRequestId.cend()
+            && readSafePositiveJsonInteger(
+                envelope.value(QStringLiteral("generation")),
+                &errorGeneration)
+            && errorOwnerEndpointId == m_webSocketClient->endpointId()
+            && errorTargetEndpointId == openRequest.value()
+            && binding.remoteSessionId == envelopeSessionId
+            && binding.ownerEndpointId == errorOwnerEndpointId
+            && binding.targetEndpointId == errorTargetEndpointId
+            && binding.generation == errorGeneration
+            && binding.phase == QLatin1String("Active");
+        if (exactInvalidSnapshot) {
+            rememberPendingOutgoingSessionClose(
+                errorTargetEndpointId, envelopeSessionId, errorGeneration);
+            m_locallyTerminatingRemoteSessions.insert(envelopeSessionId);
+            m_remoteSessionOpenSuppressedTargets.insert(errorTargetEndpointId);
+            retryPendingOutgoingSessionClose(
+                errorTargetEndpointId,
+                QStringLiteral("invalid_initial_snapshot"));
+        }
     }
-    if (targetEndpointId.isEmpty()
-        && m_remoteSessionOpenPendingTargets.size() == 1) {
-        targetEndpointId = *m_remoteSessionOpenPendingTargets.cbegin();
+
+    // CLOSE and OPEN share the remote_session error channel. Correlate CLOSE
+    // first so its rejection can never be misapplied to an unrelated device's
+    // sole in-flight OPEN.
+    auto closeRequest = m_outgoingSessionCloseRequestById.find(requestId);
+    if (!requestId.isEmpty()
+        && closeRequest != m_outgoingSessionCloseRequestById.end()) {
+        const OutgoingSessionCloseRequest request = closeRequest.value();
+        m_outgoingSessionCloseRequestById.erase(closeRequest);
+        if (!envelopeSessionId.isEmpty()
+            && envelopeSessionId != request.remoteSessionId) {
+            qWarning() << "Ignored mismatched RemoteSession CLOSE error"
+                       << requestId << envelopeSessionId;
+            publishError();
+            return;
+        }
+        const auto pending =
+            m_pendingOutgoingSessionCloses.constFind(request.targetEndpointId);
+        if (pending == m_pendingOutgoingSessionCloses.cend()
+            || pending->remoteSessionId != request.remoteSessionId
+            || pending->generation != request.generation) {
+            return; // Delayed rejection for an already finalized close.
+        }
+
+        const bool exactIdentityNoLongerControllable =
+            code == QLatin1String("unknown_remote_session")
+            || code == QLatin1String("not_a_session_party")
+            || code == QLatin1String("invalid_resume_proof");
+        if (exactIdentityNoLongerControllable) {
+            // The authenticated server has proven that this exact identity is
+            // no longer controllable by this runtime. Drop the stale local
+            // binding and honor any queued explicit replacement selection. If
+            // the old server-side pair is still converging, the correlated
+            // OPEN error below retains that intent until a later client-list
+            // update provides the next retry boundary.
+            finalizePendingOutgoingSessionClose(
+                request.targetEndpointId, request.remoteSessionId,
+                request.generation, true);
+            return;
+        }
+
+        // A generation/transport race is not proof of absence. Keep Closing
+        // monotonic; a resumed lease or a later authenticated transport will
+        // supply a new retry boundary.
+        const bool replacementDesired =
+            m_remoteSessionOpenDesiredTargets.contains(
+                request.targetEndpointId);
+        clearRemoteSessionRuntimeState(
+            request.targetEndpointId, false, true);
+        updateRemoteClientAvailability(
+            request.targetEndpointId,
+            replacementDesired ? QStringLiteral("Connecting")
+                               : QStringLiteral("Available"));
+        qWarning() << "RemoteSession CLOSE remains pending after rejection"
+                   << code << request.remoteSessionId;
+        return;
     }
-    if (!requestId.isEmpty()) m_remoteSessionOpenTargetByRequestId.remove(requestId);
+
+    // Errors for an OPEN which the user explicitly cancelled are terminal for
+    // that exact attempt only. They must not cancel a later OPEN for the same
+    // endpoint.
+    auto cancelledOpen =
+        m_cancelledInitialOpenTargetByRequestId.find(requestId);
+    if (!requestId.isEmpty()
+        && cancelledOpen != m_cancelledInitialOpenTargetByRequestId.end()) {
+        const QString cancelledTarget = cancelledOpen.value();
+        m_cancelledInitialOpenTargetByRequestId.erase(cancelledOpen);
+        if (!envelopeSessionId.isEmpty()
+            && m_cancelledInitialOpenSessionByTarget.value(cancelledTarget)
+                == envelopeSessionId) {
+            m_cancelledInitialOpenSessionByTarget.remove(cancelledTarget);
+        }
+        RemoteSessionCoordinator* coordinator = m_webSocketClient
+            ? m_webSocketClient->remoteSessionCoordinator() : nullptr;
+        const RemoteSessionCoordinator::Binding cancelledBinding = coordinator
+            ? coordinator->outgoingForPeer(cancelledTarget)
+            : RemoteSessionCoordinator::Binding();
+        if (!cancelledBinding.remoteSessionId.isEmpty()
+            && (envelopeSessionId.isEmpty()
+                || cancelledBinding.remoteSessionId == envelopeSessionId)) {
+            // The server rejected the OPEN after its Opening binding had
+            // already reached us. Keep that exact session fenced until the
+            // correlated terminal result; otherwise a queued user click could
+            // attach itself to the cancelled Opening and be lost.
+            rememberPendingOutgoingSessionClose(
+                cancelledTarget, cancelledBinding.remoteSessionId,
+                cancelledBinding.generation);
+            m_locallyTerminatingRemoteSessions.insert(
+                cancelledBinding.remoteSessionId);
+            retryPendingOutgoingSessionClose(
+                cancelledTarget, QStringLiteral("cancelled_open_rejected"));
+        }
+        if (!hasCancelledInitialOpenForTarget(cancelledTarget)
+            && !hasPendingOutgoingSessionClose(cancelledTarget)
+            && m_remoteSessionOpenDesiredTargets.contains(cancelledTarget)) {
+            for (const ClientInfo& discovered :
+                 std::as_const(m_discoveredClients)) {
+                if (discovered.endpointId() == cancelledTarget
+                    && discovered.isOnline()) {
+                    ensureRemoteSessionForClient(discovered);
+                    break;
+                }
+            }
+        }
+        return;
+    }
+
+    // All remaining remote-session errors (accept, resume, scene, upload, ...)
+    // are presentation-only unless they correlate to an exact pending OPEN.
+    // Target-only or "sole pending target" guesses are deliberately forbidden.
+    auto openRequest = m_remoteSessionOpenTargetByRequestId.find(requestId);
+    if (requestId.isEmpty()
+        || openRequest == m_remoteSessionOpenTargetByRequestId.end()) {
+        publishError();
+        return;
+    }
+    const QString targetEndpointId = openRequest.value();
+    m_remoteSessionOpenTargetByRequestId.erase(openRequest);
+    const bool retryAfterServerConvergence =
+        code == QLatin1String("session_cleanup_pending")
+        || code == QLatin1String("session_requires_resume")
+        || code == QLatin1String("session_runtime_conflict");
+    const bool retainExplicitOpenIntent = retryAfterServerConvergence
+        && !targetEndpointId.isEmpty()
+        && m_activeWorkspaceEndpointId == targetEndpointId
+        && m_navigationManager
+        && m_navigationManager->isOnScreenView();
+    if (retainExplicitOpenIntent) {
+        // OPEN consumes the one-shot desired flag at dispatch time. These
+        // errors describe an older server-side session which has not reached
+        // its terminal commit yet, not a rejection of the user's selection.
+        // Retain the intent and retry only on a later authenticated discovery
+        // update; this avoids both a lost click and an unbounded hot loop.
+        m_remoteSessionOpenDesiredTargets.insert(targetEndpointId);
+        m_remoteSessionOpenSuppressedTargets.remove(targetEndpointId);
+    }
     const bool initialAttempt = !targetEndpointId.isEmpty()
         && (!m_projectManager
             || !m_projectManager->hasProjectForTarget(targetEndpointId));
+    const bool closePending = !targetEndpointId.isEmpty()
+        && hasPendingOutgoingSessionClose(targetEndpointId);
     if (!targetEndpointId.isEmpty()) {
         m_remoteSessionOpenPendingTargets.remove(targetEndpointId);
         if (m_workspaceManager) {
             m_workspaceManager->setRemoteSessionState(
-                targetEndpointId, WorkspaceManager::RemoteSessionState::Absent);
+                targetEndpointId,
+                closePending
+                    ? WorkspaceManager::RemoteSessionState::Closing
+                    : WorkspaceManager::RemoteSessionState::Absent);
             updateWorkspaceCapabilities(targetEndpointId);
             destroyWorkspaceCanvasIfUnused(targetEndpointId);
         }
     }
 
-    QString status = m_webSocketClient && m_webSocketClient->isConnected()
-        ? QStringLiteral("Available") : QStringLiteral("Unreachable");
-    if (code == QLatin1String("target_offline")) {
+    QString status = retainExplicitOpenIntent
+        ? QStringLiteral("Connecting")
+        : (closePending
+            ? QStringLiteral("Available")
+        : (m_webSocketClient && m_webSocketClient->isConnected()
+            ? QStringLiteral("Available") : QStringLiteral("Unreachable")));
+    if (!retainExplicitOpenIntent
+        && code == QLatin1String("target_offline")) {
         status = QStringLiteral("Disconnected");
     }
     if (!targetEndpointId.isEmpty()) {
@@ -2233,6 +3202,12 @@ void ApplicationRuntime::handleRemoteSessionError(const QJsonObject& envelope) {
             if (!activeProjectExists()) m_remoteVolumePercent = -1;
             if (m_activeCanvas) m_activeCanvas->setOverlayActionsEnabled(false);
 
+            if (retainExplicitOpenIntent) {
+                qInfo() << "RemoteSession OPEN waits for server convergence"
+                        << code << targetEndpointId;
+                return;
+            }
+
             // A rejected open is terminal for this attempt.  Do not leave an
             // indeterminate spinner running forever; reveal the known local
             // project/topology with remote actions disabled.
@@ -2241,16 +3216,8 @@ void ApplicationRuntime::handleRemoteSessionError(const QJsonObject& envelope) {
             }
         }
     }
-    if (m_toastSystem) {
-        NotificationRequest notification;
-        notification.severity = NotificationSeverity::Error;
-        notification.category = QStringLiteral("Remote session");
-        notification.message = envelope.value(QStringLiteral("message"))
-            .toString(QStringLiteral("The remote session command was rejected."));
-        notification.correlationId =
-            envelope.value(QStringLiteral("messageId")).toString();
-        m_toastSystem->publishNotification(notification);
-    }
+    if (retainExplicitOpenIntent) return;
+    publishError();
     if (initialAttempt && m_navigationManager
         && m_navigationManager->isOnScreenView()) {
         showClientListView();
@@ -2275,20 +3242,22 @@ void ApplicationRuntime::terminateProjectRemoteSession(const QString& targetEndp
     if (attemptRemote && m_webSocketClient
         && !binding.remoteSessionId.isEmpty()
         && binding.ownerEndpointId == m_webSocketClient->endpointId()
-        && binding.phase != QLatin1String("Terminating")
-        && binding.phase != QLatin1String("CleanupPending")) {
+        && binding.phase != QLatin1String("Closed")) {
+        rememberPendingOutgoingSessionClose(
+            targetEndpointId, binding.remoteSessionId, binding.generation);
         m_locallyTerminatingRemoteSessions.insert(binding.remoteSessionId);
-        updateRemoteClientAvailability(targetEndpointId, QStringLiteral("Disconnecting"));
         if (m_uploadManager && m_uploadManager->canRequestCancel()) {
             m_uploadManager->requestCancel();
         }
-        m_webSocketClient->closeRemoteSession(binding.remoteSessionId);
+        retryPendingOutgoingSessionClose(
+            targetEndpointId, QStringLiteral("inactivity_timeout"));
     }
 
-    // The workspace is updated synchronously. The protocol close and target
-    // cleanup above are best effort and may settle after the local UI has
-    // already become session-less.
-    clearRemoteSessionRuntimeState(targetEndpointId, !attemptRemote);
+    // Runtime content becomes unavailable synchronously, while Closing stays
+    // monotonic until the correlated Closed envelope removes the wire fence.
+    clearRemoteSessionRuntimeState(
+        targetEndpointId, !attemptRemote,
+        hasPendingOutgoingSessionClose(targetEndpointId));
 }
 
 void ApplicationRuntime::removeRuntimeWorkspace(const QString& targetEndpointId) {
@@ -2334,7 +3303,9 @@ void ApplicationRuntime::deleteActiveProjectConfirmed() {
         return;
     }
     persistProjectCanvas(targetEndpointId);
-    terminateProjectRemoteSession(targetEndpointId, true);
+    // ProjectManager emits projectDeleted only after its durable store commit.
+    // That signal owns session teardown, so a failed delete cannot
+    // irreversibly close an otherwise intact project/session first.
     if (!m_projectManager->deleteProject(targetEndpointId)) {
         TOAST_ERROR(QStringLiteral("The project could not be deleted"),
                     AppConfig::instance().toastErrorDurationMs());
@@ -2443,9 +3414,10 @@ void ApplicationRuntime::updateVolumeIndicator()
 void ApplicationRuntime::setRemoteClientState(const RemoteClientState& state,
                                               bool propagateLoss)
 {
+    // "connected" is a command-capability bit. Reconnecting deliberately
+    // keeps the resumable identity while denying every remote command.
     m_remoteClientConnected =
-        state.connectionStatus == RemoteClientState::Connected
-        || state.connectionStatus == RemoteClientState::Reconnecting;
+        state.connectionStatus == RemoteClientState::Connected;
     m_remoteBusy = state.spinnerActive;
     m_remoteStatusText = state.statusText().trimmed().toUpper();
     m_selectedClient = state.clientInfo;
@@ -2657,8 +3629,7 @@ void ApplicationRuntime::prepareCleanShutdown()
             && m_remoteSceneController) {
             m_cleanShutdownRendererPendingSessionIds.insert(
                 binding.remoteSessionId);
-            m_remoteSceneController->teardownRemoteSession(
-                binding.remoteSessionId);
+            enqueueRendererTeardown(binding.remoteSessionId);
         }
     }
     finishCleanShutdownIncomingCacheTeardownIfReady();
@@ -2826,30 +3797,103 @@ void ApplicationRuntime::onConnectionError(const QString& error) {
 }
 
 void ApplicationRuntime::onClientListReceived(const QList<ClientInfo>& clients) {
-    if (!m_activeWorkspaceEndpointId.isEmpty()
-        && m_navigationManager && m_navigationManager->isOnScreenView()) {
-        for (const ClientInfo& client : clients) {
-            if (client.endpointId() == m_activeWorkspaceEndpointId) {
-                const WorkspaceManager::RemoteSessionState state =
-                    m_workspaceManager
-                    ? m_workspaceManager->remoteSessionState(
-                          m_activeWorkspaceEndpointId)
-                    : WorkspaceManager::RemoteSessionState::Absent;
-                const bool hasProject = m_projectManager
-                    && m_projectManager->hasProjectForTarget(
-                        m_activeWorkspaceEndpointId);
-                if ((hasProject
-                     || state == WorkspaceManager::RemoteSessionState::Opening
-                     || state == WorkspaceManager::RemoteSessionState::Grace)
-                    && state != WorkspaceManager::RemoteSessionState::Closing) {
-                    m_remoteSessionOpenSuppressedTargets.remove(
-                        m_activeWorkspaceEndpointId);
-                    ensureRemoteSessionForClient(client);
-                }
-                break;
-            }
+    if (m_activeWorkspaceEndpointId.isEmpty() || !m_navigationManager
+        || !m_navigationManager->isOnScreenView()) {
+        return;
+    }
+
+    const ClientInfo* onlineClient = nullptr;
+    for (const ClientInfo& client : clients) {
+        if (client.endpointId() == m_activeWorkspaceEndpointId
+            && client.isOnline()) {
+            onlineClient = &client;
+            break;
         }
     }
+    if (!onlineClient) return;
+
+    const QString targetEndpointId = m_activeWorkspaceEndpointId;
+    RemoteSessionCoordinator* coordinator = m_webSocketClient
+        ? m_webSocketClient->remoteSessionCoordinator() : nullptr;
+    RemoteSessionCoordinator::Binding binding = coordinator
+        ? coordinator->outgoingForPeer(targetEndpointId)
+        : RemoteSessionCoordinator::Binding();
+    const bool explicitlyRequested =
+        m_remoteSessionOpenDesiredTargets.contains(targetEndpointId);
+    const bool recoveringAuthenticatedBinding =
+        binding.phase == QLatin1String("Opening")
+        || binding.phase == QLatin1String("Grace")
+        || (binding.phase == QLatin1String("Active")
+            && !isCommandReadyBinding(m_webSocketClient, binding));
+    const bool closeFence = hasPendingOutgoingSessionClose(targetEndpointId)
+        || hasCancelledInitialOpenForTarget(targetEndpointId)
+        || (!binding.remoteSessionId.isEmpty()
+            && m_locallyTerminatingRemoteSessions.contains(
+                binding.remoteSessionId));
+    if ((explicitlyRequested || recoveringAuthenticatedBinding)
+        && !closeFence) {
+        m_remoteSessionOpenSuppressedTargets.remove(targetEndpointId);
+        ensureRemoteSessionForClient(*onlineClient);
+        binding = coordinator
+            ? coordinator->outgoingForPeer(targetEndpointId)
+            : RemoteSessionCoordinator::Binding();
+    }
+
+    const bool terminalBinding =
+        binding.phase == QLatin1String("Terminating")
+        || binding.phase == QLatin1String("CleanupPending")
+        || binding.phase == QLatin1String("Closed");
+    const bool closing = closeFence || terminalBinding;
+    const bool active = !closing
+        && isCommandReadyBinding(m_webSocketClient, binding);
+    const bool grace = !closing && !active
+        && (binding.phase == QLatin1String("Active")
+            || binding.phase == QLatin1String("Grace"));
+    const bool opening = !closing
+        && (binding.phase == QLatin1String("Opening")
+            || m_remoteSessionOpenPendingTargets.contains(targetEndpointId));
+    const bool replacementDesired =
+        m_remoteSessionOpenDesiredTargets.contains(targetEndpointId);
+
+    WorkspaceManager::RemoteSessionState workspaceState =
+        WorkspaceManager::RemoteSessionState::Absent;
+    if (closing) {
+        workspaceState = WorkspaceManager::RemoteSessionState::Closing;
+    } else if (active) {
+        workspaceState = WorkspaceManager::RemoteSessionState::Active;
+    } else if (grace) {
+        workspaceState = WorkspaceManager::RemoteSessionState::Grace;
+    } else if (opening) {
+        workspaceState = WorkspaceManager::RemoteSessionState::Opening;
+    }
+    if (m_workspaceManager) {
+        m_workspaceManager->setRemoteSessionState(
+            targetEndpointId, workspaceState);
+    }
+
+    QString status = QStringLiteral("Available");
+    if (active) {
+        status = QStringLiteral("Connected");
+    } else if (grace) {
+        status = QStringLiteral("Reconnecting");
+    } else if (opening || replacementDesired) {
+        status = QStringLiteral("Connecting");
+    }
+    updateRemoteClientAvailability(targetEndpointId, status);
+    ClientWorkspace* workspace = m_workspaceManager
+        ? m_workspaceManager->findWorkspace(targetEndpointId) : nullptr;
+    if (workspace) {
+        m_selectedClient = workspace->lastClientInfo;
+    }
+    m_remoteVolumePercent = active && workspace
+        ? workspace->lastClientInfo.getVolumePercent() : -1;
+    setRemoteConnectionStatus(
+        status == QLatin1String("Connecting")
+            ? QStringLiteral("CONNECTING...")
+            : (status == QLatin1String("Reconnecting")
+                ? QStringLiteral("RECONNECTING...") : status.toUpper()),
+        false);
+    updateWorkspaceCapabilities(targetEndpointId);
 }
 
 void ApplicationRuntime::onRegistrationConfirmed(const ClientInfo& clientInfo) {
