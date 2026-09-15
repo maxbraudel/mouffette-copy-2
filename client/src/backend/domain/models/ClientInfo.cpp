@@ -221,14 +221,14 @@ QString ClientInfo::formatRemainingTime(qint64 remainingMs)
         .arg(seconds, 2, 10, QLatin1Char('0'));
 }
 
-QString ClientInfo::getProjectSummaryText(qint64 nowMs) const
+QString ClientInfo::getProjectDeadlineText(qint64 nowMs) const
 {
     if (!m_hasProject) {
         return {};
     }
 
     const qint64 current = nowMs >= 0 ? nowMs : QDateTime::currentMSecsSinceEpoch();
-    QStringList parts{QStringLiteral("Project")};
+    QStringList parts;
     if (m_remoteSessionCloseAtMs >= current && m_remoteSessionCloseAtMs > 0) {
         parts.append(QStringLiteral("Disconnect in %1")
                          .arg(formatRemainingTime(m_remoteSessionCloseAtMs - current)));

@@ -35,7 +35,7 @@ QVariant ClientListModel::data(const QModelIndex& index, int role) const
     case EndpointIdRole: return endpointId;
     case PrimaryTextRole: return client.getIdentityDisplayText();
     case SecondaryTextRole:
-        return client.getProjectSummaryText(QDateTime::currentMSecsSinceEpoch());
+        return client.getProjectDeadlineText(QDateTime::currentMSecsSinceEpoch());
     case BadgeTextRole: return status;
     case BadgeKindRole: return badgeKind(status);
     case SelectableRole: return true;

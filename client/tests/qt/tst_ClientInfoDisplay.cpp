@@ -10,7 +10,7 @@ private slots:
     void normalizesEveryPublicAvailabilityBadge_data();
     void normalizesEveryPublicAvailabilityBadge();
     void disconnectedPresenceOverridesStaleSessionState();
-    void formatsProjectCountdowns();
+    void formatsProjectDeadlines();
     void formatsCountdownBoundaries();
     void appendsInstanceNumberOnlyForSecondaryProfiles();
 };
@@ -49,11 +49,11 @@ void ClientInfoDisplayTest::disconnectedPresenceOverridesStaleSessionState()
     client.setHasProject(true);
 
     QCOMPARE(client.availabilityBadgeText(), QStringLiteral("Disconnected"));
-    QCOMPARE(client.getProjectSummaryText(1'000), QStringLiteral("Project"));
+    QVERIFY(client.getProjectDeadlineText(1'000).isEmpty());
     QVERIFY(client.getDisplayText().endsWith(QStringLiteral("— Disconnected")));
 }
 
-void ClientInfoDisplayTest::formatsProjectCountdowns()
+void ClientInfoDisplayTest::formatsProjectDeadlines()
 {
     ClientInfo client(QStringLiteral("device-c"), QStringLiteral("Studio C"),
                       QStringLiteral("Windows"));
@@ -61,13 +61,14 @@ void ClientInfoDisplayTest::formatsProjectCountdowns()
     client.setRemoteSessionCloseAtMs(60'000);
     client.setProjectDeleteAtMs(300'000);
 
-    QCOMPARE(client.getProjectSummaryText(1'000),
-             QStringLiteral("Project · Disconnect in 0:59 · Delete project in 4:59"));
-    QCOMPARE(client.getProjectSummaryText(60'001),
-             QStringLiteral("Project · Delete project in 4:00"));
+    QCOMPARE(client.getProjectDeadlineText(1'000),
+             QStringLiteral("Disconnect in 0:59 · Delete project in 4:59"));
+    QCOMPARE(client.getProjectDeadlineText(60'001),
+             QStringLiteral("Delete project in 4:00"));
+    QVERIFY(client.getProjectDeadlineText(300'001).isEmpty());
 
     client.setHasProject(false);
-    QVERIFY(client.getProjectSummaryText(1'000).isEmpty());
+    QVERIFY(client.getProjectDeadlineText(1'000).isEmpty());
 }
 
 void ClientInfoDisplayTest::formatsCountdownBoundaries()

@@ -86,7 +86,7 @@ public:
     // Helper methods
     QString getIdentityDisplayText() const;
     QString availabilityBadgeText() const;
-    QString getProjectSummaryText(qint64 nowMs = -1) const;
+    QString getProjectDeadlineText(qint64 nowMs = -1) const;
     QString getDisplayText() const;
     static QString formatRemainingTime(qint64 remainingMs);
     int getScreenCount() const { return m_screens.size(); }
