@@ -6,6 +6,8 @@ Item {
     id: root
 
     property var interactionController: null
+    readonly property bool editingEnabled: !interactionController || interactionController.editingEnabled
+
     property var inputCoordinator: null
     property var selectionModel: []
     property var mediaModel: []
@@ -96,6 +98,13 @@ Item {
 
     function resolveEntryGeometry(entry) {
         var mediaId = entry ? (entry.mediaId || "") : ""
+        var transform = interactionController && interactionController.liveTransforms
+            ? interactionController.liveTransforms[mediaId] : null
+        if (transform) {
+            return { mediaId: mediaId, sceneX: transform.x, sceneY: transform.y,
+                     sceneW: transform.width * transform.scale,
+                     sceneH: transform.height * transform.scale }
+        }
         var liveMedia = mediaEntryById(mediaId)
         var usesLiveResize = !!interactionController
                           && !!entry
@@ -159,6 +168,7 @@ Item {
     }
 
     function hitTestHandle(viewX, viewY) {
+        if (!editingEnabled) return null
         if (!selectionModel || !contentItem || !viewportItem)
             return null
 
@@ -262,7 +272,7 @@ Item {
         // enabled to `active || coordinator.isIdle()` could disable the
         // handler on release while the coordinator was still in resize mode,
         // before onActiveChanged(false) had cleared that mode.
-        enabled: !!root.inputCoordinator
+        enabled: root.editingEnabled && !!root.inputCoordinator
         dragThreshold: 0
 
         onActiveChanged: {
@@ -360,14 +370,16 @@ Item {
             readonly property real sceneW: geometry.sceneW
             readonly property real sceneH: geometry.sceneH
             readonly property real _viewScale: root.contentItem ? root.contentItem.scale : 1.0
-            readonly property bool beingDragged: !!entry && root.draggedMediaId !== "" && root.draggedMediaId === entry.mediaId
+            readonly property bool hasLiveTransform: !!entry && !!interactionController
+                && !!interactionController.liveTransforms && !!interactionController.liveTransforms[entry.mediaId]
+            readonly property bool beingDragged: !hasLiveTransform && !!entry && root.draggedMediaId !== "" && root.draggedMediaId === entry.mediaId
             // snapDragActive does NOT require beingDragged.
             // liveDragMediaId (draggedMediaId) is cleared BEFORE mediaMoveEnded is signalled,
             // so beingDragged becomes false before the snap freeze is lifted. The freeze
             // (liveSnapDragActive) stays active until onMediaChanged fires and clears it.
             // During that window we must keep the chrome at the snapped position, which is
             // done by applying the snap offset independently of beingDragged.
-            readonly property bool snapDragActive: !!interactionController
+            readonly property bool snapDragActive: !hasLiveTransform && !!interactionController
                                                    && !!interactionController.liveSnapDragActive
                                                    && interactionController.liveSnapDragMediaId === (entry ? entry.mediaId : "")
             // When snap is active: derive position offset from snapped scene position delta.

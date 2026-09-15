@@ -15,6 +15,8 @@ void MediaSettingsViewModel::setController(QuickCanvasController* controller)
     if (m_controller) disconnect(m_controller, nullptr, this, nullptr);
     m_controller = controller;
     if (m_controller) {
+        connect(m_controller, &QuickCanvasController::editingEnabledChanged,
+                this, &MediaSettingsViewModel::refresh);
         connect(m_controller, &QuickCanvasController::selectedMediaChanged,
                 this, &MediaSettingsViewModel::refresh);
     }
@@ -28,7 +30,7 @@ CanvasMedia* MediaSettingsViewModel::media() const
 
 bool MediaSettingsViewModel::available() const
 {
-    return m_controller && m_controller->projectEditingEnabled()
+    return m_controller && m_controller->editingEnabled()
         && media() != nullptr;
 }
 QString MediaSettingsViewModel::mediaId() const { return media() ? media()->mediaId() : QString(); }

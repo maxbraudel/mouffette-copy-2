@@ -8,6 +8,7 @@ Item {
     property var media: null
     property bool selected: false
     property bool textEditable: false
+    property bool freeResizePreview: false
     property QtObject editingSession: null
     property bool handoffCovered: false
     property var handoffFrameSource: null
@@ -111,7 +112,7 @@ Item {
             textContent: root.media ? root.media.textContent : ""
             horizontalAlignment: root.media ? root.media.textHorizontalAlignment : "center"
             verticalAlignment: root.media ? root.media.textVerticalAlignment : "center"
-            fitToTextEnabled: !!(root.media && root.media.fitToTextEnabled)
+            fitToTextEnabled: !root.freeResizePreview && !!(root.media && root.media.fitToTextEnabled)
             fontFamily: root.media ? root.media.textFontFamily : "Impact"
             fontPixelSize: root.media ? root.media.textFontPixelSize : 22
             fontWeight: root.media ? root.media.textFontWeight : 400

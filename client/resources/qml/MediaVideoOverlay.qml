@@ -114,6 +114,7 @@ Item {
                 anchors.rightMargin: 8
                 anchors.topMargin: 0
                 anchors.bottomMargin: 0
+                onDragStarted: function(r) { root.volumeChangeRequested(root.mediaId, r) }
                 onSeeked:    function(r) { root.volumeChangeRequested(root.mediaId, r) }
                 onDragEnded: function(r) { root.volumeChangeRequested(root.mediaId, r) }
             }
@@ -135,6 +136,7 @@ Item {
 
         OverlaySlider {
             id: progressSlider
+            objectName: "videoProgressSlider"
             progress: root.progress
             anchors.fill: parent
             anchors.leftMargin: 8

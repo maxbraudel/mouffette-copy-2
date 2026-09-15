@@ -3,6 +3,7 @@
 #include <QFileInfo>
 #include <QImage>
 #include <QMouseEvent>
+#include <QMediaPlayer>
 #include <QQmlComponent>
 #include <QQmlEngine>
 #include <QQuickItem>
@@ -1407,6 +1408,41 @@ void MediaOverlayTest::videoVolumeAndMuteStayIndependentAndSyncWithSettings()
     QTRY_COMPARE(field->property("draftText").toString(), QStringLiteral("0"));
     QVERIFY(!video->muted());
     QVERIFY(check->property("checked").toBool());
+    QTRY_COMPARE(slider->property("progress").toReal(), 0.0);
+    QTRY_COMPARE(slider->property("_visualValue").toReal(), 0.0);
+
+    // Keep the grab beyond both ends, then release outside the control.
+    const auto dragOutside = [&](QQuickItem* control, bool right) {
+        const QPoint start = control->mapToScene({control->width() * .5, control->height() * .5}).toPoint();
+        const QPoint edge = control->mapToScene({right ? control->width() : 0, control->height() * .5}).toPoint();
+        const QPoint outside = edge + QPoint(right ? 60 : -60, 0);
+        QTest::mousePress(&window, Qt::LeftButton, Qt::NoModifier, start);
+        QTest::mouseMove(&window, edge, 20);
+        QTest::mouseMove(&window, outside, 20);
+        QTest::mouseRelease(&window, Qt::LeftButton, Qt::NoModifier, outside);
+    };
+    for (bool right : {true, false}) {
+        dragOutside(slider, right);
+        QTRY_COMPARE(video->volume(), right ? 1.0 : 0.0);
+        QTRY_COMPARE(slider->property("_visualValue").toReal(), right ? 1.0 : 0.0);
+        QVERIFY(!slider->property("_dragging").toBool());
+        QTest::qWait(120); // Authoritative playback publication must retain the endpoint.
+        QCOMPARE(slider->property("progress").toReal(), right ? 1.0 : 0.0);
+    }
+
+    auto* progress = findVisualItem(page, QStringLiteral("videoProgressSlider"));
+    QVERIFY(progress);
+    video->stopToBeginning();
+    QTRY_VERIFY(video->player()->duration() > 0);
+    QSignalSpy seeks(host->controller(), &QuickCanvasController::mediaSeekRequested);
+    for (bool right : {true, false}) {
+        dragOutside(progress, right);
+        QVERIFY(!progress->property("_dragging").toBool());
+        QCOMPARE(seeks.last().at(1).toReal(), right ? 1.0 : 0.0);
+        QTRY_VERIFY(qAbs(progress->property("_visualValue").toReal() - (right ? 1.0 : 0.0)) < .01);
+        QTRY_VERIFY(qAbs(video->positionMs() - (right ? video->player()->duration() : 0)) < 100);
+    }
+
 }
 
 void MediaOverlayTest::toastUsesBottomLeftDoubleBackground()

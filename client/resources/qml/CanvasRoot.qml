@@ -43,6 +43,8 @@ Rectangle {
     readonly property int screenCount: screensModel.length
     readonly property var canvasController: sessionViewModel
                                             ? sessionViewModel.canvasController : null
+    readonly property bool editingEnabled: canvasController ? canvasController.editingEnabled : true
+    readonly property var liveTransforms: canvasController ? canvasController.liveTransforms : ({})
     readonly property var hostingWindow: root.Window.window
     property bool remoteActive: canvasController
                                 ? canvasController.remoteActive : false
@@ -163,6 +165,26 @@ Rectangle {
         liveAltResizeScale = canvasController.liveAltResizeScale
     }
 
+    function discardPointerEdits() {
+        abandonPointerInteractions("editing-canceled")
+        for (var i = 0; i < mediaRepeater.count; ++i) {
+            var item = mediaRepeater.itemAt(i)
+            if (item && item.media) {
+                item.localDragging = false
+                item.localX = item.media.x
+                item.localY = item.media.y
+                item.localScale = item.media.scale
+            }
+        }
+    }
+
+    onEditingEnabledChanged: {
+        if (!editingEnabled) {
+            discardPointerEdits()
+            textEditSession.finish()
+        }
+    }
+
     onCanvasControllerChanged: {
         synchronizeTransientState()
         if (canvasController && hostingWindow)
@@ -180,6 +202,7 @@ Rectangle {
     Connections {
         target: root.canvasController
         function onPresentationChanged() { root.synchronizeTransientState() }
+        function onPendingEditsCanceled() { root.discardPointerEdits() }
         function onTextEditingRequested(mediaId) {
             var controller = root.canvasController
             // Let the insertion/selection bindings and creation tap finish
@@ -323,7 +346,11 @@ Rectangle {
     }
 
     function requestMediaSelection(mediaId, additive) {
-        if (!mediaId || mediaId.length === 0)
+        if (!editingEnabled || !mediaId || mediaId.length === 0)
+            return
+        // Pressing an existing selection begins a group gesture. Explicit
+        // selection commands (inspector/list) retain their replace semantics.
+        if (textEditSession.isSelected(mediaId))
             return
         root.mediaSelectRequested(mediaId, !!additive)
     }
@@ -372,7 +399,7 @@ Rectangle {
     }
 
     function canStartTextToolTap() {
-        return !!inputLayer
+        return editingEnabled && !!inputLayer
             && !!inputLayer.inputCoordinator
             && inputLayer.inputCoordinator.canStartTextToolTap()
     }
@@ -832,8 +859,10 @@ Rectangle {
                     }
                     // Actual rendered scale — switches to live scale during resize/alt-resize
                     // so overlay counter-scale stays correct every frame.
-                    readonly property real effectiveScale: usesLiveAltResize ? root.liveAltResizeScale
-                                                         : (usesLiveResize ? root.liveResizeScale : localScale)
+                    readonly property var liveTransform: root.liveTransforms[currentMediaId] || null
+                    readonly property real effectiveScale: liveTransform ? liveTransform.scale
+                        : (usesLiveAltResize ? root.liveAltResizeScale
+                           : (usesLiveResize ? root.liveResizeScale : localScale))
                     readonly property string currentMediaId: media ? (media.mediaId || "") : ""
                     readonly property bool moveHandlerActive: root.mediaMoveHandlerActive
                                                               && root.activeMoveMediaId === currentMediaId
@@ -925,16 +954,15 @@ Rectangle {
                     // When C++ has computed a snapped position, use it; otherwise use raw QML drag coords
                     readonly property real effectiveLocalX: usesSnapDrag ? root.liveSnapDragX : localX
                     readonly property real effectiveLocalY: usesSnapDrag ? root.liveSnapDragY : localY
-                    width:  usesLiveAltResize ? Math.max(1, root.liveAltResizeWidth)
+                    width: liveTransform ? liveTransform.width : usesLiveAltResize ? Math.max(1, root.liveAltResizeWidth)
                                               : (media ? Math.max(1, media.width) : 1)
-                    height: usesLiveAltResize ? Math.max(1, root.liveAltResizeHeight)
+                    height: liveTransform ? liveTransform.height : usesLiveAltResize ? Math.max(1, root.liveAltResizeHeight)
                                               : (media ? Math.max(1, media.height) : 1)
-                    x: usesLiveAltResize ? root.liveAltResizeX
+                    x: liveTransform ? liveTransform.x : usesLiveAltResize ? root.liveAltResizeX
                                          : (usesLiveResize ? root.liveResizeX : effectiveLocalX)
-                    y: usesLiveAltResize ? root.liveAltResizeY
+                    y: liveTransform ? liveTransform.y : usesLiveAltResize ? root.liveAltResizeY
                                          : (usesLiveResize ? root.liveResizeY : effectiveLocalY)
-                    scale: usesLiveAltResize ? root.liveAltResizeScale
-                                             : (usesLiveResize ? root.liveResizeScale : localScale)
+                    scale: effectiveScale
                     transformOrigin: Item.TopLeft
                     z: media ? media.z : 0
                     visible: !!media && media.contentVisible
@@ -967,14 +995,11 @@ Rectangle {
                         }
                         handoffFrameSource: handoffCovered
                                             ? root.dropPreviewFrameSource : null
-                        readonly property real liveWidth:  mediaDelegate.usesLiveAltResize
-                                                          ? root.liveAltResizeWidth
-                                                          : (media ? media.width : 0)
-                        readonly property real liveHeight: mediaDelegate.usesLiveAltResize
-                                                          ? root.liveAltResizeHeight
-                                                          : (media ? media.height : 0)
+                        readonly property real liveWidth: mediaDelegate.width
+                        readonly property real liveHeight: mediaDelegate.height
                         anchors.fill: parent
-                        textEditable: true
+                        freeResizePreview: !!mediaDelegate.liveTransform && !!mediaDelegate.liveTransform.altResize
+                        textEditable: root.editingEnabled
                         editingSession: textEditSession
                     }
 
@@ -1007,14 +1032,18 @@ Rectangle {
                         target: mediaContentLoader.visualItem
                         property: "mediaWidth"
                         value: mediaContentLoader.liveWidth
-                        when: mediaContentLoader.visualItem !== null && mediaDelegate.usesLiveAltResize
+                        when: mediaContentLoader.visualItem !== null
+                              && (mediaDelegate.usesLiveAltResize
+                                  || (!!mediaDelegate.liveTransform && !!mediaDelegate.liveTransform.altResize))
                     }
 
                     Binding {
                         target: mediaContentLoader.visualItem
                         property: "mediaHeight"
                         value: mediaContentLoader.liveHeight
-                        when: mediaContentLoader.visualItem !== null && mediaDelegate.usesLiveAltResize
+                        when: mediaContentLoader.visualItem !== null
+                              && (mediaDelegate.usesLiveAltResize
+                                  || (!!mediaDelegate.liveTransform && !!mediaDelegate.liveTransform.altResize))
                     }
 
                     // Connections lives inside mediaDelegate so both `mediaDelegate` and
@@ -1156,7 +1185,7 @@ Rectangle {
                 acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
                 acceptedButtons: Qt.LeftButton
                 grabPermissions: PointerHandler.CanTakeOverFromAnything
-                enabled: true
+                enabled: root.editingEnabled
                 dragThreshold: 4
 
                 property real pressMediaX: 0.0
@@ -1284,7 +1313,7 @@ Rectangle {
                 }
 
                 onTranslationChanged: {
-                    if (!active || !activeMoveMediaId)
+                    if (!root.editingEnabled || !active || !activeMoveMediaId)
                         return
                     var delegateItem = root.mediaDelegateById(activeMoveMediaId)
                     if (!delegateItem) {
@@ -1561,6 +1590,7 @@ Rectangle {
     // Extra metadata (displayName, mediaType, etc.) is looked up from mediaModel.
     Item {
         id: overlayLayer
+        enabled: root.editingEnabled
         anchors.fill: parent
         z: 99000
 
@@ -1612,6 +1642,7 @@ Rectangle {
                 // selectionChromeModel entry — has baked width/height
                 readonly property var chromeEntry: modelData
                 readonly property string mid: chromeEntry ? (chromeEntry.mediaId || "") : ""
+                readonly property var liveTransform: root.liveTransforms[mid] || null
 
                 // Look up the matching mediaModel entry for metadata
                 readonly property var mediaEntry: {
@@ -1629,20 +1660,20 @@ Rectangle {
                 readonly property bool isLiveAltResizing: root.liveAltResizeActive && root.liveAltResizeMediaId === mid
 
                 // Is this item being dragged?
-                readonly property bool isDragging: root.liveDragMediaId === mid
+                readonly property bool isDragging: !liveTransform && root.liveDragMediaId === mid
                 // isSnapDragging intentionally does NOT require isDragging.
                 // liveDragMediaId is cleared before commitMediaTransform updates the model,
                 // so gating on isDragging causes a flicker. The snap freeze clears via
                 // onMediaChanged once the committed position arrives in the model.
-                readonly property bool isSnapDragging: root.liveSnapDragActive
+                readonly property bool isSnapDragging: !liveTransform && root.liveSnapDragActive
                                                        && root.liveSnapDragMediaId === mid
 
                 // Scene position — switch to live resize/alt-resize coords when active.
                 // chromeEntry.x/y are already in QML scene units (scenePos * sceneUnitScale).
-                readonly property real sceneX: isLiveAltResizing ? root.liveAltResizeX
+                readonly property real sceneX: liveTransform ? liveTransform.x : isLiveAltResizing ? root.liveAltResizeX
                                              : (isLiveResizing   ? root.liveResizeX
                                                                   : (chromeEntry ? (chromeEntry.x || 0) : 0))
-                readonly property real sceneY: isLiveAltResizing ? root.liveAltResizeY
+                readonly property real sceneY: liveTransform ? liveTransform.y : isLiveAltResizing ? root.liveAltResizeY
                                              : (isLiveResizing   ? root.liveResizeY
                                                                   : (chromeEntry ? (chromeEntry.y || 0) : 0))
 
@@ -1651,6 +1682,7 @@ Rectangle {
                 // During live alt-resize use the live width/height directly (already in scene units).
                 // During live uniform resize, recompute from mediaEntry base size * liveResizeScale.
                 readonly property real screenW: {
+                    if (liveTransform) return liveTransform.width * liveTransform.scale * root.viewScale
                     if (isLiveAltResizing)
                         return root.liveAltResizeWidth * root.liveAltResizeScale * root.viewScale
                     if (isLiveResizing && mediaEntry)
@@ -1658,6 +1690,7 @@ Rectangle {
                     return (chromeEntry ? (chromeEntry.width || 0) : 0) * root.viewScale
                 }
                 readonly property real screenH: {
+                    if (liveTransform) return liveTransform.height * liveTransform.scale * root.viewScale
                     if (isLiveAltResizing)
                         return root.liveAltResizeHeight * root.liveAltResizeScale * root.viewScale
                     if (isLiveResizing && mediaEntry)
@@ -1720,7 +1753,8 @@ Rectangle {
                     isMuted:   overlayDelegate.videoState ? !!overlayDelegate.videoState.isMuted   : false
                     isLooping: overlayDelegate.videoState ? !!overlayDelegate.videoState.isLooping : false
                     progress:  overlayDelegate.videoState ? (overlayDelegate.videoState.progress || 0.0) : 0.0
-                    volume:    overlayDelegate.videoState ? (overlayDelegate.videoState.volume   || 1.0) : 1.0
+                    volume: overlayDelegate.videoState && overlayDelegate.videoState.volume !== undefined
+                            ? overlayDelegate.videoState.volume : 1.0
 
                     x: overlayDelegate.screenCentreX - panelWidth * 0.5
                     y: overlayDelegate.screenBottom   + 8

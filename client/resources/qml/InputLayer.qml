@@ -145,6 +145,9 @@ Item {
         }
 
         function canStart(requestedMode, requestedOwnerId) {
+            if (requestedMode !== "pan" && inputLayer.interactionController
+                    && !inputLayer.interactionController.editingEnabled)
+                return false
             var owner = requestedOwnerId || ""
             return mode === "idle"
                 || (mode === requestedMode && ownerId === owner)

@@ -89,7 +89,8 @@ bool ClientWorkspaceViewModel::hasScreens() const
 
 bool ClientWorkspaceViewModel::mediaEditingEnabled() const
 {
-    return hasProject() && m_canvas && m_canvas->projectEditingEnabled();
+    auto* host = qobject_cast<QuickCanvasHost*>(m_canvas.data());
+    return hasProject() && host && host->controller()->editingEnabled();
 }
 
 bool ClientWorkspaceViewModel::canvasNavigation() const
@@ -111,8 +112,8 @@ QString ClientWorkspaceViewModel::mediaEditingUnavailableReason() const
 {
     if (!hasProject()) return QStringLiteral("Create a project first");
     if (!m_canvas) return QStringLiteral("Canvas is unavailable");
-    return m_canvas->projectEditingEnabled()
-        ? QString() : QStringLiteral("Project editing is unavailable");
+    return mediaEditingEnabled()
+        ? QString() : QStringLiteral("Project editing is unavailable while a scene is running");
 }
 
 QString ClientWorkspaceViewModel::mediaSyncUnavailableReason() const
@@ -341,6 +342,8 @@ void ClientWorkspaceViewModel::setCanvas(ICanvasHost* canvas)
     }
     auto* host = qobject_cast<QuickCanvasHost*>(m_canvas.data());
     m_mediaSettings->setController(host ? host->controller() : nullptr);
+    if (host) connect(host->controller(), &QuickCanvasController::editingEnabledChanged,
+                      this, &ClientWorkspaceViewModel::actionStateChanged, Qt::UniqueConnection);
     if (MediaListModel* model = typedMediaModel()) {
         connect(model, &QAbstractItemModel::rowsInserted,
                 this, &ClientWorkspaceViewModel::mediaCountChanged);

@@ -26,6 +26,8 @@ class QuickCanvasController final : public QObject
 {
     Q_OBJECT
     Q_PROPERTY(QObject* mediaModel READ mediaModel CONSTANT)
+    Q_PROPERTY(bool editingEnabled READ editingEnabled NOTIFY editingEnabledChanged)
+    Q_PROPERTY(QVariantMap liveTransforms READ liveTransforms NOTIFY presentationChanged)
     Q_PROPERTY(QVariantList mediaSnapshot READ mediaSnapshot NOTIFY mediaSnapshotChanged)
     Q_PROPERTY(QVariantList selectionChromeModel READ selectionChromeModel NOTIFY selectionChromeModelChanged)
     Q_PROPERTY(QVariantList screensModel READ screensModel NOTIFY presentationChanged)
@@ -80,6 +82,8 @@ public:
     QObject* dropPreviewFrameSource() const;
     bool remoteActive() const { return m_shellActive; }
     bool projectEditingEnabled() const { return m_projectEditingEnabled; }
+    bool editingEnabled() const { return m_projectEditingEnabled && !editsLocked(); }
+    QVariantMap liveTransforms() const { return m_liveTransforms; }
     void setProjectEditingEnabled(bool enabled);
     bool textToolActive() const { return m_textToolActive; }
     qreal viewScale() const { return m_viewScale; }
@@ -124,6 +128,8 @@ public:
     Q_INVOKABLE void updateCamera(qreal scale, qreal panX, qreal panY);
 
 signals:
+    void editingEnabledChanged();
+    void pendingEditsCanceled();
     void presentationChanged();
     void mediaSnapshotChanged();
     void selectionChromeModelChanged();
@@ -207,6 +213,20 @@ private:
     static QRectF resizedRect(const QRectF& original, const QString& handle,
                               const QPointF& movingPoint, bool uniform);
     void clearLiveResize();
+    void cancelPendingEdits();
+    void captureTransformSelection(CanvasMedia* activeMedia);
+    void previewMove(const QPointF& position);
+    void previewResize();
+    void commitTransforms(bool resize, bool alt);
+
+    struct TransformStart {
+        QPointer<CanvasMedia> media;
+        QRectF rect;
+        QSize baseSize;
+        qreal scale = 1.0;
+    };
+    QHash<QString, TransformStart> m_transformStarts;
+    QVariantMap m_liveTransforms;
 
     QPointer<CanvasDocument> m_document;
     QPointer<QQuickWindow> m_renderWindow;

@@ -98,9 +98,10 @@ Item {
         enabled: root.enabled
         acceptedButtons: Qt.LeftButton
         hoverEnabled: true
+        preventStealing: true
 
         function ratioFromX(mx) {
-            return Math.max(0.0, Math.min(1.0, mx / track.width))
+            return Math.max(0.0, Math.min(1.0, mx / Math.max(1, track.width)))
         }
 
         onPressed: function(mouse) {
@@ -118,9 +119,16 @@ Item {
             root.seeked(r)
         }
 
+        onCanceled: {
+            if (!root._dragging) return
+            root.dragEnded(root._visualValue)
+            root._dragging = false
+        }
+
         onReleased: function(mouse) {
             mouse.accepted = true
-            var finalRatio = root._visualValue
+            var finalRatio = ratioFromX(mouse.x)
+            root._visualValue = finalRatio
             root.dragEnded(finalRatio)
             root._dragging = false
             // Binding { when: !_dragging } reactivates here and re-syncs

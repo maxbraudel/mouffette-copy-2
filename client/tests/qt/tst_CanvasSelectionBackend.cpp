@@ -221,17 +221,218 @@ private slots:
             Q_ARG(double, rectBefore.center().y()),
             Q_ARG(bool, false), Q_ARG(bool, true)));
 
-        QVERIFY(!media->fitToTextEnabled());
+        QVERIFY(media->fitToTextEnabled()); // Preview must not mutate the draft.
         QCOMPARE(fixture.controller.liveAltResizeScale(), scaleBefore);
         QCOMPARE(fixture.controller.liveAltResizeWidth(),
                  (rectBefore.width() + 180.0) / scaleBefore);
 
         QVERIFY(QMetaObject::invokeMethod(&fixture.controller,
             "handleMediaResizeEnded", Qt::DirectConnection, Q_ARG(QString, id)));
+        QVERIFY(!media->fitToTextEnabled());
         QCOMPARE(media->scale(), scaleBefore);
         QCOMPARE(media->sceneRect().height(), rectBefore.height());
         QVERIFY(qAbs(media->sceneRect().width()
                      - (rectBefore.width() + 180.0)) <= scaleBefore / 2.0);
+    }
+
+    void selectionResizeUsesManipulatedMedia_data()
+    {
+        QTest::addColumn<QString>("handle");
+        QTest::addColumn<QPointF>("uv");
+        QTest::addColumn<bool>("alt");
+        QTest::addColumn<bool>("snap");
+        const QStringList handles{"top-left", "top-mid", "top-right", "left-mid",
+                                  "right-mid", "bottom-left", "bottom-mid", "bottom-right"};
+        const QList<QPointF> points{{0,0}, {.5,0}, {1,0}, {0,.5}, {1,.5}, {0,1}, {.5,1}, {1,1}};
+        for (int i = 0; i < handles.size(); ++i)
+            for (bool alt : {false, true})
+                for (bool snap : {false, true}) {
+                    const QByteArray name = (handles[i] + (alt ? "-alt" : "-uniform")
+                        + (snap ? "-snap" : "-free")).toUtf8();
+                    QTest::newRow(name.constData()) << handles[i] << points[i] << alt << snap;
+                }
+    }
+
+    void selectionResizeUsesManipulatedMedia()
+    {
+        QFETCH(QString, handle);
+        QFETCH(QPointF, uv);
+        QFETCH(bool, alt);
+        QFETCH(bool, snap);
+        CanvasDocument document, reference;
+        QuickCanvasController controller(&document), single(&reference);
+        controller.initialize(); single.initialize();
+        controller.setProjectEditingEnabled(true); single.setProjectEditingEnabled(true);
+        auto add = [](CanvasDocument& doc, QPointF position, QSize size, qreal scale) {
+            auto* media = doc.addText(position);
+            media->setFitToTextEnabled(false);
+            media->setBaseSize(size); media->setScale(scale); media->setPosition(position);
+            return media;
+        };
+        auto* active = add(document, {100,100}, {200,100}, 1);
+        auto* control = add(reference, {100,100}, {200,100}, 1);
+        auto* follower = add(document, {-1700,-900}, {80,120}, 1.5);
+        const QRectF original = active->sceneRect(), other = follower->sceneRect();
+        const QSize targetSize(400, 200);
+        const QPointF targetOrigin(100 - (1 - uv.x()) * 200, 100 - (1 - uv.y()) * 100);
+        auto* target = add(document, targetOrigin, targetSize, 1);
+        add(reference, targetOrigin, targetSize, 1);
+        document.select(active->mediaId()); document.select(follower->mediaId(), true);
+        reference.select(control->mediaId());
+        const QPointF point = targetOrigin + QPointF(uv.x() * 400 + 2, uv.y() * 200 + 2);
+        controller.handleMediaResizeRequested(active->mediaId(), handle, point.x(), point.y(), snap, alt);
+        single.handleMediaResizeRequested(control->mediaId(), handle, point.x(), point.y(), snap, alt);
+        if (snap) QVERIFY(!controller.snapGuidesModel().isEmpty());
+        QCOMPARE(controller.snapGuidesModel(), single.snapGuidesModel());
+        QCOMPARE(active->sceneRect(), original);
+        QCOMPARE(follower->sceneRect(), other);
+        QCOMPARE(controller.liveTransforms().size(), 2);
+        controller.handleMediaResizeEnded(active->mediaId());
+        single.handleMediaResizeEnded(control->mediaId());
+        QCOMPARE(active->sceneRect(), control->sceneRect());
+        const QRectF result = active->sceneRect();
+        const qreal sx = result.width() / original.width(), sy = result.height() / original.height();
+        const QPointF expectedPosition = other.topLeft() + QPointF(
+            (result.x() - original.x()) * other.width() / original.width(),
+            (result.y() - original.y()) * other.height() / original.height());
+        QVERIFY(QLineF(follower->position(), expectedPosition).length() < .001);
+        QVERIFY(qAbs(follower->sceneRect().width() - other.width() * sx) <= .76);
+        QVERIFY(qAbs(follower->sceneRect().height() - other.height() * sy) <= .76);
+        QCOMPARE(follower->scale(), alt ? 1.5 : 1.5 * sx);
+        QCOMPARE(target->sceneRect(), QRectF(targetOrigin, targetSize));
+        QVERIFY(controller.liveTransforms().isEmpty());
+    }
+
+    void selectionMoveSnapExcludesFollowersAndUsesActiveMedia()
+    {
+        Fixture fixture;
+        QVERIFY(fixture.initialize());
+        auto* active = fixture.document.addText({0,0});
+        auto* follower = fixture.document.addText({0,0});
+        auto* target = fixture.document.addText({0,0});
+        for (auto* item : {active, follower, target}) {
+            item->setFitToTextEnabled(false); item->setBaseSize({200,100});
+        }
+        active->setPosition({100,100}); follower->setPosition({300,200}); target->setPosition({700,400});
+        fixture.document.select(active->mediaId()); fixture.document.select(follower->mediaId(), true);
+        auto& c = fixture.controller;
+        c.handleMediaMoveStarted(active->mediaId(), 100, 100, true);
+        c.handleMediaMoveUpdated(active->mediaId(), 302, 202, true);
+        QVERIFY(c.liveSnapDragMediaId().isEmpty());
+        c.handleMediaMoveUpdated(active->mediaId(), 702, 402, true);
+        QCOMPARE(c.liveSnapDragX(), 700.0); QCOMPARE(c.liveSnapDragY(), 400.0);
+        QCOMPARE(c.liveTransforms().value(follower->mediaId()).toMap().value("x").toReal(), 900.0);
+        c.handleMediaMoveEnded(active->mediaId(), 702, 402, true);
+        QCOMPARE(active->position(), QPointF(700,400));
+        QCOMPARE(follower->position(), QPointF(900,500));
+        QCOMPARE(target->position(), QPointF(700,400));
+        // A delayed release without a new gesture cannot move anything.
+        c.handleMediaMoveEnded(active->mediaId(), 0, 0, false);
+        QCOMPARE(active->position(), QPointF(700,400));
+    }
+
+    void sceneLockDiscardsPendingSelectionEdits()
+    {
+        Fixture fixture;
+        QVERIFY(fixture.initialize());
+        auto* active = fixture.document.addText({300,300});
+        auto* follower = fixture.document.addText({600,300});
+        fixture.document.select(active->mediaId()); fixture.document.select(follower->mediaId(), true);
+        const QJsonObject original = fixture.document.serializeProjectState();
+        auto& c = fixture.controller;
+        c.handleMediaResizeRequested(active->mediaId(), "bottom-right", 500, 400, false, true);
+        QVERIFY(!c.liveTransforms().isEmpty());
+        fixture.document.setEditsLocked(true);
+        QVERIFY(c.liveTransforms().isEmpty()); QVERIFY(!c.editingEnabled());
+        c.handleMediaResizeEnded(active->mediaId());
+        c.handleMediaMoveStarted(active->mediaId(), 0, 0, false);
+        c.handleMediaMoveUpdated(active->mediaId(), 900, 900, false);
+        c.handleMediaMoveEnded(active->mediaId(), 900, 900, false);
+        c.handleTextCommitRequested(active->mediaId(), "Changed");
+        c.handleOverlayVisibilityToggle(active->mediaId(), false);
+        c.handleOverlayDelete(active->mediaId());
+        QCOMPARE(fixture.document.serializeProjectState(), original);
+        fixture.document.setEditsLocked(false);
+        c.handleMediaResizeEnded(active->mediaId());
+        c.handleMediaMoveEnded(active->mediaId(), 900, 900, false);
+        QCOMPARE(fixture.document.serializeProjectState(), original);
+        QVERIFY(c.editingEnabled());
+    }
+
+    void runningSceneRejectsNativeEdits_data()
+    {
+        QTest::addColumn<bool>("testScene");
+        QTest::addColumn<bool>("duringDrag");
+        QTest::newRow("test-before-press") << true << false;
+        QTest::newRow("test-during-drag") << true << true;
+        QTest::newRow("remote-before-press") << false << false;
+        QTest::newRow("remote-during-drag") << false << true;
+    }
+
+    void runningSceneRejectsNativeEdits()
+    {
+        QFETCH(bool, testScene);
+        QFETCH(bool, duringDrag);
+        QString error;
+        std::unique_ptr<QuickCanvasHost> host(QuickCanvasHost::create(&error));
+        QVERIFY2(host, qPrintable(error));
+        host->setProjectEditingEnabled(true);
+        QQuickView view;
+        view.resize(1000, 700);
+        view.setResizeMode(QQuickView::SizeRootObjectToView);
+        view.setSource(QUrl("qrc:/qt/qml/Mouffette/App/resources/qml/CanvasRoot.qml"));
+        auto* root = view.rootObject();
+        QVERIFY(root);
+        root->setProperty("sessionViewModel", QVariantMap{{"canvasController", QVariant::fromValue<QObject*>(host->controller())}});
+        auto* media = host->document()->addText({300,250}, "Locked text");
+        media->setFitToTextEnabled(false); media->setBaseSize({200,100}); media->setPosition({200,200});
+        const QRectF original = media->sceneRect();
+        view.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&view));
+#ifdef Q_OS_MACOS
+        MacWindowManager::activateApplicationWindow(&view);
+#endif
+        QVERIFY(QTest::qWaitForWindowActive(&view));
+        QQuickItem* item = nullptr;
+        QTRY_VERIFY((item = findQuickItemWithProperty(root, "currentMediaId", media->mediaId())));
+        const QPoint start = item->mapToScene({100,50}).toPoint();
+        if (duringDrag) {
+            QTest::mousePress(&view, Qt::LeftButton, Qt::NoModifier, start);
+            QTest::mouseMove(&view, start + QPoint(40,30), 20);
+            QTRY_VERIFY(root->property("mediaMoveHandlerActive").toBool());
+        }
+        if (testScene) {
+            host->triggerTestSceneAction();
+            QVERIFY(host->testSceneLaunched());
+        } else {
+            // This is the synchronous lock used as soon as remote prepare starts.
+            host->document()->setEditsLocked(true);
+        }
+        QTRY_VERIFY(!root->property("editingEnabled").toBool());
+        if (!duringDrag) QTest::mousePress(&view, Qt::LeftButton, Qt::NoModifier, start);
+        QTest::mouseMove(&view, start + QPoint(100,60), 20);
+        QTest::mouseRelease(&view, Qt::LeftButton, Qt::NoModifier, start + QPoint(100,60));
+        QCOMPARE(media->sceneRect(), original);
+        QCOMPARE(item->position(), original.topLeft());
+        QVERIFY(!root->property("mediaMoveHandlerActive").toBool());
+        // Resize handles and text activation are locked too.
+        const QPoint corner = item->mapToScene({200,100}).toPoint();
+        QTest::mousePress(&view, Qt::LeftButton, Qt::AltModifier, corner);
+        QTest::mouseMove(&view, corner + QPoint(70,40), 20);
+        QTest::mouseRelease(&view, Qt::LeftButton, Qt::AltModifier, corner + QPoint(70,40));
+        QTest::mouseDClick(&view, Qt::LeftButton, Qt::NoModifier, start);
+        QTest::keyClick(&view, Qt::Key_X);
+        QCOMPARE(media->sceneRect(), original);
+        QCOMPARE(media->text(), QStringLiteral("Locked text"));
+        QVERIFY(!root->property("anyMediaEditing").toBool());
+        if (testScene) host->triggerTestSceneAction();
+        else host->document()->setEditsLocked(false);
+        QTRY_VERIFY(root->property("editingEnabled").toBool());
+        QTest::mousePress(&view, Qt::LeftButton, Qt::NoModifier, start);
+        QTest::mouseMove(&view, start + QPoint(50,30), 20);
+        QTest::mouseMove(&view, start + QPoint(80,40), 20);
+        QTest::mouseRelease(&view, Qt::LeftButton, Qt::NoModifier, start + QPoint(80,40));
+        QCOMPARE(media->position(), original.topLeft() + QPointF(80,40));
     }
 
     void moveSnapFitsACompleteTargetBoxAndReleasesCleanly()
@@ -484,6 +685,10 @@ private slots:
         media->setBaseSize({240, 140});
         media->setPosition({180, 160});
 
+        auto* follower = fixture.document.addText({650, 450}, "Follower");
+        const QPointF followerStart = follower->position();
+        fixture.document.select(media->mediaId());
+        fixture.document.select(follower->mediaId(), true);
         QQuickItem* root = qobject_cast<QQuickItem*>(fixture.view.rootObject());
         QVERIFY(root);
         QQuickItem* delegate = nullptr;
@@ -514,6 +719,11 @@ private slots:
                 QVERIFY(delegate->property("moveHandlerActive").toBool());
             }
         }
+        QCOMPARE(fixture.document.selectedMediaIds().size(), 2);
+        QCOMPARE(follower->position(), followerStart);
+        auto* followerItem = findQuickItemWithProperty(root, "currentMediaId", follower->mediaId());
+        QVERIFY(followerItem);
+        QCOMPARE(followerItem->position(), followerStart + QPointF(90,55));
         QTest::mouseRelease(&fixture.view, Qt::LeftButton,
                             Qt::NoModifier, end);
         QCoreApplication::processEvents();
@@ -522,6 +732,7 @@ private slots:
         QVERIFY(updated.count() > 0);
         QCOMPARE(ended.count(), 1);
         QCOMPARE(media->position(), originalPosition + QPointF(90, 55));
+        QCOMPARE(follower->position(), followerStart + QPointF(90, 55));
     }
 
     void fullPageDragSurvivesPublicationAndResize_data()

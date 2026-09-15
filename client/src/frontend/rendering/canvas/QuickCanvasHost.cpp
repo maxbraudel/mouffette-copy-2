@@ -712,6 +712,7 @@ void QuickCanvasHost::triggerTestSceneAction()
 void QuickCanvasHost::beginScenePresentation(bool remote)
 {
     if (m_sceneContext) return;
+    m_document->setEditsLocked(true);
     m_sceneContext = new QObject(this);
     m_draftState.clear();
     for (CanvasMedia* media : m_document->media()) {

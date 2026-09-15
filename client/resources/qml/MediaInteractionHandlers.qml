@@ -14,6 +14,7 @@ Item {
 
     readonly property var activeCoordinator: coordinatorRef
     readonly property bool mediaPressSelectEnabledState: !!rootController
+        && rootController.editingEnabled
         && !!delegateItem
         && !!delegateItem.media
         && !delegateItem.overlayHovered
@@ -56,8 +57,8 @@ Item {
                 return
             var additive = (eventPoint.modifiers & Qt.ShiftModifier) !== 0
             if (rootController
-                    && typeof rootController.requestMediaSelection === "function")
-                rootController.requestMediaSelection(mediaId, additive)
+                    && typeof rootController.mediaSelectRequested === "function")
+                rootController.mediaSelectRequested(mediaId, additive)
             Qt.callLater(function() {
                 if (!delegateItem || delegateItem.currentMediaId !== mediaId)
                     return
