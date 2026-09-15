@@ -952,6 +952,135 @@ private slots:
         reopened->canvas = nullptr;
     }
 
+    void pointerPresenceKeepsAllProjectsAndSessionsAliveUntilItLeaves()
+    {
+        QTemporaryDir root;
+        QVERIFY(root.isValid());
+
+        RuntimeProfileContext context;
+        context.ordinal = 2;
+        context.instanceId = QStringLiteral("activity-multiple-projects");
+        context.profileId = QStringLiteral("activity-multiple-projects");
+        context.rootPath = root.path();
+        context.persistent = false;
+        RuntimeProfile::configure(context);
+
+        ApplicationRuntime runtime(context);
+        WorkspaceManager* workspaces = runtime.getWorkspaceManager();
+        ProjectManager* projects = runtime.getProjectManager();
+        workspaces->stopAutomaticTimersForTesting();
+        projects->stopAutomaticTimersForTesting();
+        workspaces->setRemoteSessionHiddenTimeoutMs(60'000);
+
+        qint64 nowMs = 1'000'000;
+        ApplicationActivityMonitor* activity =
+            runtime.findChild<ApplicationActivityMonitor*>();
+        QVERIFY(activity);
+        activity->setNowProviderForTesting([&nowMs]() { return nowMs; });
+        workspaces->setNowProviderForTesting([&nowMs]() { return nowMs; });
+        projects->setNowProviderForTesting([&nowMs]() { return nowMs; });
+        runtime.setQmlWindowVisible(true);
+        runtime.setPointerInsideControlWindow(true);
+        QVERIFY(activity->isActive());
+
+        RemoteSessionTestServer server(runtime.getWebSocketClient()->endpointId());
+        QVERIFY(server.listen());
+        ConnectionManager* connections = runtime.findChild<ConnectionManager*>();
+        QVERIFY(connections);
+        QSignalSpy connectedSpy(runtime.getWebSocketClient(),
+                                &WebSocketClient::connected);
+        connections->connectToServer(server.url());
+        QTRY_COMPARE_WITH_TIMEOUT(connectedSpy.count(), 1, 2'000);
+
+        const QStringList targets{
+            QString(43, QLatin1Char('A')), QString(43, QLatin1Char('B'))};
+        QJsonArray clients;
+        for (qsizetype i = 0; i < targets.size(); ++i) {
+            clients.append(onlineClient(
+                targets.at(i), QStringLiteral("Activity target %1").arg(i)).toJson());
+        }
+        QVERIFY(server.send(QJsonObject{
+            {QStringLiteral("type"), QStringLiteral("client_list")},
+            {QStringLiteral("clients"), clients}
+        }));
+        QTRY_COMPARE_WITH_TIMEOUT(runtime.displayClients().size(), 2, 1'000);
+
+        for (qsizetype i = 0; i < targets.size(); ++i) {
+            runtime.activateClient(targets.at(i));
+            QTRY_COMPARE_WITH_TIMEOUT(server.openCommands.size(), i + 1, 1'000);
+            QVERIFY(server.sendOpened(
+                QStringLiteral("activity-session-%1").arg(i),
+                server.openCommands.at(i).value(QStringLiteral("requestId")).toString(),
+                targets.at(i), ScreenInfo(81 + i, 1920, 1080, 0, 0, true), 46));
+            QTRY_VERIFY_WITH_TIMEOUT(projects->hasProjectForTarget(targets.at(i)), 1'000);
+            QTRY_COMPARE_WITH_TIMEOUT(workspaces->remoteSessionState(targets.at(i)),
+                                     WorkspaceManager::RemoteSessionState::Active, 1'000);
+        }
+
+        QSignalSpy closeDueSpy(workspaces, &WorkspaceManager::remoteSessionCloseDue);
+        QSignalSpy projectDeletedSpy(projects, &ProjectManager::projectDeleted);
+        const qint64 retentionMs = projects->timingPolicy().projectHiddenRetentionMs;
+        // No new pointer event is required while it remains inside. Also,
+        // losing keyboard focus must not change this pointer-based policy.
+        runtime.handleApplicationStateChanged(Qt::ApplicationInactive);
+        QVERIFY(activity->isActive());
+        nowMs += qMax(retentionMs, workspaces->remoteSessionHiddenTimeoutMs()) + 1;
+        workspaces->processDeadlines(nowMs);
+        projects->processDeadlines(nowMs);
+        for (const QString& target : targets) {
+            QCOMPARE(workspaces->remoteSessionCloseAtMs(target), qint64(-1));
+            QCOMPARE(projects->projectDeleteAtMs(target), qint64(-1));
+            QCOMPARE(workspaces->remoteSessionState(target),
+                     WorkspaceManager::RemoteSessionState::Active);
+            QVERIFY(projects->hasProjectForTarget(target));
+        }
+        QCOMPARE(closeDueSpy.count(), 0);
+        QCOMPARE(projectDeletedSpy.count(), 0);
+
+        // A single departure starts both deadlines for every project,
+        // including the project that is no longer the selected page.
+        const qint64 leftAtMs = nowMs;
+        runtime.setPointerInsideControlWindow(false);
+        QVERIFY(!activity->isActive());
+        ++nowMs;
+        runtime.setPointerInsideControlWindow(false);
+        for (const QString& target : targets) {
+            QCOMPARE(workspaces->remoteSessionCloseAtMs(target),
+                     leftAtMs + workspaces->remoteSessionHiddenTimeoutMs());
+            QCOMPARE(projects->projectDeleteAtMs(target), leftAtMs + retentionMs);
+        }
+
+        // Returning before expiry cancels both deadlines everywhere; even
+        // advancing past their former expiry cannot close or delete anything.
+        runtime.setPointerInsideControlWindow(true);
+        QVERIFY(activity->isActive());
+        for (const QString& target : targets) {
+            QCOMPARE(workspaces->remoteSessionCloseAtMs(target), qint64(-1));
+            QCOMPARE(projects->projectDeleteAtMs(target), qint64(-1));
+        }
+        nowMs += qMax(retentionMs, workspaces->remoteSessionHiddenTimeoutMs()) + 1;
+        workspaces->processDeadlines(nowMs);
+        projects->processDeadlines(nowMs);
+        QCOMPARE(closeDueSpy.count(), 0);
+        QCOMPARE(projectDeletedSpy.count(), 0);
+        QCOMPARE(projects->projectCount(), 2);
+        for (const QString& target : targets) {
+            QCOMPARE(workspaces->remoteSessionState(target),
+                     WorkspaceManager::RemoteSessionState::Active);
+        }
+        QCOMPARE(server.closeCommands.size(), 0);
+
+        runtime.handleApplicationAboutToQuit();
+        runtime.getNavigationManager()->setActiveCanvas(nullptr);
+        runtime.setActiveCanvas(nullptr);
+        for (const QString& target : targets) {
+            ApplicationRuntime::ClientWorkspace* workspace = runtime.findWorkspace(target);
+            QVERIFY(workspace && workspace->canvas);
+            delete workspace->canvas;
+            workspace->canvas = nullptr;
+        }
+    }
+
     void returningActivityReopensTheForegroundSessionAfterInactivityTimeout()
     {
         QTemporaryDir root;

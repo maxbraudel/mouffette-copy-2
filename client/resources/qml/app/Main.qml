@@ -34,7 +34,10 @@ QtObject {
         }
 
         HoverHandler {
-            acceptedDevices: PointerDevice.Mouse
+            objectName: "windowActivityHover"
+            // Cocoa reclassifies trackpads and Magic Mouse as TouchPad after
+            // their first precise scroll. Both still move the same cursor.
+            acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
             onHoveredChanged: root.controller.setPointerInside(hovered)
         }
 
@@ -74,14 +77,6 @@ QtObject {
                     auxiliaryVisible: root.controller.remoteVolumeVisible
                     busy: root.controller.remoteBusy
                 }
-                AppButton {
-                    visible: root.controller.applicationPage === 1 && root.controller.hasProject
-                    text: "Delete project..."
-                    enabled: root.controller.canDeleteProject
-                    destructive: true
-                    unavailableReason: "No project exists for this client"
-                    onClicked: root.controller.requestDeleteProject()
-                }
                 Item { Layout.fillWidth: true }
                 SegmentedStatusCard {
                     visible: root.controller.applicationPage !== 1 || window.width >= 1100
@@ -103,6 +98,14 @@ QtObject {
                     visible: root.controller.applicationPage !== 1 || window.width >= 1100
                     text: "Settings"
                     onClicked: settings.open()
+                }
+                AppButton {
+                    visible: root.controller.applicationPage === 1 && root.controller.hasProject
+                    text: "Delete project..."
+                    enabled: root.controller.canDeleteProject
+                    destructive: true
+                    unavailableReason: "No project exists for this client"
+                    onClicked: root.controller.requestDeleteProject()
                 }
             }
 

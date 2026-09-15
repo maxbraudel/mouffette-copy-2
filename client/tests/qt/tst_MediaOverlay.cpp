@@ -2,6 +2,7 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QImage>
+#include <QMouseEvent>
 #include <QQmlComponent>
 #include <QQmlEngine>
 #include <QQuickItem>
@@ -9,12 +10,16 @@
 #include <QScopeGuard>
 #include <QTemporaryDir>
 #include <QtTest>
+#include <QtGui/private/qpointingdevice_p.h>
+#include <QtQuick/private/qquickhoverhandler_p.h>
+#include <QtQuick/private/qquickwindow_p.h>
 
 #include "frontend/rendering/canvas/MediaListModel.h"
 #include "frontend/rendering/canvas/CanvasQmlTypes.h"
 #include "frontend/rendering/canvas/QuickCanvasController.h"
 #include "frontend/rendering/canvas/QuickCanvasHost.h"
 #include "frontend/qml/ClientWorkspaceViewModel.h"
+#include "frontend/qml/ApplicationController.h"
 #include "frontend/qml/MediaSettingsViewModel.h"
 #include "backend/domain/canvas/CanvasDocument.h"
 #include "backend/domain/media/CanvasMedia.h"
@@ -35,6 +40,8 @@ private slots:
     void mediaCountTracksRealCanvasInsertions();
     void typedCapabilitiesGuardDirectCppInvocations();
     void overlayButtonHoverIsImmediate();
+    void mainWindowPointerActivity_data();
+    void mainWindowPointerActivity();
     void mediaActionPalette_data();
     void mediaActionPalette();
     void mediaRowsAndProgress();
@@ -912,6 +919,103 @@ void MediaOverlayTest::overlayButtonHoverIsImmediate()
              QColor(52, 87, 128, 242));
     QTest::mouseRelease(&window, Qt::LeftButton, Qt::NoModifier, QPoint(38, 38));
     QCOMPARE(button->property("currentBackgroundColor").value<QColor>(), hovered);
+}
+
+void MediaOverlayTest::mainWindowPointerActivity_data()
+{
+    QTest::addColumn<bool>("startsAsTouchpad");
+    QTest::addColumn<bool>("reclassifyAfterScroll");
+    QTest::newRow("mouse") << false << false;
+    QTest::newRow("trackpad-already-scrolled") << true << false;
+    QTest::newRow("macos-trackpad-or-magic-mouse-first-scroll") << false << true;
+}
+
+void MediaOverlayTest::mainWindowPointerActivity()
+{
+    QFETCH(bool, startsAsTouchpad);
+    QFETCH(bool, reclassifyAfterScroll);
+
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    RuntimeProfileContext profile;
+    profile.ordinal = 2;
+    profile.instanceId = QStringLiteral("window-activity-test");
+    profile.profileId = profile.instanceId;
+    profile.rootPath = directory.path();
+    profile.persistent = false;
+
+    // Load the shipped shell with its real presentation controller. Bootstrap
+    // is deliberately not started: this input test needs no network or stores.
+    QQmlEngine engine;
+    ApplicationController controller(profile, {});
+    QQmlComponent component(&engine, QUrl(QStringLiteral(
+        "qrc:/qt/qml/Mouffette/App/resources/qml/app/Main.qml")));
+    std::unique_ptr<QObject> root(component.createWithInitialProperties({
+        {QStringLiteral("controller"), QVariant::fromValue(&controller)}
+    }));
+    QVERIFY2(root, qPrintable(component.errorString()));
+    auto* bootstrap = qobject_cast<QWindow*>(
+        root->property("bootstrap").value<QObject*>());
+    QVERIFY(bootstrap);
+    bootstrap->hide();
+    auto* window = qobject_cast<QQuickWindow*>(
+        root->property("window").value<QObject*>());
+    QVERIFY(window);
+    auto* hover = window->findChild<QQuickHoverHandler*>(
+        QStringLiteral("windowActivityHover"));
+    QVERIFY(hover);
+
+    window->showNormal();
+    QVERIFY(QTest::qWaitForWindowExposed(window));
+    // Qt Quick synthesizes hover events using the primary pointing device,
+    // even when a mouse event carries a different test device.
+    const auto* device = QPointingDevice::primaryPointingDevice();
+    auto* deviceState = QPointingDevicePrivate::get(
+        const_cast<QPointingDevice*>(device));
+    const auto originalType = deviceState->deviceType;
+    const auto restoreDevice = qScopeGuard([&]() {
+        deviceState->deviceType = originalType;
+    });
+    deviceState->deviceType = startsAsTouchpad
+        ? QInputDevice::DeviceType::TouchPad : QInputDevice::DeviceType::Mouse;
+    const auto move = [&](const QPointF& position,
+                          Qt::MouseButtons buttons = Qt::NoButton) {
+        QMouseEvent event(QEvent::MouseMove, position, position,
+                          window->mapToGlobal(position), Qt::NoButton,
+                          buttons, Qt::NoModifier, device);
+        QCoreApplication::sendEvent(window, &event);
+        // Qt Quick coalesces moves until the next frame.
+        QQuickWindowPrivate::get(window)->deliveryAgentPrivate()
+            ->flushFrameSynchronousEvents(window);
+    };
+
+    move(QPointF(100, 100));
+    QVERIFY(hover->isHovered());
+    QSignalSpy hoverChanges(hover, &QQuickHoverHandler::hoveredChanged);
+
+    if (reclassifyAfterScroll) {
+        // Match QCocoa's precise-scroll path: the SAME device changes type
+        // after the first trackpad/Magic Mouse wheel event.
+        deviceState->deviceType = QInputDevice::DeviceType::TouchPad;
+    }
+    move(QPointF(150, 120));
+    QVERIFY(hover->isHovered());
+    move(QPointF(200, 150), Qt::LeftButton);
+    QVERIFY(hover->isHovered());
+    QCOMPARE(hoverChanges.count(), 0);
+
+    // Stationary presence is activity; no recurring move or click is needed.
+    QTest::qWait(100);
+    QVERIFY(hover->isHovered());
+    QCOMPARE(hoverChanges.count(), 0);
+
+    QEvent leave(QEvent::Leave);
+    QCoreApplication::sendEvent(window, &leave);
+    QVERIFY(!hover->isHovered());
+    QCOMPARE(hoverChanges.count(), 1);
+    move(QPointF(120, 140));
+    QVERIFY(hover->isHovered());
+    QCOMPARE(hoverChanges.count(), 2);
 }
 
 void MediaOverlayTest::canvasToolbarUsesOverlaySwitchAndSegmentedTools()
