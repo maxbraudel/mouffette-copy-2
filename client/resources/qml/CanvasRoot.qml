@@ -180,6 +180,18 @@ Rectangle {
     Connections {
         target: root.canvasController
         function onPresentationChanged() { root.synchronizeTransientState() }
+        function onTextEditingRequested(mediaId) {
+            var controller = root.canvasController
+            // Let the insertion/selection bindings and creation tap finish
+            // before moving keyboard focus into the new delegate.
+            Qt.callLater(function() {
+                if (root.canvasController !== controller)
+                    return
+                var delegate = root.mediaDelegateById(mediaId)
+                if (delegate)
+                    delegate.beginTextEditing()
+            })
+        }
     }
 
     function abandonPointerInteractions(reason) {
@@ -813,6 +825,11 @@ Rectangle {
                     property bool localDragging: false
                     property bool overlayHovered: false
                     property bool dropHandoffReadyReported: false
+                    function beginTextEditing() {
+                        var editor = mediaContentLoader.visualItem
+                        if (editor && editor.textEditable && textEditSession.begin(editor))
+                            editor.selectAllText()
+                    }
                     // Actual rendered scale — switches to live scale during resize/alt-resize
                     // so overlay counter-scale stays correct every frame.
                     readonly property real effectiveScale: usesLiveAltResize ? root.liveAltResizeScale

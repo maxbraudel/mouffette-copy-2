@@ -1377,8 +1377,10 @@ void QuickCanvasController::handleTextLiveUpdateRequested(const QString& mediaId
 void QuickCanvasController::handleTextCreateRequested(qreal viewX, qreal viewY)
 {
     if (!m_projectEditingEnabled || !m_document || editsLocked()) return;
-    m_document->addText(mapViewPointToScene({viewX, viewY}));
+    CanvasMedia* media = m_document->addText(mapViewPointToScene({viewX, viewY}));
+    if (!media) return;
     setTextToolActive(false);
+    emit textEditingRequested(media->mediaId());
 }
 
 void QuickCanvasController::handleOverlayVisibilityToggle(const QString& id, bool visible)

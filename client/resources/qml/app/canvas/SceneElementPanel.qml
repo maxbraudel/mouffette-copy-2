@@ -824,12 +824,12 @@ Rectangle {
                         checkObjectName: "volumeCheck"
                         fieldObjectName: "volumeField"
                         checkedValue: !!root.settings
-                                      && root.settings.volumeOverrideEnabled
+                                      && root.settings.audioEnabled
                         valueVisible: true
                         valueText: root.settings ? root.settings.volumeText : "100"
                         suffix: "%"
                         inputKind: "percent"
-                        onCheckedEdited: checked => root.settings.volumeOverrideEnabled = checked
+                        onCheckedEdited: checked => root.settings.audioEnabled = checked
                         onTextEdited: text => root.settings.volumeText = text
                     }
                     OptionRow {

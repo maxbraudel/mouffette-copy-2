@@ -48,6 +48,7 @@ private slots:
     void uploadActionLocksBeforeDispatchAndRecovers();
     void canvasToolbarUsesOverlaySwitchAndSegmentedTools();
     void mediaSettingsPanelRestoresTabsAndBindings();
+    void videoVolumeAndMuteStayIndependentAndSyncWithSettings();
     void toastUsesBottomLeftDoubleBackground();
     void themeTracksApplicationPalette();
 };
@@ -1291,6 +1292,105 @@ void MediaOverlayTest::mediaSettingsPanelRestoresTabsAndBindings()
 
     session.setSettingsVisible(false);
     QTRY_VERIFY(!panel->isVisible());
+}
+
+void MediaOverlayTest::videoVolumeAndMuteStayIndependentAndSyncWithSettings()
+{
+    const QString videoPath = QFINDTESTDATA("../../../video-1080p.mp4");
+    QVERIFY(!videoPath.isEmpty());
+    QString error;
+    std::unique_ptr<QuickCanvasHost> host(QuickCanvasHost::create(&error));
+    QVERIFY2(host, qPrintable(error));
+    host->setProjectEditingEnabled(true);
+    ClientWorkspaceViewModel session(
+        QStringLiteral("audio-settings"), host.get(), [] {}, nullptr,
+        [] { return false; }, [] { return true; }, [] { return true; });
+    session.setLoading(false);
+    session.setSettingsVisible(true);
+
+    QQmlEngine engine;
+    QQuickWindow window;
+    window.resize(1100, 800);
+    QQmlComponent component(&engine, QUrl(QStringLiteral(
+        "qrc:/qt/qml/Mouffette/App/resources/qml/app/pages/CanvasPage.qml")));
+    std::unique_ptr<QObject> pageObject(component.createWithInitialProperties({
+        {QStringLiteral("controller"), QVariantMap{
+             {QStringLiteral("activeWorkspace"), QVariant::fromValue(&session)},
+             {QStringLiteral("remoteBusy"), false}}}
+    }));
+    auto* page = qobject_cast<QQuickItem*>(pageObject.get());
+    QVERIFY2(page, qPrintable(component.errorString()));
+    page->setParentItem(window.contentItem());
+    page->setSize(window.size());
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    CanvasMedia* video = host->document()->addPreparedFile(
+        videoPath, QSize(320, 180), true, QPointF(500, 300));
+    QVERIFY(video);
+    auto* panel = findVisualItem(page, QStringLiteral("canvasSceneElementPanel"));
+    QVERIFY(panel);
+    panel->setProperty("activeTab", 1);
+    QQuickItem* slider = nullptr;
+    QTRY_VERIFY((slider = findVisualItem(page, QStringLiteral("videoVolumeSlider"))));
+    auto* mute = findVisualItem(page, QStringLiteral("videoMuteButton"));
+    auto* check = findVisualItem(page, QStringLiteral("volumeCheck"));
+    auto* field = findVisualItem(page, QStringLiteral("volumeField"));
+    QVERIFY(mute && check && field);
+    const auto click = [&](QQuickItem* item) {
+        QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier,
+                         item->mapToScene({item->width() / 2, item->height() / 2}).toPoint());
+    };
+    QTRY_VERIFY(check->property("checked").toBool());
+
+    // Editing the numeric field changes the actual audio and overlay slider.
+    QTRY_VERIFY(field->isVisible());
+    QTest::qWait(50); // Polish the newly selected settings tab before hit testing.
+    click(field);
+    QTRY_VERIFY(field->hasActiveFocus());
+    QTest::keyClick(&window, Qt::Key_7);
+    QTest::keyClick(&window, Qt::Key_0);
+    QCOMPARE(field->property("draftText").toString(), QStringLiteral("70"));
+    QTest::keyClick(&window, Qt::Key_Return);
+    QTRY_VERIFY(qAbs(video->volume() - 0.7) < 0.001);
+    QTRY_VERIFY(qAbs(slider->property("progress").toReal() - 0.7) < 0.001);
+    click(mute);
+    QTRY_VERIFY(video->muted());
+    QTRY_VERIFY(!check->property("checked").toBool());
+    QCOMPARE(field->property("draftText").toString(), QStringLiteral("70"));
+    QVERIFY(qAbs(slider->property("progress").toReal() - 0.7) < 0.001);
+
+    // Both ways of changing volume remain available while muted.
+    QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier,
+                     slider->mapToScene({slider->width() * 0.4, slider->height() / 2}).toPoint());
+    QTRY_VERIFY(qAbs(video->volume() - 0.4) < 0.03);
+    QVERIFY(video->muted());
+    QTRY_COMPARE(field->property("draftText").toString(),
+                 QString::number(qRound(video->volume() * 100)));
+    click(field);
+    QTest::keyClick(&window, Qt::Key_6);
+    QTest::keyClick(&window, Qt::Key_5);
+    QTest::keyClick(&window, Qt::Key_Return);
+    QTRY_VERIFY(qAbs(slider->property("progress").toReal() - 0.65) < 0.001);
+    QVERIFY(video->muted());
+    QVERIFY(!check->property("checked").toBool());
+
+    click(check);
+    QTRY_VERIFY(!video->muted());
+    QTRY_VERIFY(!mute->property("toggled").toBool());
+    QVERIFY(qAbs(video->volume() - 0.65) < 0.001);
+    click(check);
+    QTRY_VERIFY(video->muted());
+    QTRY_VERIFY(mute->property("toggled").toBool());
+    QCOMPARE(field->property("draftText").toString(), QStringLiteral("65"));
+    click(mute);
+    QTRY_VERIFY(!video->muted());
+    QTRY_VERIFY(check->property("checked").toBool());
+
+    // Zero volume is independent too: it must not toggle mute or the checkbox.
+    host->controller()->handleOverlayVolumeChange(video->mediaId(), 0.0);
+    QTRY_COMPARE(field->property("draftText").toString(), QStringLiteral("0"));
+    QVERIFY(!video->muted());
+    QVERIFY(check->property("checked").toBool());
 }
 
 void MediaOverlayTest::toastUsesBottomLeftDoubleBackground()

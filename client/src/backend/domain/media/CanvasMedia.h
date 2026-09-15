@@ -141,6 +141,7 @@ signals:
     void changed();
     void uploadStateChanged();
     void runtimeStateChanged();
+    void audioStateChanged();
 
 private:
     void notifyChanged();

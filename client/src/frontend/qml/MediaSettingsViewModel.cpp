@@ -90,8 +90,6 @@ MEDIA_STATE_BOOL_GETTER(audioFadeInEnabled, audioFadeInEnabled)
 MEDIA_STATE_TEXT_GETTER(audioFadeInText, audioFadeInText, "1")
 MEDIA_STATE_BOOL_GETTER(audioFadeOutEnabled, audioFadeOutEnabled)
 MEDIA_STATE_TEXT_GETTER(audioFadeOutText, audioFadeOutText, "1")
-MEDIA_STATE_BOOL_GETTER(volumeOverrideEnabled, volumeOverrideEnabled)
-MEDIA_STATE_TEXT_GETTER(volumeText, volumeText, "100")
 
 MEDIA_STATE_BOOL_SETTER(DisplayAutomatically, displayAutomatically)
 MEDIA_STATE_BOOL_SETTER(DisplayDelayEnabled, displayDelayEnabled)
@@ -122,13 +120,39 @@ MEDIA_STATE_BOOL_SETTER(AudioFadeInEnabled, audioFadeInEnabled)
 MEDIA_STATE_TEXT_SETTER(AudioFadeInText, audioFadeInText)
 MEDIA_STATE_BOOL_SETTER(AudioFadeOutEnabled, audioFadeOutEnabled)
 MEDIA_STATE_TEXT_SETTER(AudioFadeOutText, audioFadeOutText)
-MEDIA_STATE_BOOL_SETTER(VolumeOverrideEnabled, volumeOverrideEnabled)
-MEDIA_STATE_TEXT_SETTER(VolumeText, volumeText)
 
 #undef MEDIA_STATE_BOOL_GETTER
 #undef MEDIA_STATE_TEXT_GETTER
 #undef MEDIA_STATE_BOOL_SETTER
 #undef MEDIA_STATE_TEXT_SETTER
+
+bool MediaSettingsViewModel::audioEnabled() const
+{
+    return video() && !media()->muted();
+}
+
+void MediaSettingsViewModel::setAudioEnabled(bool enabled)
+{
+    updateSettings([enabled](CanvasMedia* item) {
+        if (item->isVideo()) item->setMuted(!enabled);
+    });
+}
+
+QString MediaSettingsViewModel::volumeText() const
+{
+    return QString::number(video() ? qRound(media()->volume() * 100.0) : 100);
+}
+
+void MediaSettingsViewModel::setVolumeText(const QString& value)
+{
+    bool ok = false;
+    const int percent = value.trimmed().toInt(&ok);
+    if (!ok || !video() || !m_controller) return;
+    // Share the slider's normalization and persistence path. Changing volume
+    // must never change the independent muted state.
+    m_controller->handleOverlayVolumeChange(media()->mediaId(),
+                                           qBound(0, percent, 100) / 100.0);
+}
 
 static CanvasMedia* asText(CanvasMedia* item)
 {
@@ -182,6 +206,8 @@ void MediaSettingsViewModel::refresh()
         m_observedMedia = next;
         if (m_observedMedia) {
             connect(m_observedMedia, &CanvasMedia::changed,
+                    this, &MediaSettingsViewModel::changed);
+            connect(m_observedMedia, &CanvasMedia::audioStateChanged,
                     this, &MediaSettingsViewModel::changed);
         }
     }

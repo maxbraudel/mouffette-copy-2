@@ -85,6 +85,7 @@ Item {
             onClicked: root.repeatToggleRequested(root.mediaId)
         }
         OverlayButton {
+            objectName: "videoMuteButton"
             iconSource: root.isMuted ? "qrc:/icons/icons/volume-off.svg" : "qrc:/icons/icons/volume-on.svg"
             isToggle: true
             toggled: root.isMuted
@@ -106,7 +107,8 @@ Item {
 
             OverlaySlider {
                 id: volumeSlider
-                progress: root.isMuted ? 0.0 : root.volume
+                objectName: "videoVolumeSlider"
+                progress: root.volume
                 anchors.fill: parent
                 anchors.leftMargin: 8
                 anchors.rightMargin: 8

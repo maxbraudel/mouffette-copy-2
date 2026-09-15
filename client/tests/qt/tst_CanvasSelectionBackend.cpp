@@ -570,6 +570,19 @@ private slots:
             QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier, createPoint);
             QTRY_COMPARE(host->document()->media().size(), 1);
             QCOMPARE(session.activeTool(), QStringLiteral("selection"));
+            QTRY_VERIFY(root->property("anyMediaEditing").toBool());
+            QVERIFY(!root->property("textToolActive").toBool());
+            // The creation click hands focus to the editor and selects the
+            // placeholder so typing immediately replaces it.
+            for (const char character : QByteArray("New title"))
+                QTest::keyClick(&window, character);
+            QTRY_COMPARE(host->document()->selectedMedia()->text(),
+                         QStringLiteral("New title"));
+            const QPoint background = root->mapToScene({700, 500}).toPoint();
+            QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier, background);
+            QTRY_VERIFY(!root->property("anyMediaEditing").toBool());
+            QCOMPARE(host->document()->media().size(), 1);
+            host->document()->select(host->document()->media().constFirst()->mediaId());
         } else {
             QString path;
             if (mediaType == QLatin1String("video")) {

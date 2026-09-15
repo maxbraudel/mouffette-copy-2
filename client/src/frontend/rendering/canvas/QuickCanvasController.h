@@ -128,6 +128,7 @@ signals:
     void mediaSnapshotChanged();
     void selectionChromeModelChanged();
     void textToolActiveChanged();
+    void textEditingRequested(const QString& mediaId);
     void selectedMediaChanged();
     void mediaVisibilityToggleRequested(const QString& mediaId, bool visible);
     void mediaBringForwardRequested(const QString& mediaId);

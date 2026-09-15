@@ -452,6 +452,7 @@ void CanvasMedia::setMuted(bool muted)
 {
     if (!m_audioOutput || m_audioOutput->isMuted() == muted) return;
     m_audioOutput->setMuted(muted);
+    emit audioStateChanged();
     emit runtimeStateChanged();
 }
 
@@ -462,8 +463,11 @@ qreal CanvasMedia::volume() const
 
 void CanvasMedia::setVolume(qreal volume)
 {
-    if (!m_audioOutput) return;
-    m_audioOutput->setVolume(std::clamp<qreal>(volume, 0.0, 1.0));
+    if (!m_audioOutput || !std::isfinite(volume)) return;
+    const qreal normalized = std::clamp<qreal>(volume, 0.0, 1.0);
+    if (qFuzzyCompare(qreal(m_audioOutput->volume()), normalized)) return;
+    m_audioOutput->setVolume(normalized);
+    emit audioStateChanged();
     emit runtimeStateChanged();
 }
 

@@ -46,7 +46,7 @@ class MediaSettingsViewModel final : public QObject
     Q_PROPERTY(QString audioFadeInText READ audioFadeInText WRITE setAudioFadeInText NOTIFY changed)
     Q_PROPERTY(bool audioFadeOutEnabled READ audioFadeOutEnabled WRITE setAudioFadeOutEnabled NOTIFY changed)
     Q_PROPERTY(QString audioFadeOutText READ audioFadeOutText WRITE setAudioFadeOutText NOTIFY changed)
-    Q_PROPERTY(bool volumeOverrideEnabled READ volumeOverrideEnabled WRITE setVolumeOverrideEnabled NOTIFY changed)
+    Q_PROPERTY(bool audioEnabled READ audioEnabled WRITE setAudioEnabled NOTIFY changed)
     Q_PROPERTY(QString volumeText READ volumeText WRITE setVolumeText NOTIFY changed)
 
     Q_PROPERTY(bool textColorOverrideEnabled READ textColorOverrideEnabled WRITE setTextColorOverrideEnabled NOTIFY changed)
@@ -103,7 +103,7 @@ public:
     QString audioFadeInText() const; void setAudioFadeInText(const QString& value);
     bool audioFadeOutEnabled() const; void setAudioFadeOutEnabled(bool value);
     QString audioFadeOutText() const; void setAudioFadeOutText(const QString& value);
-    bool volumeOverrideEnabled() const; void setVolumeOverrideEnabled(bool value);
+    bool audioEnabled() const; void setAudioEnabled(bool value);
     QString volumeText() const; void setVolumeText(const QString& value);
 
     bool textColorOverrideEnabled() const; void setTextColorOverrideEnabled(bool value);
