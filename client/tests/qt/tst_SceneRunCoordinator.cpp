@@ -67,6 +67,58 @@ class SceneRunCoordinatorTest final : public QObject
     Q_OBJECT
 
 private slots:
+    void openingHandshakeAcceptsOnlyTheCorrelatedLocalRole()
+    {
+        QJsonObject opening = sessionEnvelope(
+            1, QStringLiteral("Opening"),
+            QStringLiteral("remote_session_opening"));
+        opening.remove(QStringLiteral("resumeToken"));
+        opening.insert(QStringLiteral("requestId"),
+                       QStringLiteral("open_request_1"));
+
+        SceneRunCoordinator owner;
+        owner.setLocalEndpointId(kOwner);
+        QVERIFY(owner.upsertSession(opening, 1));
+        QCOMPARE(owner.sessionById(QStringLiteral("remote_session_1")).phase,
+                 QStringLiteral("Opening"));
+        QVERIFY(!owner.sessionById(QStringLiteral("remote_session_1")).active);
+        QVERIFY(owner.upsertSession(opening, 1));
+
+        QJsonObject opened = sessionEnvelope();
+        QVERIFY(owner.upsertSession(opened, 1));
+        QVERIFY(owner.sessionById(QStringLiteral("remote_session_1")).active);
+        QVERIFY(!owner.upsertSession(opening, 1));
+
+        QJsonObject offer = opening;
+        offer.insert(QStringLiteral("type"),
+                     QStringLiteral("remote_session_offer"));
+        SceneRunCoordinator target;
+        target.setLocalEndpointId(kTarget);
+        QVERIFY(target.upsertSession(offer, 1));
+        QCOMPARE(target.sessionById(QStringLiteral("remote_session_1")).phase,
+                 QStringLiteral("Opening"));
+        QVERIFY(target.upsertSession(opened, 1));
+
+        SceneRunCoordinator wrongOwnerRole;
+        wrongOwnerRole.setLocalEndpointId(kOwner);
+        QVERIFY(!wrongOwnerRole.upsertSession(offer, 1));
+        SceneRunCoordinator wrongTargetRole;
+        wrongTargetRole.setLocalEndpointId(kTarget);
+        QVERIFY(!wrongTargetRole.upsertSession(opening, 1));
+
+        QJsonObject uncorrelated = opening;
+        uncorrelated.remove(QStringLiteral("requestId"));
+        SceneRunCoordinator missingRequest;
+        missingRequest.setLocalEndpointId(kOwner);
+        QVERIFY(!missingRequest.upsertSession(uncorrelated, 1));
+
+        QJsonObject wrongGeneration = opening;
+        wrongGeneration.insert(QStringLiteral("generation"), 2);
+        SceneRunCoordinator generationTwo;
+        generationTwo.setLocalEndpointId(kOwner);
+        QVERIFY(!generationTwo.upsertSession(wrongGeneration, 1));
+    }
+
     void canonicalDigestMatchesServerImplementation()
     {
         QString error;

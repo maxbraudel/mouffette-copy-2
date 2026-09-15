@@ -50,5 +50,25 @@ if (-not (Test-Path $clientExe)) {
 }
 
 Write-Host "Starting Mouffette ($label)..." -ForegroundColor Cyan
-& $clientExe @ApplicationArguments
-exit $LASTEXITCODE
+$savedQtRoot = $env:MOUFFETTE_QT_ROOT
+$savedMsysRoot = $env:MOUFFETTE_MSYS2_ROOT
+try {
+    # Build-tool discovery variables are intentionally not part of the strict
+    # application configuration namespace.
+    Remove-Item Env:MOUFFETTE_QT_ROOT -ErrorAction SilentlyContinue
+    Remove-Item Env:MOUFFETTE_MSYS2_ROOT -ErrorAction SilentlyContinue
+    & $clientExe @ApplicationArguments
+    $applicationExitCode = $LASTEXITCODE
+} finally {
+    if ($null -eq $savedQtRoot) {
+        Remove-Item Env:MOUFFETTE_QT_ROOT -ErrorAction SilentlyContinue
+    } else {
+        $env:MOUFFETTE_QT_ROOT = $savedQtRoot
+    }
+    if ($null -eq $savedMsysRoot) {
+        Remove-Item Env:MOUFFETTE_MSYS2_ROOT -ErrorAction SilentlyContinue
+    } else {
+        $env:MOUFFETTE_MSYS2_ROOT = $savedMsysRoot
+    }
+}
+exit $applicationExitCode

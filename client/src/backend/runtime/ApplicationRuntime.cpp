@@ -144,7 +144,6 @@ QString sha256ForPath(const QString& canonicalPath) {
 #include <QSet>
 #include <QElapsedTimer>
 #include <QDateTime>
-#include <QThreadPool>
 #include <QRunnable>
 #include <QMutex>
 #include <QMutexLocker>

@@ -108,7 +108,25 @@ bool SceneRunCoordinator::upsertSession(const QJsonObject& envelope,
     }
     const SessionBinding existing = m_remoteSessions->byId(remoteSessionId);
 
-    if (type == QLatin1String("remote_session_opened")) {
+    if (type == QLatin1String("remote_session_offer")
+        || type == QLatin1String("remote_session_opening")) {
+        const bool offer = type == QLatin1String("remote_session_offer");
+        const bool localRoleMatches = offer
+            ? envelope.value(QStringLiteral("targetEndpointId")).toString()
+                == m_localEndpointId
+            : envelope.value(QStringLiteral("ownerEndpointId")).toString()
+                == m_localEndpointId;
+        const QString requestId =
+            envelope.value(QStringLiteral("requestId")).toString();
+        if (generation != 1 || phase != QLatin1String("Opening")
+            || !localRoleMatches || !isOpaqueId(requestId)
+            || !envelope.value(QStringLiteral("resumeToken")).toString().isEmpty()
+            || (!existing.remoteSessionId.isEmpty()
+                && (existing.generation != generation
+                    || existing.phase != QLatin1String("Opening")))) {
+            return false;
+        }
+    } else if (type == QLatin1String("remote_session_opened")) {
         // Open is generation one only. A byte-for-byte-equivalent replay is
         // idempotent, but it must never be used as an alias for Resume.
         if (generation != 1 || phase != QLatin1String("Active")

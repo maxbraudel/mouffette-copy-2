@@ -20,7 +20,6 @@ QtObject {
         width: 600
         height: 500
         minimumWidth: 480
-        visible: root.controller.ready
         visibility: root.controller.ready ? Window.Maximized : Window.Hidden
         title: "Mouffette"
         color: Theme.windowBackground
@@ -29,7 +28,10 @@ QtObject {
             close.accepted = false
             root.controller.hideWindow()
         }
-        onVisibilityChanged: root.controller.setWindowVisible(visible && visibility !== Window.Minimized)
+        onVisibilityChanged: function() {
+            root.controller.setWindowVisible(window.visible
+                                             && window.visibility !== Window.Minimized)
+        }
 
         HoverHandler {
             acceptedDevices: PointerDevice.Mouse
