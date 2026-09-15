@@ -2343,8 +2343,8 @@ bool RemoteCacheStore::quarantineAbandonedSessions(QString* errorCode)
             return false;
         }
         if (!isValidEndpointId(senderName)) {
-            // Unknown legacy directories are handled by the one-time v2
-            // migration.  Never traverse or interpret them as a live scope.
+            // Unknown directories are never traversed or interpreted as a
+            // live protocol-v4 scope.
             continue;
         }
 

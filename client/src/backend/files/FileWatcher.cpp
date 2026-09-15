@@ -1,4 +1,5 @@
 #include "backend/files/FileWatcher.h"
+#include "backend/config/AppConfig.h"
 #include "backend/domain/media/CanvasMedia.h"
 #include <QFileInfo>
 #include <QDir>
@@ -15,7 +16,8 @@ FileWatcher::FileWatcher(QObject* parent)
     
     // Setup delayed check timer (batch multiple file checks)
     m_delayedCheckTimer->setSingleShot(true);
-    m_delayedCheckTimer->setInterval(500); // 500ms delay to batch checks
+    m_delayedCheckTimer->setInterval(
+        AppConfig::instance().fileWatchDebounceMs());
     connect(m_delayedCheckTimer, &QTimer::timeout, this, &FileWatcher::performDelayedCheck);
 }
 

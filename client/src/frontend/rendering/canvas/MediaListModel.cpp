@@ -71,10 +71,10 @@ void MediaListModel::clearAll()
 // rowForId
 // ---------------------------------------------------------------------------
 
-int MediaListModel::rowForId(const QString& mediaId) const
+int MediaListModel::rowForKey(const QString& rowKey) const
 {
     for (int i = 0, n = m_rows.size(); i < n; ++i) {
-        if (m_rows[i].mediaId == mediaId)
+        if (m_rows[i].rowKey == rowKey)
             return i;
     }
     return -1;
@@ -84,7 +84,7 @@ int MediaListModel::rowForId(const QString& mediaId) const
 // updateFromList — structural diff algorithm
 //
 // After the sort performed by pushMediaModelOnly() the order is deterministic
-// (by mediaId).  We walk the new list in order and either:
+// (by rowKey). We walk the new list in order and either:
 //   1. In-place update a row that exists at the correct position and changed.
 //   2. Move a row that exists at the wrong position.
 //   3. Insert a brand-new row.
@@ -98,8 +98,9 @@ void MediaListModel::updateFromList(const QVariantList& newList)
     newRows.reserve(newList.size());
     for (const QVariant& v : newList) {
         QVariantMap map = v.toMap();
-        QString mediaId = map.value(QStringLiteral("mediaId")).toString();
-        newRows.append({ std::move(mediaId), std::move(map) });
+        QString rowKey = map.value(QStringLiteral("rowKey")).toString();
+        Q_ASSERT(!rowKey.isEmpty());
+        newRows.append({ std::move(rowKey), std::move(map) });
     }
 
     // ── Pass 1: remove rows whose mediaId no longer exists ────────────────
@@ -108,10 +109,10 @@ void MediaListModel::updateFromList(const QVariantList& newList)
         QSet<QString> newIds;
         newIds.reserve(newRows.size());
         for (const Row& r : std::as_const(newRows))
-            newIds.insert(r.mediaId);
+            newIds.insert(r.rowKey);
 
         for (int i = static_cast<int>(m_rows.size()) - 1; i >= 0; --i) {
-            if (!newIds.contains(m_rows[i].mediaId)) {
+            if (!newIds.contains(m_rows[i].rowKey)) {
                 beginRemoveRows(QModelIndex(), i, i);
                 m_rows.remove(i);
                 endRemoveRows();
@@ -122,7 +123,7 @@ void MediaListModel::updateFromList(const QVariantList& newList)
     // ── Pass 2: insert / move / update to match newRows order ────────────
     for (int newIdx = 0; newIdx < static_cast<int>(newRows.size()); ++newIdx) {
         const Row& nr = newRows[newIdx];
-        int curIdx = rowForId(nr.mediaId);
+        int curIdx = rowForKey(nr.rowKey);
 
         if (curIdx == -1) {
             // ── Brand-new item: insert at newIdx ─────────────────────────

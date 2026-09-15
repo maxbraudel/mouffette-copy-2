@@ -40,7 +40,7 @@ function messages(ws, type) {
 
 function envelope(session, extra = {}) {
     return {
-        protocolVersion: 3,
+        protocolVersion: 4,
         serverBootId: session.serverBootId,
         messageId: crypto.randomUUID(),
         remoteSessionId: session.remoteSessionId,
@@ -55,11 +55,27 @@ const asset = Object.freeze({
     mediaIds: ['media-1'], sha256: 'a'.repeat(64), size: 128,
 });
 const scene = Object.freeze({
-    screens: [{ id: 'screen-1' }],
-    media: [{ mediaId: 'media-1', assetId: 'asset-1', type: 'image' }],
+    renderSchemaVersion: 2,
+    screens: [{ id: 1, x: 0, y: 0, width: 1920, height: 1080, primary: true }],
+    media: [{
+        mediaId: 'media-1', assetId: 'asset-1', fileId: 'a'.repeat(64),
+        fileName: 'asset.png', type: 'image',
+        x: 0, y: 0, width: 1920, height: 1080,
+        baseWidth: 1920, baseHeight: 1080, visible: true, z: 1,
+        autoDisplay: false, autoDisplayDelayMs: 0,
+        autoHide: false, autoHideDelayMs: 0, hideWhenVideoEnds: false,
+        fadeInSeconds: 0, fadeOutSeconds: 0, contentOpacity: 1,
+        spans: [{
+            screenId: 1, normX: 0, normY: 0, normW: 1, normH: 1,
+            spanDestNormX: 0, spanDestNormY: 0,
+            spanDestNormW: 1, spanDestNormH: 1,
+            spanSourceNormX: 0, spanSourceNormY: 0,
+            spanSourceNormW: 1, spanSourceNormH: 1,
+        }],
+    }],
 });
 const checklist = Object.freeze([
-    { itemId: 'screen_screen-1', stage: 'screen_render_graph_ready', ready: true },
+    { itemId: 'screen_1', stage: 'screen_render_graph_ready', ready: true },
     { itemId: 'media-1_file', stage: 'file_validated', ready: true },
     { itemId: 'media-1_decode', stage: 'image_decoded', ready: true },
     { itemId: 'media-1_texture', stage: 'image_texture_ready', ready: true },
@@ -86,6 +102,13 @@ const checklist = Object.freeze([
     };
     assert.equal(registry.prepare(binding).ok, true);
     assert.equal(registry.prepare(binding).replay, true);
+    assert.equal(registry.prepare({
+        ...binding,
+        remoteSessionId: 'session-competing',
+        sceneRunId: 'run-competing',
+        ownerEndpointId: 'C',
+    }).error, 'target_scene_already_running',
+    'one target-wide scene lock must cover every RemoteSession');
     assert.equal(registry.markPrepared('run-1', 'A', digest).ready, false);
     assert.equal(registry.markPrepared('run-1', 'B', digest).ready, true);
     assert.equal(registry.arm('run-1', 'A', digest, 51).error,
@@ -119,6 +142,13 @@ const checklist = Object.freeze([
         'stale_snapshot_sequence');
     registry.stop('run-1', 'owner_stop');
     assert.equal(registry.acknowledgeStopped('run-1', 'A', true).completed, false);
+    assert.equal(registry.prepare({
+        ...binding,
+        remoteSessionId: 'session-competing',
+        sceneRunId: 'run-competing',
+        ownerEndpointId: 'C',
+    }).error, 'target_scene_already_running',
+    'the target lock must remain held throughout Stopping');
     assert.equal(registry.acknowledgeStopped('run-1', 'B', true).completed, true);
     assert.equal(registry.stop('run-1', 'owner_stop').replay, true);
 
@@ -597,11 +627,11 @@ for (const invalidCase of [
     assert.equal(messages(owner, 'stopped').at(-1).success, true);
 
     server.handleMessage('owner-connection', {
-        protocolVersion: 3, serverBootId: server.serverBootId,
+        protocolVersion: 4, serverBootId: server.serverBootId,
         messageId: crypto.randomUUID(),
         type: 'remote_scene_start',
     });
-    assert.equal(messages(owner, 'error').at(-1).code, 'legacy_message_type');
+    assert.equal(messages(owner, 'error').at(-1).code, 'removed_message_type');
 }
 
 // An asset from another session generation cannot be prepared.
@@ -672,4 +702,4 @@ for (const invalidCase of [
         'scene_prepare_ack_delivery_failed');
 }
 
-console.log('scene protocol v3 tests passed');
+console.log('scene protocol v4 tests passed');

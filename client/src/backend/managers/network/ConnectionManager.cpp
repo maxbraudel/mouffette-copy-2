@@ -1,5 +1,7 @@
 #include "backend/managers/network/ConnectionManager.h"
+#include "backend/config/AppConfig.h"
 #include "backend/network/WebSocketClient.h"
+#include <QRandomGenerator>
 #include "backend/domain/models/ClientInfo.h"
 #include <QDebug>
 #include <algorithm>
@@ -16,7 +18,8 @@ ConnectionManager::ConnectionManager(WebSocketClient* wsClient, QObject* parent)
     
     m_reconnectTimer->setSingleShot(true);
     m_attemptTimeoutTimer->setSingleShot(true);
-    m_attemptTimeoutTimer->setInterval(3000);
+    m_attemptTimeoutTimer->setInterval(
+        AppConfig::instance().connectionAttemptTimeoutMs());
     
     // Connect WebSocketClient signals to local slots
     connect(m_wsClient, &WebSocketClient::connected, this, &ConnectionManager::onConnected);
@@ -144,7 +147,7 @@ void ConnectionManager::onFatalError(const QString& error)
     m_attemptInProgress = false;
     qCritical() << "ConnectionManager: Fatal transport error:" << error;
     emit connectionError(error);
-    setStatus(QStringLiteral("Unavailable"));
+    setStatus(QStringLiteral("Unreachable"));
 }
 
 void ConnectionManager::onLeaseExpired(const QString& serverBootId,
@@ -191,12 +194,23 @@ void ConnectionManager::scheduleReconnect()
 int ConnectionManager::retryDelayForAttempt(int attempt, bool withinLease)
 {
     attempt = std::max(0, attempt);
+    const AppConfig& config = AppConfig::instance();
     if (withinLease) {
-        static constexpr int fastDelays[] = {0, 250, 500, 750};
-        return fastDelays[std::min(attempt, 3)];
+        const qint64 base = qMin<qint64>(
+            static_cast<qint64>(attempt) * config.reconnectFastStepMs(),
+            config.reconnectFastMaxMs());
+        return static_cast<int>(base);
     }
-    const int exponent = std::min(attempt, 5);
-    return std::min(1000 * (1 << exponent), 30000);
+    const int exponent = std::min(attempt, 20);
+    const qint64 capped = qMin<qint64>(
+        static_cast<qint64>(config.reconnectBaseMs()) << exponent,
+        config.reconnectMaxMs());
+    const qint64 spread = capped * config.reconnectJitterPercent() / 100;
+    if (spread <= 0) return static_cast<int>(capped);
+    const qint64 minimum = qMax<qint64>(1, capped - spread);
+    const quint64 width = static_cast<quint64>(capped + spread - minimum + 1);
+    return static_cast<int>(minimum
+        + static_cast<qint64>(QRandomGenerator::global()->generate64() % width));
 }
 
 void ConnectionManager::attemptReconnect()
@@ -217,9 +231,14 @@ void ConnectionManager::beginAttempt()
     m_wsClient->connectToServer(m_serverUrl);
     if (m_attemptInProgress && !m_wsClient->isConnected()) {
         const qint64 remainingLease = m_wsClient->leaseRemainingMs();
+        const AppConfig& config = AppConfig::instance();
         const int timeoutMs = remainingLease > 0
-            ? static_cast<int>(std::clamp<qint64>(remainingLease, 100, 750))
-            : 3000;
+            ? static_cast<int>(std::clamp<qint64>(
+                  remainingLease,
+                  qMin(config.leaseHealthCheckIntervalMs(),
+                       config.reconnectFastMaxMs()),
+                  config.reconnectFastMaxMs()))
+            : config.connectionAttemptTimeoutMs();
         m_attemptTimeoutTimer->start(timeoutMs);
     }
 }

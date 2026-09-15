@@ -7,7 +7,7 @@
 #include "backend/domain/project/ProjectManager.h"
 #include "backend/domain/project/ProjectStore.h"
 #include "backend/domain/session/IncomingSessionOrphanWatchdog.h"
-#include "backend/domain/session/SessionManager.h"
+#include "backend/domain/workspace/WorkspaceManager.h"
 
 namespace {
 ClientInfo client(const QString& endpointId,
@@ -42,6 +42,19 @@ ProjectTargetReference target(const QString& endpointId,
     return ProjectTargetReference::fromClientInfo(
         client(endpointId, QStringLiteral("ignored-connection"), name));
 }
+
+QString createProject(ProjectManager& manager,
+                      const ProjectTargetReference& reference,
+                      ProjectLifecycleState state,
+                      qint64 nowMs)
+{
+    const QString projectId = manager.createProjectFromSnapshot(
+        reference, {}, 50, 1, qMax<qint64>(1, nowMs), nowMs);
+    if (!projectId.isEmpty() && state == ProjectLifecycleState::Hidden) {
+        if (!manager.setHidden(reference.endpointId, nowMs)) return {};
+    }
+    return projectId;
+}
 }
 
 class ProjectManagerTest final : public QObject {
@@ -62,7 +75,7 @@ private slots:
 
         ProjectManager writer(&store);
         writer.stopAutomaticTimersForTesting();
-        QCOMPARE(writer.ensureProject(target(QStringLiteral("device-a"),
+        QCOMPARE(createProject(writer, target(QStringLiteral("device-a"),
                                              QStringLiteral("Studio A")),
                                       ProjectLifecycleState::Visible,
                                       1000).isEmpty(), false);
@@ -80,7 +93,7 @@ private slots:
             {QStringLiteral("startPositionMs"), 4210}
         };
         QJsonObject canvas {
-            {QStringLiteral("canvasSessionId"), QStringLiteral("legacy-session")},
+            {QStringLiteral("canvasSessionId"), QStringLiteral("removed-session")},
             {QStringLiteral("viewport"), QJsonObject{
                  {QStringLiteral("scale"), 1.75},
                  {QStringLiteral("panX"), 42.0},
@@ -183,7 +196,7 @@ private slots:
 
         ProjectManager writer(&store);
         writer.stopAutomaticTimersForTesting();
-        QVERIFY(!writer.ensureProject(
+        QVERIFY(!createProject(writer,
             target(QStringLiteral("device-a"), QStringLiteral("Studio A")),
             ProjectLifecycleState::Hidden, 1'000).isEmpty());
         QVERIFY(writer.flush());
@@ -207,7 +220,7 @@ private slots:
         ProjectStore store(temporary.filePath(QStringLiteral("projects.json")));
         ProjectManager manager(&store);
         manager.stopAutomaticTimersForTesting();
-        manager.ensureProject(target(QStringLiteral("device-a"),
+        createProject(manager, target(QStringLiteral("device-a"),
                                      QStringLiteral("Studio A")),
                               ProjectLifecycleState::Visible, 0);
         QVERIFY(manager.setHidden(QStringLiteral("device-a"), 100));
@@ -234,10 +247,10 @@ private slots:
         ProjectStore store(temporary.filePath(QStringLiteral("projects.json")));
         ProjectManager manager(&store);
         manager.stopAutomaticTimersForTesting();
-        manager.ensureProject(target(QStringLiteral("device-a"),
+        createProject(manager, target(QStringLiteral("device-a"),
                                      QStringLiteral("Studio A")),
                               ProjectLifecycleState::Visible, 1'000);
-        manager.ensureProject(target(QStringLiteral("device-b"),
+        createProject(manager, target(QStringLiteral("device-b"),
                                      QStringLiteral("Studio B")),
                               ProjectLifecycleState::Visible, 2'000);
 
@@ -258,13 +271,13 @@ private slots:
                  qint64(310'000));
     }
 
-    void discoveryMergeKeepsOfflineProjectsAndRefreshesByEndpointId()
+    void discoveryMergeKeepsDisconnectedProjectsAndRefreshesByEndpointId()
     {
         QTemporaryDir temporary;
         ProjectStore store(temporary.filePath(QStringLiteral("projects.json")));
         ProjectManager manager(&store);
         manager.stopAutomaticTimersForTesting();
-        manager.ensureProject(target(QStringLiteral("device-a"),
+        createProject(manager, target(QStringLiteral("device-a"),
                                      QStringLiteral("Old name")),
                               ProjectLifecycleState::Hidden, 10);
         QVERIFY(manager.updateSavedScreens(
@@ -294,7 +307,7 @@ private slots:
         QVERIFY(!entries.at(1).online);
         QVERIFY(entries.at(1).hasProject);
         QCOMPARE(entries.at(1).client.getMachineName(), QStringLiteral("New name"));
-        QCOMPARE(entries.at(1).client.getVolumePercent(), -1);
+        QCOMPARE(entries.at(1).client.getVolumePercent(), 50);
         QCOMPARE(entries.at(1).client.getScreens().first().uiZones.first().type,
                  QStringLiteral("taskbar"));
 
@@ -307,8 +320,8 @@ private slots:
         entries = manager.mergeDiscoveredClients({returnedWithoutDisplays}, 31);
         QCOMPARE(entries.size(), 1); // B was discovery-only, so it vanishes.
         QCOMPARE(entries.first().endpointId, QStringLiteral("device-a"));
-        QVERIFY(entries.first().client.getScreens().isEmpty());
-        QCOMPARE(entries.first().client.getVolumePercent(), -1);
+        QCOMPARE(entries.first().client.getScreens().size(), 1);
+        QCOMPARE(entries.first().client.getVolumePercent(), 50);
         const ProjectRecord* replaced = manager.projectForTarget(QStringLiteral("device-a"));
         QVERIFY(replaced);
         QCOMPARE(replaced->savedScreens.size(), 1);
@@ -356,7 +369,7 @@ private slots:
 
         // Recreate the offline branch to prove deletion removes the row when
         // no authenticated discovery entry remains.
-        manager.ensureProject(target(QStringLiteral("device-a"),
+        createProject(manager, target(QStringLiteral("device-a"),
                                      QStringLiteral("New name")),
                               ProjectLifecycleState::Hidden, 37);
         QVERIFY(manager.deleteProject(QStringLiteral("device-a")));
@@ -373,7 +386,7 @@ private slots:
         ProjectStore store(temporary.filePath(QStringLiteral("projects.json")));
         ProjectManager writer(&store);
         writer.stopAutomaticTimersForTesting();
-        writer.ensureProject(target(QStringLiteral("device-a"),
+        createProject(writer, target(QStringLiteral("device-a"),
                                     QStringLiteral("Studio A")),
                              ProjectLifecycleState::Visible, 0);
         writer.checkpointVisibleProjects(15'000);
@@ -393,14 +406,14 @@ private slots:
         ProjectManager manager(&store);
         manager.stopAutomaticTimersForTesting();
 
-        manager.ensureProject(target(QStringLiteral("device-299"),
+        createProject(manager, target(QStringLiteral("device-299"),
                                      QStringLiteral("Studio 299")),
                               ProjectLifecycleState::Visible, 0);
         QVERIFY(manager.setHidden(QStringLiteral("device-299"), 0));
         QVERIFY(manager.setVisible(QStringLiteral("device-299"), 299'999));
         QVERIFY(manager.hasProjectForTarget(QStringLiteral("device-299")));
 
-        manager.ensureProject(target(QStringLiteral("device-300"),
+        createProject(manager, target(QStringLiteral("device-300"),
                                      QStringLiteral("Studio 300")),
                               ProjectLifecycleState::Visible, 0);
         QVERIFY(manager.setHidden(QStringLiteral("device-300"), 0));
@@ -410,28 +423,28 @@ private slots:
 
     void remoteSessionDeadlineAt59And60SecondsIsIndependent()
     {
-        SessionManager sessions;
+        WorkspaceManager sessions;
         sessions.stopAutomaticTimersForTesting();
         sessions.setRemoteSessionHiddenTimeoutMs(60'000);
         ClientInfo targetClient = client(
             QStringLiteral("device-a"), QStringLiteral("socket-a"),
             QStringLiteral("Studio A"));
-        sessions.getOrCreateSession(QStringLiteral("device-a"), targetClient);
+        sessions.getOrCreateWorkspace(QStringLiteral("device-a"), targetClient);
         QVERIFY(sessions.setWorkspaceVisible(QStringLiteral("device-a"), 0));
         QVERIFY(sessions.setRemoteSessionState(
-            QStringLiteral("device-a"), SessionManager::RemoteSessionState::Active));
+            QStringLiteral("device-a"), WorkspaceManager::RemoteSessionState::Active));
         QVERIFY(sessions.setWorkspaceHidden(QStringLiteral("device-a"), 0));
         QVERIFY(sessions.setWorkspaceHidden(QStringLiteral("device-a"), 30'000));
         QCOMPARE(sessions.remoteSessionCloseAtMs(QStringLiteral("device-a")),
                  qint64(60'000));
 
-        QSignalSpy closeSpy(&sessions, &SessionManager::remoteSessionCloseDue);
+        QSignalSpy closeSpy(&sessions, &WorkspaceManager::remoteSessionCloseDue);
         sessions.processDeadlines(59'999);
         QCOMPARE(closeSpy.count(), 0);
         sessions.processDeadlines(60'000);
         QCOMPARE(closeSpy.count(), 1);
         QCOMPARE(sessions.remoteSessionState(QStringLiteral("device-a")),
-                 SessionManager::RemoteSessionState::Closing);
+                 WorkspaceManager::RemoteSessionState::Closing);
     }
 
     void incomingOrphanWatchdogUsesExactNonExtensibleDeadline()
@@ -503,7 +516,7 @@ private slots:
         timing.deadlinePollIntervalMs = 60'000;
         ProjectManager manager(&store, timing);
 
-        const QString projectId = manager.ensureProject(
+        const QString projectId = createProject(manager,
             target(QStringLiteral("device-a"), QStringLiteral("Studio A")),
             ProjectLifecycleState::Visible, 1'000);
         QVERIFY(!projectId.isEmpty());

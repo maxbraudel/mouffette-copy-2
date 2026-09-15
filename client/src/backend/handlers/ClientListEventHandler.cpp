@@ -28,7 +28,6 @@ void ClientListEventHandler::onClientListReceived(const QList<ClientInfo>& clien
 {
     qDebug() << "Received client list with" << clients.size() << "clients";
     
-    // Update remote scene target ID if the target machine reconnected with a new ID
     ICanvasHost* activeCanvas = m_mainWindow->getActiveCanvas();
     if (activeCanvas) {
         activeCanvas->updateRemoteSceneTargetFromClientList(clients);
@@ -39,13 +38,17 @@ void ClientListEventHandler::onClientListReceived(const QList<ClientInfo>& clien
     int previousConnectedCount = m_mainWindow->getLastConnectedClientCount();
     m_mainWindow->setLastConnectedClientCount(clients.size());
 
-    QString activeSessionIdentity = m_mainWindow->getActiveSessionIdentity();
-    if (!activeSessionIdentity.isEmpty()) {
-        ApplicationRuntime::CanvasSession* activeSession = m_mainWindow->findCanvasSession(activeSessionIdentity);
-        if (activeSession) {
-            m_mainWindow->setSelectedClient(activeSession->lastClientInfo);
-            if (activeSession->canvas && !activeSession->serverAssignedId.isEmpty()) {
-                activeSession->canvas->setRemoteSceneTarget(activeSession->serverAssignedId, activeSession->lastClientInfo.getMachineName());
+    const QString activeWorkspaceEndpointId =
+        m_mainWindow->activeWorkspaceEndpointId();
+    if (!activeWorkspaceEndpointId.isEmpty()) {
+        ApplicationRuntime::ClientWorkspace* activeWorkspace =
+            m_mainWindow->findWorkspace(activeWorkspaceEndpointId);
+        if (activeWorkspace) {
+            m_mainWindow->setSelectedClient(activeWorkspace->lastClientInfo);
+            if (activeWorkspace->canvas) {
+                activeWorkspace->canvas->setRemoteSceneTarget(
+                    activeWorkspace->targetEndpointId,
+                    activeWorkspace->lastClientInfo.getMachineName());
             }
         }
     }
@@ -65,15 +68,17 @@ void ClientListEventHandler::onClientListReceived(const QList<ClientInfo>& clien
     // machine name is presentation data and must never reconnect one physical
     // device's project to another device which happens to share that name.
     ScreenNavigationManager* navigationManager = m_mainWindow->getNavigationManager();
-    if (navigationManager && navigationManager->isOnScreenView() && !activeSessionIdentity.isEmpty()) {
-        ApplicationRuntime::CanvasSession* activeSession = m_mainWindow->findCanvasSession(activeSessionIdentity);
-        if (activeSession) {
+    if (navigationManager && navigationManager->isOnScreenView()
+        && !activeWorkspaceEndpointId.isEmpty()) {
+        ApplicationRuntime::ClientWorkspace* activeWorkspace =
+            m_mainWindow->findWorkspace(activeWorkspaceEndpointId);
+        if (activeWorkspace) {
             const ClientInfo* matchingDevice = nullptr;
             // Use the project-enriched list here. Discovery snapshots can be
             // identity-only for one refresh; the durable project supplies the
             // authenticated presentation fields without fabricating presence.
             for (const ClientInfo& candidate : displayList) {
-                if (candidate.endpointId() == activeSessionIdentity
+                if (candidate.endpointId() == activeWorkspaceEndpointId
                     && candidate.isOnline()) {
                     matchingDevice = &candidate;
                     break;
@@ -81,77 +86,20 @@ void ClientListEventHandler::onClientListReceived(const QList<ClientInfo>& clien
             }
 
             if (matchingDevice) {
-                m_mainWindow->getSessionManager()->updateSessionServerId(
-                    activeSessionIdentity, matchingDevice->getId());
-                activeSession = m_mainWindow->findCanvasSession(activeSessionIdentity);
-                if (!activeSession) {
-                    return;
+                activeWorkspace->lastClientInfo = *matchingDevice;
+                activeWorkspace->lastClientInfo.setEndpointId(activeWorkspaceEndpointId);
+                activeWorkspace->lastClientInfo.setOnline(true);
+                activeWorkspace->remoteContentClearedOnDisconnect = false;
+                m_mainWindow->setSelectedClient(activeWorkspace->lastClientInfo);
+                if (activeWorkspace->canvas) {
+                    activeWorkspace->canvas->setRemoteSceneTarget(
+                        activeWorkspaceEndpointId,
+                        activeWorkspace->lastClientInfo.getMachineName());
                 }
-                activeSession->lastClientInfo = *matchingDevice;
-                activeSession->lastClientInfo.setEndpointId(activeSessionIdentity);
-                activeSession->lastClientInfo.setOnline(true);
-                activeSession->remoteContentClearedOnDisconnect = false;
-                m_mainWindow->setSelectedClient(activeSession->lastClientInfo);
-                const bool explicitRemoteSession =
-                    activeSession->remoteSessionState
-                        == SessionManager::RemoteSessionState::Opening
-                    || activeSession->remoteSessionState
-                        == SessionManager::RemoteSessionState::Active
-                    || activeSession->remoteSessionState
-                        == SessionManager::RemoteSessionState::Grace;
-                if (activeSession->canvas && !activeSession->serverAssignedId.isEmpty()) {
-                    activeSession->canvas->setRemoteSceneTarget(
-                        activeSessionIdentity,
-                        activeSession->lastClientInfo.getMachineName());
-                    // Replace only the remote topology. The document host rebuilds
-                    // its screen backdrops without remapping media, whose
-                    // project coordinates remain absolute.
-                    if (explicitRemoteSession) {
-                        activeSession->canvas->setScreens(
-                            activeSession->lastClientInfo.getScreens());
-                        if (ProjectManager* projects =
-                                m_mainWindow->getProjectManager();
-                            projects && projects->hasProjectForTarget(
-                                activeSessionIdentity)) {
-                            projects->updateSavedScreens(
-                                activeSessionIdentity,
-                                activeSession->lastClientInfo.getScreens());
-                        }
-                    }
-                }
-                navigationManager->refreshActiveClientPreservingCanvas(activeSession->lastClientInfo);
-
-                // remote_session_opened and the refreshed topology normally
-                // arrive in that order. If the ready event carried no usable
-                // screens yet, complete the same readiness barrier here once
-                // discovery supplies them; a discovery refresh by itself is
-                // still never enough to reveal the canvas.
-                RemoteSessionCoordinator* coordinator = m_webSocketClient
-                    ? m_webSocketClient->remoteSessionCoordinator() : nullptr;
-                const RemoteSessionCoordinator::Binding binding = coordinator
-                    ? coordinator->outgoingForPeer(activeSessionIdentity)
-                    : RemoteSessionCoordinator::Binding();
-                if (binding.phase == QLatin1String("Active")
-                    && activeSession->canvas
-                    && activeSession->canvas->hasActiveScreens()
-                    && !m_mainWindow->isCanvasRevealedForCurrentClient()) {
-                    navigationManager->revealCanvas();
-                    activeSession->canvas->requestDeferredInitialRecenter(53);
-                    if (!m_mainWindow->shouldPreserveViewportOnReconnect()) {
-                        activeSession->canvas->recenterWithMargin(53);
-                    }
-                    m_mainWindow->setPreserveViewportOnReconnect(false);
-                    m_mainWindow->setCanvasRevealedForCurrentClient(true);
-                    m_mainWindow->setCanvasContentEverLoaded(true);
-                }
-                m_mainWindow->updateClientNameDisplay(activeSession->lastClientInfo);
-                const bool isActiveSelection = (activeSession->persistentClientId == activeSessionIdentity);
-                if (isActiveSelection) {
-                    QString activeRemoteClientId = m_mainWindow->getActiveRemoteClientId();
-                    if (activeRemoteClientId != activeSessionIdentity) {
-                        m_mainWindow->setActiveRemoteClientId(activeSessionIdentity);
-                    }
-                }
+                navigationManager->refreshActiveClientPreservingCanvas(
+                    activeWorkspace->lastClientInfo);
+                m_mainWindow->updateClientNameDisplay(
+                    activeWorkspace->lastClientInfo);
             } else {
                 // Discovery loss does not delete the local project/canvas and
                 // does not itself purge uploads. The RemoteSession lease owns
@@ -159,7 +107,7 @@ void ClientListEventHandler::onClientListReceived(const QList<ClientInfo>& clien
                 RemoteSessionCoordinator* coordinator = m_webSocketClient
                     ? m_webSocketClient->remoteSessionCoordinator() : nullptr;
                 const RemoteSessionCoordinator::Binding binding = coordinator
-                    ? coordinator->outgoingForPeer(activeSessionIdentity)
+                    ? coordinator->outgoingForPeer(activeWorkspaceEndpointId)
                     : RemoteSessionCoordinator::Binding();
                 const bool retainedActive = !binding.remoteSessionId.isEmpty()
                     && binding.phase == QLatin1String("Active");
@@ -172,16 +120,16 @@ void ClientListEventHandler::onClientListReceived(const QList<ClientInfo>& clien
                     // Connected/Reconnecting state and command gating.
                     return;
                 }
-                activeSession->lastClientInfo.setOnline(false);
-                activeSession->lastClientInfo.setFromMemory(true);
-                m_mainWindow->setSelectedClient(activeSession->lastClientInfo);
+                activeWorkspace->lastClientInfo.setOnline(false);
+                activeWorkspace->lastClientInfo.setFromMemory(true);
+                m_mainWindow->setSelectedClient(activeWorkspace->lastClientInfo);
                 m_mainWindow->setPreserveViewportOnReconnect(true);
                 m_mainWindow->refreshOverlayActionsState(false, /*propagateLoss*/ false);
                 if (m_mainWindow->getUploadManager()) {
                     m_mainWindow->getUploadManager()->setTargetClientId(QString());
                 }
                 RemoteClientState state = RemoteClientState::disconnected();
-                state.clientInfo = activeSession->lastClientInfo;
+                state.clientInfo = activeWorkspace->lastClientInfo;
                 state.volumeVisible = false;
                 state.volumePercent = -1;
                 m_mainWindow->setRemoteClientState(state, /*propagateLoss*/ false);

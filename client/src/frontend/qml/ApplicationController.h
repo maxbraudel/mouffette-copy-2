@@ -10,7 +10,6 @@
 #include "backend/runtime/RuntimeProfile.h"
 #include "backend/runtime/RuntimeStorageBootstrap.h"
 
-class CanvasSessionViewModel;
 class ClientWorkspaceViewModel;
 class ClientListModel;
 class HistoryListModel;
@@ -34,8 +33,7 @@ class ApplicationController final : public QObject
     Q_PROPERTY(QObject* sceneActivitiesModel READ sceneActivitiesModel CONSTANT)
     Q_PROPERTY(QObject* historyModel READ historyModel CONSTANT)
     Q_PROPERTY(QObject* toastModel READ toastModel CONSTANT)
-    Q_PROPERTY(QObject* activeWorkspace READ activeWorkspace NOTIFY activeCanvasSessionChanged)
-    Q_PROPERTY(QObject* activeCanvasSession READ activeCanvasSession NOTIFY activeCanvasSessionChanged)
+    Q_PROPERTY(QObject* activeWorkspace READ activeWorkspace NOTIFY activeWorkspaceChanged)
 
     Q_PROPERTY(bool connectionEnabled READ connectionEnabled NOTIFY presentationChanged)
     Q_PROPERTY(QString localStatusText READ localStatusText NOTIFY presentationChanged)
@@ -46,13 +44,8 @@ class ApplicationController final : public QObject
     Q_PROPERTY(QString remoteVolumeText READ remoteVolumeText NOTIFY presentationChanged)
     Q_PROPERTY(bool remoteVolumeVisible READ remoteVolumeVisible NOTIFY presentationChanged)
     Q_PROPERTY(bool remoteBusy READ remoteBusy NOTIFY presentationChanged)
-    Q_PROPERTY(bool canCloseSession READ canCloseSession NOTIFY presentationChanged)
-    Q_PROPERTY(bool closingSession READ closingSession NOTIFY presentationChanged)
     Q_PROPERTY(bool canDeleteProject READ canDeleteProject NOTIFY presentationChanged)
     Q_PROPERTY(bool hasProject READ hasProject NOTIFY presentationChanged)
-    Q_PROPERTY(bool hasRemoteSession READ hasRemoteSession NOTIFY presentationChanged)
-    Q_PROPERTY(bool canCreateProject READ canCreateProject NOTIFY presentationChanged)
-    Q_PROPERTY(bool canLaunchSession READ canLaunchSession NOTIFY presentationChanged)
 
     Q_PROPERTY(QString settingsServerUrl READ settingsServerUrl NOTIFY settingsChanged)
     Q_PROPERTY(bool settingsAutoUpload READ settingsAutoUpload NOTIFY settingsChanged)
@@ -89,8 +82,7 @@ public:
     QObject* sceneActivitiesModel() const;
     QObject* historyModel() const;
     QObject* toastModel() const;
-    QObject* activeWorkspace() const { return activeCanvasSession(); }
-    QObject* activeCanvasSession() const;
+    QObject* activeWorkspace() const;
 
     bool connectionEnabled() const;
     QString localStatusText() const;
@@ -101,13 +93,8 @@ public:
     QString remoteVolumeText() const;
     bool remoteVolumeVisible() const;
     bool remoteBusy() const;
-    bool canCloseSession() const;
-    bool closingSession() const;
     bool canDeleteProject() const;
     bool hasProject() const;
-    bool hasRemoteSession() const;
-    bool canCreateProject() const;
-    bool canLaunchSession() const;
 
     QString settingsServerUrl() const;
     bool settingsAutoUpload() const;
@@ -127,9 +114,6 @@ public:
     Q_INVOKABLE void goBack();
     Q_INVOKABLE void showHistory();
     Q_INVOKABLE void toggleConnection();
-    Q_INVOKABLE void closeSession();
-    Q_INVOKABLE void createProject();
-    Q_INVOKABLE void launchSession();
     Q_INVOKABLE void requestDeleteProject();
     Q_INVOKABLE void requestClearHistory();
     Q_INVOKABLE void acceptDialog();
@@ -137,6 +121,7 @@ public:
     Q_INVOKABLE QString saveSettings(const QString& serverUrl, bool autoUpload);
     Q_INVOKABLE void hideWindow();
     Q_INVOKABLE void setWindowVisible(bool visible);
+    Q_INVOKABLE void setPointerInside(bool inside);
 
 public slots:
     void handleApplicationStateChanged(Qt::ApplicationState state);
@@ -147,7 +132,7 @@ signals:
     void readyChanged();
     void bootstrapChanged();
     void applicationPageChanged();
-    void activeCanvasSessionChanged();
+    void activeWorkspaceChanged();
     void presentationChanged();
     void settingsChanged();
     void dialogChanged();
@@ -164,7 +149,7 @@ private:
     void setBootstrapStage(RuntimeStorageBootstrap::Stage stage);
     void setApplicationPage(ApplicationPage page);
     void refreshPresentation();
-    void refreshActiveCanvasSession();
+    void refreshActiveWorkspace();
     void clearDialog();
     void showDialog(DialogKind kind, const QString& title,
                     const QString& message, const QString& acceptText,
@@ -198,8 +183,8 @@ private:
     SceneActivityListModel* m_sceneActivitiesModel = nullptr;
     HistoryListModel* m_historyModel = nullptr;
     ToastListModel* m_toastModel = nullptr;
-    QHash<QString, ClientWorkspaceViewModel*> m_canvasSessions;
-    QPointer<ClientWorkspaceViewModel> m_activeCanvasSession;
+    QHash<QString, ClientWorkspaceViewModel*> m_workspaces;
+    QPointer<ClientWorkspaceViewModel> m_activeWorkspace;
 };
 
 #endif // APPLICATIONCONTROLLER_H

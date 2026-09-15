@@ -100,23 +100,19 @@ private:
 		// Text-specific properties
 		QString text;
 		QString fontFamily;
-		int fontSize = 12;
-		bool fontBold = false;
 		bool fontItalic = false;
 		bool fontUnderline = false;
 		bool fontUppercase = false;
-		int fontWeight = 0; // 0 falls back to bold flag
-		int fontPixelSize = 0;
+		int fontWeight = 400;
+		int fontPixelSize = 1;
 		QString textColor;
-		double textBorderWidthPercent = 0.0;
-		double textOutlineWidthPx = -1.0;
+		double textOutlineWidthPx = 0.0;
 		QString textBorderColor;
 		bool fitToTextEnabled = false;
 		bool highlightEnabled = false;
 		QString textHighlightColor;
 		int baseWidth = 0;
 		int baseHeight = 0;
-		double uniformScale = 1.0;
 		double z = 0.0;
 		bool contentVisible = true;
 		double renderOpacity = 0.0;
@@ -257,7 +253,6 @@ private:
 
 
 	private:
-	// Phase 4.3: FileManager injected (not singleton)
 	FileManager* m_fileManager = nullptr;
 	
 	WebSocketClient* m_ws = nullptr; // not owned
@@ -269,7 +264,6 @@ private:
 	QString m_pendingSceneInstanceId;
 	QString m_pendingSceneDigest;
 	QString m_pendingRemoteSessionId;
-	QString m_lastTornDownRemoteSessionId;
 	quint64 m_pendingSessionGeneration = 0;
 	quint64 m_pendingSceneRevision = 0;
 	QJsonArray m_prepareChecklist;
@@ -300,6 +294,7 @@ private:
 	bool m_teardownCompletionScheduled = false;
 	QSet<QObject*> m_pendingTeardownObjects;
 	QSet<QString> m_teardownSessionWaiters;
+	QSet<QString> m_pendingEmptySessionTeardowns;
 	QString m_teardownGraphRemoteSessionId;
 	bool m_sceneStartInProgress = false;
 	PendingSceneRequest m_deferredSceneStart;

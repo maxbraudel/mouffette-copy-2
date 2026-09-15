@@ -36,7 +36,6 @@ struct IncomingUploadSession {
     quint64 generation = 0;                 // RemoteSession generation
     quint64 sourceConnectionGeneration = 0; // authenticated sender transport
     QString uploadId;
-    QString canvasSessionId;
     QString cacheDirPath;
     QHash<QString, QFile*> openFiles;          // assetId -> QFile*
     QHash<QString, qint64> expectedSizes;      // assetId -> total bytes
@@ -52,6 +51,7 @@ struct IncomingUploadSession {
     qint64 lastProgressBytesReported = 0;
     int totalFiles = 0;
     bool suspendedForResume = false;
+    QTimer* stallTimer = nullptr;
 };
 
 // Dedicated component that encapsulates upload/unload logic previously in ApplicationRuntime.
@@ -98,9 +98,8 @@ public:
     void setTargetClientId(const QString& id);
     QString targetClientId() const { return m_targetClientId; }
     QString activeUploadTargetClientId() const;
-    void setActiveIdeaId(const QString& canvasSessionId) { m_activeIdeaId = canvasSessionId; }
-    void setActiveSessionIdentity(const QString& identity) { m_activeSessionIdentity = identity; }
-    QString activeSessionIdentity() const { return m_activeSessionIdentity; }
+    void setActiveWorkspaceEndpointId(const QString& identity) { m_activeWorkspaceEndpointId = identity; }
+    QString activeWorkspaceEndpointId() const { return m_activeWorkspaceEndpointId; }
     void forceResetForClient(const QString& clientId = QString());
     
     // Set local client ID for generating directional session IDs
@@ -199,9 +198,9 @@ signals:
     void fileUploadStarted(const QString& fileId);
     void fileUploadProgress(const QString& fileId, int percent);
     void fileUploadFinished(const QString& fileId);
-    // Complete v2 target replies. The transport layer must add its standard
+    // Complete target replies. The transport layer adds its standard
     // protocolVersion/serverBootId/messageId/connectionGeneration envelope.
-    void protocolV3UploadResponseReady(const QJsonObject& response);
+    void uploadProtocolResponseReady(const QJsonObject& response);
     void remoteSessionCacheCommitted(const QString& senderEndpointId,
                                      const QString& remoteSessionId,
                                      quint64 generation,
@@ -221,7 +220,7 @@ signals:
     void terminalIncomingCleanupRequired(const QString& reasonCode);
 
 public slots:
-    // Canonical protocol-v3 entry point. Both owner responses and target
+    // Canonical protocol entry point. Both owner responses and target
     // requests arrive here with their immutable RemoteSession correlation.
     void handleUploadProtocolMessage(const QJsonObject& message);
     // Handle network connection loss while uploading/finalizing
@@ -229,7 +228,7 @@ public slots:
 
 private:
     struct OutgoingAsset {
-        QString assetId;       // content SHA-256 used by protocol v3
+        QString assetId;       // content SHA-256 used by protocol v4
         QString sha256;
         QString path;
         QString name;
@@ -268,11 +267,8 @@ private:
         qint64 expiresAtEpochMs = 0;
     };
 
-    // The original UI exposes one selected project at a time, while protocol
-    // v2 permits two uploads to different RemoteSessions concurrently.  The
-    // first transfer keeps the historical fields below for source
-    // compatibility; every additional queued/active transfer owns this fully
-    // independent context.  All protocol routing is by uploadId + session.
+    // Every queued or active transfer owns a fully independent context. All
+    // protocol routing is correlated by uploadId and RemoteSession identity.
     struct ParallelOutgoingTransfer {
         QString targetEndpointId;
         QString remoteSessionId;
@@ -353,7 +349,8 @@ private:
     void resetToInitial();
     void cleanupOrphanedIncomingCache();
     void cleanupIncomingCacheForConnectionLoss();
-    bool discardActiveIncomingSession(bool rememberRejectedUpload);
+    bool discardIncomingUpload(const QString& uploadId,
+                               bool rememberRejectedUpload);
     bool removeResidualIncomingStaging(const QString& senderId,
                                        const QString& uploadId);
     void rejectIncomingUpload(const QString& senderId,
@@ -363,12 +360,6 @@ private:
                               const QString& remoteSessionId = QString(),
                               quint64 generation = 0);
     void clearIncomingChunkTracking(const QString& uploadId);
-    bool cleanupIncomingSession(bool deleteDiskContents,
-                                bool notifySender,
-                                const QString& senderOverride = QString(),
-                                const QString& cacheDirOverride = QString(),
-                                const QString& uploadIdOverride = QString(),
-                                const QString& ideaOverride = QString());
     void resetProgressTracking();
     void scheduleOutgoingPump();
     void pumpOutgoingUpload();
@@ -385,10 +376,10 @@ private:
     void emitEffectivePerFileProgress(const QString& fileId);
     bool canAcceptNewAction() const;
     void recordAcceptedAction();
-    void restartIncomingStallTimer();
-    void closeIncomingFiles(bool flush);
-    void suspendIncomingForResume();
-    QJsonArray incomingAssetOffsets() const;
+    void restartIncomingStallTimer(IncomingUploadSession& incoming);
+    void closeIncomingFiles(IncomingUploadSession& incoming, bool flush);
+    void suspendIncomingForResume(IncomingUploadSession& incoming);
+    QJsonArray incomingAssetOffsets(const IncomingUploadSession& incoming) const;
     void rememberIncomingUploadCompletion(
         const QString& senderEndpointId,
         const QString& remoteSessionId,
@@ -404,12 +395,12 @@ private:
         quint64 sourceConnectionGeneration);
     void pruneIncomingUploadCompletions(qint64 nowEpochMs);
     void forgetIncomingUploadCompletions(const QString& remoteSessionId);
-    void emitIncomingV3Response(const QString& type,
-                                const QString& senderEndpointId,
-                                const QString& remoteSessionId,
-                                quint64 generation,
-                                const QString& uploadId,
-                                const QJsonObject& extra = QJsonObject());
+    void emitIncomingResponse(const QString& type,
+                              const QString& senderEndpointId,
+                              const QString& remoteSessionId,
+                              quint64 generation,
+                              const QString& uploadId,
+                              const QJsonObject& extra = QJsonObject());
     int detachReceivedMappingsForScope(const RemoteCacheStore::Scope& scope);
     void rememberCommittedAssets(const QString& targetEndpointId,
                                  const QString& remoteSessionId,
@@ -433,8 +424,7 @@ private:
     QString m_targetClientId;
     // Captured at startUpload to remain stable across the whole transfer
     QString m_uploadTargetClientId;
-    QString m_activeSessionIdentity;
-    QString m_activeIdeaId;
+    QString m_activeWorkspaceEndpointId;
 
     // Sender side state
     bool m_uploadActive = false;      // true while this target has validated remote inventory
@@ -492,7 +482,6 @@ private:
         m_committedAssetsByTarget; // targetEndpointId -> assetId -> metadata
     QHash<QString, PendingAssetRemoval> m_pendingAssetRemovals; // removalId -> request
 
-    // Phase 4.3: FileManager injected (not singleton)
     FileManager* m_fileManager = nullptr;
     RemoteCacheStore* m_remoteCacheStore = nullptr;
     UploadScheduler* m_uploadScheduler = nullptr;
@@ -503,9 +492,9 @@ private:
     bool m_terminalIncomingCleanupAwaitingRenderer = false;
     int m_lastTeardownRemovedFileCount = 0;
 
-    // Incoming session (target side)
-    IncomingUploadSession m_incoming;
-    QTimer* m_incomingStallTimer = nullptr;
+    // Incoming sessions are independent per upload and may belong to different
+    // owners/RemoteSessions. This prevents one sender from blocking another.
+    QHash<QString, IncomingUploadSession*> m_incomingUploads;
     QSet<QString> m_canceledIncoming; // uploadIds canceled by sender
     QHash<QString, IncomingUploadCompletionTombstone>
         m_incomingUploadCompletionTombstones;
@@ -519,8 +508,6 @@ private:
     // authoritative; timing only filters accidental double-clicks.
     QElapsedTimer m_lastAcceptedAction;
     QElapsedTimer m_outgoingStateAge;
-    static constexpr int MIN_ACTION_INTERVAL_MS = 300;
-    static constexpr int CANCEL_GUARD_MS = 1000;
 };
 
 #endif // UPLOADMANAGER_H

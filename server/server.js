@@ -13,12 +13,11 @@ const {
 const DEFAULT_CONFIG = loadServerConfig();
 const CURSOR_DEBUG = DEFAULT_CONFIG.cursorDebug;
 const CANONICAL_UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const CANVAS_SESSION_ID_PATTERN = /^[A-Za-z0-9_-]{1,512}$/;
 const OPAQUE_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
-// Protocol v3 is a hard cut-over. These names are deliberately rejected at
-// the envelope boundary rather than translated into their v3 counterparts.
-const LEGACY_MESSAGE_TYPES = new Set([
+// Protocol v4 is a hard cut-over. Obsolete names are rejected at the envelope
+// boundary and are never translated.
+const REMOVED_MESSAGE_TYPES = new Set([
     'register', 'device_register',
     'request_screens', 'watch_screens', 'unwatch_screens', 'cursor_update',
     'canvas_created', 'canvas_deleted',
@@ -29,13 +28,13 @@ const LEGACY_MESSAGE_TYPES = new Set([
     'registration_confirmed', 'state_sync', 'screens_info',
     'watch_status', 'data_request',
 ]);
-const LEGACY_WIRE_FIELDS = Object.freeze([
+const REMOVED_WIRE_FIELDS = Object.freeze([
     'clientId', 'persistentClientId', 'persistentId', 'deviceId', 'sessionId',
     'canvasSessionId', 'targetClientId', 'targetPersistentClientId',
     'senderClientId', 'senderPersistentClientId', 'senderId', 'targetId',
 ]);
 
-function findLegacyWireField(value) {
+function findRemovedWireField(value) {
     if (!value || typeof value !== 'object') return null;
     const pending = [value];
     const visited = new Set();
@@ -44,20 +43,242 @@ function findLegacyWireField(value) {
         if (!current || typeof current !== 'object' || visited.has(current)) continue;
         visited.add(current);
         for (const [key, nested] of Object.entries(current)) {
-            if (LEGACY_WIRE_FIELDS.includes(key)) return key;
+            if (REMOVED_WIRE_FIELDS.includes(key)) return key;
             if (nested && typeof nested === 'object') pending.push(nested);
         }
     }
     return null;
 }
 
+function hasOnlyKeys(object, required, optional = []) {
+    const allowed = new Set([...required, ...optional]);
+    return required.every(key => Object.prototype.hasOwnProperty.call(object, key))
+        && Object.keys(object).every(key => allowed.has(key));
+}
+
+function isBoundedInteger(value, minimum, maximum) {
+    return Number.isSafeInteger(value) && value >= minimum && value <= maximum;
+}
+
+function normalizeUiZone(value) {
+    const keys = ['type', 'x', 'y', 'width', 'height'];
+    const types = new Set(['taskbar', 'menu_bar', 'dock']);
+    if (!isPlainObject(value) || !hasOnlyKeys(value, keys)
+        || typeof value.type !== 'string' || !types.has(value.type)
+        || !isBoundedInteger(value.x, -1_000_000, 1_000_000)
+        || !isBoundedInteger(value.y, -1_000_000, 1_000_000)
+        || !isBoundedInteger(value.width, 0, 100_000)
+        || !isBoundedInteger(value.height, 0, 100_000)) {
+        return null;
+    }
+    return { type: value.type, x: value.x, y: value.y,
+        width: value.width, height: value.height };
+}
+
+function normalizeScreen(value) {
+    const required = ['id', 'width', 'height', 'x', 'y', 'primary'];
+    if (!isPlainObject(value) || !hasOnlyKeys(value, required, ['uiZones'])
+        || !isBoundedInteger(value.id, 0, 1_000_000)
+        || !isBoundedInteger(value.width, 1, 100_000)
+        || !isBoundedInteger(value.height, 1, 100_000)
+        || !isBoundedInteger(value.x, -1_000_000, 1_000_000)
+        || !isBoundedInteger(value.y, -1_000_000, 1_000_000)
+        || typeof value.primary !== 'boolean') {
+        return null;
+    }
+    const zones = value.uiZones === undefined ? [] : value.uiZones;
+    if (!Array.isArray(zones) || zones.length > 16) return null;
+    const normalizedZones = zones.map(normalizeUiZone);
+    if (normalizedZones.some(zone => zone === null)) return null;
+    const screen = { id: value.id, width: value.width, height: value.height,
+        x: value.x, y: value.y, primary: value.primary };
+    if (normalizedZones.length > 0) screen.uiZones = normalizedZones;
+    return screen;
+}
+
+function normalizeScreens(value, maximumScreens) {
+    if (!Array.isArray(value) || value.length > maximumScreens) return null;
+    const screens = value.map(normalizeScreen);
+    if (screens.some(screen => screen === null)) return null;
+    const ids = new Set(screens.map(screen => screen.id));
+    return ids.size === screens.length ? screens : null;
+}
+
+const SCENE_COMMON_MEDIA_KEYS = Object.freeze([
+    'mediaId', 'fileId', 'fileName', 'type',
+    'x', 'y', 'width', 'height', 'baseWidth', 'baseHeight',
+    'visible', 'z', 'autoDisplay', 'autoDisplayDelayMs',
+    'autoHide', 'autoHideDelayMs', 'hideWhenVideoEnds',
+    'fadeInSeconds', 'fadeOutSeconds', 'contentOpacity', 'spans',
+]);
+const SCENE_TEXT_MEDIA_KEYS = Object.freeze([
+    'text', 'fontFamily', 'fontItalic',
+    'fontUnderline', 'fontUppercase', 'fontWeight', 'fontPixelSize',
+    'textColor', 'textOutlineWidthPx',
+    'textBorderColor', 'textFitToTextEnabled', 'textHighlightEnabled',
+    'textHighlightColor', 'horizontalAlignment',
+    'verticalAlignment',
+]);
+const SCENE_VIDEO_MEDIA_KEYS = Object.freeze([
+    'assetId', 'autoPlay', 'autoPlayDelayMs', 'autoPause',
+    'autoPauseDelayMs', 'muted', 'volume', 'continuousLoop',
+    'repeatEnabled', 'repeatCount', 'autoUnmute', 'autoUnmuteDelayMs',
+    'autoMute', 'autoMuteDelayMs', 'muteWhenVideoEnds',
+    'audioFadeInSeconds', 'audioFadeOutSeconds', 'startPositionMs',
+]);
+const SCENE_SPAN_KEYS = Object.freeze([
+    'screenId', 'normX', 'normY', 'normW', 'normH',
+    'spanDestNormX', 'spanDestNormY', 'spanDestNormW', 'spanDestNormH',
+    'spanSourceNormX', 'spanSourceNormY', 'spanSourceNormW', 'spanSourceNormH',
+]);
+
+function isFiniteInRange(value, minimum, maximum) {
+    return Number.isFinite(value) && value >= minimum && value <= maximum;
+}
+
+function isUnitRectangle(x, y, width, height) {
+    const epsilon = 0.0001;
+    return isFiniteInRange(x, -epsilon, 1 + epsilon)
+        && isFiniteInRange(y, -epsilon, 1 + epsilon)
+        && isFiniteInRange(width, Number.EPSILON, 1 + epsilon)
+        && isFiniteInRange(height, Number.EPSILON, 1 + epsilon)
+        && x + width <= 1 + epsilon
+        && y + height <= 1 + epsilon;
+}
+
+function isCanonicalSceneSpan(span, screenIds) {
+    if (!isPlainObject(span) || !hasOnlyKeys(span, SCENE_SPAN_KEYS)
+        || !isBoundedInteger(span.screenId, 0, 1_000_000)
+        || !screenIds.has(span.screenId)
+        || !isFiniteInRange(span.normX, -10_000, 10_000)
+        || !isFiniteInRange(span.normY, -10_000, 10_000)
+        || !isFiniteInRange(span.normW, Number.EPSILON, 10_000)
+        || !isFiniteInRange(span.normH, Number.EPSILON, 10_000)
+        || !isUnitRectangle(span.spanDestNormX, span.spanDestNormY,
+            span.spanDestNormW, span.spanDestNormH)
+        || !isUnitRectangle(span.spanSourceNormX, span.spanSourceNormY,
+            span.spanSourceNormW, span.spanSourceNormH)) {
+        return false;
+    }
+    return true;
+}
+
+function isCanonicalSceneMedia(item, screenIds) {
+    if (!isPlainObject(item) || !OPAQUE_ID_PATTERN.test(item.mediaId)
+        || !['image', 'video', 'text'].includes(item.type)
+        || typeof item.fileId !== 'string' || item.fileId.length > 128
+        || typeof item.fileName !== 'string' || item.fileName.length > 1024
+        || !isFiniteInRange(item.x, -100_000_000, 100_000_000)
+        || !isFiniteInRange(item.y, -100_000_000, 100_000_000)
+        || !isFiniteInRange(item.width, Number.EPSILON, 10_000_000)
+        || !isFiniteInRange(item.height, Number.EPSILON, 10_000_000)
+        || !isBoundedInteger(item.baseWidth, 0, 10_000_000)
+        || !isBoundedInteger(item.baseHeight, 0, 10_000_000)
+        || typeof item.visible !== 'boolean'
+        || !isFiniteInRange(item.z, -100_000_000, 100_000_000)
+        || typeof item.autoDisplay !== 'boolean'
+        || !isBoundedInteger(item.autoDisplayDelayMs, 0, 604_800_000)
+        || typeof item.autoHide !== 'boolean'
+        || !isBoundedInteger(item.autoHideDelayMs, 0, 604_800_000)
+        || typeof item.hideWhenVideoEnds !== 'boolean'
+        || !isFiniteInRange(item.fadeInSeconds, 0, 3600)
+        || !isFiniteInRange(item.fadeOutSeconds, 0, 3600)
+        || !isFiniteInRange(item.contentOpacity, 0, 1)
+        || !Array.isArray(item.spans) || item.spans.length < 1
+        || item.spans.length > 64) {
+        return false;
+    }
+    const spanScreenIds = new Set();
+    for (const span of item.spans) {
+        if (!isCanonicalSceneSpan(span, screenIds)
+            || spanScreenIds.has(span.screenId)) return false;
+        spanScreenIds.add(span.screenId);
+    }
+
+    if (item.type === 'image') {
+        return hasOnlyKeys(item, [...SCENE_COMMON_MEDIA_KEYS, 'assetId'])
+            && SHA256_PATTERN.test(item.fileId)
+            && OPAQUE_ID_PATTERN.test(item.assetId)
+            && item.fileName.length > 0;
+    }
+    if (item.type === 'text') {
+        const horizontalAlignments = new Set(['left', 'center', 'right']);
+        const verticalAlignments = new Set(['top', 'center', 'bottom']);
+        return hasOnlyKeys(item, [...SCENE_COMMON_MEDIA_KEYS, ...SCENE_TEXT_MEDIA_KEYS])
+            && item.fileId === '' && item.fileName === ''
+            && typeof item.text === 'string' && item.text.length <= 1_000_000
+            && typeof item.fontFamily === 'string'
+            && item.fontFamily.length > 0 && item.fontFamily.length <= 1024
+            && typeof item.fontItalic === 'boolean'
+            && typeof item.fontUnderline === 'boolean'
+            && typeof item.fontUppercase === 'boolean'
+            && isBoundedInteger(item.fontWeight, 1, 900)
+            && isBoundedInteger(item.fontPixelSize, 1, 4096)
+            && typeof item.textColor === 'string' && item.textColor.length <= 64
+            && isFiniteInRange(item.textOutlineWidthPx, 0, 100_000)
+            && typeof item.textBorderColor === 'string'
+            && item.textBorderColor.length <= 64
+            && typeof item.textFitToTextEnabled === 'boolean'
+            && typeof item.textHighlightEnabled === 'boolean'
+            && typeof item.textHighlightColor === 'string'
+            && item.textHighlightColor.length <= 64
+            && horizontalAlignments.has(item.horizontalAlignment)
+            && verticalAlignments.has(item.verticalAlignment);
+    }
+    return hasOnlyKeys(item, [...SCENE_COMMON_MEDIA_KEYS, ...SCENE_VIDEO_MEDIA_KEYS])
+        && SHA256_PATTERN.test(item.fileId)
+        && OPAQUE_ID_PATTERN.test(item.assetId)
+        && item.fileName.length > 0
+        && typeof item.autoPlay === 'boolean'
+        && isBoundedInteger(item.autoPlayDelayMs, 0, 604_800_000)
+        && typeof item.autoPause === 'boolean'
+        && isBoundedInteger(item.autoPauseDelayMs, 0, 604_800_000)
+        && typeof item.muted === 'boolean'
+        && isFiniteInRange(item.volume, 0, 1)
+        && typeof item.continuousLoop === 'boolean'
+        && typeof item.repeatEnabled === 'boolean'
+        && isBoundedInteger(item.repeatCount, 0, 1_000_000)
+        && typeof item.autoUnmute === 'boolean'
+        && isBoundedInteger(item.autoUnmuteDelayMs, 0, 604_800_000)
+        && typeof item.autoMute === 'boolean'
+        && isBoundedInteger(item.autoMuteDelayMs, 0, 604_800_000)
+        && typeof item.muteWhenVideoEnds === 'boolean'
+        && isFiniteInRange(item.audioFadeInSeconds, 0, 3600)
+        && isFiniteInRange(item.audioFadeOutSeconds, 0, 3600)
+        && isBoundedInteger(item.startPositionMs, 0, 604_800_000);
+}
+
+function isCanonicalScene(scene, maximumScreens, maximumMedia) {
+    if (!isPlainObject(scene)
+        || !hasOnlyKeys(scene, ['renderSchemaVersion', 'screens', 'media'])
+        || scene.renderSchemaVersion !== 2
+        || !Array.isArray(scene.screens) || scene.screens.length < 1
+        || scene.screens.length > maximumScreens
+        || !Array.isArray(scene.media) || scene.media.length < 1
+        || scene.media.length > maximumMedia
+        || !normalizeScreens(scene.screens, maximumScreens)) {
+        return false;
+    }
+    const screenIds = new Set(scene.screens.map(screen => screen.id));
+    const mediaIds = new Set();
+    let spanCount = 0;
+    for (const item of scene.media) {
+        if (!isCanonicalSceneMedia(item, screenIds)
+            || mediaIds.has(item.mediaId)) return false;
+        mediaIds.add(item.mediaId);
+        spanCount += item.spans.length;
+        if (spanCount > 4096) return false;
+    }
+    return true;
+}
+
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// MOUFFETTE SERVER - PROTOCOL V3 IDENTITY BOUNDARY
+// MOUFFETTE SERVER - PROTOCOL V4 IDENTITY BOUNDARY
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 //
-// Protocol v3 authenticates one installation key, derives one addressable
+// Protocol v4 authenticates one installation key, derives one addressable
 // endpoint per application instance, and keeps transport runtime identity
-// separate. Legacy wire identifiers are never accepted as aliases.
+// separate. Removed wire identifiers are never accepted as aliases.
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 class MouffetteServer {
@@ -79,8 +300,8 @@ class MouffetteServer {
         this.clients = new Map(); // transport key -> authenticated endpoint state
         this.connectionGenerationByEndpoint = new Map();
         this.wss = null;
-        this.uploads = new Map(); // uploadId -> protocol-v3 endpoint/session state
-        this.uploadTombstones = new Map(); // uploadId -> bounded terminal v3 result
+        this.uploads = new Map(); // uploadId -> protocol-v4 endpoint/session state
+        this.uploadTombstones = new Map(); // uploadId -> bounded terminal result
         this.pendingAssetRemovals = new Map(); // removalId -> immutable session-scoped removal
         this.assetRemovalTombstones = new Map(); // removalId -> bounded committed/error result
         this.connectionsByEndpoint = new Map(); // endpointId -> Set(connectionId)
@@ -88,9 +309,11 @@ class MouffetteServer {
 
         this.UPLOAD_TIMEOUT_MS = this.config.uploadIdleTimeoutMs;
         this.UPLOAD_TARGET_ACK_TIMEOUT_MS = this.config.uploadTargetAckTimeoutMs;
+        this.UPLOAD_RESULT_TOMBSTONE_TTL_MS =
+            this.config.uploadResultTombstoneTtlMs;
         this.REMOVAL_ACK_TIMEOUT_MS = this.config.removalAckTimeoutMs;
-        this.ASSET_REMOVAL_TOMBSTONE_TTL_MS = Math.max(
-            60_000, this.REMOVAL_ACK_TIMEOUT_MS * 2);
+        this.ASSET_REMOVAL_TOMBSTONE_TTL_MS =
+            this.config.assetRemovalTombstoneTtlMs;
         this.MAX_UPLOAD_FILES = 256;
         this.MAX_UPLOAD_FILE_BYTES = 16 * 1024 * 1024 * 1024;
         this.MAX_UPLOAD_TOTAL_BYTES = 64 * 1024 * 1024 * 1024;
@@ -106,7 +329,7 @@ class MouffetteServer {
         this.MAX_REMOTE_SCENE_BUFFERED_BYTES = 1024 * 1024;
         this.MAX_REMOTE_SCENE_TOMBSTONES = 4096;
         this.MAX_SCENE_PROGRESS_ITEMS = 2048;
-        this.UPLOAD_CHANNEL_TOKEN_TTL_MS = 30 * 1000;
+        this.UPLOAD_CHANNEL_TOKEN_TTL_MS = this.config.uploadChannelTokenTtlMs;
         this.uploadChannelTokens = new Map();
         this.uploadSocketsByClient = new Map();
         this.uploadChannelMessageTypes = new Set([
@@ -116,6 +339,9 @@ class MouffetteServer {
         this.leaseSweepInterval = null;
         this.remoteSessions = new RemoteSessionRegistry({
             leaseTimeoutMs: this.config.leaseTimeoutMs,
+            openTimeoutMs: this.config.remoteSessionOpenTimeoutMs,
+            openRequestTtlMs: this.config.remoteSessionOpenRequestTtlMs,
+            tombstoneTtlMs: this.config.remoteSessionTombstoneTtlMs,
             maximumTombstones: this.MAX_REMOTE_SCENE_TOMBSTONES,
             monotonicNow: this.monotonicNow,
             epochNow: this.epochNow,
@@ -123,10 +349,11 @@ class MouffetteServer {
         this.sceneRuns = new SceneRunRegistry({
             prepareTimeoutMs: this.config.scenePrepareTimeoutMs,
             activationLeadMs: this.config.sceneActivationLeadMs,
-            startedAckTimeoutMs: this.config.sceneStartedAckTimeoutMs ?? 5_000,
+            startedAckTimeoutMs: this.config.sceneStartedAckTimeoutMs,
             maximumClockUncertaintyMs: this.config.sceneMaxClockSkewMs,
-            maximumStartSkewMs: this.config.sceneMaxStartSkewMs ?? 750,
-            stopTimeoutMs: this.config.leaseTimeoutMs,
+            maximumStartSkewMs: this.config.sceneMaxStartSkewMs,
+            stopTimeoutMs: this.config.sceneStopTimeoutMs,
+            tombstoneTtlMs: this.config.sceneRunTombstoneTtlMs,
             maximumTombstones: this.MAX_REMOTE_SCENE_TOMBSTONES,
             epochNow: this.epochNow,
             monotonicNow: this.monotonicNow,
@@ -167,9 +394,10 @@ class MouffetteServer {
         
         // Sweep frequently so stalled partial state is released promptly.
         this.uploadCleanupInterval = setInterval(() => {
-            this.cleanupStalledUploadsV3();
-        }, 5000);
-        this.leaseSweepInterval = setInterval(() => this.sweepRemoteSessionLeases(), 100);
+            this.cleanupStalledUploads();
+        }, this.config.uploadSweepIntervalMs);
+        this.leaseSweepInterval = setInterval(() => this.sweepRemoteSessionLeases(),
+            this.config.sessionLeaseSweepIntervalMs);
         console.log(`🧹 Upload timeout cleanup started (timeout: ${this.UPLOAD_TIMEOUT_MS}ms)`);
         
         this.wss.on('connection', (ws, req) => {
@@ -210,7 +438,7 @@ class MouffetteServer {
                 
                 ws.on('close', () => {
                     if (!ws.mouffettePreserveSessionUploads) {
-                        this.abortUploadsForUploadSocketV3(boundClient.id, ws,
+                        this.abortUploadsForUploadSocket(boundClient.id, ws,
                             'Dedicated upload connection closed');
                     }
                     this.unregisterUploadSocket(boundClient, ws);
@@ -219,7 +447,7 @@ class MouffetteServer {
                 
                 ws.on('error', (error) => {
                     if (!ws.mouffettePreserveSessionUploads) {
-                        this.abortUploadsForUploadSocketV3(boundClient.id, ws,
+                        this.abortUploadsForUploadSocket(boundClient.id, ws,
                             'Dedicated upload connection failed');
                     }
                     this.unregisterUploadSocket(boundClient, ws);
@@ -272,7 +500,7 @@ class MouffetteServer {
                 if (!clientInfo.authenticated && ws.readyState === WebSocket.OPEN) {
                     ws.close(1008, 'Authentication timeout');
                 }
-            }, 10_000);
+            }, this.config.authChallengeTimeoutMs);
             
             ws.on('message', (data) => {
                 try {
@@ -297,7 +525,7 @@ class MouffetteServer {
                 const protectedByLease = this.handleRemoteSessionDeparture(clientInfo);
                 this.revokeUploadChannelsForClient(clientInfo, protectedByLease);
                 if (!protectedByLease) {
-                    this.abortUploadsForClientV3(finalId);
+                    this.abortUploadsForClient(finalId);
                 }
                 if (clientInfo.endpointId) {
                     this.unregisterConnectionForEndpoint(clientInfo.endpointId, finalId);
@@ -316,7 +544,7 @@ class MouffetteServer {
                 const protectedByLease = this.handleRemoteSessionDeparture(clientInfo);
                 this.revokeUploadChannelsForClient(clientInfo, protectedByLease);
                 if (!protectedByLease) {
-                    this.abortUploadsForClientV3(finalId);
+                    this.abortUploadsForClient(finalId);
                 }
                 if (clientInfo.endpointId) {
                     this.unregisterConnectionForEndpoint(clientInfo.endpointId, finalId);
@@ -507,7 +735,7 @@ class MouffetteServer {
             return;
         }
 
-        // Authenticated socket binding is authoritative in v3. Do not add the
+        // Authenticated socket binding is authoritative in v4. Do not add the
         // sender aliases used by the v1 relay protocol to the wire envelope.
         this.handleMessage(boundClient.id, message, ws);
     }
@@ -742,9 +970,9 @@ class MouffetteServer {
         const scene = message.scene;
         if (!this.isValidOpaqueId(message.sceneRunId)
             || !Number.isSafeInteger(message.revision) || message.revision < 1
-            || !manifest || !isPlainObject(scene)
-            || !Array.isArray(scene.screens) || scene.screens.length > this.MAX_REMOTE_SCENE_SCREENS
-            || !Array.isArray(scene.media) || scene.media.length > this.MAX_REMOTE_SCENE_MEDIA
+            || !manifest
+            || !isCanonicalScene(scene, this.MAX_REMOTE_SCENE_SCREENS,
+                this.MAX_REMOTE_SCENE_MEDIA)
             || !this.validateSceneMediaBindings(scene, manifest)
             || !this.serializedJsonWithinLimit(scene, this.MAX_REMOTE_SCENE_BYTES)) {
             this.countScenePreparationFailure(message);
@@ -1130,7 +1358,7 @@ class MouffetteServer {
                 });
                 this.sendToEndpoint(action.run.ownerEndpointId, payload);
                 this.sendToEndpoint(action.run.targetEndpointId, payload);
-                if (!this.failAssetRemovalsWaitingForSceneV3(
+                if (!this.failAssetRemovalsWaitingForScene(
                     action.run, 'scene_stop_timeout', now)) {
                     this.dispatchReadyAssetRemovalsForSession(action.run.remoteSessionId);
                 }
@@ -1150,22 +1378,22 @@ class MouffetteServer {
             return;
         }
         if (!this.isValidOpaqueId(message.type)) {
-            this.sendError(clientId, 'Invalid protocol v3 message type',
+            this.sendError(clientId, 'Invalid protocol v4 message type',
                 'invalid_message_type');
             return;
         }
-        if (LEGACY_MESSAGE_TYPES.has(message.type)
+        if (REMOVED_MESSAGE_TYPES.has(message.type)
             || (typeof message.type === 'string' && message.type.startsWith('remote_scene_'))) {
             this.sendError(clientId,
-                `Legacy message type is not supported by protocol v3: ${message.type}`,
-                'legacy_message_type');
+                `Obsolete message type is not supported by protocol v4: ${message.type}`,
+                'removed_message_type');
             return;
         }
-        const legacyField = findLegacyWireField(message);
-        if (legacyField) {
+        const removedField = findRemovedWireField(message);
+        if (removedField) {
             this.sendError(clientId,
-                `Legacy field is not supported by protocol v3: ${legacyField}`,
-                'legacy_protocol_field');
+                `Obsolete field is not supported by protocol v4: ${removedField}`,
+                'removed_protocol_field');
             return;
         }
         if (message.type === 'auth_response') {
@@ -1225,6 +1453,9 @@ class MouffetteServer {
             case 'endpoint_snapshot':
                 this.handleEndpointSnapshot(clientId, message);
                 break;
+            case 'endpoint_disable':
+                this.handleEndpointDisable(clientId);
+                break;
             case 'request_client_list':
                 this.sendClientList(clientId);
                 break;
@@ -1235,41 +1466,41 @@ class MouffetteServer {
                 break;
             // Upload flow: track state and relay
             case 'upload_start':
-                this.handleUploadStartV3(clientId, message, uploadTransportSocket);
+                this.handleUploadStart(clientId, message, uploadTransportSocket);
                 break;
             case 'upload_resume':
-                this.handleUploadResumeV3(clientId, message, uploadTransportSocket);
+                this.handleUploadResume(clientId, message, uploadTransportSocket);
                 break;
             case 'upload_chunk':
-                this.handleUploadChunkV3(clientId, message, uploadTransportSocket);
+                this.handleUploadChunk(clientId, message, uploadTransportSocket);
                 break;
             case 'upload_complete':
-                this.handleUploadCompleteV3(clientId, message, uploadTransportSocket);
+                this.handleUploadComplete(clientId, message, uploadTransportSocket);
                 break;
             case 'upload_abort':
-                this.handleUploadAbortV3(clientId, message);
+                this.handleUploadAbort(clientId, message);
                 break;
             // Progress/status notifications from target back to sender
             case 'upload_progress':
-                this.handleUploadProgressV3(clientId, message);
+                this.handleUploadProgress(clientId, message);
                 break;
             case 'upload_ready':
-                this.handleUploadReadyV3(clientId, message);
+                this.handleUploadReady(clientId, message);
                 break;
             case 'upload_finished':
-                this.handleUploadFinishedV3(clientId, message);
+                this.handleUploadFinished(clientId, message);
                 break;
             case 'upload_rejected':
-                this.handleUploadRejectedV3(clientId, message);
+                this.handleUploadRejected(clientId, message);
                 break;
             case 'upload_abort_ack':
-                this.handleUploadAbortAcknowledgementV3(clientId, message);
+                this.handleUploadAbortAcknowledgement(clientId, message);
                 break;
             case 'upload_remove':
-                this.handleUploadRemoveV3(clientId, message);
+                this.handleUploadRemove(clientId, message);
                 break;
             case 'upload_removed':
-                this.handleUploadRemovedV3(clientId, message);
+                this.handleUploadRemoved(clientId, message);
                 break;
             case 'scene_prepare':
                 this.handleScenePrepare(clientId, message);
@@ -1301,6 +1532,12 @@ class MouffetteServer {
             case 'remote_session_open':
                 this.handleRemoteSessionOpen(clientId, message);
                 break;
+            case 'remote_session_accept':
+                this.handleRemoteSessionAccept(clientId, message);
+                break;
+            case 'remote_session_snapshot':
+                this.handleRemoteSessionSnapshot(clientId, message);
+                break;
             case 'remote_session_resume':
                 this.handleRemoteSessionResume(clientId, message);
                 break;
@@ -1311,7 +1548,7 @@ class MouffetteServer {
                 this.handleRemoteSessionTeardownAck(clientId, message);
                 break;
             default:
-                this.sendError(clientId, 'Unknown protocol v3 message type', 'unknown_message_type');
+                this.sendError(clientId, 'Unknown protocol v4 message type', 'unknown_message_type');
         }
     }
 
@@ -1344,7 +1581,7 @@ class MouffetteServer {
         if (current !== client) return false;
         client.replaced = true;
         this.revokeUploadChannelsForClient(client, preserveSessionUploads);
-        if (!preserveSessionUploads) this.abortUploadsForClientV3(client.id);
+        if (!preserveSessionUploads) this.abortUploadsForClient(client.id);
         if (client.endpointId) {
             this.unregisterConnectionForEndpoint(client.endpointId, client.id);
         }
@@ -1390,7 +1627,8 @@ class MouffetteServer {
         // the WebSocket close handshake is still in progress.
         const challenge = client.authChallenge;
         client.authChallenge = null;
-        const verified = verifyAuthResponse(challenge, message, epochNow);
+        const verified = verifyAuthResponse(challenge, message, epochNow,
+            this.config.authChallengeTimeoutMs);
         if (!verified.ok) {
             this.sendError(clientId, verified.error, verified.error);
             if (client.ws && client.ws.readyState === WebSocket.OPEN) {
@@ -1451,6 +1689,7 @@ class MouffetteServer {
                 sceneActivationLeadMs: this.config.sceneActivationLeadMs,
                 sceneMaxClockSkewMs: this.config.sceneMaxClockSkewMs,
                 sceneStartedAckTimeoutMs: this.sceneRuns.startedAckTimeoutMs,
+                sceneStopTimeoutMs: this.config.sceneStopTimeoutMs,
                 sceneMaxStartSkewMs: this.sceneRuns.maximumStartSkewMs,
                 uploadIdleTimeoutMs: this.config.uploadIdleTimeoutMs,
                 uploadTargetAckTimeoutMs: this.config.uploadTargetAckTimeoutMs,
@@ -1522,7 +1761,8 @@ class MouffetteServer {
             return this.sendRemoteSessionError(ownerId,
                 'Stale connection generation', 'stale_connection_generation', message);
         }
-        if (!owner || !target || !target.authenticated || !target.machineName) {
+        if (!owner || !target || !target.authenticated || !target.machineName
+            || target.draining === true) {
             return this.sendRemoteSessionError(ownerId,
                 'Target client is offline', 'target_offline', message);
         }
@@ -1540,19 +1780,10 @@ class MouffetteServer {
                 message.targetEndpointId);
         }
 
-        // A previous controller may have reached its own strict lease while B
-        // is still healthy. Terminalize that incoming session synchronously;
-        // B remains unavailable until its cleanup commit removes the registry
-        // reservation, so no open can race the 100 ms background sweep.
-        const incoming = this.remoteSessions.activeIncomingFor(target.endpointId);
-        if (incoming && (incoming.phase === 'Active' || incoming.phase === 'Grace')) {
-            const lease = this.remoteSessions.validateLease(
-                incoming.remoteSessionId, commandNow);
-            if (!lease.ok && lease.terminalTransition && lease.session) {
-                this.metrics.incrementOnce('remote_session_lease_expired_total',
-                    lease.session.remoteSessionId);
-                this.beginRemoteSessionTeardown(lease.session);
-            }
+        if (!this.isValidOpaqueId(message.requestId)) {
+            return this.sendRemoteSessionError(ownerId,
+                'A request identifier is required', 'invalid_request_id', message,
+                target.endpointId);
         }
         const opened = this.remoteSessions.open({
             ownerEndpointId: owner.endpointId,
@@ -1561,19 +1792,144 @@ class MouffetteServer {
             targetRuntimeId: target.runtimeId,
             ownerConnectionGeneration: owner.connectionGeneration,
             targetConnectionGeneration: target.connectionGeneration,
+            requestId: message.requestId,
+            awaitTargetAcceptance: true,
         });
         if (!opened.ok) {
             return this.sendRemoteSessionError(
                 ownerId, opened.error, opened.error, message, target.endpointId);
         }
 
-        const payload = this.remoteSessionPayload(opened.session, 'remote_session_opened');
-        payload.requestId = this.isValidOpaqueId(message.requestId)
-            ? message.requestId : undefined;
-        payload.resumeToken = opened.session.resumeToken;
-        this.sendToEndpoint(owner.endpointId, payload);
-        this.sendToEndpoint(target.endpointId, payload);
-        this.broadcastClientList();
+        if (opened.session.phase === 'Active' && opened.replay) {
+            const payload = this.remoteSessionPayload(
+                opened.session, 'remote_session_opened');
+            payload.requestId = message.requestId;
+            payload.resumeToken = opened.session.resumeToken;
+            payload.snapshot = opened.session.initialSnapshot;
+            return this.sendToEndpoint(owner.endpointId, payload);
+        }
+
+        const offer = this.remoteSessionPayload(
+            opened.session, 'remote_session_offer');
+        offer.requestId = message.requestId;
+        if (!this.sendToEndpoint(target.endpointId, offer)) {
+            const failed = this.remoteSessions.terminate(
+                opened.session.remoteSessionId, 'open_target_unavailable');
+            if (failed.ok && !failed.replay) {
+                this.beginRemoteSessionTeardown(failed.session, message.requestId);
+            }
+            return this.sendRemoteSessionError(ownerId,
+                'Target client is offline', 'target_offline', message,
+                target.endpointId);
+        }
+        this.sendToEndpoint(owner.endpointId, {
+            ...this.remoteSessionPayload(
+                opened.session, 'remote_session_opening'),
+            requestId: message.requestId,
+        });
+    }
+
+    normalizeRemoteSessionSnapshot(snapshot) {
+        const required = ['screens', 'systemUI', 'volumePercent',
+            'revision', 'capturedAtEpochMs'];
+        if (!isPlainObject(snapshot) || !hasOnlyKeys(snapshot, required)
+            || (snapshot.volumePercent !== null
+                && !isBoundedInteger(snapshot.volumePercent, 0, 100))
+            || !Number.isSafeInteger(snapshot.revision)
+            || snapshot.revision < 1
+            || !Number.isSafeInteger(snapshot.capturedAtEpochMs)
+            || snapshot.capturedAtEpochMs < 1) {
+            return null;
+        }
+        const screens = normalizeScreens(
+            snapshot.screens, this.MAX_REMOTE_SCENE_SCREENS);
+        if (!screens || !Array.isArray(snapshot.systemUI)
+            || snapshot.systemUI.length > 64) return null;
+        const systemUI = snapshot.systemUI.map(normalizeUiZone);
+        if (systemUI.some(zone => zone === null)) return null;
+        return {
+            screens,
+            systemUI,
+            volumePercent: snapshot.volumePercent,
+            revision: snapshot.revision,
+            capturedAtEpochMs: snapshot.capturedAtEpochMs,
+        };
+    }
+
+    handleRemoteSessionAccept(targetId, message) {
+        const target = this.clients.get(targetId);
+        const session = target && this.remoteSessions.get(message.remoteSessionId);
+        const snapshot = this.normalizeRemoteSessionSnapshot(message.snapshot);
+        if (!target || !session
+            || session.targetEndpointId !== target.endpointId
+            || session.targetRuntimeId !== target.runtimeId) {
+            return this.sendRemoteSessionError(targetId,
+                'Unknown remote session offer', 'unknown_remote_session', message);
+        }
+        if (!snapshot) {
+            const failed = this.remoteSessions.terminate(
+                session.remoteSessionId, 'invalid_initial_snapshot');
+            this.sendRemoteSessionError(this.resolveClientId(session.ownerEndpointId),
+                'The remote client returned an invalid initial snapshot',
+                'invalid_initial_snapshot', {
+                    requestId: session.openRequestId,
+                    remoteSessionId: session.remoteSessionId,
+                }, session.targetEndpointId);
+            if (failed.ok && !failed.replay) this.beginRemoteSessionTeardown(failed.session);
+            return this.sendRemoteSessionError(targetId,
+                'Invalid initial snapshot', 'invalid_initial_snapshot', message);
+        }
+        const accepted = this.remoteSessions.accept({
+            remoteSessionId: session.remoteSessionId,
+            targetEndpointId: target.endpointId,
+            targetRuntimeId: target.runtimeId,
+            generation: message.generation,
+            connectionGeneration: target.connectionGeneration,
+        });
+        if (!accepted.ok) {
+            if (accepted.terminalTransition && accepted.session) {
+                this.beginRemoteSessionTeardown(accepted.session);
+            }
+            return this.sendRemoteSessionError(targetId,
+                accepted.error, accepted.error, message);
+        }
+        accepted.session.initialSnapshot = snapshot;
+        accepted.session.snapshotSequence = 1;
+        accepted.session.snapshotRevision = snapshot.revision;
+        const payload = this.remoteSessionPayload(
+            accepted.session, 'remote_session_opened');
+        payload.requestId = accepted.session.openRequestId;
+        payload.resumeToken = accepted.session.resumeToken;
+        payload.snapshotSequence = 1;
+        payload.snapshot = snapshot;
+        this.sendToEndpoint(accepted.session.ownerEndpointId, payload);
+        this.sendToEndpoint(accepted.session.targetEndpointId, payload);
+    }
+
+    handleRemoteSessionSnapshot(targetId, message) {
+        const validated = this.validateSessionMessage(targetId, message);
+        if (!validated.ok || validated.role !== 'target') {
+            return this.sendRemoteSessionError(targetId,
+                validated.ok ? 'Only the target may publish a snapshot' : validated.error,
+                validated.ok ? 'not_session_target' : validated.error, message);
+        }
+        const { session } = validated;
+        const snapshot = this.normalizeRemoteSessionSnapshot(message.snapshot);
+        if (!snapshot || !Number.isSafeInteger(message.snapshotSequence)
+            || message.snapshotSequence <= (session.snapshotSequence || 0)
+            || snapshot.revision <= (session.snapshotRevision || 0)) {
+            return this.sendRemoteSessionError(targetId,
+                'Invalid or stale remote session snapshot',
+                'invalid_remote_session_snapshot', message);
+        }
+        session.snapshotSequence = message.snapshotSequence;
+        session.snapshotRevision = snapshot.revision;
+        session.updatedAt = this.remoteSessions.now();
+        this.sendToEndpoint(session.ownerEndpointId, {
+            ...this.remoteSessionPayload(session, 'remote_session_snapshot'),
+            snapshotSequence: message.snapshotSequence,
+            snapshot,
+        });
     }
 
     handleRemoteSessionResume(clientId, message) {
@@ -2004,8 +2360,7 @@ class MouffetteServer {
     }
 
     sweepRemoteSessionLeases(now = this.remoteSessions.now()) {
-        const degradedAfterMs = Math.min(this.config.leaseTimeoutMs - 1,
-            this.config.heartbeatIntervalMs * 2);
+        const degradedAfterMs = this.config.remoteSessionDegradedAfterMs;
         for (const transition of this.remoteSessions.markDegraded(now, degradedAfterMs)) {
             const payload = this.remoteSessionPayload(
                 transition.session, 'remote_session_lease_state');
@@ -2020,6 +2375,15 @@ class MouffetteServer {
             if (session.teardownReason === 'lease_expired') {
                 this.metrics.incrementOnce('remote_session_lease_expired_total',
                     session.remoteSessionId);
+            }
+            if (session.teardownReason === 'open_timeout') {
+                this.sendRemoteSessionError(
+                    this.resolveClientId(session.ownerEndpointId),
+                    'The remote client did not accept the session in time',
+                    'remote_session_open_timeout', {
+                        requestId: session.openRequestId,
+                        remoteSessionId: session.remoteSessionId,
+                    }, session.targetEndpointId);
             }
             this.beginRemoteSessionTeardown(session);
         }
@@ -2173,6 +2537,11 @@ class MouffetteServer {
     handleEndpointSnapshot(clientId, message) {
         const client = this.clients.get(clientId);
         if (!client || !client.authenticated || !client.endpointId || !client.runtimeId) return;
+        if (client.draining === true) {
+            this.sendError(clientId, 'This endpoint is shutting down',
+                'endpoint_draining');
+            return;
+        }
 
         // endpoint_snapshot is an authoritative replacement, never a partial
         // patch. Validate the complete snapshot before mutating advertised state.
@@ -2193,11 +2562,8 @@ class MouffetteServer {
                 || (client.instanceId !== 'primary' && message.instanceOrdinal < 2)) {
                 return 'instanceOrdinal is inconsistent with the authenticated instance';
             }
-            if (!Array.isArray(message.screens)
-                || message.screens.length > this.MAX_REMOTE_SCENE_SCREENS
-                || message.screens.some(screen => !isPlainObject(screen))) {
-                return `screens must be an array of at most ${this.MAX_REMOTE_SCENE_SCREENS} objects`;
-            }
+            if (!normalizeScreens(message.screens, this.MAX_REMOTE_SCENE_SCREENS))
+                return `screens must contain at most ${this.MAX_REMOTE_SCENE_SCREENS} valid, uniquely identified screens`;
             if (message.volumePercent !== null
                 && (typeof message.volumePercent !== 'number'
                     || !Number.isFinite(message.volumePercent)
@@ -2205,10 +2571,9 @@ class MouffetteServer {
                     || message.volumePercent > 100)) {
                 return 'volumePercent must be a finite number from 0 to 100 or null';
             }
-            if (Object.prototype.hasOwnProperty.call(message, 'systemUI')
-                && !Array.isArray(message.systemUI)) {
-                return 'systemUI must be an array when present';
-            }
+            if (!Array.isArray(message.systemUI) || message.systemUI.length > 64
+                || message.systemUI.map(normalizeUiZone).some(zone => zone === null))
+                return 'systemUI must contain at most 64 valid zones';
             return null;
         })();
         if (invalidSnapshot) {
@@ -2230,8 +2595,8 @@ class MouffetteServer {
         client.machineName = message.machineName;
         client.platform = message.platform;
         client.instanceOrdinal = message.instanceOrdinal;
-        client.screens = message.screens;
-        client.systemUI = Array.isArray(message.systemUI) ? message.systemUI : [];
+        client.screens = normalizeScreens(message.screens, this.MAX_REMOTE_SCENE_SCREENS);
+        client.systemUI = message.systemUI.map(normalizeUiZone);
         client.volumePercent = message.volumePercent;
 
         this.logProtocolEvent('endpoint_snapshot_applied', {
@@ -2272,45 +2637,38 @@ class MouffetteServer {
         this.replayTerminalStateForClient(client);
     }
 
+    handleEndpointDisable(clientId) {
+        const client = this.clients.get(clientId);
+        if (!client || !client.authenticated || !client.endpointId) return;
+        if (!client.draining) {
+            client.draining = true;
+            for (const session of this.remoteSessions.sessionsForEndpoint(
+                client.endpointId)) {
+                const result = this.remoteSessions.terminate(
+                    session.remoteSessionId, 'client_disabled');
+                if (result.ok && !result.replay) {
+                    this.beginRemoteSessionTeardown(result.session);
+                }
+            }
+            this.broadcastClientList();
+        }
+        client.ws.send(JSON.stringify({ type: 'endpoint_disable_started' }));
+    }
+
     sendClientList(clientId) {
         const client = this.clients.get(clientId);
         if (!client) return;
 
         const clientList = Array.from(this.clients.values())
-            .filter(c => c.id !== clientId && c.machineName && c.endpointId) // Don't include self and only registered clients with stable identity
-            .map(c => {
-                const incoming = this.remoteSessions.activeIncomingFor(c.endpointId);
-                let remoteSessionState = 'Available';
-                if (incoming) {
-                    if (incoming.ownerEndpointId === client.endpointId) {
-                        if (incoming.phase === 'Terminating'
-                            || incoming.phase === 'CleanupPending') {
-                            remoteSessionState = 'Disconnecting';
-                        } else {
-                            remoteSessionState = incoming.phase === 'Grace'
-                                ? 'Reconnecting' : 'Connected';
-                        }
-                    } else {
-                        remoteSessionState = incoming.phase === 'CleanupPending'
-                            || incoming.phase === 'Terminating' ? 'Unavailable' : 'In use';
-                    }
-                }
-                return {
-                    installationId: c.installationId,
-                    endpointId: c.endpointId,
-                    instanceId: c.instanceId,
-                    instanceOrdinal: c.instanceOrdinal,
-                    runtimeId: c.runtimeId,
-                    machineName: c.machineName,
-                    screens: c.screens,
-                    platform: c.platform,
-                    systemUI: c.systemUI || [],
-                    volumePercent: c.volumePercent,
-                    status: c.status,
-                    lastSeenAt: c.lastHeartbeatAt || null,
-                    remoteSessionState,
-                };
-            });
+            .filter(c => c.id !== clientId && c.machineName && c.endpointId
+                && c.draining !== true)
+            .map(c => ({
+                endpointId: c.endpointId,
+                machineName: c.machineName,
+                platform: c.platform,
+                status: 'Available',
+                lastSeenAt: c.lastHeartbeatAt || null,
+            }));
 
         client.ws.send(JSON.stringify({
             type: 'client_list',
@@ -2330,10 +2688,10 @@ class MouffetteServer {
         }
     }
 
-    // Protocol v3 upload state. A transfer is immutable and belongs to one
+    // Protocol v4 upload state. A transfer is immutable and belongs to one
     // RemoteSession generation; authenticated socket identity supplies both
     // parties, so client-provided sender/target aliases are never consulted.
-    uploadPayloadV3(upload, type, extra = {}) {
+    uploadPayload(upload, type, extra = {}) {
         return {
             type,
             protocolVersion: this.protocolVersion,
@@ -2349,7 +2707,7 @@ class MouffetteServer {
         };
     }
 
-    uploadOffsetsV3(upload) {
+    uploadOffsets(upload) {
         return Array.from(upload.assetStates.values()).map(asset => ({
             assetId: asset.assetId,
             offset: asset.durableOffset,
@@ -2358,7 +2716,7 @@ class MouffetteServer {
         })).sort((left, right) => left.assetId.localeCompare(right.assetId));
     }
 
-    uploadCompletionInventoryV3(upload) {
+    uploadCompletionInventory(upload) {
         return Array.from(upload.assetStates.values()).map(asset => ({
             assetId: asset.assetId,
             offset: asset.nextOffset,
@@ -2367,7 +2725,7 @@ class MouffetteServer {
         })).sort((left, right) => left.assetId.localeCompare(right.assetId));
     }
 
-    validateUploadInventoryV3(upload, entries, validateOffset) {
+    validateUploadInventory(upload, entries, validateOffset) {
         if (!upload || !Array.isArray(entries)
             || entries.length !== upload.assetStates.size) return false;
         const seen = new Set();
@@ -2383,7 +2741,7 @@ class MouffetteServer {
         return seen.size === upload.assetStates.size;
     }
 
-    sendUploadRejectedV3(clientId, uploadId, code, detail = '', upload = null) {
+    sendUploadRejected(clientId, uploadId, code, detail = '', upload = null) {
         const client = this.clients.get(clientId);
         if (!client) return;
         const payload = {
@@ -2404,7 +2762,7 @@ class MouffetteServer {
         this.sendToEndpoint(client.endpointId, payload);
     }
 
-    normalizeUploadFilesV3(files) {
+    normalizeUploadFiles(files) {
         if (!Array.isArray(files) || files.length < 1 || files.length > this.MAX_UPLOAD_FILES) {
             return { ok: false, error: 'invalid_upload_file_count' };
         }
@@ -2458,7 +2816,7 @@ class MouffetteServer {
         return { ok: true, assets, totalSize };
     }
 
-    validateUploadPartyV3(clientId, message, role, allowGrace = false) {
+    validateUploadParty(clientId, message, role, allowGrace = false) {
         const validated = this.validateSessionMessage(clientId, message, {
             ownerOnly: role === 'owner',
             allowGrace,
@@ -2468,14 +2826,14 @@ class MouffetteServer {
         return validated;
     }
 
-    removeUploadV3(upload) {
+    removeUpload(upload) {
         if (!upload) return;
         this.uploads.delete(upload.uploadId);
         const session = this.remoteSessions.get(upload.remoteSessionId);
         if (session) session.activeUploadIds.delete(upload.uploadId);
     }
 
-    rememberUploadResultV3(upload, status, extra = {}, now = Date.now()) {
+    rememberUploadResult(upload, status, extra = {}, now = Date.now()) {
         this.uploadTombstones.delete(upload.uploadId);
         this.uploadTombstones.set(upload.uploadId, {
             uploadId: upload.uploadId,
@@ -2487,13 +2845,13 @@ class MouffetteServer {
             ownerConnectionGeneration: upload.ownerConnectionGeneration,
             manifestDigest: upload.manifestDigest,
             status,
-            expiresAt: now + 60_000,
+            expiresAt: now + this.UPLOAD_RESULT_TOMBSTONE_TTL_MS,
             ...extra,
         });
-        this.pruneUploadTombstonesV3(now);
+        this.pruneUploadTombstones(now);
     }
 
-    pruneUploadTombstonesV3(now = Date.now()) {
+    pruneUploadTombstones(now = Date.now()) {
         for (const [uploadId, result] of this.uploadTombstones) {
             if (!result || result.expiresAt <= now) this.uploadTombstones.delete(uploadId);
         }
@@ -2502,7 +2860,7 @@ class MouffetteServer {
         }
     }
 
-    assetRemovalPayloadV3(removal, type = 'upload_removed', extra = {}) {
+    assetRemovalPayload(removal, type = 'upload_removed', extra = {}) {
         return {
             type,
             protocolVersion: this.protocolVersion,
@@ -2525,7 +2883,7 @@ class MouffetteServer {
         };
     }
 
-    sendAssetRemovalProtocolErrorV3(clientId, message, code, detail = code) {
+    sendAssetRemovalProtocolError(clientId, message, code, detail = code) {
         const client = this.clients.get(clientId);
         if (!client) return false;
         const payload = {
@@ -2558,7 +2916,7 @@ class MouffetteServer {
         return this.sendToEndpoint(client.endpointId, payload);
     }
 
-    assetRemovalMatchesMessageV3(removal, message, includeDerived = false) {
+    assetRemovalMatchesMessage(removal, message, includeDerived = false) {
         if (!removal || !message
             || message.remoteSessionId !== removal.remoteSessionId
             || message.generation !== removal.generation
@@ -2573,17 +2931,17 @@ class MouffetteServer {
                 && message.extension === removal.extension);
     }
 
-    sceneRunUsesAssetV3(run, assetId) {
+    sceneRunUsesAsset(run, assetId) {
         return !!run && Array.isArray(run.manifest)
             && run.manifest.some(entry => entry && entry.assetId === assetId);
     }
 
-    dispatchAssetRemovalV3(removal, forceReplay = false) {
+    dispatchAssetRemoval(removal, forceReplay = false) {
         if (!removal || !this.pendingAssetRemovals.has(removal.removalId)) return false;
         const session = this.remoteSessions.get(removal.remoteSessionId);
         if (!session || !['Active', 'Grace'].includes(session.phase)) return false;
         const run = this.sceneRuns.getForSession(removal.remoteSessionId);
-        if (this.sceneRunUsesAssetV3(run, removal.assetId)) {
+        if (this.sceneRunUsesAsset(run, removal.assetId)) {
             removal.waitingForSceneRunId = run.sceneRunId;
             this.initiateSceneStop(run, 'asset_removed', false);
             return false;
@@ -2594,7 +2952,7 @@ class MouffetteServer {
         const target = targetId ? this.clients.get(targetId) : null;
         if (target) removal.targetConnectionGeneration = target.connectionGeneration;
         const delivered = this.sendToEndpoint(removal.targetEndpointId,
-            this.assetRemovalPayloadV3(removal, 'upload_remove', {
+            this.assetRemovalPayload(removal, 'upload_remove', {
                 replay: forceReplay || removal.dispatchAttempts > 0,
                 reason: removal.reason,
             }));
@@ -2609,29 +2967,29 @@ class MouffetteServer {
     dispatchReadyAssetRemovalsForSession(remoteSessionId) {
         for (const removal of this.pendingAssetRemovals.values()) {
             if (removal.remoteSessionId !== remoteSessionId) continue;
-            this.dispatchAssetRemovalV3(removal);
+            this.dispatchAssetRemoval(removal);
         }
     }
 
-    failAssetRemovalsWaitingForSceneV3(run, code, now = Date.now()) {
+    failAssetRemovalsWaitingForScene(run, code, now = Date.now()) {
         if (!run) return false;
         let failed = false;
         for (const removal of Array.from(this.pendingAssetRemovals.values())) {
             if (removal.remoteSessionId !== run.remoteSessionId
                 || removal.waitingForSceneRunId !== run.sceneRunId) continue;
             failed = true;
-            this.settleAssetRemovalV3(removal, {
+            this.settleAssetRemoval(removal, {
                 success: false,
                 result: 'cleanup_error',
                 code,
                 reason: 'The scene render graph did not stop before asset cleanup',
             }, now);
-            this.terminateSessionAfterAssetRemovalFailureV3(removal, code, now);
+            this.terminateSessionAfterAssetRemovalFailure(removal, code, now);
         }
         return failed;
     }
 
-    rememberAssetRemovalResultV3(removal, result, now = Date.now()) {
+    rememberAssetRemovalResult(removal, result, now = Date.now()) {
         const terminal = {
             ...removal,
             phase: 'terminal',
@@ -2648,11 +3006,11 @@ class MouffetteServer {
         };
         this.assetRemovalTombstones.delete(removal.removalId);
         this.assetRemovalTombstones.set(removal.removalId, terminal);
-        this.pruneAssetRemovalTombstonesV3(now);
+        this.pruneAssetRemovalTombstones(now);
         return terminal;
     }
 
-    pruneAssetRemovalTombstonesV3(now = Date.now()) {
+    pruneAssetRemovalTombstones(now = Date.now()) {
         for (const [removalId, result] of this.assetRemovalTombstones) {
             if (!result || result.expiresAt <= now) {
                 this.assetRemovalTombstones.delete(removalId);
@@ -2664,7 +3022,7 @@ class MouffetteServer {
         }
     }
 
-    invalidateUploadReplayAfterAssetRemovalV3(removal, now = Date.now()) {
+    invalidateUploadReplayAfterAssetRemoval(removal, now = Date.now()) {
         const previous = this.uploadTombstones.get(removal.uploadId);
         const invalidated = {
             uploadId: removal.uploadId,
@@ -2675,14 +3033,15 @@ class MouffetteServer {
             manifestDigest: previous && previous.manifestDigest,
             status: 'asset_removed',
             removedAssetId: removal.assetId,
-            expiresAt: Math.max(previous && previous.expiresAt || 0, now + 60_000),
+            expiresAt: Math.max(previous && previous.expiresAt || 0,
+                now + this.UPLOAD_RESULT_TOMBSTONE_TTL_MS),
         };
         this.uploadTombstones.delete(removal.uploadId);
         this.uploadTombstones.set(removal.uploadId, invalidated);
-        this.pruneUploadTombstonesV3(now);
+        this.pruneUploadTombstones(now);
     }
 
-    settleAssetRemovalV3(removal, result, now = Date.now()) {
+    settleAssetRemoval(removal, result, now = Date.now()) {
         if (!removal || !this.pendingAssetRemovals.has(removal.removalId)) return null;
         let finalResult = { ...result };
         if (finalResult.success === true) {
@@ -2707,13 +3066,13 @@ class MouffetteServer {
             } else {
                 inventory.delete(removal.assetId);
                 if (inventory.size === 0) this.sessionAssets.delete(removal.remoteSessionId);
-                this.invalidateUploadReplayAfterAssetRemovalV3(removal, now);
+                this.invalidateUploadReplayAfterAssetRemoval(removal, now);
             }
         }
         this.pendingAssetRemovals.delete(removal.removalId);
-        const terminal = this.rememberAssetRemovalResultV3(removal, finalResult, now);
+        const terminal = this.rememberAssetRemovalResult(removal, finalResult, now);
         this.sendToEndpoint(removal.ownerEndpointId,
-            this.assetRemovalPayloadV3(terminal, 'upload_removed', {
+            this.assetRemovalPayload(terminal, 'upload_removed', {
                 success: terminal.success,
                 result: terminal.result,
                 code: terminal.code,
@@ -2729,7 +3088,7 @@ class MouffetteServer {
         if (!session) return;
         for (const removal of Array.from(this.pendingAssetRemovals.values())) {
             if (removal.remoteSessionId !== session.remoteSessionId) continue;
-            this.settleAssetRemovalV3(removal, {
+            this.settleAssetRemoval(removal, {
                 success: false,
                 result: 'rejected',
                 code: 'remote_session_terminating',
@@ -2738,7 +3097,7 @@ class MouffetteServer {
         }
     }
 
-    terminateSessionAfterAssetRemovalFailureV3(removal, reason, now = Date.now()) {
+    terminateSessionAfterAssetRemovalFailure(removal, reason, now = Date.now()) {
         const session = removal && this.remoteSessions.get(removal.remoteSessionId);
         if (!session || !['Active', 'Grace'].includes(session.phase)) return false;
         const terminated = this.remoteSessions.terminate(
@@ -2748,26 +3107,26 @@ class MouffetteServer {
         return true;
     }
 
-    sweepAssetRemovalsV3(now = Date.now()) {
-        this.pruneAssetRemovalTombstonesV3(now);
+    sweepAssetRemovals(now = Date.now()) {
+        this.pruneAssetRemovalTombstones(now);
         for (const removal of Array.from(this.pendingAssetRemovals.values())) {
             if (now < removal.deadlineAt) continue;
-            this.settleAssetRemovalV3(removal, {
+            this.settleAssetRemoval(removal, {
                 success: false,
                 result: 'timeout',
                 code: 'asset_removal_ack_timeout',
                 reason: 'Remote asset removal was not committed before its fixed deadline',
             }, now);
-            this.terminateSessionAfterAssetRemovalFailureV3(
+            this.terminateSessionAfterAssetRemovalFailure(
                 removal, 'asset_removal_timeout', now);
         }
     }
 
-    handleUploadRemoveV3(senderId, message) {
-        this.sweepAssetRemovalsV3();
-        const validated = this.validateUploadPartyV3(senderId, message, 'owner');
+    handleUploadRemove(senderId, message) {
+        this.sweepAssetRemovals();
+        const validated = this.validateUploadParty(senderId, message, 'owner');
         if (!validated.ok) {
-            return this.sendAssetRemovalProtocolErrorV3(
+            return this.sendAssetRemovalProtocolError(
                 senderId, message, validated.error, validated.error);
         }
         const { client: owner, session } = validated;
@@ -2777,19 +3136,19 @@ class MouffetteServer {
             || !Number.isSafeInteger(message.size) || message.size < 1
             || !Number.isSafeInteger(message.offset) || message.offset !== message.size
             || !SHA256_PATTERN.test(message.sha256 || '')) {
-            return this.sendAssetRemovalProtocolErrorV3(senderId, message,
+            return this.sendAssetRemovalProtocolError(senderId, message,
                 'invalid_asset_removal', 'Invalid remote asset removal fields');
         }
-        this.pruneAssetRemovalTombstonesV3();
+        this.pruneAssetRemovalTombstones();
         const tombstone = this.assetRemovalTombstones.get(message.removalId);
         if (tombstone) {
             if (tombstone.ownerEndpointId !== owner.endpointId
-                || !this.assetRemovalMatchesMessageV3(tombstone, message)) {
-                return this.sendAssetRemovalProtocolErrorV3(senderId, message,
+                || !this.assetRemovalMatchesMessage(tombstone, message)) {
+                return this.sendAssetRemovalProtocolError(senderId, message,
                     'removal_id_reused', 'A terminal removal identifier cannot be reused');
             }
             return this.sendToEndpoint(owner.endpointId,
-                this.assetRemovalPayloadV3(tombstone, 'upload_removed', {
+                this.assetRemovalPayload(tombstone, 'upload_removed', {
                     success: tombstone.success,
                     result: tombstone.result,
                     code: tombstone.code,
@@ -2803,15 +3162,15 @@ class MouffetteServer {
         const pending = this.pendingAssetRemovals.get(message.removalId);
         if (pending) {
             if (pending.ownerEndpointId !== owner.endpointId
-                || !this.assetRemovalMatchesMessageV3(pending, message)) {
-                return this.sendAssetRemovalProtocolErrorV3(senderId, message,
+                || !this.assetRemovalMatchesMessage(pending, message)) {
+                return this.sendAssetRemovalProtocolError(senderId, message,
                     'removal_id_reused', 'A pending removal identifier cannot be reused');
             }
-            this.dispatchAssetRemovalV3(pending, true);
+            this.dispatchAssetRemoval(pending, true);
             return;
         }
         if (this.pendingAssetRemovals.size >= this.MAX_PENDING_REMOVALS) {
-            return this.sendAssetRemovalProtocolErrorV3(senderId, message,
+            return this.sendAssetRemovalProtocolError(senderId, message,
                 'too_many_pending_removals', 'Too many asset removals are pending');
         }
         const inventory = this.sessionAssets.get(session.remoteSessionId);
@@ -2824,27 +3183,27 @@ class MouffetteServer {
             || stored.size !== message.size
             || stored.sha256 !== message.sha256
             || stored.fileId !== message.sha256) {
-            return this.sendAssetRemovalProtocolErrorV3(senderId, message,
+            return this.sendAssetRemovalProtocolError(senderId, message,
                 'asset_inventory_mismatch',
                 'The asset does not exactly match this session inventory');
         }
         for (const other of this.pendingAssetRemovals.values()) {
             if (other.remoteSessionId === session.remoteSessionId
                 && other.assetId === message.assetId) {
-                return this.sendAssetRemovalProtocolErrorV3(senderId, message,
+                return this.sendAssetRemovalProtocolError(senderId, message,
                     'asset_removal_pending', 'This asset already has a pending removal');
             }
         }
         for (const upload of Array.from(this.uploads.values())) {
             if (upload.remoteSessionId === session.remoteSessionId
                 && upload.assetStates && upload.assetStates.has(message.assetId)) {
-                this.rejectTrackedUploadV3(upload, 'source_asset_removed',
+                this.rejectTrackedUpload(upload, 'source_asset_removed',
                     'The source asset was removed while its upload was active');
             }
         }
         const now = Date.now();
         const removal = {
-            protocolVersion: 3,
+            protocolVersion: this.protocolVersion,
             removalId: message.removalId,
             remoteSessionId: session.remoteSessionId,
             generation: session.generation,
@@ -2869,14 +3228,14 @@ class MouffetteServer {
             deadlineAt: now + this.REMOVAL_ACK_TIMEOUT_MS,
         };
         this.pendingAssetRemovals.set(removal.removalId, removal);
-        this.dispatchAssetRemovalV3(removal);
+        this.dispatchAssetRemoval(removal);
     }
 
-    handleUploadRemovedV3(targetId, message) {
-        this.sweepAssetRemovalsV3();
-        const validated = this.validateUploadPartyV3(targetId, message, 'target', true);
+    handleUploadRemoved(targetId, message) {
+        this.sweepAssetRemovals();
+        const validated = this.validateUploadParty(targetId, message, 'target', true);
         if (!validated.ok) {
-            return this.sendAssetRemovalProtocolErrorV3(
+            return this.sendAssetRemovalProtocolError(
                 targetId, message, validated.error, validated.error);
         }
         const removal = this.pendingAssetRemovals.get(message.removalId);
@@ -2884,10 +3243,10 @@ class MouffetteServer {
             const tombstone = this.assetRemovalTombstones.get(message.removalId);
             if (tombstone
                 && tombstone.targetEndpointId === validated.client.endpointId
-                && this.assetRemovalMatchesMessageV3(tombstone, message, true)) {
+                && this.assetRemovalMatchesMessage(tombstone, message, true)) {
                 if (tombstone.success) {
                     this.sendToEndpoint(tombstone.ownerEndpointId,
-                        this.assetRemovalPayloadV3(tombstone, 'upload_removed', {
+                        this.assetRemovalPayload(tombstone, 'upload_removed', {
                             success: true,
                             result: 'committed',
                             cacheQuarantined: true,
@@ -2898,17 +3257,17 @@ class MouffetteServer {
                 }
                 return;
             }
-            return this.sendAssetRemovalProtocolErrorV3(targetId, message,
+            return this.sendAssetRemovalProtocolError(targetId, message,
                 'unknown_asset_removal', 'Unknown remote asset removal');
         }
         if (removal.targetEndpointId !== validated.client.endpointId
-            || !this.assetRemovalMatchesMessageV3(removal, message, true)) {
-            return this.sendAssetRemovalProtocolErrorV3(targetId, message,
+            || !this.assetRemovalMatchesMessage(removal, message, true)) {
+            return this.sendAssetRemovalProtocolError(targetId, message,
                 'asset_removal_ack_mismatch',
                 'Remote asset removal acknowledgement does not match the request');
         }
         if (removal.phase !== 'awaiting_target_commit') {
-            return this.sendAssetRemovalProtocolErrorV3(targetId, message,
+            return this.sendAssetRemovalProtocolError(targetId, message,
                 'asset_removal_not_dispatched',
                 'Remote asset removal is not awaiting a target commit');
         }
@@ -2916,7 +3275,7 @@ class MouffetteServer {
             && message.cacheQuarantined === true
             && message.success !== false;
         if (!committed) {
-            const terminal = this.settleAssetRemovalV3(removal, {
+            const terminal = this.settleAssetRemoval(removal, {
                 success: false,
                 result: 'cleanup_error',
                 code: typeof message.errorCode === 'string'
@@ -2925,7 +3284,7 @@ class MouffetteServer {
                     ? message.reason.slice(0, 512)
                     : 'The target did not commit the remote asset removal',
             });
-            this.terminateSessionAfterAssetRemovalFailureV3(
+            this.terminateSessionAfterAssetRemovalFailure(
                 removal, 'asset_removal_cleanup_error');
             return terminal;
         }
@@ -2933,7 +3292,7 @@ class MouffetteServer {
             ? Math.max(0, message.removedFileCount) : 1;
         const quarantinedBytes = Number.isSafeInteger(message.quarantinedBytes)
             ? Math.max(0, message.quarantinedBytes) : removal.size;
-        const terminal = this.settleAssetRemovalV3(removal, {
+        const terminal = this.settleAssetRemoval(removal, {
             success: true,
             result: 'committed',
             cacheQuarantined: true,
@@ -2941,43 +3300,43 @@ class MouffetteServer {
             quarantinedBytes,
         });
         if (terminal && !terminal.success) {
-            this.terminateSessionAfterAssetRemovalFailureV3(
+            this.terminateSessionAfterAssetRemovalFailure(
                 removal, 'asset_removal_inventory_changed');
         }
         return terminal;
     }
 
-    rejectTrackedUploadV3(upload, code, detail = code, notifyTarget = true) {
+    rejectTrackedUpload(upload, code, detail = code, notifyTarget = true) {
         if (!upload) return;
         if (notifyTarget) {
             this.sendToEndpoint(upload.targetEndpointId,
-                this.uploadPayloadV3(upload, 'upload_abort', { code, reason: detail }));
+                this.uploadPayload(upload, 'upload_abort', { code, reason: detail }));
         }
         const ownerId = this.resolveClientId(upload.ownerEndpointId);
-        if (ownerId) this.sendUploadRejectedV3(ownerId, upload.uploadId, code, detail, upload);
-        this.rememberUploadResultV3(upload, 'rejected', { code, detail });
-        this.removeUploadV3(upload);
+        if (ownerId) this.sendUploadRejected(ownerId, upload.uploadId, code, detail, upload);
+        this.rememberUploadResult(upload, 'rejected', { code, detail });
+        this.removeUpload(upload);
     }
 
-    handleUploadStartV3(senderId, message, transportSocket = null) {
-        const validated = this.validateUploadPartyV3(senderId, message, 'owner');
+    handleUploadStart(senderId, message, transportSocket = null) {
+        const validated = this.validateUploadParty(senderId, message, 'owner');
         if (!validated.ok) {
-            return this.sendUploadRejectedV3(senderId, message.uploadId,
+            return this.sendUploadRejected(senderId, message.uploadId,
                 validated.error, validated.error);
         }
         const { client: owner, session } = validated;
         if (!this.isValidOpaqueId(message.uploadId)) {
-            return this.sendUploadRejectedV3(senderId, message.uploadId,
+            return this.sendUploadRejected(senderId, message.uploadId,
                 'invalid_upload_id', 'Invalid upload identifier');
         }
-        const normalized = this.normalizeUploadFilesV3(message.files);
+        const normalized = this.normalizeUploadFiles(message.files);
         if (!normalized.ok) {
-            return this.sendUploadRejectedV3(senderId, message.uploadId,
+            return this.sendUploadRejected(senderId, message.uploadId,
                 normalized.error, normalized.error);
         }
         const manifestDigest = crypto.createHash('sha256')
             .update(JSON.stringify(normalized.assets), 'utf8').digest('hex');
-        this.pruneUploadTombstonesV3();
+        this.pruneUploadTombstones();
         const terminal = this.uploadTombstones.get(message.uploadId);
         if (terminal) {
             if (terminal.status === 'finished'
@@ -2993,16 +3352,16 @@ class MouffetteServer {
                     replay: true,
                 });
             }
-            return this.sendUploadRejectedV3(senderId, message.uploadId,
+            return this.sendUploadRejected(senderId, message.uploadId,
                 'upload_id_reused', 'A terminal upload identifier cannot be reused');
         }
         if (this.sceneRuns.getForSession(session.remoteSessionId)) {
-            return this.sendUploadRejectedV3(senderId, message.uploadId,
+            return this.sendUploadRejected(senderId, message.uploadId,
                 'scene_run_active', 'Uploads are locked while a scene run exists');
         }
         if (Array.from(this.pendingAssetRemovals.values()).some(removal =>
             removal.remoteSessionId === session.remoteSessionId)) {
-            return this.sendUploadRejectedV3(senderId, message.uploadId,
+            return this.sendUploadRejected(senderId, message.uploadId,
                 'asset_removal_pending',
                 'Uploads are locked while a remote asset removal is pending');
         }
@@ -3013,7 +3372,7 @@ class MouffetteServer {
             .reduce((total, asset) => total + asset.size, 0);
         if (resultingAssets.size > this.MAX_UPLOAD_FILES
             || resultingBytes > this.MAX_UPLOAD_TOTAL_BYTES) {
-            return this.sendUploadRejectedV3(senderId, message.uploadId,
+            return this.sendUploadRejected(senderId, message.uploadId,
                 'session_asset_limit_exceeded',
                 'The remote session asset inventory would exceed its hard limit');
         }
@@ -3031,30 +3390,31 @@ class MouffetteServer {
                     // ACK was lost. Ask it to replay only that exact terminal
                     // validation; never reopen staging or rewind the upload.
                     this.sendToEndpoint(duplicate.targetEndpointId,
-                        this.uploadPayloadV3(duplicate, 'upload_complete', {
+                        this.uploadPayload(duplicate, 'upload_complete', {
                             replay: true,
-                            assets: this.uploadCompletionInventoryV3(duplicate),
+                            assets: this.uploadCompletionInventory(duplicate),
                         }));
                 }
                 return this.sendToEndpoint(owner.endpointId,
-                    this.uploadPayloadV3(duplicate, 'upload_resume_ready', {
+                    this.uploadPayload(duplicate, 'upload_resume_ready', {
                         replay: true,
-                        assets: this.uploadOffsetsV3(duplicate),
+                        assets: this.uploadOffsets(duplicate),
                     }));
             }
-            return this.sendUploadRejectedV3(senderId, message.uploadId,
+            return this.sendUploadRejected(senderId, message.uploadId,
                 'upload_id_reused',
                 'An active upload identifier is already bound to a different immutable transfer');
         }
         const ownerUploads = Array.from(this.uploads.values())
-            .filter(upload => upload && upload.protocolVersion === 3
+            .filter(upload => upload
+                && upload.protocolVersion === this.protocolVersion
                 && upload.ownerEndpointId === owner.endpointId);
         if (ownerUploads.some(upload => upload.remoteSessionId === session.remoteSessionId)) {
-            return this.sendUploadRejectedV3(senderId, message.uploadId,
+            return this.sendUploadRejected(senderId, message.uploadId,
                 'upload_session_busy', 'Only one upload per remote session is allowed');
         }
         if (ownerUploads.length >= 2) {
-            return this.sendUploadRejectedV3(senderId, message.uploadId,
+            return this.sendUploadRejected(senderId, message.uploadId,
                 'upload_concurrency_exceeded', 'At most two outgoing uploads are allowed');
         }
         const assetStates = new Map(normalized.assets.map(asset => [asset.assetId, {
@@ -3064,7 +3424,7 @@ class MouffetteServer {
         }]));
         const now = Date.now();
         const upload = {
-            protocolVersion: 3,
+            protocolVersion: this.protocolVersion,
             uploadId: message.uploadId,
             remoteSessionId: session.remoteSessionId,
             generation: session.generation,
@@ -3088,27 +3448,27 @@ class MouffetteServer {
         this.uploads.set(upload.uploadId, upload);
         session.activeUploadIds.add(upload.uploadId);
         const delivered = this.sendToEndpoint(upload.targetEndpointId,
-            this.uploadPayloadV3(upload, 'upload_start', {
+            this.uploadPayload(upload, 'upload_start', {
                 connectionGeneration: owner.connectionGeneration,
                 files: upload.assets,
                 totalSize: upload.totalSize,
             }));
         if (!delivered) {
-            this.rejectTrackedUploadV3(upload, 'upload_target_unavailable',
+            this.rejectTrackedUpload(upload, 'upload_target_unavailable',
                 'Upload target is unavailable', false);
         }
     }
 
-    handleUploadResumeV3(senderId, message, transportSocket = null) {
+    handleUploadResume(senderId, message, transportSocket = null) {
         const upload = this.uploads.get(message.uploadId);
         // Keep the immutable binding even when lease validation synchronously
         // tears the session down and removes it from the live upload map.
-        const validated = this.validateUploadPartyV3(senderId, message, 'owner');
-        if (!validated.ok || !upload || upload.protocolVersion !== 3
+        const validated = this.validateUploadParty(senderId, message, 'owner');
+        if (!validated.ok || !upload || upload.protocolVersion !== this.protocolVersion
             || upload.remoteSessionId !== message.remoteSessionId
             || upload.ownerEndpointId !== validated.client?.endpointId) {
             const code = validated.ok ? 'unknown_upload' : validated.error;
-            return this.sendUploadRejectedV3(senderId, message.uploadId, code, code, upload);
+            return this.sendUploadRejected(senderId, message.uploadId, code, code, upload);
         }
         upload.generation = validated.session.generation;
         upload.ownerConnectionGeneration = validated.client.connectionGeneration;
@@ -3126,40 +3486,40 @@ class MouffetteServer {
         }
         upload.lastActivity = Date.now();
         this.sendToEndpoint(upload.targetEndpointId,
-            this.uploadPayloadV3(upload, 'upload_resume', {
+            this.uploadPayload(upload, 'upload_resume', {
                 connectionGeneration: validated.client.connectionGeneration,
-                assets: this.uploadOffsetsV3(upload),
+                assets: this.uploadOffsets(upload),
             }));
         this.sendToEndpoint(upload.ownerEndpointId,
-            this.uploadPayloadV3(upload, 'upload_resume_ready', {
+            this.uploadPayload(upload, 'upload_resume_ready', {
                 replay: false,
-                assets: this.uploadOffsetsV3(upload),
+                assets: this.uploadOffsets(upload),
             }));
     }
 
-    handleUploadReadyV3(targetId, message) {
-        const validated = this.validateUploadPartyV3(targetId, message, 'target');
+    handleUploadReady(targetId, message) {
+        const validated = this.validateUploadParty(targetId, message, 'target');
         const upload = this.uploads.get(message.uploadId);
-        if (!validated.ok || !upload || upload.protocolVersion !== 3
+        if (!validated.ok || !upload || upload.protocolVersion !== this.protocolVersion
             || upload.remoteSessionId !== message.remoteSessionId
             || upload.awaitingTargetValidation || !upload.awaitingTargetReady) return;
         if (upload.generation !== validated.session.generation
             || upload.targetEndpointId !== validated.client.endpointId
-            || !this.validateUploadInventoryV3(
+            || !this.validateUploadInventory(
                 upload, message.assets,
                 (asset, offset) => offset === asset.durableOffset)) {
-            return this.rejectTrackedUploadV3(upload,
+            return this.rejectTrackedUpload(upload,
                 'invalid_upload_ready_inventory');
         }
         upload.awaitingTargetReady = false;
         upload.lastActivity = Date.now();
         this.sendToEndpoint(upload.ownerEndpointId,
-            this.uploadPayloadV3(upload, 'upload_ready', {
-                assets: this.uploadOffsetsV3(upload),
+            this.uploadPayload(upload, 'upload_ready', {
+                assets: this.uploadOffsets(upload),
             }));
     }
 
-    decodeUploadChunkV3(message) {
+    decodeUploadChunk(message) {
         if (typeof message.data !== 'string' || message.data.length < 1
             || message.data.length > this.MAX_UPLOAD_CHUNK_BASE64_LENGTH
             || message.data.length % 4 !== 0
@@ -3170,34 +3530,34 @@ class MouffetteServer {
         return decoded;
     }
 
-    handleUploadChunkV3(senderId, message, transportSocket = null) {
+    handleUploadChunk(senderId, message, transportSocket = null) {
         const upload = this.uploads.get(message.uploadId);
-        const validated = this.validateUploadPartyV3(senderId, message, 'owner');
-        if (!validated.ok || !upload || upload.protocolVersion !== 3
+        const validated = this.validateUploadParty(senderId, message, 'owner');
+        if (!validated.ok || !upload || upload.protocolVersion !== this.protocolVersion
             || upload.remoteSessionId !== message.remoteSessionId
             || upload.ownerEndpointId !== validated.client?.endpointId) {
             const code = validated.ok ? 'unknown_upload' : validated.error;
-            return this.sendUploadRejectedV3(senderId, message.uploadId, code, code, upload);
+            return this.sendUploadRejected(senderId, message.uploadId, code, code, upload);
         }
         if (upload.transportSocket !== transportSocket) {
-            return this.rejectTrackedUploadV3(upload, 'upload_transport_changed');
+            return this.rejectTrackedUpload(upload, 'upload_transport_changed');
         }
         const asset = upload.assetStates.get(message.assetId);
-        const decoded = this.decodeUploadChunkV3(message);
+        const decoded = this.decodeUploadChunk(message);
         if (upload.awaitingTargetReady || upload.awaitingTargetValidation || !asset || !decoded
             || message.offset !== asset.nextOffset || message.size !== decoded.length
             || message.sha256 !== asset.sha256
             || decoded.length > asset.size - asset.nextOffset) {
-            return this.rejectTrackedUploadV3(upload, 'invalid_upload_chunk');
+            return this.rejectTrackedUpload(upload, 'invalid_upload_chunk');
         }
         const targetId = this.resolveClientId(upload.targetEndpointId);
         const target = targetId ? this.clients.get(targetId) : null;
         if (!target || !target.ws || target.ws.readyState !== WebSocket.OPEN) return;
         if ((Number(target.ws.bufferedAmount) || 0) > this.MAX_TARGET_BUFFERED_UPLOAD_BYTES) {
-            return this.rejectTrackedUploadV3(upload, 'upload_target_backpressure');
+            return this.rejectTrackedUpload(upload, 'upload_target_backpressure');
         }
         const delivered = this.sendToEndpoint(upload.targetEndpointId,
-            this.uploadPayloadV3(upload, 'upload_chunk', {
+            this.uploadPayload(upload, 'upload_chunk', {
                 connectionGeneration: validated.client.connectionGeneration,
                 assetId: asset.assetId,
                 offset: message.offset,
@@ -3211,19 +3571,19 @@ class MouffetteServer {
         upload.lastActivity = Date.now();
     }
 
-    handleUploadProgressV3(targetId, message) {
-        const validated = this.validateUploadPartyV3(targetId, message, 'target');
+    handleUploadProgress(targetId, message) {
+        const validated = this.validateUploadParty(targetId, message, 'target');
         const upload = this.uploads.get(message.uploadId);
-        if (!validated.ok || !upload || upload.protocolVersion !== 3
+        if (!validated.ok || !upload || upload.protocolVersion !== this.protocolVersion
             || upload.remoteSessionId !== message.remoteSessionId
             || !Array.isArray(message.assets)) return;
         if (upload.generation !== validated.session.generation
             || upload.targetEndpointId !== validated.client.endpointId
-            || !this.validateUploadInventoryV3(
+            || !this.validateUploadInventory(
                 upload, message.assets,
                 (asset, offset) => offset >= asset.durableOffset
                     && offset <= asset.nextOffset)) {
-            return this.rejectTrackedUploadV3(upload,
+            return this.rejectTrackedUpload(upload,
                 'invalid_upload_progress_inventory');
         }
         let progressed = false;
@@ -3240,60 +3600,60 @@ class MouffetteServer {
             upload.lastActivity = Date.now();
         }
         this.sendToEndpoint(upload.ownerEndpointId,
-            this.uploadPayloadV3(upload, 'upload_progress', {
+            this.uploadPayload(upload, 'upload_progress', {
                 durableBytes: upload.durableBytes,
                 totalSize: upload.totalSize,
-                assets: this.uploadOffsetsV3(upload),
+                assets: this.uploadOffsets(upload),
             }));
-        if (upload.completionRequested && this.uploadIsFullyDurableV3(upload)) {
-            this.beginUploadTargetValidationV3(upload);
+        if (upload.completionRequested && this.uploadIsFullyDurable(upload)) {
+            this.beginUploadTargetValidation(upload);
         }
     }
 
-    uploadIsFullyDurableV3(upload) {
+    uploadIsFullyDurable(upload) {
         return upload.durableBytes === upload.totalSize
             && Array.from(upload.assetStates.values()).every(asset =>
                 asset.durableOffset === asset.size);
     }
 
-    beginUploadTargetValidationV3(upload) {
+    beginUploadTargetValidation(upload) {
         if (!upload || upload.awaitingTargetValidation
-            || !this.uploadIsFullyDurableV3(upload)) return;
+            || !this.uploadIsFullyDurable(upload)) return;
         upload.completionRequested = false;
         upload.awaitingTargetValidation = true;
         upload.awaitingTargetValidationSince = Date.now();
         upload.lastActivity = upload.awaitingTargetValidationSince;
         this.sendToEndpoint(upload.targetEndpointId,
-            this.uploadPayloadV3(upload, 'upload_complete', {
+            this.uploadPayload(upload, 'upload_complete', {
                 connectionGeneration: upload.ownerConnectionGeneration,
-                assets: this.uploadCompletionInventoryV3(upload),
+                assets: this.uploadCompletionInventory(upload),
             }));
     }
 
-    handleUploadCompleteV3(senderId, message, transportSocket = null) {
+    handleUploadComplete(senderId, message, transportSocket = null) {
         const upload = this.uploads.get(message.uploadId);
-        const validated = this.validateUploadPartyV3(senderId, message, 'owner');
-        if (!validated.ok || !upload || upload.protocolVersion !== 3
+        const validated = this.validateUploadParty(senderId, message, 'owner');
+        if (!validated.ok || !upload || upload.protocolVersion !== this.protocolVersion
             || upload.remoteSessionId !== message.remoteSessionId
             || upload.ownerEndpointId !== validated.client?.endpointId) {
             const code = validated.ok ? 'unknown_upload' : validated.error;
-            return this.sendUploadRejectedV3(senderId, message.uploadId, code, code, upload);
+            return this.sendUploadRejected(senderId, message.uploadId, code, code, upload);
         }
         if (upload.transportSocket !== transportSocket || upload.awaitingTargetReady) {
-            return this.rejectTrackedUploadV3(upload, 'invalid_upload_completion_state');
+            return this.rejectTrackedUpload(upload, 'invalid_upload_completion_state');
         }
-        if (!this.validateUploadInventoryV3(
+        if (!this.validateUploadInventory(
             upload, message.assets, (asset, offset) => offset === asset.size)) {
-            return this.rejectTrackedUploadV3(
+            return this.rejectTrackedUpload(
                 upload, 'invalid_upload_completion_inventory');
         }
         if (upload.awaitingTargetValidation) return;
         if (upload.relayedBytes !== upload.totalSize
             || Array.from(upload.assetStates.values()).some(asset =>
                 asset.nextOffset !== asset.size)) {
-            return this.rejectTrackedUploadV3(upload, 'upload_incomplete');
+            return this.rejectTrackedUpload(upload, 'upload_incomplete');
         }
-        if (!this.uploadIsFullyDurableV3(upload)) {
+        if (!this.uploadIsFullyDurable(upload)) {
             // Version-skew tolerant barrier: an older owner may request
             // completion as soon as its send queue drains. Preserve that exact
             // request and release it only after B reports every byte durable.
@@ -3301,19 +3661,19 @@ class MouffetteServer {
             upload.lastActivity = Date.now();
             return;
         }
-        this.beginUploadTargetValidationV3(upload);
+        this.beginUploadTargetValidation(upload);
     }
 
-    handleUploadFinishedV3(targetId, message) {
-        const validated = this.validateUploadPartyV3(targetId, message, 'target');
+    handleUploadFinished(targetId, message) {
+        const validated = this.validateUploadParty(targetId, message, 'target');
         const upload = this.uploads.get(message.uploadId);
-        if (!validated.ok || !upload || upload.protocolVersion !== 3
+        if (!validated.ok || !upload || upload.protocolVersion !== this.protocolVersion
             || upload.remoteSessionId !== message.remoteSessionId
             || !upload.awaitingTargetValidation || !Array.isArray(message.assets)) return;
         const acknowledgements = new Map();
         for (const entry of message.assets) {
             if (!isPlainObject(entry) || acknowledgements.has(entry.assetId)) {
-                return this.rejectTrackedUploadV3(upload, 'invalid_upload_ack');
+                return this.rejectTrackedUpload(upload, 'invalid_upload_ack');
             }
             acknowledgements.set(entry.assetId, entry);
         }
@@ -3323,7 +3683,7 @@ class MouffetteServer {
                 return !entry || entry.offset !== asset.size || entry.size !== asset.size
                     || entry.sha256 !== asset.sha256;
             });
-        if (invalid) return this.rejectTrackedUploadV3(upload, 'invalid_upload_ack');
+        if (invalid) return this.rejectTrackedUpload(upload, 'invalid_upload_ack');
         let inventory = this.sessionAssets.get(upload.remoteSessionId);
         if (!inventory) {
             inventory = new Map();
@@ -3340,7 +3700,7 @@ class MouffetteServer {
                 validatedAt: Date.now(),
             });
         }
-        const finished = this.uploadPayloadV3(upload, 'upload_finished', {
+        const finished = this.uploadPayload(upload, 'upload_finished', {
             assets: upload.assets.map(asset => ({
                 assetId: asset.assetId,
                 offset: asset.size,
@@ -3348,48 +3708,49 @@ class MouffetteServer {
                 sha256: asset.sha256,
             })),
         });
-        this.rememberUploadResultV3(upload, 'finished', { payload: finished });
-        this.removeUploadV3(upload);
+        this.rememberUploadResult(upload, 'finished', { payload: finished });
+        this.removeUpload(upload);
         this.sendToEndpoint(upload.ownerEndpointId, finished);
     }
 
-    handleUploadRejectedV3(targetId, message) {
-        const validated = this.validateUploadPartyV3(targetId, message, 'target');
+    handleUploadRejected(targetId, message) {
+        const validated = this.validateUploadParty(targetId, message, 'target');
         const upload = this.uploads.get(message.uploadId);
-        if (!validated.ok || !upload || upload.protocolVersion !== 3
+        if (!validated.ok || !upload || upload.protocolVersion !== this.protocolVersion
             || upload.remoteSessionId !== message.remoteSessionId) return;
-        this.rejectTrackedUploadV3(upload,
+        this.rejectTrackedUpload(upload,
             typeof message.code === 'string' ? message.code.slice(0, 128) : 'upload_target_rejected',
             typeof message.reason === 'string' ? message.reason.slice(0, 512) : '', false);
     }
 
-    handleUploadAbortV3(senderId, message) {
-        const validated = this.validateUploadPartyV3(senderId, message, 'owner', true);
+    handleUploadAbort(senderId, message) {
+        const validated = this.validateUploadParty(senderId, message, 'owner', true);
         const upload = this.uploads.get(message.uploadId);
-        if (!validated.ok || !upload || upload.protocolVersion !== 3
+        if (!validated.ok || !upload || upload.protocolVersion !== this.protocolVersion
             || upload.remoteSessionId !== message.remoteSessionId) return;
         this.sendToEndpoint(upload.targetEndpointId,
-            this.uploadPayloadV3(upload, 'upload_abort', {
+            this.uploadPayload(upload, 'upload_abort', {
                 reason: typeof message.reason === 'string'
                     ? message.reason.slice(0, 128) : 'owner_abort',
             }));
-        this.rememberUploadResultV3(upload, 'aborted');
-        this.removeUploadV3(upload);
+        this.rememberUploadResult(upload, 'aborted');
+        this.removeUpload(upload);
         this.sendToEndpoint(upload.ownerEndpointId,
-            this.uploadPayloadV3(upload, 'upload_aborted', { success: true }));
+            this.uploadPayload(upload, 'upload_aborted', { success: true }));
     }
 
-    handleUploadAbortAcknowledgementV3(targetId, message) {
+    handleUploadAbortAcknowledgement(targetId, message) {
         // No state is recreated by a late acknowledgement. This is deliberately
         // an idempotent no-op after the server has committed an abort.
         void targetId;
         void message;
     }
 
-    abortUploadsForUploadSocketV3(senderId, socket, reason) {
+    abortUploadsForUploadSocket(senderId, socket, reason) {
         void senderId;
         for (const upload of this.uploads.values()) {
-            if (!upload || upload.protocolVersion !== 3 || upload.transportSocket !== socket) continue;
+            if (!upload || upload.protocolVersion !== this.protocolVersion
+                || upload.transportSocket !== socket) continue;
             upload.transportSocket = null;
             upload.transportDisconnectedAt = Date.now();
             upload.lastActivity = Date.now();
@@ -3397,34 +3758,34 @@ class MouffetteServer {
         }
     }
 
-    abortUploadsForClientV3(clientId) {
+    abortUploadsForClient(clientId) {
         const client = this.clients.get(clientId);
         if (!client) return;
         for (const upload of Array.from(this.uploads.values())) {
-            if (!upload || upload.protocolVersion !== 3
+            if (!upload || upload.protocolVersion !== this.protocolVersion
                 || (upload.ownerEndpointId !== client.endpointId
                     && upload.targetEndpointId !== client.endpointId)) continue;
             const peer = upload.ownerEndpointId === client.endpointId
                 ? upload.targetEndpointId : upload.ownerEndpointId;
-            this.sendToEndpoint(peer, this.uploadPayloadV3(upload, 'upload_abort', {
+            this.sendToEndpoint(peer, this.uploadPayload(upload, 'upload_abort', {
                 reason: 'remote_session_unavailable',
             }));
-            this.removeUploadV3(upload);
+            this.removeUpload(upload);
         }
     }
 
-    cleanupStalledUploadsV3(now = Date.now()) {
-        this.pruneUploadTombstonesV3(now);
-        this.sweepAssetRemovalsV3(now);
+    cleanupStalledUploads(now = Date.now()) {
+        this.pruneUploadTombstones(now);
+        this.sweepAssetRemovals(now);
         for (const upload of Array.from(this.uploads.values())) {
-            if (!upload || upload.protocolVersion !== 3) continue;
+            if (!upload || upload.protocolVersion !== this.protocolVersion) continue;
             const waitingForValidation = upload.awaitingTargetValidation === true;
             const timeout = waitingForValidation
                 ? this.UPLOAD_TARGET_ACK_TIMEOUT_MS : this.UPLOAD_TIMEOUT_MS;
             const activity = waitingForValidation
                 ? upload.awaitingTargetValidationSince : upload.lastActivity;
             if (now - activity < timeout) continue;
-            this.rejectTrackedUploadV3(upload,
+            this.rejectTrackedUpload(upload,
                 waitingForValidation ? 'upload_validation_timeout' : 'upload_idle_timeout');
         }
         this.sweepSceneRuns(now);
@@ -3475,7 +3836,7 @@ if (require.main === module) {
     setInterval(() => {
         const stats = server.getStats();
         console.log(`📊 Stats: ${stats.connectedClients} connected, ${stats.registeredClients} registered`);
-    }, 30000);
+    }, server.config.statsIntervalMs);
 
     process.on('SIGINT', () => {
         console.log('\n🛑 Shutting down Mouffette Server...');

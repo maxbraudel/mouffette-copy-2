@@ -183,8 +183,11 @@ void RemoteCacheStoreTest::strictIdentifiersAndGenerationBinding()
                                               RemoteCacheStore::AssetArea::Staging,
                                               QStringLiteral("MP4"), &error);
     QVERIFY2(!assetPath.isEmpty(), qPrintable(error));
-    QVERIFY(QFileInfo(assetPath).absoluteFilePath().startsWith(
-        QFileInfo(store.rootPath()).absoluteFilePath() + QDir::separator()));
+    const QString normalizedAssetPath = QDir::fromNativeSeparators(
+        QFileInfo(assetPath).absoluteFilePath());
+    const QString normalizedRootPath = QDir::fromNativeSeparators(
+        QFileInfo(store.rootPath()).absoluteFilePath());
+    QVERIFY(normalizedAssetPath.startsWith(normalizedRootPath + QLatin1Char('/')));
     QVERIFY(assetPath.endsWith(QStringLiteral(".mp4")));
     QVERIFY(store.acceptsCommands(scope()));
 

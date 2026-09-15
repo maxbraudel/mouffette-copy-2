@@ -159,10 +159,11 @@ set(SOURCES
     # ═══════════════════════════════════════════════════════
     src/main.cpp
     src/backend/runtime/ApplicationRuntime.cpp
+    src/backend/runtime/ApplicationActivityMonitor.cpp
 
     # Qt Quick application shell and presentation models
     src/frontend/qml/ApplicationController.cpp
-    src/frontend/qml/CanvasSessionViewModel.cpp
+    src/frontend/qml/ClientWorkspaceViewModel.cpp
     src/frontend/qml/ClientListModel.cpp
     src/frontend/qml/NotificationListModels.cpp
     src/frontend/qml/MediaSettingsViewModel.cpp
@@ -190,7 +191,7 @@ set(SOURCES
     src/frontend/rendering/remote/RemoteSceneController.cpp
     src/frontend/rendering/remote/RemoteVideoFrameItem.cpp
 
-    # Protocol v3 scene lifecycle
+    # Protocol v4 scene lifecycle
     src/backend/network/RemoteSessionCoordinator.cpp
     src/backend/network/SceneRunCoordinator.cpp
     
@@ -228,7 +229,7 @@ set(SOURCES
     
     # Domain - Session
     src/backend/domain/session/IncomingSessionOrphanWatchdog.cpp
-    src/backend/domain/session/SessionManager.cpp
+    src/backend/domain/workspace/WorkspaceManager.cpp
 
     # Notifications
     src/backend/notifications/HistoryStore.cpp
@@ -263,7 +264,6 @@ set(SOURCES
     # Backend Managers - App
     src/backend/managers/app/SettingsManager.cpp
     src/backend/managers/app/SystemTrayManager.cpp
-    src/backend/managers/app/MigrationTelemetryManager.cpp
     
     # Backend Managers - Network
     src/backend/managers/network/ConnectionManager.cpp
@@ -274,8 +274,7 @@ set(SOURCES
     src/backend/managers/system/SystemLifecycleMonitor.cpp
     
     # Controllers
-    src/backend/controllers/CanvasSessionController.cpp
-    src/backend/controllers/TimerController.cpp
+    src/backend/controllers/ClientWorkspaceController.cpp
 )
 
 # Platform-specific sources
@@ -307,7 +306,7 @@ set(HEADERS
 
     # Qt Quick application shell and presentation models
     src/frontend/qml/ApplicationController.h
-    src/frontend/qml/CanvasSessionViewModel.h
+    src/frontend/qml/ClientWorkspaceViewModel.h
     src/frontend/qml/ClientListModel.h
     src/frontend/qml/NotificationListModels.h
     src/frontend/qml/MediaSettingsViewModel.h
@@ -317,9 +316,6 @@ set(HEADERS
     # ═══════════════════════════════════════════════════════
     # FRONTEND - User Interface & Rendering
     # ═══════════════════════════════════════════════════════
-    
-    # QML owns all shell/page/control headers. The remaining widget header is
-    # part of the temporary canvas document bridge only.
     
     # UI - Notifications
     src/frontend/ui/notifications/ToastNotificationSystem.h
@@ -376,7 +372,7 @@ set(HEADERS
     src/backend/domain/scene/SceneActivityModel.h
     
     # Domain - Session
-    src/backend/domain/session/SessionManager.h
+    src/backend/domain/workspace/WorkspaceManager.h
     src/backend/domain/session/IncomingSessionOrphanWatchdog.h
 
     # Notifications
@@ -413,7 +409,6 @@ set(HEADERS
     # Backend Managers - App
     src/backend/managers/app/SettingsManager.h
     src/backend/managers/app/SystemTrayManager.h
-    src/backend/managers/app/MigrationTelemetryManager.h
     
     # Backend Managers - Network
     src/backend/managers/network/ConnectionManager.h
@@ -425,8 +420,7 @@ set(HEADERS
     src/backend/managers/system/SystemLifecycleMonitorBackend.h
     
     # Controllers
-    src/backend/controllers/CanvasSessionController.h
-    src/backend/controllers/TimerController.h
+    src/backend/controllers/ClientWorkspaceController.h
 )
 
 # Platform-specific headers
@@ -679,6 +673,8 @@ if(BUILD_TESTING)
         src/backend/runtime/ApplicationInstanceManager.h
         src/backend/runtime/RuntimeProfile.cpp
         src/backend/runtime/RuntimeProfile.h
+        src/backend/config/AppConfig.cpp
+        src/backend/config/AppConfig.h
     )
     target_include_directories(tst_ApplicationInstanceManager PRIVATE src)
     target_link_libraries(tst_ApplicationInstanceManager PRIVATE
@@ -789,6 +785,8 @@ if(BUILD_TESTING)
         src/frontend/rendering/canvas/TextOutlineItem.cpp
         src/frontend/rendering/canvas/TextEditHelper.cpp
         src/frontend/rendering/remote/RemoteVideoFrameItem.cpp
+        src/backend/config/AppConfig.cpp
+        src/backend/runtime/RuntimeProfile.cpp
         resources/resources.qrc
     )
     target_include_directories(tst_CanvasInteraction PRIVATE src)
@@ -896,26 +894,22 @@ if(BUILD_TESTING)
     # suites when CI invokes ctest with parallel jobs.
     set_tests_properties(TextOutlineMotion CanvasInteraction CanvasInteractionScaled CanvasSelectionBackend ClientConnectionFlow VideoPlaybackBackend UploadRemovalSecurity RemoteSceneControllerLifecycle RemoteSceneLifecycle MediaOverlay MediaOverlayScaled
         PROPERTIES RUN_SERIAL TRUE)
-
-    # Reference implementation retained for before/after profiling only. The
-    # application no longer registers, compiles or bundles this SVG renderer.
-    add_executable(tst_TextGlyphPath
-        tests/qt/tst_TextGlyphPath.cpp
-        src/frontend/rendering/canvas/TextGlyphPath.cpp
-        src/frontend/rendering/canvas/TextGlyphPath.h
-        src/frontend/rendering/canvas/GlyphBorderAtlas.cpp
-        src/frontend/rendering/canvas/GlyphBorderAtlas.h
-        ${ATLAS_QRC}
-    )
-    target_include_directories(tst_TextGlyphPath PRIVATE src)
-    target_link_libraries(tst_TextGlyphPath PRIVATE Qt6::Core Qt6::Gui Qt6::Quick Qt6::Test)
-    add_test(NAME TextGlyphPath COMMAND tst_TextGlyphPath)
-    set_tests_properties(TextGlyphPath PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+    # Match the production style explicitly. Loading the native Controls
+    # plugin concurrently with asynchronous QML compilation is unstable on
+    # some Windows Qt builds and does not represent the shipped application.
+    set_tests_properties(TextOutlineMotion CanvasInteraction CanvasSelectionBackend ClientConnectionFlow VideoPlaybackBackend UploadRemovalSecurity RemoteSceneControllerLifecycle RemoteSceneLifecycle MediaOverlay
+        PROPERTIES ENVIRONMENT "QT_QUICK_CONTROLS_STYLE=Basic")
+    set_tests_properties(CanvasInteractionScaled MediaOverlayScaled
+        PROPERTIES ENVIRONMENT "QT_QUICK_CONTROLS_STYLE=Basic;QT_SCALE_FACTOR=2")
 
     add_executable(tst_MediaFilePolicy
         tests/qt/tst_MediaFilePolicy.cpp
         src/backend/domain/media/MediaFilePolicy.cpp
         src/backend/domain/media/MediaFilePolicy.h
+        src/backend/config/AppConfig.cpp
+        src/backend/config/AppConfig.h
+        src/backend/runtime/RuntimeProfile.cpp
+        src/backend/runtime/RuntimeProfile.h
     )
     target_include_directories(tst_MediaFilePolicy PRIVATE src)
     target_compile_definitions(tst_MediaFilePolicy PRIVATE
@@ -924,7 +918,9 @@ if(BUILD_TESTING)
     target_link_libraries(tst_MediaFilePolicy PRIVATE
         Qt6::Core Qt6::Gui Qt6::Multimedia Qt6::Test)
     add_test(NAME MediaFilePolicy COMMAND tst_MediaFilePolicy)
-    set(MOUFFETTE_MEDIA_POLICY_TEST_ENV "QT_MEDIA_BACKEND=ffmpeg")
+    set(MOUFFETTE_MEDIA_POLICY_TEST_ENV
+        "QT_MEDIA_BACKEND=ffmpeg"
+        "QT_QUICK_CONTROLS_STYLE=Basic")
     if(NOT APPLE)
         # Headless Unix CI needs a platform plugin. AVFoundation on macOS,
         # however, cannot deliver QVideoSink frames through the offscreen
@@ -953,10 +949,12 @@ if(BUILD_TESTING)
         src/backend/domain/project/ProjectStore.h
         src/backend/domain/project/ProjectManager.cpp
         src/backend/domain/project/ProjectManager.h
-        src/backend/domain/session/SessionManager.cpp
-        src/backend/domain/session/SessionManager.h
+        src/backend/domain/workspace/WorkspaceManager.cpp
+        src/backend/domain/workspace/WorkspaceManager.h
         src/backend/domain/session/IncomingSessionOrphanWatchdog.cpp
         src/backend/domain/session/IncomingSessionOrphanWatchdog.h
+        src/backend/config/AppConfig.cpp
+        src/backend/config/AppConfig.h
         src/backend/runtime/RuntimeProfile.cpp
         src/backend/runtime/RuntimeProfile.h
     )

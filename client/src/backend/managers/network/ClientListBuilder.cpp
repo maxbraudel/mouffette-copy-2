@@ -1,6 +1,6 @@
 #include "backend/managers/network/ClientListBuilder.h"
 #include "backend/runtime/ApplicationRuntime.h"
-#include "backend/domain/session/SessionManager.h"
+#include "backend/domain/workspace/WorkspaceManager.h"
 #include "shared/rendering/ICanvasHost.h"
 #include <QDebug>
 
@@ -12,60 +12,56 @@ QList<ClientInfo> ClientListBuilder::buildDisplayClientList(
     
     QList<ClientInfo> result;
     
-    // Mark all sessions as offline initially
-    mainWindow->markAllSessionsOffline();
+    // Discovery is authoritative for presence. Projects remain visible offline.
+    mainWindow->markAllWorkspacesDisconnected();
     
     QSet<QString> identitiesSeen;
 
     // Process connected clients and update their sessions
     for (ClientInfo client : connectedClients) {
-        QString persistentId = client.endpointId();
-        if (persistentId.isEmpty()) {
-            qWarning() << "ClientListBuilder::buildDisplayClientList: client has no persistentClientId";
+        const QString targetEndpointId = client.endpointId();
+        if (targetEndpointId.isEmpty()) {
+            qWarning() << "ClientListBuilder: ignored a client without endpointId";
             continue;
         }
-        client.setEndpointId(persistentId);
+        client.setEndpointId(targetEndpointId);
         client.setOnline(true);
 
-        // Find existing session for this client
-        if (ApplicationRuntime::CanvasSession* session = mainWindow->findCanvasSession(persistentId)) {
-            session->serverAssignedId = client.getId(); // Keep for local lookup
-            session->lastClientInfo = client;
-            session->lastClientInfo.setEndpointId(persistentId);
-            session->lastClientInfo.setFromMemory(true);
-            session->lastClientInfo.setOnline(true);
-            session->remoteContentClearedOnDisconnect = false;
+        if (ApplicationRuntime::ClientWorkspace* workspace =
+                mainWindow->findWorkspace(targetEndpointId)) {
+            workspace->lastClientInfo = client;
+            workspace->lastClientInfo.setEndpointId(targetEndpointId);
+            workspace->lastClientInfo.setFromMemory(true);
+            workspace->lastClientInfo.setOnline(true);
+            workspace->remoteContentClearedOnDisconnect = false;
             
-            // Update remote scene target if canvas exists
-            if (session->canvas && !session->persistentClientId.isEmpty()) {
-                session->canvas->setRemoteSceneTarget(
-                    session->persistentClientId,
-                    session->lastClientInfo.getMachineName()
+            if (workspace->canvas) {
+                workspace->canvas->setRemoteSceneTarget(
+                    workspace->targetEndpointId,
+                    workspace->lastClientInfo.getMachineName()
                 );
             }
             
             client.setFromMemory(true);
-            client.setId(session->serverAssignedId);
         } else {
             client.setFromMemory(false);
         }
 
-        identitiesSeen.insert(persistentId);
+        identitiesSeen.insert(targetEndpointId);
         result.append(client);
     }
 
-    // Add offline clients from session history
-    SessionManager* sessionManager = mainWindow->getSessionManager();
-    if (sessionManager) {
-        for (ApplicationRuntime::CanvasSession* session : sessionManager->getAllSessions()) {
-            // Skip if already seen as online
-            if (identitiesSeen.contains(session->persistentClientId)) continue;
+    // A workspace without a durable project is ephemeral and disappears as
+    // soon as its endpoint leaves discovery.
+    WorkspaceManager* workspaceManager = mainWindow->getWorkspaceManager();
+    if (workspaceManager) {
+        for (ApplicationRuntime::ClientWorkspace* workspace
+             : workspaceManager->allWorkspaces()) {
+            if (identitiesSeen.contains(workspace->targetEndpointId)
+                || workspace->projectId.isEmpty()) continue;
             
-            ClientInfo info = session->lastClientInfo;
-            info.setEndpointId(session->persistentClientId);
-            if (!session->serverAssignedId.isEmpty()) {
-                info.setId(session->serverAssignedId);
-            }
+            ClientInfo info = workspace->lastClientInfo;
+            info.setEndpointId(workspace->targetEndpointId);
             info.setOnline(false);
             info.setFromMemory(true);
             result.append(info);

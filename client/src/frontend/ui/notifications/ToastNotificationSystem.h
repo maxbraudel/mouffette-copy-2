@@ -5,7 +5,7 @@
 
 #include "backend/notifications/NotificationCenter.h"
 
-// Compatibility publishing facade used by the business layer. It owns no
+// Publishing facade used by the business layer. It owns no
 // visual object: NotificationCenter is the source for both durable history and
 // the QML ToastStack model.
 class ToastNotificationSystem final : public QObject

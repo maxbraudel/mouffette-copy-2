@@ -1,5 +1,6 @@
 #include "frontend/rendering/canvas/QuickCanvasController.h"
 
+#include "backend/config/AppConfig.h"
 #include "backend/domain/canvas/CanvasDocument.h"
 #include "backend/domain/media/CanvasMedia.h"
 #include "backend/domain/media/MediaFilePolicy.h"
@@ -244,7 +245,8 @@ QuickCanvasController::QuickCanvasController(CanvasDocument* document,
             this, &QuickCanvasController::publishScreens);
     connect(document, &CanvasDocument::remoteCursorChanged,
             this, &QuickCanvasController::publishRemoteCursor);
-    m_videoStateTimer->setInterval(50);
+    m_videoStateTimer->setInterval(
+        AppConfig::instance().videoStatePublishIntervalMs());
     connect(m_videoStateTimer, &QTimer::timeout,
             this, &QuickCanvasController::publishVideoState);
 }
@@ -318,6 +320,7 @@ void QuickCanvasController::publishMedia()
             if (!item) continue;
             activeMediaIds.insert(item->mediaId());
             QVariantMap projection = item->toModelMap();
+            projection.insert(QStringLiteral("rowKey"), item->mediaId());
             if (item->isVideo()) {
                 const auto poster = m_videoPosterSources.constFind(item->mediaId());
                 if (poster != m_videoPosterSources.cend() && *poster) {

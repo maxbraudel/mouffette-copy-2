@@ -145,13 +145,59 @@ private slots:
         secondIncoming.insert(QStringLiteral("remoteSessionId"),
                               QStringLiteral("remote_session_second_incoming"));
         secondIncoming.insert(QStringLiteral("ownerEndpointId"), kThird);
-        QVERIFY(!sessions.upsert(secondIncoming, 1));
-        QCOMPARE(sessions.all().size(), 2);
+        QVERIFY(sessions.upsert(secondIncoming, 1));
+        QCOMPARE(sessions.all().size(), 3);
+        QCOMPARE(sessions.incomingForPeer(kThird).remoteSessionId,
+                 QStringLiteral("remote_session_second_incoming"));
 
         sessions.remove(QStringLiteral("remote_session_reverse"));
         QVERIFY(sessions.incomingForPeer(kTarget).remoteSessionId.isEmpty());
         QCOMPARE(sessions.outgoingForPeer(kTarget).remoteSessionId,
                  QStringLiteral("remote_session_1"));
+    }
+
+    void initialSnapshotsAreStrictFreshAndMonotonic()
+    {
+        RemoteSessionCoordinator sessions;
+        sessions.setLocalEndpointId(kOwner);
+        QVERIFY(sessions.upsert(sessionEnvelope(), 1));
+
+        QJsonObject snapshot{
+            {QStringLiteral("screens"), QJsonArray{QJsonObject{
+                {QStringLiteral("id"), 0},
+                {QStringLiteral("width"), 1920},
+                {QStringLiteral("height"), 1080},
+                {QStringLiteral("x"), 0},
+                {QStringLiteral("y"), 0},
+                {QStringLiteral("primary"), true},
+                {QStringLiteral("uiZones"), QJsonArray{}}
+            }}},
+            {QStringLiteral("systemUI"), QJsonArray{}},
+            {QStringLiteral("volumePercent"), 50},
+            {QStringLiteral("revision"), 1},
+            {QStringLiteral("capturedAtEpochMs"), 1}
+        };
+        QJsonObject envelope{
+            {QStringLiteral("remoteSessionId"), QStringLiteral("remote_session_1")},
+            {QStringLiteral("generation"), 1},
+            {QStringLiteral("snapshotSequence"), 1},
+            {QStringLiteral("snapshot"), snapshot}
+        };
+        QVERIFY(sessions.acceptSnapshot(envelope, 1));
+        QVERIFY(!sessions.acceptSnapshot(envelope, 1));
+
+        envelope.insert(QStringLiteral("snapshotSequence"), 2);
+        QVERIFY(!sessions.acceptSnapshot(envelope, 1));
+
+        snapshot.insert(QStringLiteral("revision"), 2);
+        snapshot.insert(QStringLiteral("unexpected"), true);
+        envelope.insert(QStringLiteral("snapshot"), snapshot);
+        QVERIFY(!sessions.acceptSnapshot(envelope, 1));
+
+        snapshot.remove(QStringLiteral("unexpected"));
+        snapshot.insert(QStringLiteral("screens"), QJsonArray{});
+        envelope.insert(QStringLiteral("snapshot"), snapshot);
+        QVERIFY(sessions.acceptSnapshot(envelope, 1));
     }
 
     void immutableRunRejectsWrongDigestAndIllegalTransitions()

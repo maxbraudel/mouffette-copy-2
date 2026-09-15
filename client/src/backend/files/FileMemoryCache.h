@@ -7,7 +7,7 @@
 #include <QByteArray>
 
 /**
- * Phase 4.2: FileMemoryCache
+ * In-memory file cache.
  * 
  * Manages in-memory caching of file contents for fast access.
  * Extracted from FileManager to separate concerns.

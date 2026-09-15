@@ -27,7 +27,7 @@ Item {
         // has crossed the render barrier this item is removed atomically.
         enabled: !root.handoffActive
         NumberAnimation {
-            duration: 80
+            duration: UiTiming.contentFadeDurationMs
             easing.type: Easing.OutCubic
         }
     }
@@ -36,7 +36,6 @@ Item {
         objectName: "dropPreviewSurface"
         anchors.fill: parent
         contentReady: root.frameReady && previewFrame.hasFrame
-        fadeDuration: 80
 
         RemoteVideoFrameItem {
             id: previewFrame

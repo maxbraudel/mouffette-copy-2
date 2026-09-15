@@ -31,6 +31,11 @@ QtObject {
         }
         onVisibilityChanged: root.controller.setWindowVisible(visible && visibility !== Window.Minimized)
 
+        HoverHandler {
+            acceptedDevices: PointerDevice.Mouse
+            onHoveredChanged: root.controller.setPointerInside(hovered)
+        }
+
         ColumnLayout {
             anchors.fill: parent
             anchors.topMargin: Theme.windowMargin
@@ -67,6 +72,14 @@ QtObject {
                     auxiliaryVisible: root.controller.remoteVolumeVisible
                     busy: root.controller.remoteBusy
                 }
+                AppButton {
+                    visible: root.controller.applicationPage === 1 && root.controller.hasProject
+                    text: "Delete project..."
+                    enabled: root.controller.canDeleteProject
+                    destructive: true
+                    unavailableReason: "No project exists for this client"
+                    onClicked: root.controller.requestDeleteProject()
+                }
                 Item { Layout.fillWidth: true }
                 SegmentedStatusCard {
                     visible: root.controller.applicationPage !== 1 || window.width >= 1100
@@ -78,38 +91,6 @@ QtObject {
                     visible: root.controller.applicationPage !== 1 || window.width >= 1100
                     text: root.controller.connectionEnabled ? "Disable" : "Enable"
                     onClicked: root.controller.toggleConnection()
-                }
-                AppButton {
-                    visible: root.controller.applicationPage === 1 && !root.controller.hasProject
-                    text: "Create Project"
-                    enabled: root.controller.canCreateProject
-                    unavailableReason: "A project already exists for this client"
-                    onClicked: root.controller.createProject()
-                }
-                AppButton {
-                    visible: root.controller.applicationPage === 1 && !root.controller.hasRemoteSession
-                    text: "Launch Session"
-                    enabled: root.controller.canLaunchSession
-                    unavailableReason: root.controller.connectionEnabled
-                        ? "The client is offline or unavailable"
-                        : "Enable the local client first"
-                    onClicked: root.controller.launchSession()
-                }
-                AppButton {
-                    visible: root.controller.applicationPage === 1 && root.controller.hasRemoteSession
-                    text: root.controller.closingSession ? "Closing…" : "Close session"
-                    enabled: root.controller.canCloseSession && !root.controller.closingSession
-                    unavailableReason: root.controller.closingSession
-                        ? "The session is closing" : "No remote session is active"
-                    onClicked: root.controller.closeSession()
-                }
-                AppButton {
-                    visible: root.controller.applicationPage === 1 && root.controller.hasProject
-                    text: "Delete project…"
-                    enabled: root.controller.canDeleteProject
-                    destructive: true
-                    unavailableReason: "No project exists for this client"
-                    onClicked: root.controller.requestDeleteProject()
                 }
                 AppButton {
                     visible: root.controller.applicationPage !== 1 || window.width >= 1100

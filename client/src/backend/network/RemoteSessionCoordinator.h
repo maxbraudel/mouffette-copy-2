@@ -33,6 +33,8 @@ public:
     QString localEndpointId() const { return m_localEndpointId; }
     bool upsert(const QJsonObject& envelope,
                 quint64 localConnectionGeneration = 0);
+    bool acceptSnapshot(const QJsonObject& envelope,
+                        quint64 localConnectionGeneration = 0);
     bool canClose(const QJsonObject& envelope,
                   quint64 localConnectionGeneration = 0) const;
     void remove(const QString& remoteSessionId);
@@ -43,8 +45,8 @@ public:
     // so the reverse direction cannot evict or alias the first binding.
     Binding outgoingForPeer(const QString& peerEndpointId) const;
     Binding incomingForPeer(const QString& peerEndpointId) const;
-    // Compatibility lookup for role-agnostic observers. Outgoing is selected
-    // deterministically when both directions exist.
+    // Role-agnostic lookup for observers. Outgoing is selected deterministically
+    // when both directions exist.
     Binding forPeer(const QString& peerEndpointId) const;
     Binding byId(const QString& remoteSessionId) const;
     QList<Binding> all() const;
@@ -65,5 +67,7 @@ private:
     QHash<QString, Binding> m_byId;
     QHash<QString, QString> m_outgoingIdByPeer;
     QHash<QString, QString> m_incomingIdByPeer;
+    QHash<QString, quint64> m_lastSnapshotSequenceBySession;
+    QHash<QString, quint64> m_lastSnapshotRevisionBySession;
     QSet<QString> m_closedSessionIds;
 };

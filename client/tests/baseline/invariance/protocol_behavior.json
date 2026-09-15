@@ -12,7 +12,7 @@
       "file": "src/backend/handlers/ScreenEventHandler.cpp",
       "mustContain": [
         "registerClient\\(",
-        "endpointId\\("
+        "volumePercent"
       ]
     },
     {

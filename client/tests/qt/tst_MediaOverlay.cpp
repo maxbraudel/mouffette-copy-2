@@ -11,9 +11,10 @@
 #include <QtTest>
 
 #include "frontend/rendering/canvas/MediaListModel.h"
+#include "frontend/rendering/canvas/CanvasQmlTypes.h"
 #include "frontend/rendering/canvas/QuickCanvasController.h"
 #include "frontend/rendering/canvas/QuickCanvasHost.h"
-#include "frontend/qml/CanvasSessionViewModel.h"
+#include "frontend/qml/ClientWorkspaceViewModel.h"
 #include "frontend/qml/MediaSettingsViewModel.h"
 #include "backend/domain/canvas/CanvasDocument.h"
 #include "backend/domain/media/CanvasMedia.h"
@@ -25,6 +26,7 @@ class MediaOverlayTest final : public QObject
     Q_OBJECT
 
 private slots:
+    void initTestCase();
     void segmentedStatusFillReachesBothEdges_data();
     void segmentedStatusFillReachesBothEdges();
     void availableStatusUsesNeutralGreyPalette();
@@ -35,11 +37,11 @@ private slots:
     void overlayButtonHoverIsImmediate();
     void mediaActionPalette_data();
     void mediaActionPalette();
-    void legacyMediaRowsAndProgress();
+    void mediaRowsAndProgress();
     void uploadActionLocksBeforeDispatchAndRecovers();
     void canvasToolbarUsesOverlaySwitchAndSegmentedTools();
-    void mediaSettingsPanelRestoresLegacyTabsAndBindings();
-    void toastMatchesLegacyBottomLeftDoubleBackground();
+    void mediaSettingsPanelRestoresTabsAndBindings();
+    void toastUsesBottomLeftDoubleBackground();
     void themeTracksApplicationPalette();
 };
 
@@ -395,6 +397,11 @@ Item {
 }
 }
 
+void MediaOverlayTest::initTestCase()
+{
+    registerCanvasQmlTypes();
+}
+
 void MediaOverlayTest::segmentedStatusFillReachesBothEdges_data()
 {
     QTest::addColumn<bool>("auxiliaryVisible");
@@ -497,13 +504,16 @@ void MediaOverlayTest::mediaPanelVisibilityAnchorInteractionAndScroll()
 
     window.show();
     QVERIFY(QTest::qWaitForWindowExposed(&window));
+    window.requestActivate();
+    QVERIFY(QTest::qWaitForWindowActive(&window));
     harness->setSize(window.size());
     QCoreApplication::processEvents();
     QVERIFY(!panel->isVisible());
     QVERIFY(!list->isVisible());
 
     QVariantList rows;
-    rows.append(QVariantMap{{QStringLiteral("mediaId"), QStringLiteral("media-0")},
+    rows.append(QVariantMap{{QStringLiteral("rowKey"), QStringLiteral("media-0")},
+                            {QStringLiteral("mediaId"), QStringLiteral("media-0")},
                             {QStringLiteral("displayName"), QStringLiteral("Image 0")},
                             {QStringLiteral("mediaType"), QStringLiteral("image")},
                             {QStringLiteral("uploadState"), QStringLiteral("not_uploaded")},
@@ -520,6 +530,8 @@ void MediaOverlayTest::mediaPanelVisibilityAnchorInteractionAndScroll()
     QTRY_VERIFY(findVisualItem(harness.get(), QStringLiteral("mediaRow_0")));
     auto* firstRow = findVisualItem(harness.get(), QStringLiteral("mediaRow_0"));
     QVERIFY(firstRow);
+    QTRY_VERIFY(firstRow->width() > 0 && firstRow->height() > 0);
+    QTRY_VERIFY(list->height() >= firstRow->height());
     const QPoint clickPoint = firstRow->mapToScene(
         QPointF(firstRow->width() / 2.0, firstRow->height() / 2.0)).toPoint();
     QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier, clickPoint);
@@ -528,6 +540,7 @@ void MediaOverlayTest::mediaPanelVisibilityAnchorInteractionAndScroll()
 
     for (int index = 1; index < 30; ++index) {
         rows.append(QVariantMap{
+            {QStringLiteral("rowKey"), QStringLiteral("media-%1").arg(index)},
             {QStringLiteral("mediaId"), QStringLiteral("media-%1").arg(index)},
             {QStringLiteral("displayName"), QStringLiteral("Image %1").arg(index)},
             {QStringLiteral("mediaType"), QStringLiteral("image")},
@@ -556,10 +569,10 @@ void MediaOverlayTest::mediaCountTracksRealCanvasInsertions()
     std::unique_ptr<QuickCanvasHost> host(QuickCanvasHost::create(&error));
     QVERIFY2(host, qPrintable(error));
     host->setProjectEditingEnabled(true);
-    CanvasSessionViewModel session(
+    ClientWorkspaceViewModel session(
         QStringLiteral("media-count-session"), host.get(), [] {}, nullptr,
         [] { return false; }, [] { return true; }, [] { return true; });
-    QSignalSpy countChanged(&session, &CanvasSessionViewModel::mediaCountChanged);
+    QSignalSpy countChanged(&session, &ClientWorkspaceViewModel::mediaCountChanged);
     std::unique_ptr<QQuickItem> harness(
         createRealMediaPanelHarness(engine, window, &session, &error));
     QVERIFY2(harness, qPrintable(error));
@@ -739,7 +752,7 @@ void MediaOverlayTest::mediaActionPalette()
     QCOMPARE(clicked.count(), enabled ? 1 : 0);
 }
 
-void MediaOverlayTest::legacyMediaRowsAndProgress()
+void MediaOverlayTest::mediaRowsAndProgress()
 {
     QTemporaryDir temporary;
     QVERIFY(temporary.isValid());
@@ -756,7 +769,7 @@ void MediaOverlayTest::legacyMediaRowsAndProgress()
     QVERIFY(photo);
     QVERIFY(text);
     photo->setZ(10);
-    CanvasSessionViewModel session(QStringLiteral("rows"), host.get(), [] {}, nullptr,
+    ClientWorkspaceViewModel session(QStringLiteral("rows"), host.get(), [] {}, nullptr,
                                   [] { return false; }, [] { return true; }, [] { return true; });
     QQmlEngine engine;
     QQuickWindow window;
@@ -844,8 +857,8 @@ void MediaOverlayTest::uploadActionLocksBeforeDispatchAndRecovers()
     bool hasProject = true;
     bool sawLock = false;
     int calls = 0;
-    CanvasSessionViewModel* workspace = nullptr;
-    CanvasSessionViewModel session(QStringLiteral("persistent-workspace"), host.get(), [&] {
+    ClientWorkspaceViewModel* workspace = nullptr;
+    ClientWorkspaceViewModel session(QStringLiteral("persistent-workspace"), host.get(), [&] {
         ++calls;
         sawLock = workspace->actionPending() && !workspace->uploadActionEnabled()
             && !workspace->testSceneActionEnabled();
@@ -944,7 +957,7 @@ void MediaOverlayTest::canvasToolbarUsesOverlaySwitchAndSegmentedTools()
     QVERIFY(!selection->property("toggled").toBool());
 }
 
-void MediaOverlayTest::mediaSettingsPanelRestoresLegacyTabsAndBindings()
+void MediaOverlayTest::mediaSettingsPanelRestoresTabsAndBindings()
 {
     QQmlEngine engine;
     QQuickWindow window;
@@ -953,7 +966,7 @@ void MediaOverlayTest::mediaSettingsPanelRestoresLegacyTabsAndBindings()
     std::unique_ptr<QuickCanvasHost> host(QuickCanvasHost::create(&error));
     QVERIFY2(host, qPrintable(error));
     host->setProjectEditingEnabled(true);
-    CanvasSessionViewModel session(
+    ClientWorkspaceViewModel session(
         QStringLiteral("media-settings-session"), host.get(), [] {}, nullptr,
         [] { return false; }, [] { return true; }, [] { return true; });
     std::unique_ptr<QQuickItem> harness(
@@ -1160,9 +1173,8 @@ void MediaOverlayTest::mediaSettingsPanelRestoresLegacyTabsAndBindings()
     QTest::keyClick(&window, Qt::Key_0);
     QTest::keyClick(&window, Qt::Key_Return);
     QTRY_COMPARE(media->outlineWidthPercent(), 100.0);
-    QCOMPARE(media->toModelMap().value(
-                 QStringLiteral("textOutlineWidthPercent")).toDouble(),
-             100.0);
+    QVERIFY(media->toModelMap().value(
+                QStringLiteral("textOutlineWidthPx")).toDouble() > 0.0);
 
     QVERIFY(QMetaObject::invokeMethod(textBorderWidthCheck, "click"));
     QTRY_VERIFY(!media->outlineWidthOverrideEnabled());
@@ -1170,15 +1182,14 @@ void MediaOverlayTest::mediaSettingsPanelRestoresLegacyTabsAndBindings()
     QTRY_COMPARE(textBorderWidthField->property("draftText").toString(),
                  QStringLiteral("100"));
     QCOMPARE(media->toModelMap().value(
-                 QStringLiteral("textOutlineWidthPercent")).toDouble(),
-             0.0);
+                 QStringLiteral("textOutlineWidthPx")).toDouble(), 0.0);
     QCOMPARE(host->document()->selectedMedia(), media);
 
     session.setSettingsVisible(false);
     QTRY_VERIFY(!panel->isVisible());
 }
 
-void MediaOverlayTest::toastMatchesLegacyBottomLeftDoubleBackground()
+void MediaOverlayTest::toastUsesBottomLeftDoubleBackground()
 {
     QQmlEngine engine;
     QQuickWindow window;

@@ -19,7 +19,7 @@ QString LocalFileRepository::generateFileId(const QString& filePath) const {
         return QString();
     }
 
-    // Protocol v3 uses one content-addressed identity all the way from the
+    // Protocol v4 uses one content-addressed identity all the way from the
     // local canvas through upload validation and the immutable scene manifest.
     // Metadata and paths must never participate in this value.
     QCryptographicHash hash(QCryptographicHash::Sha256);

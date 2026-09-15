@@ -1,6 +1,7 @@
 pragma Singleton
 
 import QtQuick
+import Mouffette.Canvas
 
 QtObject {
     id: theme
@@ -86,7 +87,7 @@ QtObject {
     readonly property int toastMarginBottom: 40
     readonly property int toastSpacing: 10
     readonly property int toastRadius: 8
-    readonly property int toastAnimationDuration: 300
+    readonly property int toastAnimationDuration: UiTiming.toastAnimationDurationMs
     readonly property int toastSlideDistance: 20
     readonly property int toastTextSize: 13
 }

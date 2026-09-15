@@ -2,6 +2,7 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Effects
 import Mouffette.App
+import Mouffette.Canvas
 
 Rectangle {
     id: root
@@ -42,6 +43,7 @@ Rectangle {
     // Keep disabled controls and separators from forwarding presses or wheel
     // events to the canvas. The interactive children sit above this shield.
     MouseArea {
+        z: 0
         anchors.fill: parent
         acceptedButtons: Qt.AllButtons
         onWheel: wheel => { wheel.accepted = true }
@@ -49,6 +51,7 @@ Rectangle {
 
     Item {
         id: panelContent
+        z: 1
         anchors.fill: parent
         layer.enabled: true
         layer.effect: MultiEffect {
@@ -257,6 +260,7 @@ Rectangle {
 
     Rectangle {
         id: roundedMask
+        z: -1
         anchors.fill: parent
         radius: root.radius
         color: "white"
@@ -264,6 +268,7 @@ Rectangle {
         layer.enabled: true
     }
     Rectangle {
+        z: 2
         objectName: "mediaPanelBorder"
         anchors.fill: parent
         color: "transparent"
@@ -271,5 +276,5 @@ Rectangle {
         border.width: 1
         border.color: Theme.overlayBorder
     }
-    Timer { id: scrollbarHide; interval: 500 }
+    Timer { id: scrollbarHide; interval: UiTiming.scrollbarHideDelayMs }
 }

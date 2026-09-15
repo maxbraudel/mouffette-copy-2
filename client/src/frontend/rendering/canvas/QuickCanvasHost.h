@@ -27,7 +27,7 @@ public:
     QList<CanvasMedia*> enumerateMediaItems() const override;
     void deleteMediaItemCanonical(CanvasMedia* mediaItem) override;
 
-    void setActiveIdeaId(const QString& canvasSessionId) override;
+    void setActiveProjectId(const QString& projectId) override;
     void setWebSocketClient(WebSocketClient* client) override;
     void setUploadManager(UploadManager* manager) override;
     void setFileManager(FileManager* manager) override;

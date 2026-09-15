@@ -71,6 +71,7 @@ class SceneRunRegistry {
             || (() => Number(process.hrtime.bigint() / 1_000_000n));
         this.runs = new Map(); // remoteSessionId -> SceneRun
         this.runToSession = new Map(); // sceneRunId -> remoteSessionId
+        this.runByTarget = new Map(); // targetEndpointId -> remoteSessionId
         this.tombstones = new Map(); // sceneRunId -> terminal summary
     }
 
@@ -92,6 +93,10 @@ class SceneRunRegistry {
                 return { ok: true, replay: true, run: current };
             }
             return { ok: false, error: 'scene_run_already_active' };
+        }
+        const targetSessionId = binding && this.runByTarget.get(binding.targetEndpointId);
+        if (targetSessionId && targetSessionId !== binding.remoteSessionId) {
+            return { ok: false, error: 'target_scene_already_running' };
         }
         if (this.tombstones.has(binding && binding.sceneRunId)) {
             return { ok: false, error: 'scene_run_id_reused' };
@@ -146,6 +151,7 @@ class SceneRunRegistry {
         };
         this.runs.set(run.remoteSessionId, run);
         this.runToSession.set(run.sceneRunId, run.remoteSessionId);
+        this.runByTarget.set(run.targetEndpointId, run.remoteSessionId);
         return { ok: true, replay: false, run };
     }
 
@@ -428,6 +434,9 @@ class SceneRunRegistry {
             ? timing.nowMonotonic : this.monotonicNow();
         this.runs.delete(run.remoteSessionId);
         this.runToSession.delete(run.sceneRunId);
+        if (this.runByTarget.get(run.targetEndpointId) === run.remoteSessionId) {
+            this.runByTarget.delete(run.targetEndpointId);
+        }
         this.tombstones.set(run.sceneRunId, run);
         this.#trimTombstones(run.closedServerMonotonicMs);
         return run;

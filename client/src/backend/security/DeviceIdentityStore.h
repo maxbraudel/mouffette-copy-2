@@ -7,7 +7,7 @@
 #include <memory>
 
 /**
- * Stable, self-certifying installation identity used by protocol v3.
+ * Stable, self-certifying installation identity used by protocol v4.
  *
  * The private Ed25519 key is stored in the operating-system credential vault
  * when one is available.  A strictly owner-only file is the explicit fallback
@@ -48,7 +48,7 @@ public:
     static QString installationIdForPublicKey(const QByteArray& publicKeyDer);
     static QString endpointIdForInstallation(const QString& installationId,
                                              const QString& instanceId);
-    static bool removeLegacyInstallationIdentity(QString* errorMessage = nullptr);
+    static bool removeObsoleteInstallationIdentity(QString* errorMessage = nullptr);
 
 private:
     class Impl;

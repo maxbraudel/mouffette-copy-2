@@ -5,6 +5,6 @@
     "uploadActive": true,
     "trackedFiles": 2
   },
-  "renderer": "legacy_screen_canvas",
-  "version": 1
+  "renderer": "qt_quick_canvas",
+  "version": 2
 }

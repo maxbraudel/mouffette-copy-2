@@ -11,20 +11,31 @@ function main() {
   const sender = read('src/backend/domain/canvas/CanvasDocument.cpp');
   const receiver = read('src/frontend/rendering/remote/RemoteSceneController.cpp');
   const remoteQml = read('resources/qml/RemoteSceneRoot.qml');
+  const textQml = read('resources/qml/TextItem.qml');
+  const sceneStart = sender.indexOf('QJsonObject CanvasDocument::serializeSceneState() const');
+  const sceneEnd = sender.indexOf('QJsonObject CanvasDocument::serializeProjectState() const');
+  const sceneSerializer = sender.slice(sceneStart, sceneEnd);
 
-  assert(sender.includes('QStringLiteral("renderSchemaVersion"), 2'), 'schema v2 marker missing');
+  assert(sceneStart >= 0 && sceneEnd > sceneStart, 'scene serializer boundaries missing');
+  assert(sceneSerializer.includes('QStringLiteral("renderSchemaVersion"), 2'), 'schema v2 marker missing');
   for (const field of ['fontPixelSize', 'fontUnderline', 'fontUppercase', 'textOutlineWidthPx', 'z', 'visible']) {
-    assert(sender.includes(`QStringLiteral("${field}")`), `sender field missing: ${field}`);
+    assert(sceneSerializer.includes(`QStringLiteral("${field}")`), `sender field missing: ${field}`);
   }
-  for (const legacy of ['fontSize', 'fontBold', 'textBorderWidthPercent', 'uniformScale']) {
-    assert(sender.includes(`QStringLiteral("${legacy}")`), `compatibility field removed: ${legacy}`);
+  for (const removed of ['fontSize', 'fontBold', 'textBorderWidthPercent', 'uniformScale']) {
+    assert(!sceneSerializer.includes(`QStringLiteral("${removed}")`), `obsolete field remains: ${removed}`);
+    assert(!receiver.includes(`"${removed}"`), `receiver still accepts obsolete field: ${removed}`);
   }
-  assert(receiver.includes('m.value("fontPixelSize").toInt(0)'), 'v2 pixel size is not read');
-  assert(receiver.includes('TextRenderMetrics::effectiveFontPixelSize'), 'v1 font fallback is missing');
-  assert(receiver.includes('m.value("visible").toBool(true)'), 'visibility fallback is missing');
-  assert(receiver.includes('mediaArray.size() - idx'), 'v1 topmost-first z fallback is missing');
-  assert(remoteQml.includes('media.z || 0'), 'explicit z is not applied');
-  assert(remoteQml.includes('media.contentVisible !== false'), 'visibility is not applied');
+  assert(receiver.includes('readBoundedInteger(mediaObject, "fontPixelSize", 1, 4096'), 'pixel size is not required');
+  assert(receiver.includes('readBoundedInteger(mediaObject, "fontWeight", 1, 900'), 'font weight is not required');
+  assert(!receiver.includes('TextRenderMetrics::effectiveFontPixelSize'), 'font fallback remains');
+  assert(!receiver.includes('toBool(true)'), 'boolean fallback remains');
+  assert(!receiver.includes('mediaArray.size() - idx'), 'implicit stacking fallback remains');
+  assert(remoteQml.includes('z: media ? media.z : 0'), 'explicit z is not applied');
+  assert(remoteQml.includes('media.contentVisible && media.renderVisible'), 'explicit visibility is not applied');
+  assert(remoteQml.includes('root.spanReady(media.mediaId, media.spanId)'), 'canonical span identity is not used');
+  assert(!remoteQml.includes('remoteMediaId'), 'remote renderer identity alias remains');
+  assert(textQml.includes('outlinePixels: Math.max(0, root.outlineWidthPx)'), 'pixel outline is not authoritative');
+  assert(!textQml.includes('outlineWidthPercent'), 'percentage outline fallback remains');
 
   const outline = (percent, pixels) => percent <= 0 ? 0 : Math.max(1, Math.round(percent * pixels / 100));
   assert(outline(0, 48) === 0, 'zero outline formula regression');

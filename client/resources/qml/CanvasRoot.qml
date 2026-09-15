@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Window
+import Mouffette.Canvas
 Rectangle {
     id: root
     color: "#10131a"
@@ -869,7 +870,7 @@ Rectangle {
                     // force-clears the snap freeze so content is never permanently stuck.
                     Timer {
                         id: snapFreezeCleanupTimer
-                        interval: 300
+                        interval: UiTiming.snapFreezeCleanupDelayMs
                         repeat: false
                         onTriggered: {
                             if (root.liveSnapDragMediaId === mediaDelegate.currentMediaId) {
@@ -919,10 +920,8 @@ Rectangle {
                                              : (usesLiveResize ? root.liveResizeScale : localScale)
                     transformOrigin: Item.TopLeft
                     z: media ? media.z : 0
-                    visible: !!media && (media.contentVisible !== false)
-                    opacity: media ? ((media.contentOpacity !== undefined ? media.contentOpacity : 1.0)
-                                    * (media.animatedDisplayOpacity !== undefined ? media.animatedDisplayOpacity : 1.0))
-                                   : 1.0
+                    visible: !!media && media.contentVisible
+                    opacity: media ? media.contentOpacity * media.animatedDisplayOpacity : 1.0
                     // Opacity alone does not disable Qt input. Match the picker
                     // for the whole subtree, including TextEdit and MouseArea,
                     // so invisible content cannot swallow another item's press.
@@ -934,7 +933,7 @@ Rectangle {
                         rootController: root
                         coordinatorRef: inputLayer ? inputLayer.inputCoordinator : null
                         delegateItem: mediaDelegate
-                        mediaContentItem: mediaContentLoader.item
+                        mediaContentItem: mediaContentLoader.visualItem
                     }
 
                     MediaVisual {
@@ -988,24 +987,24 @@ Rectangle {
                     Component.onCompleted: Qt.callLater(reportDropHandoffReady)
 
                     Binding {
-                        target: mediaContentLoader.item
+                        target: mediaContentLoader.visualItem
                         property: "mediaWidth"
                         value: mediaContentLoader.liveWidth
-                        when: mediaContentLoader.item !== null && mediaDelegate.usesLiveAltResize
+                        when: mediaContentLoader.visualItem !== null && mediaDelegate.usesLiveAltResize
                     }
 
                     Binding {
-                        target: mediaContentLoader.item
+                        target: mediaContentLoader.visualItem
                         property: "mediaHeight"
                         value: mediaContentLoader.liveHeight
-                        when: mediaContentLoader.item !== null && mediaDelegate.usesLiveAltResize
+                        when: mediaContentLoader.visualItem !== null && mediaDelegate.usesLiveAltResize
                     }
 
                     // Connections lives inside mediaDelegate so both `mediaDelegate` and
                     // `root` ids are in scope — Components defined outside the Repeater
                     // cannot access the delegate's id directly.
                     Connections {
-                        target: mediaContentLoader.item
+                        target: mediaContentLoader.visualItem
                         ignoreUnknownSignals: true
                         function onPrimaryPressed(mediaId, additive) {
                             if (!mediaId)
@@ -1529,7 +1528,7 @@ Rectangle {
             }
 
             Timer {
-                interval: 120
+                interval: UiTiming.inputWatchdogIntervalMs
                 repeat: true
                 running: true
                 onTriggered: {
@@ -1573,7 +1572,10 @@ Rectangle {
                 // create a visible blink.
                 enabled: !(dropPreviewTitle.preview
                            && dropPreviewTitle.preview.handoffMediaId)
-                NumberAnimation { duration: 80; easing.type: Easing.OutCubic }
+                NumberAnimation {
+                    duration: UiTiming.contentFadeDurationMs
+                    easing.type: Easing.OutCubic
+                }
             }
 
             MediaNamePill {

@@ -476,7 +476,11 @@ class RemoteCacheStore extends EventEmitter {
             if (error.code !== 'EEXIST') throw error;
         }
         await this.#assertDirectoryNoSymlink(child, 'unsafe_symlink');
-        if (privateDirectory) await fsp.chmod(child, 0o700);
+        // Windows has no POSIX mode bits; mkdir inherits the user's ACL and
+        // chmod may fail with EPERM even though the directory is private.
+        if (privateDirectory && process.platform !== 'win32') {
+            await fsp.chmod(child, 0o700);
+        }
     }
 
     async #assertDirectoryNoSymlink(candidate, code) {
@@ -579,7 +583,9 @@ class RemoteCacheStore extends EventEmitter {
         }
         if (active.exists) {
             await fsp.rename(active.path, quarantinePath);
-            await fsp.chmod(quarantinePath, 0o700);
+            if (process.platform !== 'win32') {
+                await fsp.chmod(quarantinePath, 0o700);
+            }
             await this.#syncDirectory(active.senderPath);
             await this.#syncDirectory(this.quarantineRoot);
             quarantineExists = true;
@@ -791,7 +797,7 @@ class RemoteCacheStore extends EventEmitter {
             return 1;
         }
 
-        await fsp.chmod(candidate, 0o700);
+        if (process.platform !== 'win32') await fsp.chmod(candidate, 0o700);
         let removed = 0;
         const names = await fsp.readdir(candidate);
         for (const name of names) {
@@ -978,7 +984,10 @@ class RemoteCacheStore extends EventEmitter {
             handle = await fsp.open(directory, 'r');
             await handle.sync();
         } catch (error) {
-            if (!['EINVAL', 'ENOTSUP', 'EISDIR'].includes(error.code)) throw error;
+            const unsupportedWindowsDirectorySync = process.platform === 'win32'
+                && ['EPERM', 'EACCES'].includes(error.code);
+            if (!unsupportedWindowsDirectorySync
+                && !['EINVAL', 'ENOTSUP', 'EISDIR'].includes(error.code)) throw error;
         } finally {
             if (handle) await handle.close();
         }

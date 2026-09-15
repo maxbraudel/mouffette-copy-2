@@ -62,7 +62,7 @@ private slots:
         int progressCount = 0;
         int stopCount = 0;
         auto send = [&](QWebSocket* peer, QJsonObject message) {
-            message.insert(QStringLiteral("protocolVersion"), 3);
+            message.insert(QStringLiteral("protocolVersion"), 4);
             message.insert(QStringLiteral("serverBootId"), bootId);
             message.insert(QStringLiteral("messageId"),
                            QUuid::createUuid().toString(QUuid::WithoutBraces));
@@ -97,6 +97,7 @@ private slots:
                             {"leaseTimeoutMs", 3000}, {"scenePrepareTimeoutMs", 1000},
                             {"sceneActivationLeadMs", 500}, {"sceneMaxClockSkewMs", 50},
                             {"sceneStartedAckTimeoutMs", 5000}, {"sceneMaxStartSkewMs", 750},
+                            {"sceneStopTimeoutMs", 5000},
                             {"uploadIdleTimeoutMs", 45000}, {"uploadTargetAckTimeoutMs", 30000},
                             {"removalAckTimeoutMs", 30000}}}
                     });
@@ -105,7 +106,12 @@ private slots:
                         {"remoteSessionId", "preparation-session"}, {"generation", 1},
                         {"ownerEndpointId", ownerId}, {"targetEndpointId", targetId},
                         {"ownerConnectionGeneration", 1}, {"targetConnectionGeneration", 1},
-                        {"resumeToken", "test-resume-token"}, {"phase", "Active"}
+                        {"resumeToken", "test-resume-token"}, {"phase", "Active"},
+                        {"snapshotSequence", 1},
+                        {"snapshot", QJsonObject{
+                            {"screens", QJsonArray{}}, {"systemUI", QJsonArray{}},
+                            {"volumePercent", QJsonValue::Null}, {"revision", 1},
+                            {"capturedAtEpochMs", 1}}}
                     });
                 } else if (type == QLatin1String("heartbeat")) {
                     send(peer, {{"type", "heartbeat_ack"}, {"connectionGeneration", 1},
@@ -246,7 +252,7 @@ private slots:
         int readyCount = 0;
         for (const QJsonValue& value : checklist) {
             const QJsonObject item = value.toObject();
-            // Protocol v3 rejects any extra keys, including mediaId.
+            // Protocol v4 rejects any extra keys, including mediaId.
             QCOMPARE(item.keys(), (QStringList{"itemId", "ready", "stage"}));
             if (item.value("ready").toBool()) ++readyCount;
         }
@@ -274,7 +280,7 @@ private slots:
         const QString targetId(43, QLatin1Char('B'));
         int scenePrepareCount = 0;
         auto send = [&](QWebSocket* peer, QJsonObject message) {
-            message.insert(QStringLiteral("protocolVersion"), 3);
+            message.insert(QStringLiteral("protocolVersion"), 4);
             message.insert(QStringLiteral("serverBootId"), bootId);
             message.insert(QStringLiteral("messageId"),
                            QUuid::createUuid().toString(QUuid::WithoutBraces));
@@ -309,6 +315,7 @@ private slots:
                             {"leaseTimeoutMs", 3000}, {"scenePrepareTimeoutMs", 5000},
                             {"sceneActivationLeadMs", 500}, {"sceneMaxClockSkewMs", 50},
                             {"sceneStartedAckTimeoutMs", 5000}, {"sceneMaxStartSkewMs", 750},
+                            {"sceneStopTimeoutMs", 5000},
                             {"uploadIdleTimeoutMs", 45000}, {"uploadTargetAckTimeoutMs", 30000},
                             {"removalAckTimeoutMs", 30000}}}
                     });
@@ -317,7 +324,12 @@ private slots:
                         {"remoteSessionId", "scene-exclusion-session"}, {"generation", 1},
                         {"ownerEndpointId", ownerId}, {"targetEndpointId", targetId},
                         {"ownerConnectionGeneration", 1}, {"targetConnectionGeneration", 1},
-                        {"resumeToken", "scene-exclusion-token"}, {"phase", "Active"}
+                        {"resumeToken", "scene-exclusion-token"}, {"phase", "Active"},
+                        {"snapshotSequence", 1},
+                        {"snapshot", QJsonObject{
+                            {"screens", QJsonArray{}}, {"systemUI", QJsonArray{}},
+                            {"volumePercent", QJsonValue::Null}, {"revision", 1},
+                            {"capturedAtEpochMs", 1}}}
                     });
                 } else if (type == QLatin1String("heartbeat")) {
                     send(peer, {{"type", "heartbeat_ack"}, {"connectionGeneration", 1},
@@ -512,8 +524,7 @@ private slots:
                      QStringLiteral("textColor")).toString()),
                  QColor(Qt::white));
         QCOMPARE(disabledProjection.value(
-                     QStringLiteral("textOutlineWidthPercent")).toDouble(),
-                 0.0);
+                     QStringLiteral("textOutlineWidthPx")).toDouble(), 0.0);
         QCOMPARE(QColor(disabledProjection.value(
                      QStringLiteral("textOutlineColor")).toString()),
                  QColor(Qt::black));
@@ -567,9 +578,8 @@ private slots:
         QCOMPARE(QColor(enabledProjection.value(
                      QStringLiteral("textColor")).toString()),
                  QColor(QStringLiteral("#8044aa22")));
-        QCOMPARE(enabledProjection.value(
-                     QStringLiteral("textOutlineWidthPercent")).toDouble(),
-                 100.0);
+        QVERIFY(enabledProjection.value(
+                    QStringLiteral("textOutlineWidthPx")).toDouble() > 0.0);
         QCOMPARE(QColor(enabledProjection.value(
                      QStringLiteral("textOutlineColor")).toString()),
                  QColor(QStringLiteral("#ff22ccdd")));

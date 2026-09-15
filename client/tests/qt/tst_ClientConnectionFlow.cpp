@@ -72,7 +72,7 @@ private slots:
         QVERIFY(!navigation.canvasVisible());
     }
 
-    void clickingClientOpensEmptyWorkspaceUntilProjectIsExplicitlyCreated()
+    void clickingClientWaitsForAuthenticatedSnapshotBeforeCreatingProject()
     {
         QTemporaryDir root;
         QVERIFY(root.isValid());
@@ -82,7 +82,6 @@ private slots:
         context.instanceId = QStringLiteral("client-connection-flow");
         context.profileId = QStringLiteral("client-connection-flow");
         context.rootPath = root.path();
-        context.temporaryRoot = root.path();
         context.persistent = false;
         RuntimeProfile::configure(context);
 
@@ -91,30 +90,20 @@ private slots:
             QStringLiteral("endpoint-real-canvas"), QStringLiteral("Windows B"));
         runtime.buildDisplayClientList({client});
 
-        QSignalSpy activeSessionChanged(
-            &runtime, &ApplicationRuntime::activeSessionChanged);
+        QSignalSpy activeWorkspaceChanged(
+            &runtime, &ApplicationRuntime::activeWorkspaceChanged);
         runtime.activateClient(client.endpointId());
 
-        QCOMPARE(runtime.getActiveSessionIdentity(), client.endpointId());
+        QCOMPARE(runtime.activeWorkspaceEndpointId(), client.endpointId());
         QVERIFY(!runtime.getActiveCanvas());
         QVERIFY(!runtime.activeProjectExists());
         QVERIFY(!runtime.activeRemoteSessionExists());
-        QVERIFY(runtime.findCanvasSession(client.endpointId()));
-        QVERIFY(!runtime.findCanvasSession(client.endpointId())->canvas);
-        QVERIFY(activeSessionChanged.count() >= 1);
+        QVERIFY(runtime.findWorkspace(client.endpointId()));
+        QVERIFY(!runtime.findWorkspace(client.endpointId())->canvas);
+        QVERIFY(activeWorkspaceChanged.count() >= 1);
 
-        runtime.createActiveProject();
-        QVERIFY(runtime.activeProjectExists());
-        QVERIFY(!runtime.activeRemoteSessionExists());
-        QVERIFY(runtime.getActiveCanvas());
-        QVERIFY(runtime.getActiveCanvas()->document());
-        QVERIFY(!runtime.getActiveCanvas()->document()->canvasSessionId().isEmpty());
-        QVERIFY(runtime.getActiveCanvas()->document()->screens().isEmpty());
-        const auto* project = runtime.getProjectManager()->projectForTarget(
-            client.endpointId());
-        QVERIFY(project);
-        QCOMPARE(runtime.getActiveCanvas()->document()->canvasSessionId(),
-                 project->projectId);
+        QCOMPARE(runtime.getProjectManager()->projectCount(), 0);
+        QVERIFY(runtime.getNavigationManager()->isLoading());
 
         runtime.handleApplicationAboutToQuit();
     }

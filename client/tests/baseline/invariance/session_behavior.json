@@ -1,18 +1,19 @@
 {
-  "id": "session_behavior",
+  "id": "workspace_behavior",
   "rules": [
     {
-      "file": "src/backend/domain/session/SessionManager.h",
+      "file": "src/backend/domain/workspace/WorkspaceManager.h",
       "mustContain": [
-        "QString canvasSessionId",
+        "QString targetEndpointId",
+        "QString projectId",
         "ICanvasHost\\* canvas"
       ]
     },
     {
-      "file": "src/backend/controllers/CanvasSessionController.cpp",
+      "file": "src/backend/controllers/ClientWorkspaceController.cpp",
       "mustContain": [
-        "ensureCanvasSession",
-        "setActiveIdeaId\\(session\\.canvasSessionId\\)"
+        "getOrCreateWorkspace",
+        "setActiveProjectId\\(workspace->projectId\\)"
       ]
     }
   ]

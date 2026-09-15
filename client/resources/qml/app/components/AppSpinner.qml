@@ -1,5 +1,6 @@
 import QtQuick
 import Mouffette.App
+import Mouffette.Canvas
 
 Item {
     id: root
@@ -33,7 +34,7 @@ Item {
     RotationAnimator on rotation {
         from: 0
         to: 360
-        duration: 900
+        duration: UiTiming.spinnerRotationDurationMs
         loops: Animation.Infinite
         running: root.running
     }

@@ -21,7 +21,6 @@ RuntimeProfileContext temporaryContext(const QString& root,
     context.instanceId = id;
     context.profileId = id;
     context.rootPath = root;
-    context.temporaryRoot = root;
     context.persistent = false;
     return context;
 }
@@ -52,7 +51,7 @@ private slots:
     void manifestCases();
     void normalBootPreservesDurableStateAndPurgesCache();
     void corruptComponentsAreResetIndependently();
-    void versionTwoProjectStoreIsResetInIsolation();
+    void obsoleteProjectStoreIsResetInIsolation();
     void mismatchedStorageNeverTouchesExternalSource();
     void runtimesHaveIndependentSettingsCachesAndIdentities();
     void unsafeRuntimeRootFailsClosed();
@@ -120,7 +119,6 @@ void RuntimeStorageBootstrapTest::normalBootPreservesDurableStateAndPurgesCache(
     QSettings settings(RuntimeProfile::settingsFilePath(), QSettings::IniFormat);
     settings.setValue(QStringLiteral("serverUrl"), QStringLiteral("ws://127.0.0.1:9000"));
     settings.setValue(QStringLiteral("autoUploadImportedMedia"), true);
-    settings.setValue(QStringLiteral("useQuickCanvasRenderer"), false);
     settings.sync();
     const QByteArray projectsBefore = [&] {
         QFile file(RuntimeProfile::projectsFilePath());
@@ -137,8 +135,6 @@ void RuntimeStorageBootstrapTest::normalBootPreservesDurableStateAndPurgesCache(
     const auto result = bootstrap.run();
     QVERIFY(result.succeeded());
     QVERIFY(!result.hadReset());
-    QVERIFY(!RuntimeProfile::readSettings().contains(
-        QStringLiteral("useQuickCanvasRenderer")));
     QVERIFY(!QFileInfo::exists(cached));
     QCOMPARE(RuntimeProfile::readSettings().value(QStringLiteral("serverUrl")).toString(),
              QStringLiteral("ws://127.0.0.1:9000"));
@@ -164,6 +160,15 @@ void RuntimeStorageBootstrapTest::corruptComponentsAreResetIndependently()
     QVERIFY(result.succeeded());
     QCOMPARE(result.resetCategories, QStringList{QStringLiteral("settings")});
 
+    QSettings settings(RuntimeProfile::settingsFilePath(), QSettings::IniFormat);
+    settings.setValue(QStringLiteral("unsupportedSetting"), true);
+    settings.sync();
+    result = bootstrap.run();
+    QVERIFY(result.succeeded());
+    QCOMPARE(result.resetCategories, QStringList{QStringLiteral("settings")});
+    QVERIFY(!RuntimeProfile::readSettings().contains(
+        QStringLiteral("unsupportedSetting")));
+
     QVERIFY(writeBytes(RuntimeProfile::projectsFilePath(), QByteArrayLiteral("{")));
     result = bootstrap.run();
     QVERIFY(result.succeeded());
@@ -183,7 +188,7 @@ void RuntimeStorageBootstrapTest::corruptComponentsAreResetIndependently()
     QVERIFY(repaired.isReady());
 }
 
-void RuntimeStorageBootstrapTest::versionTwoProjectStoreIsResetInIsolation()
+void RuntimeStorageBootstrapTest::obsoleteProjectStoreIsResetInIsolation()
 {
     QTemporaryDir directory;
     QVERIFY(directory.isValid());
@@ -230,7 +235,7 @@ void RuntimeStorageBootstrapTest::versionTwoProjectStoreIsResetInIsolation()
     QFile projects(RuntimeProfile::projectsFilePath());
     QVERIFY(projects.open(QIODevice::ReadOnly));
     const QJsonObject root = QJsonDocument::fromJson(projects.readAll()).object();
-    QCOMPARE(root.value(QStringLiteral("schemaVersion")).toInt(), 3);
+    QCOMPARE(root.value(QStringLiteral("schemaVersion")).toInt(), 4);
     QVERIFY(root.value(QStringLiteral("projects")).toArray().isEmpty());
 }
 

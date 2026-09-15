@@ -7,7 +7,7 @@
 #include "backend/managers/app/SettingsManager.h"
 #include "backend/notifications/NotificationCenter.h"
 #include "backend/runtime/RuntimeProfile.h"
-#include "frontend/qml/CanvasSessionViewModel.h"
+#include "frontend/qml/ClientWorkspaceViewModel.h"
 #include "frontend/qml/ClientListModel.h"
 #include "frontend/qml/NotificationListModels.h"
 #include "frontend/qml/SceneActivityListModel.h"
@@ -50,9 +50,9 @@ QObject* ApplicationController::clientsModel() const { return m_clientsModel; }
 QObject* ApplicationController::sceneActivitiesModel() const { return m_sceneActivitiesModel; }
 QObject* ApplicationController::historyModel() const { return m_historyModel; }
 QObject* ApplicationController::toastModel() const { return m_toastModel; }
-QObject* ApplicationController::activeCanvasSession() const
+QObject* ApplicationController::activeWorkspace() const
 {
-    return m_activeCanvasSession.data();
+    return m_activeWorkspace.data();
 }
 
 bool ApplicationController::connectionEnabled() const
@@ -105,16 +105,6 @@ bool ApplicationController::remoteBusy() const
     return m_runtime && m_runtime->remoteBusy();
 }
 
-bool ApplicationController::canCloseSession() const
-{
-    return m_runtime && m_runtime->canCloseActiveSession();
-}
-
-bool ApplicationController::closingSession() const
-{
-    return m_runtime && m_runtime->closingActiveSession();
-}
-
 bool ApplicationController::canDeleteProject() const
 {
     return m_runtime && m_runtime->canDeleteActiveProject();
@@ -123,21 +113,6 @@ bool ApplicationController::canDeleteProject() const
 bool ApplicationController::hasProject() const
 {
     return m_runtime && m_runtime->activeProjectExists();
-}
-
-bool ApplicationController::hasRemoteSession() const
-{
-    return m_runtime && m_runtime->activeRemoteSessionExists();
-}
-
-bool ApplicationController::canCreateProject() const
-{
-    return m_runtime && m_runtime->canCreateActiveProject();
-}
-
-bool ApplicationController::canLaunchSession() const
-{
-    return m_runtime && m_runtime->canLaunchActiveSession();
 }
 
 QString ApplicationController::settingsServerUrl() const
@@ -246,14 +221,14 @@ void ApplicationController::initializeBackend()
     connect(m_runtime.get(), &ApplicationRuntime::applicationPageChanged,
             this, [this](int page) {
         setApplicationPage(static_cast<ApplicationPage>(page));
-        refreshActiveCanvasSession();
+        refreshActiveWorkspace();
     });
     connect(m_runtime.get(), &ApplicationRuntime::qmlRaiseRequested,
             this, &ApplicationController::raiseRequested);
     connect(m_runtime.get(), &ApplicationRuntime::qmlHideRequested,
             this, &ApplicationController::hideRequested);
-    connect(m_runtime.get(), &ApplicationRuntime::activeSessionChanged,
-            this, [this]() { refreshActiveCanvasSession(); });
+    connect(m_runtime.get(), &ApplicationRuntime::activeWorkspaceChanged,
+            this, [this]() { refreshActiveWorkspace(); });
 
     m_clientsModel->setClients(m_runtime->displayClients());
     m_sceneActivitiesModel->setSource(m_runtime->getSceneActivityModel());
@@ -277,7 +252,7 @@ void ApplicationController::openClient(const QString& endpointId)
     if (!m_runtime) return;
     m_runtime->activateClient(endpointId);
     setApplicationPage(ApplicationPage::Canvas);
-    refreshActiveCanvasSession();
+    refreshActiveWorkspace();
 }
 
 void ApplicationController::openOngoingScene(const QString& sceneRunId)
@@ -289,7 +264,7 @@ void ApplicationController::openOngoingScene(const QString& sceneRunId)
     if (activity.direction == SceneActivityModel::Direction::Outgoing) {
         m_runtime->activateOngoingScene(sceneRunId);
         setApplicationPage(ApplicationPage::Canvas);
-        refreshActiveCanvasSession();
+        refreshActiveWorkspace();
         return;
     }
 
@@ -321,7 +296,7 @@ void ApplicationController::goBack()
     if (!m_runtime) return;
     m_runtime->navigateToClients();
     setApplicationPage(ApplicationPage::Clients);
-    refreshActiveCanvasSession();
+    refreshActiveWorkspace();
 }
 
 void ApplicationController::showHistory()
@@ -329,27 +304,12 @@ void ApplicationController::showHistory()
     if (!m_runtime) return;
     m_runtime->navigateToHistory();
     setApplicationPage(ApplicationPage::History);
-    refreshActiveCanvasSession();
+    refreshActiveWorkspace();
 }
 
 void ApplicationController::toggleConnection()
 {
     if (m_runtime) m_runtime->toggleConnectionEnabled();
-}
-
-void ApplicationController::closeSession()
-{
-    if (m_runtime) m_runtime->closeActiveSession();
-}
-
-void ApplicationController::createProject()
-{
-    if (m_runtime) m_runtime->createActiveProject();
-}
-
-void ApplicationController::launchSession()
-{
-    if (m_runtime) m_runtime->launchActiveSession();
 }
 
 void ApplicationController::requestDeleteProject()
@@ -373,7 +333,7 @@ void ApplicationController::acceptDialog()
     if (!m_runtime) return;
     if (accepted == DialogKind::DeleteProject) {
         m_runtime->deleteActiveProjectConfirmed();
-        refreshActiveCanvasSession();
+        refreshActiveWorkspace();
     } else if (accepted == DialogKind::ClearHistory) {
         if (NotificationCenter* center = m_runtime->getNotificationCenter()) {
             center->clearHistory();
@@ -422,6 +382,11 @@ void ApplicationController::setWindowVisible(bool visible)
     if (m_runtime) m_runtime->setQmlWindowVisible(visible);
 }
 
+void ApplicationController::setPointerInside(bool inside)
+{
+    if (m_runtime) m_runtime->setPointerInsideControlWindow(inside);
+}
+
 void ApplicationController::handleApplicationStateChanged(Qt::ApplicationState state)
 {
     if (m_runtime) m_runtime->handleApplicationStateChanged(state);
@@ -451,39 +416,39 @@ void ApplicationController::refreshPresentation()
     emit presentationChanged();
 }
 
-void ApplicationController::refreshActiveCanvasSession()
+void ApplicationController::refreshActiveWorkspace()
 {
     if (!m_runtime || m_applicationPage != ApplicationPage::Canvas) {
-        if (m_activeCanvasSession) {
-            m_activeCanvasSession = nullptr;
-            emit activeCanvasSessionChanged();
+        if (m_activeWorkspace) {
+            m_activeWorkspace = nullptr;
+            emit activeWorkspaceChanged();
         }
         return;
     }
-    const QString id = m_runtime->getActiveSessionIdentity();
-    ApplicationRuntime::CanvasSession* session = m_runtime->findCanvasSession(id);
-    if (!session || !session->canvas) {
-        if (ClientWorkspaceViewModel* cached = m_canvasSessions.value(id)) {
+    const QString id = m_runtime->activeWorkspaceEndpointId();
+    ApplicationRuntime::ClientWorkspace* workspace = m_runtime->findWorkspace(id);
+    if (!workspace || !workspace->canvas) {
+        if (ClientWorkspaceViewModel* cached = m_workspaces.value(id)) {
             cached->setCanvas(nullptr);
             cached->refreshCapabilities();
         }
-        if (m_activeCanvasSession) {
-            m_activeCanvasSession = nullptr;
-            emit activeCanvasSessionChanged();
+        if (m_activeWorkspace) {
+            m_activeWorkspace = nullptr;
+            emit activeWorkspaceChanged();
         }
         return;
     }
 
-    ClientWorkspaceViewModel* viewModel = m_canvasSessions.value(id);
+    ClientWorkspaceViewModel* viewModel = m_workspaces.value(id);
     if (!viewModel) {
         viewModel = new ClientWorkspaceViewModel(
-            id, session->canvas,
+            id, workspace->canvas,
             [backend = m_runtime.get()]() {
                 if (backend) backend->onUploadButtonClicked();
             }, m_runtime->getUploadManager(),
             [backend = m_runtime.get(), id]() {
-                const ApplicationRuntime::CanvasSession* current = backend
-                    ? backend->findCanvasSession(id) : nullptr;
+                const ApplicationRuntime::ClientWorkspace* current = backend
+                    ? backend->findWorkspace(id) : nullptr;
                 return current && current->upload.remoteFilesPresent;
             },
             [backend = m_runtime.get(), id]() {
@@ -493,14 +458,14 @@ void ApplicationController::refreshActiveCanvasSession()
                 return backend && backend->getProjectManager()
                     && backend->getProjectManager()->hasProjectForTarget(id);
             }, this);
-        m_canvasSessions.insert(id, viewModel);
+        m_workspaces.insert(id, viewModel);
     } else {
-        viewModel->setCanvas(session->canvas);
+        viewModel->setCanvas(workspace->canvas);
         viewModel->refreshCapabilities();
     }
-    if (m_activeCanvasSession != viewModel) {
-        m_activeCanvasSession = viewModel;
-        emit activeCanvasSessionChanged();
+    if (m_activeWorkspace != viewModel) {
+        m_activeWorkspace = viewModel;
+        emit activeWorkspaceChanged();
     }
 }
 

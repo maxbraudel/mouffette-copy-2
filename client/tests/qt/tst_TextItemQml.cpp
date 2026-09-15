@@ -33,7 +33,7 @@ private slots:
         std::unique_ptr<QObject> object(component.createWithInitialProperties({
             {"mediaWidth", 600}, {"mediaHeight", 360},
             {"textContent", "Éi:B"}, {"fontPixelSize", 64},
-            {"outlineWidthPercent", 100}, {"textColor", QColor(Qt::white)},
+            {"outlineWidthPx", 64}, {"textColor", QColor(Qt::white)},
             {"outlineColor", QColor(Qt::red)}
         }));
         QVERIFY2(object, qPrintable(component.errorString()));

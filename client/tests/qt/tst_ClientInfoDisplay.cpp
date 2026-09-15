@@ -9,7 +9,7 @@ class ClientInfoDisplayTest : public QObject
 private slots:
     void normalizesEveryPublicAvailabilityBadge_data();
     void normalizesEveryPublicAvailabilityBadge();
-    void offlinePresenceOverridesStaleSessionState();
+    void disconnectedPresenceOverridesStaleSessionState();
     void formatsProjectCountdowns();
     void formatsCountdownBoundaries();
     void appendsInstanceNumberOnlyForSecondaryProfiles();
@@ -25,9 +25,8 @@ void ClientInfoDisplayTest::normalizesEveryPublicAvailabilityBadge_data()
     QTest::newRow("connected") << QStringLiteral("active") << QStringLiteral("Connected");
     QTest::newRow("reconnecting") << QStringLiteral("grace") << QStringLiteral("Reconnecting");
     QTest::newRow("disconnecting") << QStringLiteral("cleanup_pending") << QStringLiteral("Disconnecting");
-    QTest::newRow("in-use") << QStringLiteral("in_use") << QStringLiteral("In use");
-    QTest::newRow("offline") << QStringLiteral("Offline") << QStringLiteral("Offline");
-    QTest::newRow("unavailable") << QStringLiteral("cleanup_error") << QStringLiteral("Unavailable");
+    QTest::newRow("disconnected") << QStringLiteral("Disconnected") << QStringLiteral("Disconnected");
+    QTest::newRow("unreachable") << QStringLiteral("Unreachable") << QStringLiteral("Unreachable");
 }
 
 void ClientInfoDisplayTest::normalizesEveryPublicAvailabilityBadge()
@@ -41,7 +40,7 @@ void ClientInfoDisplayTest::normalizesEveryPublicAvailabilityBadge()
     QCOMPARE(client.availabilityBadgeText(), displayStatus);
 }
 
-void ClientInfoDisplayTest::offlinePresenceOverridesStaleSessionState()
+void ClientInfoDisplayTest::disconnectedPresenceOverridesStaleSessionState()
 {
     ClientInfo client(QStringLiteral("device-b"), QStringLiteral("Studio B"),
                       QStringLiteral("macOS"));
@@ -49,9 +48,9 @@ void ClientInfoDisplayTest::offlinePresenceOverridesStaleSessionState()
     client.setOnline(false);
     client.setHasProject(true);
 
-    QCOMPARE(client.availabilityBadgeText(), QStringLiteral("Offline"));
+    QCOMPARE(client.availabilityBadgeText(), QStringLiteral("Disconnected"));
     QCOMPARE(client.getProjectSummaryText(1'000), QStringLiteral("Project"));
-    QVERIFY(client.getDisplayText().endsWith(QStringLiteral("— Offline")));
+    QVERIFY(client.getDisplayText().endsWith(QStringLiteral("— Disconnected")));
 }
 
 void ClientInfoDisplayTest::formatsProjectCountdowns()

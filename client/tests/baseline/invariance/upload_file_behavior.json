@@ -5,9 +5,9 @@
       "file": "src/backend/handlers/UploadEventHandler.cpp",
       "mustContain": [
         "requestCancel\\(",
-        "reconcileRemoteFilesForSession\\(",
+        "reconcileRemoteFilesForWorkspace\\(",
         "toggleUpload\\(",
-        "associateFileWithIdea\\("
+        "associateFileWithProject\\("
       ]
     },
     {

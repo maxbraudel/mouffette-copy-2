@@ -35,7 +35,7 @@ assert.equal(config.cursorDebug, false);
 assert.equal(config.sceneStartedAckTimeoutMs, 5000);
 assert.equal(config.sceneMaxStartSkewMs, 750);
 assert.equal(config.sceneActivationLeadMs, 4000,
-    'an explicit legacy activation lead remains supported');
+    'the explicit activation lead is loaded');
 assert.ok(config.warnings.some((warning) => warning.includes('UNKNOWN_KEY')));
 
 process.env.MOUFFETTE_MISSPELLED_OPTION = 'true';

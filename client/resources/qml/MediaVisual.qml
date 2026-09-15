@@ -13,8 +13,6 @@ Item {
     property var handoffFrameSource: null
 
     readonly property var visualItem: visualLoader.item
-    // Compatibility alias for the former Loader-based local delegate.
-    readonly property var item: visualItem
     readonly property bool editing: !!(visualItem && visualItem.editing === true)
     readonly property bool contentReady: !!(visualItem && visualItem.contentReady === true)
     readonly property bool handoffContentReady: !!visualItem
@@ -67,9 +65,7 @@ Item {
             selected: root.selected
             handoffCovered: root.handoffCovered
             handoffFrameSource: root.handoffFrameSource
-            imageSource: root.media
-                         ? (root.media.sourceUrl || root.media.sourcePath || "")
-                         : ""
+            imageSource: root.media ? root.media.sourceUrl : ""
         }
     }
 
@@ -112,23 +108,21 @@ Item {
             mediaZ: 0
             selected: root.selected
             editingSession: root.editingSession
-            textContent: root.media ? (root.media.textContent || "") : ""
-            horizontalAlignment: root.media ? (root.media.textHorizontalAlignment || "center") : "center"
-            verticalAlignment: root.media ? (root.media.textVerticalAlignment || "center") : "center"
+            textContent: root.media ? root.media.textContent : ""
+            horizontalAlignment: root.media ? root.media.textHorizontalAlignment : "center"
+            verticalAlignment: root.media ? root.media.textVerticalAlignment : "center"
             fitToTextEnabled: !!(root.media && root.media.fitToTextEnabled)
-            fontFamily: root.media ? (root.media.textFontFamily || "Impact") : "Impact"
-            fontPixelSize: Math.max(1, root.media ? (root.media.textFontPixelSize || 22) : 22)
-            fontWeight: root.media ? (root.media.textFontWeight || 400) : 400
+            fontFamily: root.media ? root.media.textFontFamily : "Impact"
+            fontPixelSize: root.media ? root.media.textFontPixelSize : 22
+            fontWeight: root.media ? root.media.textFontWeight : 400
             fontItalic: !!(root.media && root.media.textItalic)
             fontUnderline: !!(root.media && root.media.textUnderline)
             fontUppercase: !!(root.media && root.media.textUppercase)
-            textColor: root.media ? (root.media.textColor || "#FFFFFFFF") : "#FFFFFFFF"
-            outlineWidthPercent: root.media ? (root.media.textOutlineWidthPercent || 0.0) : 0.0
-            outlineWidthPx: root.media && root.media.textOutlineWidthPx !== undefined
-                            ? root.media.textOutlineWidthPx : -1.0
-            outlineColor: root.media ? (root.media.textOutlineColor || "#FF000000") : "#FF000000"
+            textColor: root.media ? root.media.textColor : "#FFFFFFFF"
+            outlineWidthPx: root.media ? root.media.textOutlineWidthPx : 0.0
+            outlineColor: root.media ? root.media.textOutlineColor : "#FF000000"
             highlightEnabled: !!(root.media && root.media.textHighlightEnabled)
-            highlightColor: root.media ? (root.media.textHighlightColor || "#00000000") : "#00000000"
+            highlightColor: root.media ? root.media.textHighlightColor : "#00000000"
             textEditable: root.textEditable
         }
     }

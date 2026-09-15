@@ -1,4 +1,5 @@
 #include "backend/managers/system/SystemMonitor.h"
+#include "backend/config/AppConfig.h"
 #include "backend/domain/models/ClientInfo.h"
 #include <QTimer>
 #include <QProcess>
@@ -64,7 +65,8 @@ SystemMonitor::SystemMonitor(QObject* parent)
 {
     m_screenChangeTimer = new QTimer(this);
     m_screenChangeTimer->setSingleShot(true);
-    m_screenChangeTimer->setInterval(150);
+    m_screenChangeTimer->setInterval(
+        AppConfig::instance().screenChangeDebounceMs());
     connect(m_screenChangeTimer, &QTimer::timeout, this, [this]() {
         emit screenConfigurationChanged(getLocalScreenInfo());
     });
@@ -175,7 +177,8 @@ void SystemMonitor::startVolumeMonitoring() {
     
     if (!m_volTimer) {
         m_volTimer = new QTimer(this);
-        m_volTimer->setInterval(1200); // ~1.2s cadence
+        m_volTimer->setInterval(
+            AppConfig::instance().systemVolumePollIntervalMs());
         connect(m_volTimer, &QTimer::timeout, this, [this]() {
             if (m_volProc->state() == QProcess::NotRunning) {
                 m_volProc->start("/usr/bin/osascript", 
@@ -189,7 +192,8 @@ void SystemMonitor::startVolumeMonitoring() {
     // Non-macOS: simple polling; Windows call is fast
     if (!m_volTimer) {
         m_volTimer = new QTimer(this);
-        m_volTimer->setInterval(1200);
+        m_volTimer->setInterval(
+            AppConfig::instance().systemVolumePollIntervalMs());
         connect(m_volTimer, &QTimer::timeout, this, [this]() {
             int v = getSystemVolumePercent();
             if (v != m_cachedSystemVolume) {
@@ -209,7 +213,7 @@ void SystemMonitor::stopVolumeMonitoring() {
     }
     if (m_volProc && m_volProc->state() != QProcess::NotRunning) {
         m_volProc->kill();
-        m_volProc->waitForFinished(100);
+        m_volProc->waitForFinished(AppConfig::instance().processStopTimeoutMs());
     }
 #else
     if (m_volTimer) {

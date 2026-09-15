@@ -2,7 +2,7 @@
   "id": "qml_only_application_path",
   "rules": [
     {
-      "file": "src/backend/controllers/CanvasSessionController.cpp",
+      "file": "src/backend/controllers/ClientWorkspaceController.cpp",
       "mustContain": [
         "QuickCanvasHost::create",
         "mandatory Qt Quick canvas unavailable"

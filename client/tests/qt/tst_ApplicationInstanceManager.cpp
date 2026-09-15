@@ -43,7 +43,7 @@ void ApplicationInstanceManagerTest::allocatesAndReusesUnboundedSlots()
     QCOMPARE(second->start(&error), ApplicationInstanceManager::StartResult::Started);
     QCOMPARE(second->profile().ordinal, 2);
     QVERIFY(second->profile().isTemporary());
-    const QString secondRoot = second->profile().temporaryRoot;
+    const QString secondRoot = second->profile().rootPath;
     QVERIFY(QDir(secondRoot).exists());
 
     ApplicationInstanceManager third(QStringLiteral("allocation"), true, root.path());
@@ -157,7 +157,6 @@ void ApplicationInstanceManagerTest::redirectsSecondaryWritableState()
     context.profileId = QStringLiteral("instance-2-test");
     context.rootPath = root.path();
     context.persistent = false;
-    context.temporaryRoot = root.path();
     RuntimeProfile::configure(context);
 
     QVERIFY(RuntimeProfile::appDataLocation().startsWith(root.path()));

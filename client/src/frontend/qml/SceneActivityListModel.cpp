@@ -1,5 +1,6 @@
 #include "frontend/qml/SceneActivityListModel.h"
 
+#include "backend/config/AppConfig.h"
 #include "frontend/qml/ClientListModel.h"
 
 #include <QDateTime>
@@ -7,7 +8,8 @@
 SceneActivityListModel::SceneActivityListModel(QObject* parent)
     : QAbstractListModel(parent)
 {
-    m_durationTimer.setInterval(1000);
+    m_durationTimer.setInterval(
+        AppConfig::instance().sceneActivityRefreshIntervalMs());
     m_durationTimer.setTimerType(Qt::PreciseTimer);
     connect(&m_durationTimer, &QTimer::timeout, this, [this]() {
         if (!m_rows.isEmpty()) {

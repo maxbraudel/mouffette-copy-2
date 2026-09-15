@@ -19,23 +19,15 @@ QString FileManager::receivedMemoryKey(const RemoteCacheStore::Scope& scope,
         + QChar(0x1f) + fileId;
 }
 
-// Phase 4.3: Constructor with dependency injection
 FileManager::FileManager()
 {
-    // Phase 4.2: Initialize service references
     m_repository = &LocalFileRepository::instance();
     m_tracker = &RemoteFileTracker::instance();
     m_cache = &FileMemoryCache::instance();
 }
 
-FileManager::~FileManager()
-{
-    // Services are singletons, no need to delete
-}
-
 QString FileManager::getOrCreateFileId(const QString& filePath)
 {
-    // Delegate to LocalFileRepository
     return m_repository->getOrCreateFileId(filePath);
 }
 
@@ -87,19 +79,16 @@ QList<QString> FileManager::getMediaIdsForFile(const QString& fileId) const
 
 QString FileManager::getFilePathForId(const QString& fileId) const
 {
-    // Delegate to LocalFileRepository
     return m_repository->getFilePathForId(fileId);
 }
 
 QList<QString> FileManager::getAllFileIds() const
 {
-    // Delegate to LocalFileRepository
     return m_repository->getAllFileIds();
 }
 
 bool FileManager::hasFileId(const QString& fileId) const
 {
-    // Delegate to LocalFileRepository
     return m_repository->hasFileId(fileId);
 }
 
@@ -206,7 +195,7 @@ int FileManager::removeReceivedFileMappingsForScope(
     const QList<QString> ids = scopeIt->pathsByFileId.keys();
     for (const QString& fileId : ids) {
         releaseReceivedFileMemory(scope, fileId);
-        m_tracker->dissociateFileFromIdea(fileId, scope.remoteSessionId);
+        m_tracker->dissociateFileFromProject(fileId, scope.remoteSessionId);
     }
     const int count = ids.size();
     m_receivedFilesByScope.erase(scopeIt);
@@ -293,7 +282,7 @@ void FileManager::unmarkFileUploadedToClient(const QString& fileId, const QStrin
     m_tracker->unmarkFileUploadedToClient(fileId, clientId);
 }
 
-void FileManager::setFileRemovalNotifier(std::function<void(const QString& fileId, const QList<QString>& clientIds, const QList<QString>& canvasSessionIds)> cb)
+void FileManager::setFileRemovalNotifier(std::function<void(const QString& fileId, const QList<QString>& clientIds, const QList<QString>& projectIds)> cb)
 {
     RemoteFileTracker::instance().setFileRemovalNotifier(std::move(cb));
 }
@@ -331,38 +320,38 @@ void FileManager::removeReceivedFileMappingsUnderPathPrefix(const QString& pathP
     }
 }
 
-void FileManager::associateFileWithIdea(const QString& fileId, const QString& canvasSessionId)
+void FileManager::associateFileWithProject(const QString& fileId, const QString& projectId)
 {
     // Delegate to RemoteFileTracker
-    m_tracker->associateFileWithIdea(fileId, canvasSessionId);
+    m_tracker->associateFileWithProject(fileId, projectId);
 }
 
-void FileManager::dissociateFileFromIdea(const QString& fileId, const QString& canvasSessionId)
+void FileManager::dissociateFileFromProject(const QString& fileId, const QString& projectId)
 {
     // Delegate to RemoteFileTracker
-    m_tracker->dissociateFileFromIdea(fileId, canvasSessionId);
+    m_tracker->dissociateFileFromProject(fileId, projectId);
 }
 
-QSet<QString> FileManager::getIdeaIdsForFile(const QString& fileId) const
+QSet<QString> FileManager::getProjectIdsForFile(const QString& fileId) const
 {
     // Delegate to RemoteFileTracker
-    return m_tracker->getIdeaIdsForFile(fileId);
+    return m_tracker->getProjectIdsForFile(fileId);
 }
 
-QSet<QString> FileManager::getFileIdsForIdea(const QString& canvasSessionId) const
+QSet<QString> FileManager::getFileIdsForProject(const QString& projectId) const
 {
     // Delegate to RemoteFileTracker
-    return m_tracker->getFileIdsForIdea(canvasSessionId);
+    return m_tracker->getFileIdsForProject(projectId);
 }
 
-void FileManager::replaceIdeaFileSet(const QString& canvasSessionId, const QSet<QString>& fileIds)
+void FileManager::replaceProjectFileSet(const QString& projectId, const QSet<QString>& fileIds)
 {
     // Delegate to RemoteFileTracker
-    m_tracker->replaceIdeaFileSet(canvasSessionId, fileIds);
+    m_tracker->replaceProjectFileSet(projectId, fileIds);
 }
 
-void FileManager::removeIdeaAssociations(const QString& canvasSessionId)
+void FileManager::removeProjectAssociations(const QString& projectId)
 {
     // Delegate to RemoteFileTracker
-    m_tracker->removeIdeaAssociations(canvasSessionId);
+    m_tracker->removeProjectAssociations(projectId);
 }

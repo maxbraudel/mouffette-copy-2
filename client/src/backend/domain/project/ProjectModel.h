@@ -54,6 +54,9 @@ struct ProjectRecord {
     QString targetEndpointId;
     ProjectTargetReference target;
     QList<ScreenInfo> savedScreens;
+    int savedVolumePercent = -1;
+    quint64 snapshotRevision = 0;
+    qint64 snapshotCapturedAtMs = -1;
     ProjectLifecycleState state = ProjectLifecycleState::Hidden;
     qint64 createdAtMs = -1;
     qint64 updatedAtMs = -1;

@@ -99,10 +99,18 @@ public:
 
     void add(const QString& id, const QString& type, qreal x, qreal y)
     {
-        media.append(QVariantMap {{"mediaId", id}, {"mediaType", type},
+        media.append(QVariantMap {{"rowKey", id}, {"mediaId", id}, {"mediaType", type},
             {"x", x}, {"y", y}, {"width", 280}, {"height", 170}, {"scale", 1.0}, {"z", 1},
-            {"contentVisible", true}, {"contentOpacity", 1.0}, {"displayName", id},
+            {"contentVisible", true}, {"contentOpacity", 1.0},
+            {"animatedDisplayOpacity", 1.0}, {"displayName", id},
+            {"sourceUrl", ""},
             {"textContent", "Canvas text"}, {"textFontPixelSize", 40},
+            {"textFontFamily", "Impact"}, {"textFontWeight", 400},
+            {"textItalic", false}, {"textUnderline", false},
+            {"textUppercase", false}, {"textColor", "#ffffffff"},
+            {"textOutlineWidthPx", 0.0}, {"textOutlineColor", "#ff000000"},
+            {"textHorizontalAlignment", "center"},
+            {"textVerticalAlignment", "center"}, {"fitToTextEnabled", false},
             {"textHighlightEnabled", true}, {"textHighlightColor", "#ffff00"}});
         publish();
     }
@@ -357,8 +365,8 @@ private slots:
         CanvasFixture scene;
         QVERIFY2(scene.initialize(), qPrintable(scene.error));
         scene.add("text", "text", 100, 150);
-        scene.change("text", {{"textOutlineWidthPercent", outlinePercent},
-                               {"textOutlineWidthPx", qreal(40)}});
+        scene.change("text", {{"textOutlineWidthPx",
+                               outlinePercent > 0 ? qreal(40) : qreal(0)}});
 
         QSignalSpy selected(scene.root, SIGNAL(mediaSelectRequested(QString,bool)));
         QTest::mousePress(&scene.window, Qt::LeftButton, Qt::NoModifier, {240, 230});

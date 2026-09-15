@@ -1,4 +1,5 @@
 #include "UploadSignalConnector.h"
+#include "backend/config/AppConfig.h"
 #include "backend/runtime/ApplicationRuntime.h"
 #include "backend/network/UploadManager.h"
 #include "backend/network/WebSocketClient.h"
@@ -46,7 +47,7 @@ void UploadSignalConnector::connectAllSignals(
     
     // Signal: File upload started - mark items as uploading
     connect(uploadManager, &UploadManager::fileUploadStarted, mainWindow, [mainWindow](const QString& fileId) {
-        if (ApplicationRuntime::CanvasSession* session = mainWindow->sessionForActiveUpload()) {
+        if (ApplicationRuntime::ClientWorkspace* session = mainWindow->workspaceForActiveUpload()) {
             if (!session->canvas) return;
             session->upload.perFileProgress[fileId] = 0;
             const QList<CanvasMedia*> items = session->upload.itemsByFileId.value(fileId);
@@ -60,7 +61,7 @@ void UploadSignalConnector::connectAllSignals(
     
     // Signal: File upload progress - update upload progress on items
     connect(uploadManager, &UploadManager::fileUploadProgress, mainWindow, [mainWindow](const QString& fileId, int percent) {
-        if (ApplicationRuntime::CanvasSession* session = mainWindow->sessionForActiveUpload()) {
+        if (ApplicationRuntime::ClientWorkspace* session = mainWindow->workspaceForActiveUpload()) {
             if (!session->canvas) return;
             if (percent >= 100) {
                 session->upload.perFileProgress[fileId] = 100;
@@ -87,15 +88,15 @@ void UploadSignalConnector::connectAllSignals(
     // Signal: Upload finished - show success toast and update session state
     connect(uploadManager, &UploadManager::uploadFinished, mainWindow,
             [mainWindow](const QString& uploadId) {
-        if (ApplicationRuntime::CanvasSession* session = mainWindow->sessionForUploadId(uploadId)) {
+        if (ApplicationRuntime::ClientWorkspace* session = mainWindow->workspaceForUploadId(uploadId)) {
             const QString label = session->lastClientInfo.getDisplayText().isEmpty()
-                ? session->serverAssignedId
+                ? session->targetEndpointId
                 : session->lastClientInfo.getDisplayText();
             publishTerminalUploadNotification(
                 uploadId, NotificationSeverity::Success,
                 QStringLiteral("Upload completed successfully to %1").arg(label));
             session->upload.remoteFilesPresent = true;
-            session->knownRemoteFileIds.unite(session->expectedIdeaFileIds);
+            session->knownRemoteFileIds.unite(session->expectedProjectFileIds);
             mainWindow->clearUploadTracking(*session);
         } else {
             publishTerminalUploadNotification(
@@ -106,7 +107,7 @@ void UploadSignalConnector::connectAllSignals(
 
     connect(uploadManager, &UploadManager::uploadCancelled, mainWindow,
             [mainWindow](const QString& uploadId) {
-        if (ApplicationRuntime::CanvasSession* session = mainWindow->sessionForUploadId(uploadId)) {
+        if (ApplicationRuntime::ClientWorkspace* session = mainWindow->workspaceForUploadId(uploadId)) {
             for (auto it = session->upload.itemsByFileId.constBegin();
                  it != session->upload.itemsByFileId.constEnd(); ++it) {
                 for (CanvasMedia* item : it.value()) {
@@ -125,7 +126,7 @@ void UploadSignalConnector::connectAllSignals(
     // already known on the remote remain synchronized and keep their state.
     connect(uploadManager, &UploadManager::uploadRejected, mainWindow,
             [mainWindow](const QString& uploadId, const QString& reason) {
-        ApplicationRuntime::CanvasSession* session = mainWindow->sessionForUploadId(uploadId);
+        ApplicationRuntime::ClientWorkspace* session = mainWindow->workspaceForUploadId(uploadId);
         if (session) {
             for (auto it = session->upload.itemsByFileId.constBegin();
                  it != session->upload.itemsByFileId.constEnd(); ++it) {
@@ -142,12 +143,13 @@ void UploadSignalConnector::connectAllSignals(
             : reason.trimmed();
         publishTerminalUploadNotification(
             uploadId, NotificationSeverity::Error,
-            QStringLiteral("Upload failed: %1").arg(detail), 5000);
+            QStringLiteral("Upload failed: %1").arg(detail),
+            AppConfig::instance().toastErrorDurationMs());
     });
 
     // Signal: Upload completed file IDs - mark files as uploaded
     connect(uploadManager, &UploadManager::uploadCompletedFileIds, mainWindow, [mainWindow](const QStringList& fileIds) {
-        if (ApplicationRuntime::CanvasSession* session = mainWindow->sessionForActiveUpload()) {
+        if (ApplicationRuntime::ClientWorkspace* session = mainWindow->workspaceForActiveUpload()) {
             if (!session->canvas) return;
             for (const QString& fileId : fileIds) {
                 if (session->upload.serverCompletedFileIds.contains(fileId)) continue;

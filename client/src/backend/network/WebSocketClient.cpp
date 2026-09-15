@@ -1,4 +1,5 @@
 #include "backend/network/WebSocketClient.h"
+#include "backend/config/AppConfig.h"
 #include "backend/network/SceneRunCoordinator.h"
 #include "backend/security/DeviceIdentityStore.h"
 #include "MediaFormatContract.h"
@@ -183,7 +184,6 @@ bool isRemoteSessionBusinessError(const QString& code) {
     // never feed ConnectionManager through connectionError().
     static const QSet<QString> codes = {
         QStringLiteral("target_offline"),
-        QStringLiteral("target_in_use"),
         QStringLiteral("invalid_remote_session_binding"),
         QStringLiteral("self_target_not_allowed"),
         QStringLiteral("unknown_remote_session"),
@@ -207,7 +207,7 @@ bool isRemoteSessionBusinessError(const QString& code) {
     return codes.contains(code);
 }
 
-bool containsLegacyWireField(const QJsonValue& value) {
+bool containsRemovedWireField(const QJsonValue& value) {
     static const QSet<QString> forbidden = {
         QStringLiteral("clientId"), QStringLiteral("persistentClientId"),
         QStringLiteral("persistentId"), QStringLiteral("sessionId"),
@@ -220,14 +220,14 @@ bool containsLegacyWireField(const QJsonValue& value) {
     };
     if (value.isArray()) {
         for (const QJsonValue& child : value.toArray()) {
-            if (containsLegacyWireField(child)) return true;
+            if (containsRemovedWireField(child)) return true;
         }
         return false;
     }
     if (!value.isObject()) return false;
     const QJsonObject object = value.toObject();
     for (auto it = object.begin(); it != object.end(); ++it) {
-        if (forbidden.contains(it.key()) || containsLegacyWireField(it.value())) {
+        if (forbidden.contains(it.key()) || containsRemovedWireField(it.value())) {
             return true;
         }
     }
@@ -258,7 +258,7 @@ bool isRemovedWireType(const QString& type) {
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// MOUFFETTE PROTOCOL V3 ENDPOINT IDENTITY
+// MOUFFETTE PROTOCOL  ENDPOINT IDENTITY
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 //
 // installationId is SHA-256(SPKI), endpointId adds the application instance,
@@ -294,7 +294,8 @@ WebSocketClient::WebSocketClient(const QString& identityFallbackDirectory,
     m_processClock.start();
     m_heartbeatTimer->setSingleShot(false);
     connect(m_heartbeatTimer, &QTimer::timeout, this, &WebSocketClient::sendHeartbeat);
-    m_leaseHealthTimer->setInterval(100);
+    m_leaseHealthTimer->setInterval(
+        AppConfig::instance().leaseHealthCheckIntervalMs());
     m_leaseHealthTimer->setSingleShot(false);
     connect(m_leaseHealthTimer, &QTimer::timeout, this, &WebSocketClient::checkLeaseHealth);
 
@@ -354,7 +355,7 @@ void WebSocketClient::onUploadTextMessageReceived(const QString& message) {
         return;
     }
     if (type == "welcome") {
-        // A legacy upload-channel welcome is not proof of identity. Keep the
+        // The removed upload-channel welcome is not proof of identity. Keep the
         // dedicated socket unauthenticated and let the upload fall back to the
         // already authenticated control connection.
         qWarning() << "Upload channel server did not provide authenticated readiness";
@@ -407,6 +408,7 @@ void WebSocketClient::connectToServer(const QString& serverUrl) {
 
     closeUploadChannel();
     m_authenticated = false;
+    m_endpointDraining = false;
     m_heartbeatTimer->stop();
     m_pendingServerBootId.clear();
     m_heartbeatSentAt.clear();
@@ -705,7 +707,16 @@ void WebSocketClient::registerClient(const QString& machineName, const QString& 
         screensArray.append(screen.toJson());
     }
     message["screens"] = screensArray;
-    // Legacy systemUI field removed; per-screen uiZones now embedded in screens
+    message["systemUI"] = QJsonArray();
+
+    m_registeredTargetSnapshot = QJsonObject{
+        {QStringLiteral("screens"), screensArray},
+        {QStringLiteral("systemUI"), QJsonArray()},
+        {QStringLiteral("volumePercent"), message.value(QStringLiteral("volumePercent"))},
+        {QStringLiteral("revision"), static_cast<double>(++m_targetSnapshotRevision)},
+        {QStringLiteral("capturedAtEpochMs"),
+         static_cast<double>(QDateTime::currentMSecsSinceEpoch())}
+    };
     
     sendMessage(message);
     qDebug() << "Registering device:" << machineName << "(" << platform
@@ -910,6 +921,60 @@ bool WebSocketClient::openRemoteSession(const QString& targetEndpointId,
     return true;
 }
 
+bool WebSocketClient::acceptRemoteSessionOffer(const QJsonObject& offer)
+{
+    if (!isConnected() || !m_sceneRuns || m_registeredTargetSnapshot.isEmpty()) {
+        return false;
+    }
+    const QString remoteSessionId =
+        offer.value(QStringLiteral("remoteSessionId")).toString();
+    const SceneRunCoordinator::SessionBinding binding =
+        m_sceneRuns->sessionById(remoteSessionId);
+    if (binding.remoteSessionId.isEmpty()
+        || binding.targetEndpointId != m_endpointId
+        || binding.phase != QLatin1String("Opening")) {
+        return false;
+    }
+
+    QJsonObject snapshot = m_registeredTargetSnapshot;
+    snapshot.insert(QStringLiteral("revision"),
+                    static_cast<double>(++m_targetSnapshotRevision));
+    snapshot.insert(QStringLiteral("capturedAtEpochMs"),
+                    static_cast<double>(QDateTime::currentMSecsSinceEpoch()));
+    return sendControlMessage(QJsonObject{
+        {QStringLiteral("type"), QStringLiteral("remote_session_accept")},
+        {QStringLiteral("remoteSessionId"), binding.remoteSessionId},
+        {QStringLiteral("generation"), static_cast<double>(binding.generation)},
+        {QStringLiteral("snapshot"), snapshot}
+    });
+}
+
+bool WebSocketClient::sendRemoteSessionSnapshot(
+    const QString& remoteSessionId,
+    quint64 generation,
+    const QJsonObject& targetSnapshot)
+{
+    if (!isConnected() || !m_sceneRuns || targetSnapshot.isEmpty()) return false;
+    const SceneRunCoordinator::SessionBinding binding =
+        m_sceneRuns->sessionById(remoteSessionId);
+    if (!binding.active || binding.generation != generation
+        || binding.targetEndpointId != m_endpointId) return false;
+    quint64& sequence = m_targetSnapshotSequenceBySession[remoteSessionId];
+    sequence = qMax<quint64>(sequence + 1, 2);
+    QJsonObject snapshot = targetSnapshot;
+    snapshot.insert(QStringLiteral("revision"),
+                    static_cast<double>(++m_targetSnapshotRevision));
+    snapshot.insert(QStringLiteral("capturedAtEpochMs"),
+                    static_cast<double>(QDateTime::currentMSecsSinceEpoch()));
+    return sendControlMessage(QJsonObject{
+        {QStringLiteral("type"), QStringLiteral("remote_session_snapshot")},
+        {QStringLiteral("remoteSessionId"), remoteSessionId},
+        {QStringLiteral("generation"), static_cast<double>(generation)},
+        {QStringLiteral("snapshotSequence"), static_cast<double>(sequence)},
+        {QStringLiteral("snapshot"), snapshot}
+    });
+}
+
 bool WebSocketClient::resumeRemoteSession(const QString& remoteSessionId)
 {
     if (!isConnected() || !m_sceneRuns) return false;
@@ -929,13 +994,25 @@ bool WebSocketClient::resumeRemoteSession(const QString& remoteSessionId)
 void WebSocketClient::resumeAllRemoteSessions()
 {
     if (!m_sceneRuns) return;
-    // A client can have several outgoing sessions but at most one incoming.
-    // Do not derive this list from discovery: an offline project may still own
+    // A client can have several outgoing and incoming sessions. Do not derive
+    // this list from discovery: an offline project may still own
     // a resumable session during the strict three-second grace window.
     const QList<SceneRunCoordinator::SessionBinding> bindings = m_sceneRuns->sessions();
     for (const SceneRunCoordinator::SessionBinding& binding : bindings) {
         if (!binding.resumeToken.isEmpty()) resumeRemoteSession(binding.remoteSessionId);
     }
+}
+
+bool WebSocketClient::beginEndpointDisable()
+{
+    if (!isConnected() || m_endpointDraining) return false;
+    if (!sendControlMessage(QJsonObject{
+            {QStringLiteral("type"), QStringLiteral("endpoint_disable")}
+        })) {
+        return false;
+    }
+    m_endpointDraining = true;
+    return true;
 }
 
 bool WebSocketClient::closeRemoteSession(const QString& remoteSessionId,
@@ -1336,6 +1413,7 @@ bool WebSocketClient::validateServerPolicy(const QJsonObject& policy,
         {"sceneActivationLeadMs", 500, 10000},
         {"sceneMaxClockSkewMs", 0, 250},
         {"sceneStartedAckTimeoutMs", 1000, 15000},
+        {"sceneStopTimeoutMs", 1000, 120000},
         {"sceneMaxStartSkewMs", 50, 5000},
         {"uploadIdleTimeoutMs", 5000, 600000},
         {"uploadTargetAckTimeoutMs", 1000, 120000},
@@ -1520,10 +1598,10 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
         return;
     }
     if (!isCanonicalUuid(message.value(QStringLiteral("messageId")).toString())) {
-        qWarning() << "Rejected protocol-v3 message without a canonical messageId";
+        qWarning() << "Rejected protocol v4 message without a canonical messageId";
         return;
     }
-    if (isRemovedWireType(type) || containsLegacyWireField(message)) {
+    if (isRemovedWireType(type) || containsRemovedWireField(message)) {
         qWarning() << "Rejected removed protocol message type or field" << type;
         return;
     }
@@ -1746,12 +1824,39 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
             && message.value(QStringLiteral("targetEndpointId")).toString()
                 == binding.targetEndpointId;
         if (!isUploadOpaqueId(uploadId) || (!correlated && !unboundStartRejection)) {
-            qWarning() << "Rejected stale or malformed protocol-v3 upload envelope";
+            qWarning() << "Rejected stale or malformed protocol v4 upload envelope";
             return;
         }
         emit uploadMessageReceived(message);
     }
-    else if (type == "remote_session_opened" || type == "remote_session_resumed"
+    else if (type == "remote_session_offer") {
+        if (!m_sceneRuns
+            || !m_sceneRuns->upsertSession(message, m_connectionGeneration)) {
+            qWarning() << "Rejected stale or malformed RemoteSession offer";
+            return;
+        }
+        if (m_endpointDraining) {
+            closeRemoteSession(
+                message.value(QStringLiteral("remoteSessionId")).toString(),
+                nullptr, QStringLiteral("client_disabled"));
+            return;
+        }
+        emit remoteSessionOfferReceived(message);
+        if (!acceptRemoteSessionOffer(message)) {
+            qWarning() << "Could not accept RemoteSession offer with a fresh snapshot";
+        }
+    }
+    else if (type == "remote_session_snapshot") {
+        RemoteSessionCoordinator* sessions = remoteSessionCoordinator();
+        if (!sessions || !sessions->acceptSnapshot(message, m_connectionGeneration)) {
+            qWarning() << "Rejected stale or malformed RemoteSession snapshot";
+            return;
+        }
+        emit remoteSessionSnapshotReceived(message);
+        emit messageReceived(message);
+    }
+    else if (type == "remote_session_opening" || type == "remote_session_opened"
+             || type == "remote_session_resumed"
              || type == "remote_session_lease_state"
              || type == "remote_session_terminating") {
         if (!m_sceneRuns
@@ -1759,8 +1864,48 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
             qWarning() << "Rejected stale or malformed RemoteSession envelope" << type;
             return;
         }
-        if (type == "remote_session_opened") emit remoteSessionOpened(message);
-        else if (type == "remote_session_resumed") emit remoteSessionResumed(message);
+        if (type == "remote_session_opening") {
+            emit messageReceived(message);
+            return;
+        }
+        if (type == "remote_session_opened") {
+            const RemoteSessionCoordinator::Binding binding =
+                m_sceneRuns->sessionById(
+                    message.value(QStringLiteral("remoteSessionId")).toString());
+            if (binding.ownerEndpointId == m_endpointId
+                && (!remoteSessionCoordinator()
+                    || !remoteSessionCoordinator()->acceptSnapshot(
+                        message, m_connectionGeneration))) {
+                closeRemoteSession(binding.remoteSessionId, nullptr,
+                                   QStringLiteral("invalid_initial_snapshot"));
+                QJsonObject failure{
+                    {QStringLiteral("scope"), QStringLiteral("remote_session")},
+                    {QStringLiteral("code"), QStringLiteral("invalid_initial_snapshot")},
+                    {QStringLiteral("message"),
+                     QStringLiteral("The remote client returned an invalid initial snapshot")},
+                    {QStringLiteral("requestId"),
+                     message.value(QStringLiteral("requestId"))},
+                    {QStringLiteral("remoteSessionId"), binding.remoteSessionId},
+                    {QStringLiteral("targetEndpointId"), binding.targetEndpointId}
+                };
+                emit remoteSessionError(failure);
+                return;
+            }
+            m_targetSnapshotSequenceBySession.insert(binding.remoteSessionId, 1);
+            emit remoteSessionOpened(message);
+        }
+        else if (type == "remote_session_resumed") {
+            const RemoteSessionCoordinator::Binding binding =
+                m_sceneRuns->sessionById(
+                    message.value(QStringLiteral("remoteSessionId")).toString());
+            if (binding.targetEndpointId == m_endpointId
+                && !m_registeredTargetSnapshot.isEmpty()) {
+                sendRemoteSessionSnapshot(binding.remoteSessionId,
+                                          binding.generation,
+                                          m_registeredTargetSnapshot);
+            }
+            emit remoteSessionResumed(message);
+        }
         else if (type == "remote_session_lease_state") emit remoteSessionLeaseStateChanged(message);
         else emit remoteSessionTerminating(message);
         emit messageReceived(message);
@@ -1772,7 +1917,16 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
             return;
         }
         emit remoteSessionClosed(message);
+        m_targetSnapshotSequenceBySession.remove(
+            message.value(QStringLiteral("remoteSessionId")).toString());
         emit messageReceived(message);
+    }
+    else if (type == "endpoint_disable_started") {
+        if (!m_endpointDraining) {
+            qWarning() << "Rejected unsolicited endpoint disable acknowledgement";
+            return;
+        }
+        emit endpointDisableAcknowledged();
     }
     else if (type == "scene_prepare" || type == "prepare_progress"
              || type == "prepared" || type == "armed" || type == "commit"
@@ -1780,7 +1934,7 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
              || type == "stop" || type == "stopped") {
         QString validationError;
         if (!m_sceneRuns || !m_sceneRuns->acceptInboundEnvelope(message, &validationError)) {
-            qWarning() << "Rejected protocol-v3 scene message:" << validationError;
+            qWarning() << "Rejected protocol v4 scene message:" << validationError;
             return;
         }
         if (type == "scene_prepare") emit scenePrepareReceived(message);
@@ -1830,8 +1984,8 @@ bool WebSocketClient::sendControlMessage(const QJsonObject& message) {
         qWarning() << "Cannot send message: connection lease expired";
         return false;
     }
-    if (containsLegacyWireField(message)) {
-        qWarning() << "Refusing protocol-v3 message containing a removed wire field";
+    if (containsRemovedWireField(message)) {
+        qWarning() << "Refusing protocol v4 message containing a removed wire field";
         return false;
     }
 
@@ -1848,7 +2002,7 @@ bool WebSocketClient::sendMessageUpload(const QJsonObject& message) {
         qWarning() << "Cannot send upload payload: connection lease expired";
         return false;
     }
-    if (containsLegacyWireField(message)) {
+    if (containsRemovedWireField(message)) {
         qWarning() << "Refusing upload message containing a removed wire field";
         return false;
     }

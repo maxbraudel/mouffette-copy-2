@@ -540,7 +540,6 @@ QVariantMap CanvasMedia::toModelMap(qreal unit) const
         {QStringLiteral("textUnderline"), m_underline},
         {QStringLiteral("textUppercase"), m_uppercase},
         {QStringLiteral("textColor"), renderedTextColor().name(QColor::HexArgb)},
-        {QStringLiteral("textOutlineWidthPercent"), renderedOutlineWidthPercent()},
         {QStringLiteral("textOutlineWidthPx"),
              TextRenderMetrics::outlinePixels(renderedOutlineWidthPercent(),
                                                m_fontPixelSize)},

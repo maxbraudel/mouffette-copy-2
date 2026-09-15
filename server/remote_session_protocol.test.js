@@ -21,7 +21,7 @@ const { MouffetteServer } = require('./server');
     const signature = crypto.sign(null,
         challengePayload({ ...challenge, runtimeId, instanceId }), keys.privateKey);
     const response = {
-        protocolVersion: 3,
+        protocolVersion: 4,
         serverBootId,
         runtimeId,
         instanceId,
@@ -29,30 +29,30 @@ const { MouffetteServer } = require('./server');
         installationId,
         signature: signature.toString('base64url'),
     };
-    const verified = verifyAuthResponse(challenge, response, 1500);
+    const verified = verifyAuthResponse(challenge, response, 1500, 10_000);
     assert.equal(verified.ok, true);
     assert.equal(verified.installationId, installationId);
     assert.equal(verified.endpointId,
         endpointIdForInstallation(installationId, instanceId));
-    assert.equal(verifyAuthResponse(challenge, { ...response, runtimeId: crypto.randomUUID() }, 1500).ok, false);
+    assert.equal(verifyAuthResponse(challenge, { ...response, runtimeId: crypto.randomUUID() }, 1500, 10_000).ok, false);
     assert.equal(verifyAuthResponse(challenge, {
         ...response,
         installationId: installationIdForPublicKey(Buffer.from('another-key')),
-    }, 1500).error, 'installation_id_mismatch');
+    }, 1500, 10_000).error, 'installation_id_mismatch');
     const forgedSignature = Buffer.from(signature);
     forgedSignature[0] ^= 0xff;
     assert.equal(verifyAuthResponse(challenge, {
         ...response,
         signature: forgedSignature.toString('base64url'),
-    }, 1500).error, 'invalid_identity_signature');
+    }, 1500, 10_000).error, 'invalid_identity_signature');
     assert.equal(verifyAuthResponse(challenge, {
         ...response,
         publicKey: `${response.publicKey}=`,
-    }, 1500).error, 'invalid_identity_material');
-    assert.equal(verifyAuthResponse(challenge, response, 11_001).ok, false);
+    }, 1500, 10_000).error, 'invalid_identity_material');
+    assert.equal(verifyAuthResponse(challenge, response, 11_001, 10_000).ok, false);
 
     const differentChallenge = createChallenge(serverBootId, 1000);
-    assert.equal(verifyAuthResponse(differentChallenge, response, 1500).error,
+    assert.equal(verifyAuthResponse(differentChallenge, response, 1500, 10_000).error,
         'invalid_identity_signature',
     'a response signed for one nonce cannot authenticate a different socket');
 }
@@ -127,7 +127,7 @@ function addAuthenticationCandidate(server, connectionId, keyPair, runtimeId,
     };
     server.clients.set(connectionId, client);
     const response = {
-        protocolVersion: 3,
+        protocolVersion: 4,
         serverBootId: server.serverBootId,
         runtimeId,
         instanceId,
@@ -290,7 +290,8 @@ function messages(socket, type) {
 
     boundaryServer.handleEndpointSnapshot('candidate-boundary', {
         connectionGeneration: 2,
-        machineName: 'Restarted target', platform: 'test', instanceOrdinal: 1, screens: [],
+        machineName: 'Restarted target', platform: 'test', instanceOrdinal: 1,
+        screens: [], systemUI: [],
         volumePercent: 50,
     });
     assert.equal(session.targetConnectionGeneration, 1,
@@ -319,7 +320,8 @@ function messages(socket, type) {
         boundaryCandidate.ws, 'remote_session_closed').length;
     boundaryServer.handleEndpointSnapshot('candidate-boundary', {
         connectionGeneration: 3,
-        machineName: 'Restarted target again', platform: 'test', instanceOrdinal: 1, screens: [],
+        machineName: 'Restarted target again', platform: 'test', instanceOrdinal: 1,
+        screens: [], systemUI: [],
         volumePercent: 50,
     });
     assert.equal(messages(boundaryCandidate.ws, 'remote_session_closed').length,
@@ -410,7 +412,8 @@ function messages(socket, type) {
         requestId: 'open-before-boundary',
     });
     assert.equal(early.server.remoteSessions.sessions.size, 1);
-    assert.equal(messages(early.ownerSocket, 'remote_session_opened').length, 1);
+    assert.equal(messages(early.ownerSocket, 'remote_session_opening').length, 1);
+    assert.equal(messages(early.target.ws, 'remote_session_offer').length, 1);
 
     const boundary = createOpenServer();
     boundary.setMonotonic(13_000);
@@ -425,9 +428,7 @@ function messages(socket, type) {
         'target_offline');
 }
 
-// A healthy B cannot be rebound merely because its previous controller's
-// session reached the lease boundary. The old incoming session becomes
-// CleanupPending synchronously and continues to reserve B until its ACK.
+// A healthy target accepts independent sessions from several controllers.
 {
     let monotonic = 20_000;
     const server = new MouffetteServer({
@@ -456,11 +457,11 @@ function messages(socket, type) {
         targetEndpointId: 'busy-B', connectionGeneration: 1,
         requestId: 'open-after-old-controller-expired',
     });
-    assert.equal(oldSession.phase, 'CleanupPending');
-    assert.equal(server.remoteSessions.activeIncomingFor('busy-B'), oldSession);
-    assert.equal(server.remoteSessions.outgoingByOwner.has('next-C'), false);
-    assert.equal(messages(nextOwnerSocket, 'error').at(-1).code, 'target_in_use');
-    assert.equal(messages(targetSocket, 'remote_session_terminating').length, 1);
+    assert.equal(oldSession.phase, 'Active');
+    assert.equal(server.remoteSessions.incomingForTarget('busy-B').length, 2);
+    assert.equal(server.remoteSessions.outgoingByOwner.has('next-C'), true);
+    assert.equal(messages(nextOwnerSocket, 'remote_session_opening').length, 1);
+    assert.equal(messages(targetSocket, 'remote_session_offer').length, 1);
 }
 
 // RemoteSession errors include only safe correlation fields. This lets the
@@ -469,23 +470,6 @@ function messages(socket, type) {
     const context = serverSessionContext('correlated-error');
     const controllerSocket = addAuthenticatedClient(
         context.server, 'controller-connection', 'C');
-
-    context.server.handleRemoteSessionOpen('controller-connection', {
-        targetEndpointId: 'B',
-        connectionGeneration: 1,
-        requestId: 'open-in-use',
-        resumeToken: 'must-not-be-reflected',
-    });
-    const inUse = messages(controllerSocket, 'error').at(-1);
-    assert.equal(inUse.scope, 'remote_session');
-    assert.equal(inUse.code, 'target_in_use');
-    assert.equal(inUse.requestId, 'open-in-use');
-    assert.equal(inUse.targetEndpointId, 'B');
-    assert.equal(typeof inUse.messageId, 'string');
-    assert.equal(Object.hasOwn(inUse, 'resumeToken'), false);
-    assert.equal(Object.hasOwn(inUse, 'teardownId'), false);
-    assert.equal(controllerSocket.readyState, WebSocket.OPEN,
-        'a RemoteSession refusal must not reconnect the healthy transport');
 
     context.server.handleRemoteSessionOpen('owner-connection', {
         targetEndpointId: 'offline-device',
@@ -523,26 +507,15 @@ function messages(socket, type) {
         targetEndpointId: 'bounded-B', connectionGeneration: 1,
         requestId: `secret\n${'x'.repeat(1024)}`,
     });
-    const opened = messages(ownerSocket, 'remote_session_opened').at(-1);
-    assert.ok(opened);
-    assert.equal(Object.hasOwn(opened, 'requestId'), false);
-    assert.equal(Object.hasOwn(
-        messages(targetSocket, 'remote_session_opened').at(-1), 'requestId'), false);
-
-    const session = server.remoteSessions.get(opened.remoteSessionId);
-    server.handleRemoteSessionClose('bounded-owner', {
-        remoteSessionId: session.remoteSessionId,
-        generation: session.generation,
-        connectionGeneration: 1,
-        requestId: `secret\n${'y'.repeat(1024)}`,
-    });
-    assert.equal(Object.hasOwn(
-        messages(targetSocket, 'remote_session_terminating').at(-1), 'requestId'), false);
+    const rejected = messages(ownerSocket, 'error').at(-1);
+    assert.equal(rejected.code, 'invalid_request_id');
+    assert.equal(Object.hasOwn(rejected, 'requestId'), false);
+    assert.equal(messages(targetSocket, 'remote_session_offer').length, 0);
+    assert.equal(server.remoteSessions.sessions.size, 0);
 }
 
-// A target has exactly one incoming controller. Refusal never queues or
-// preempts, and cleanup_error keeps the target unavailable until a committed
-// acknowledgement arrives.
+// Incoming sessions are independent. Cleaning one session does not disturb
+// another controller bound to the same target.
 {
     let clock = 10_000;
     let sequence = 0;
@@ -554,13 +527,10 @@ function messages(socket, type) {
     const first = registry.open(binding('A', 'B'));
     assert.equal(first.ok, true);
 
-    const refused = registry.open(binding('C', 'B'));
-    assert.equal(refused.error, 'target_in_use');
-    assert.equal(refused.remoteSessionId, first.session.remoteSessionId);
-    assert.equal(registry.outgoingByOwner.has('C'), false,
-        'a refused controller must not enter a hidden queue');
-    assert.equal(registry.activeIncomingFor('B'), first.session,
-        'refusal must not preempt the current controller');
+    const second = registry.open(binding('C', 'B'));
+    assert.equal(second.ok, true);
+    assert.equal(registry.incomingForTarget('B').length, 2);
+    assert.equal(registry.outgoingByOwner.has('C'), true);
 
     assert.equal(registry.open(binding('B', 'C')).ok, true,
         'a target may simultaneously own outgoing sessions');
@@ -581,25 +551,18 @@ function messages(socket, type) {
     assert.equal(cleanupError.error, 'cleanup_not_committed');
     assert.equal(cleanupError.session.phase, 'CleanupPending');
     assert.equal(cleanupError.session.cleanupError, 'quarantine_failed');
-    assert.equal(registry.activeIncomingFor('B'), first.session,
-        'cleanup_error must retain exclusive occupancy');
-    assert.equal(registry.open(binding('C', 'B')).error, 'target_in_use');
-    assert.equal(registry.outgoingByOwner.has('C'), false,
-        'cleanup failure must not silently queue the refused controller');
+    assert.equal(registry.incomingForTarget('B').length, 2);
+    assert.equal(registry.forOwnerTarget('C', 'B'), second.session);
 
     const closed = registry.acknowledgeCleanup(
         first.session.remoteSessionId, terminating.session.teardownId, 'B',
         committedCleanup({ removedFileCount: 4 }), clock);
     assert.equal(closed.ok, true);
-    assert.equal(registry.activeIncomingFor('B'), null);
-    assert.equal(registry.outgoingByOwner.has('C'), false,
-        'freeing B must not auto-start a previously refused request');
-    assert.equal(registry.open(binding('C', 'B')).ok, true,
-        'the second controller must issue a fresh explicit open');
+    assert.deepEqual(registry.incomingForTarget('B'), [second.session]);
+    assert.equal(registry.outgoingByOwner.has('C'), true);
 }
 
-// The client-list projection must not resurrect a terminal session as
-// Connected while the target is still logically occupied by cleanup.
+// Discovery exposes presence only; private session topology is never present.
 {
     const context = serverSessionContext('list-cleanup-state');
     const observerSocket = addAuthenticatedClient(
@@ -614,12 +577,14 @@ function messages(socket, type) {
     context.server.sendClientList('owner-connection');
     const ownerTarget = messages(context.ownerSocket, 'client_list')
         .at(-1).clients.find(client => client.endpointId === 'B');
-    assert.equal(ownerTarget.remoteSessionState, 'Disconnecting');
+    assert.equal(ownerTarget.status, 'Available');
+    assert.equal(Object.hasOwn(ownerTarget, 'remoteSessionState'), false);
 
     context.server.sendClientList('observer-connection');
     const observerTarget = messages(observerSocket, 'client_list')
         .at(-1).clients.find(client => client.endpointId === 'B');
-    assert.equal(observerTarget.remoteSessionState, 'Unavailable');
+    assert.equal(observerTarget.status, 'Available');
+    assert.equal(Object.hasOwn(observerTarget, 'remoteSessionState'), false);
 }
 
 // Both peers may enter Grace independently. Each must resume from the exact
@@ -842,7 +807,7 @@ function messages(socket, type) {
         'B', result, clock);
     assert.equal(committed.ok, true);
     assert.equal(committed.replay, false);
-    assert.equal(registry.activeIncomingFor('B'), null);
+    assert.equal(registry.incomingForTarget('B').length, 0);
 
     // Simulate the server->client CLOSED response being lost: the target sends
     // the same commit ACK again and receives the same tombstone result.
@@ -1078,7 +1043,8 @@ function messages(socket, type) {
     ownerClient.connectionGeneration = 2;
     context.server.handleEndpointSnapshot('owner-connection', {
         connectionGeneration: 2,
-        machineName: 'Owner rebound', platform: 'test', instanceOrdinal: 1, screens: [],
+        machineName: 'Owner rebound', platform: 'test', instanceOrdinal: 1,
+        screens: [], systemUI: [],
         volumePercent: 50,
     });
     const ownerTerminal = messages(
@@ -1093,7 +1059,8 @@ function messages(socket, type) {
     targetClient.connectionGeneration = 2;
     context.server.handleEndpointSnapshot('target-connection', {
         connectionGeneration: 2,
-        machineName: 'Target rebound', platform: 'test', instanceOrdinal: 1, screens: [],
+        machineName: 'Target rebound', platform: 'test', instanceOrdinal: 1,
+        screens: [], systemUI: [],
         volumePercent: 50,
     });
     const targetTerminal = messages(
@@ -1126,7 +1093,8 @@ function messages(socket, type) {
     const closedCount = messages(context.ownerSocket, 'remote_session_closed').length;
     context.server.handleEndpointSnapshot('owner-connection', {
         connectionGeneration: 3,
-        machineName: 'Owner rebound again', platform: 'test', instanceOrdinal: 1, screens: [],
+        machineName: 'Owner rebound again', platform: 'test', instanceOrdinal: 1,
+        screens: [], systemUI: [],
         volumePercent: 50,
     });
     assert.equal(messages(context.ownerSocket, 'remote_session_closed').length,
@@ -1146,7 +1114,8 @@ function messages(socket, type) {
         context.ownerSocket, 'remote_session_closed').length;
     context.server.handleEndpointSnapshot('owner-connection', {
         connectionGeneration: 4,
-        machineName: 'Different owner process', platform: 'test', instanceOrdinal: 1, screens: [],
+        machineName: 'Different owner process', platform: 'test', instanceOrdinal: 1,
+        screens: [], systemUI: [],
         volumePercent: 50,
     });
     assert.equal(messages(context.ownerSocket, 'remote_session_terminating').length,

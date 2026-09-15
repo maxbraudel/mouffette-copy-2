@@ -24,18 +24,64 @@ struct SettingSpec {
     bool boolean;
 };
 
-constexpr std::array<SettingSpec, 12> kSpecs{{
+constexpr std::array<SettingSpec, 58> kSpecs{{
     {Key::ServerUrl, "MOUFFETTE_SERVER_URL", "server-url", "serverUrl", "ws://localhost:8080", false},
     {Key::RemoteSessionHiddenTimeoutMs, "MOUFFETTE_REMOTE_SESSION_HIDDEN_TIMEOUT_MS", "remote-session-hidden-timeout-ms", nullptr, "60000", false},
     {Key::ProjectHiddenRetentionMs, "MOUFFETTE_PROJECT_HIDDEN_RETENTION_MS", "project-hidden-retention-ms", nullptr, "300000", false},
     {Key::IncomingSessionOrphanTimeoutMs, "MOUFFETTE_INCOMING_SESSION_ORPHAN_TIMEOUT_MS", "incoming-session-orphan-timeout-ms", nullptr, "3000", false},
+    {Key::UploadIdleTimeoutMs, "MOUFFETTE_UPLOAD_IDLE_TIMEOUT_MS", "upload-idle-timeout-ms", nullptr, "45000", false},
+    {Key::ConnectionAttemptTimeoutMs, "MOUFFETTE_CONNECTION_ATTEMPT_TIMEOUT_MS", "connection-attempt-timeout-ms", nullptr, "3000", false},
+    {Key::ReconnectFastStepMs, "MOUFFETTE_RECONNECT_FAST_STEP_MS", "reconnect-fast-step-ms", nullptr, "250", false},
+    {Key::ReconnectFastMaxMs, "MOUFFETTE_RECONNECT_FAST_MAX_MS", "reconnect-fast-max-ms", nullptr, "750", false},
+    {Key::ReconnectBaseMs, "MOUFFETTE_RECONNECT_BASE_MS", "reconnect-base-ms", nullptr, "1000", false},
+    {Key::ReconnectMaxMs, "MOUFFETTE_RECONNECT_MAX_MS", "reconnect-max-ms", nullptr, "30000", false},
+    {Key::ReconnectJitterPercent, "MOUFFETTE_RECONNECT_JITTER_PERCENT", "reconnect-jitter-percent", nullptr, "20", false},
+    {Key::LeaseHealthCheckIntervalMs, "MOUFFETTE_LEASE_HEALTH_CHECK_INTERVAL_MS", "lease-health-check-interval-ms", nullptr, "100", false},
+    {Key::SessionDeadlinePollIntervalMs, "MOUFFETTE_SESSION_DEADLINE_POLL_INTERVAL_MS", "session-deadline-poll-interval-ms", nullptr, "250", false},
+    {Key::ProjectAutosaveDelayMs, "MOUFFETTE_PROJECT_AUTOSAVE_DELAY_MS", "project-autosave-delay-ms", nullptr, "300", false},
+    {Key::ProjectCheckpointIntervalMs, "MOUFFETTE_PROJECT_CHECKPOINT_INTERVAL_MS", "project-checkpoint-interval-ms", nullptr, "15000", false},
+    {Key::ProjectDeadlinePollIntervalMs, "MOUFFETTE_PROJECT_DEADLINE_POLL_INTERVAL_MS", "project-deadline-poll-interval-ms", nullptr, "250", false},
+    {Key::ScreenChangeDebounceMs, "MOUFFETTE_SCREEN_CHANGE_DEBOUNCE_MS", "screen-change-debounce-ms", nullptr, "150", false},
+    {Key::SystemVolumePollIntervalMs, "MOUFFETTE_SYSTEM_VOLUME_POLL_INTERVAL_MS", "system-volume-poll-interval-ms", nullptr, "1200", false},
+    {Key::FileWatchDebounceMs, "MOUFFETTE_FILE_WATCH_DEBOUNCE_MS", "file-watch-debounce-ms", nullptr, "500", false},
+    {Key::SceneActivityRefreshIntervalMs, "MOUFFETTE_SCENE_ACTIVITY_REFRESH_INTERVAL_MS", "scene-activity-refresh-interval-ms", nullptr, "1000", false},
+    {Key::VideoStatePublishIntervalMs, "MOUFFETTE_VIDEO_STATE_PUBLISH_INTERVAL_MS", "video-state-publish-interval-ms", nullptr, "50", false},
+    {Key::VideoSnapshotIntervalMs, "MOUFFETTE_VIDEO_SNAPSHOT_INTERVAL_MS", "video-snapshot-interval-ms", nullptr, "1000", false},
+    {Key::RemoteWindowShowDelayMs, "MOUFFETTE_REMOTE_WINDOW_SHOW_DELAY_MS", "remote-window-show-delay-ms", nullptr, "10", false},
+    {Key::MediaProbeTimeoutMs, "MOUFFETTE_MEDIA_PROBE_TIMEOUT_MS", "media-probe-timeout-ms", nullptr, "5000", false},
+    {Key::IncomingUploadCompletionTtlMs, "MOUFFETTE_INCOMING_UPLOAD_COMPLETION_TTL_MS", "incoming-upload-completion-ttl-ms", nullptr, "60000", false},
+    {Key::DeferredCleanupRetryMs, "MOUFFETTE_DEFERRED_CLEANUP_RETRY_MS", "deferred-cleanup-retry-ms", nullptr, "1000", false},
+    {Key::SceneLaunchTimeoutMarginMs, "MOUFFETTE_SCENE_LAUNCH_TIMEOUT_MARGIN_MS", "scene-launch-timeout-margin-ms", nullptr, "1000", false},
+    {Key::InstanceActivationConnectTimeoutMs, "MOUFFETTE_INSTANCE_ACTIVATION_CONNECT_TIMEOUT_MS", "instance-activation-connect-timeout-ms", nullptr, "100", false},
+    {Key::InstanceActivationAckTimeoutMs, "MOUFFETTE_INSTANCE_ACTIVATION_ACK_TIMEOUT_MS", "instance-activation-ack-timeout-ms", nullptr, "250", false},
+    {Key::InstanceActivationRetryIntervalMs, "MOUFFETTE_INSTANCE_ACTIVATION_RETRY_INTERVAL_MS", "instance-activation-retry-interval-ms", nullptr, "25", false},
+    {Key::ControlledDisconnectDrainTimeoutMs, "MOUFFETTE_CONTROLLED_DISCONNECT_DRAIN_TIMEOUT_MS", "controlled-disconnect-drain-timeout-ms", nullptr, "10000", false},
+    {Key::ProcessStopTimeoutMs, "MOUFFETTE_PROCESS_STOP_TIMEOUT_MS", "process-stop-timeout-ms", nullptr, "100", false},
+    {Key::UploadActionMinIntervalMs, "MOUFFETTE_UPLOAD_ACTION_MIN_INTERVAL_MS", "upload-action-min-interval-ms", nullptr, "300", false},
+    {Key::UploadCancelGuardMs, "MOUFFETTE_UPLOAD_CANCEL_GUARD_MS", "upload-cancel-guard-ms", nullptr, "1000", false},
+    {Key::SceneSeekPositionToleranceMs, "MOUFFETTE_SCENE_SEEK_POSITION_TOLERANCE_MS", "scene-seek-position-tolerance-ms", nullptr, "120", false},
+    {Key::SceneStartFrameToleranceMs, "MOUFFETTE_SCENE_START_FRAME_TOLERANCE_MS", "scene-start-frame-tolerance-ms", nullptr, "25", false},
+    {Key::SceneDecoderSyncToleranceMs, "MOUFFETTE_SCENE_DECODER_SYNC_TOLERANCE_MS", "scene-decoder-sync-tolerance-ms", nullptr, "25", false},
+    {Key::SceneVideoSyncPositionToleranceMs, "MOUFFETTE_SCENE_VIDEO_SYNC_POSITION_TOLERANCE_MS", "scene-video-sync-position-tolerance-ms", nullptr, "400", false},
+    {Key::SceneVideoSyncTransitMaxMs, "MOUFFETTE_SCENE_VIDEO_SYNC_TRANSIT_MAX_MS", "scene-video-sync-transit-max-ms", nullptr, "2000", false},
+    {Key::SceneAuthoritativeSeekGuardMs, "MOUFFETTE_SCENE_AUTHORITATIVE_SEEK_GUARD_MS", "scene-authoritative-seek-guard-ms", nullptr, "250", false},
+    {Key::SceneRepeatTriggerGuardMs, "MOUFFETTE_SCENE_REPEAT_TRIGGER_GUARD_MS", "scene-repeat-trigger-guard-ms", nullptr, "500", false},
+    {Key::UiContentFadeDurationMs, "MOUFFETTE_UI_CONTENT_FADE_DURATION_MS", "ui-content-fade-duration-ms", nullptr, "80", false},
+    {Key::UiSpinnerRotationDurationMs, "MOUFFETTE_UI_SPINNER_ROTATION_DURATION_MS", "ui-spinner-rotation-duration-ms", nullptr, "900", false},
+    {Key::UiScrollbarHideDelayMs, "MOUFFETTE_UI_SCROLLBAR_HIDE_DELAY_MS", "ui-scrollbar-hide-delay-ms", nullptr, "500", false},
+    {Key::UiInputWatchdogIntervalMs, "MOUFFETTE_UI_INPUT_WATCHDOG_INTERVAL_MS", "ui-input-watchdog-interval-ms", nullptr, "120", false},
+    {Key::UiSnapFreezeCleanupDelayMs, "MOUFFETTE_UI_SNAP_FREEZE_CLEANUP_DELAY_MS", "ui-snap-freeze-cleanup-delay-ms", nullptr, "300", false},
+    {Key::ToastDefaultDurationMs, "MOUFFETTE_TOAST_DEFAULT_DURATION_MS", "toast-default-duration-ms", nullptr, "4000", false},
+    {Key::ToastInfoDurationMs, "MOUFFETTE_TOAST_INFO_DURATION_MS", "toast-info-duration-ms", nullptr, "2000", false},
+    {Key::ToastWarningDurationMs, "MOUFFETTE_TOAST_WARNING_DURATION_MS", "toast-warning-duration-ms", nullptr, "3500", false},
+    {Key::ToastErrorDurationMs, "MOUFFETTE_TOAST_ERROR_DURATION_MS", "toast-error-duration-ms", nullptr, "5000", false},
+    {Key::ToastAnimationDurationMs, "MOUFFETTE_TOAST_ANIMATION_DURATION_MS", "toast-animation-duration-ms", nullptr, "300", false},
     {Key::UploadConcurrency, "MOUFFETTE_UPLOAD_CONCURRENCY", "upload-concurrency", nullptr, "2", false},
     {Key::AutoUploadImportedMedia, "MOUFFETTE_AUTO_UPLOAD_IMPORTED_MEDIA", "auto-upload-imported-media", "autoUploadImportedMedia", "false", true},
     {Key::QtMediaBackend, "QT_MEDIA_BACKEND", "media-backend", nullptr, "ffmpeg", false},
     {Key::AllowMultipleInstances, "MOUFFETTE_ALLOW_MULTIPLE_INSTANCES", "allow-multiple-instances", nullptr, "false", true},
     {Key::CursorDebug, "MOUFFETTE_CURSOR_DEBUG", "cursor-debug", nullptr, "false", true},
     {Key::RuntimeDiagnostics, "MOUFFETTE_RUNTIME_DIAGNOSTICS", "runtime-diagnostics", nullptr, "false", true},
-    {Key::MigrationTelemetry, "MOUFFETTE_MIGRATION_TELEMETRY", "migration-telemetry", nullptr, "false", true},
     {Key::CanvasProfiling, "MOUFFETTE_CANVAS_PROFILING", "canvas-profiling", nullptr, "false", true},
 }};
 
@@ -322,13 +368,59 @@ void AppConfig::resetToCompiledDefaults() {
     m_remoteSessionHiddenTimeoutMs = 60000;
     m_projectHiddenRetentionMs = 300000;
     m_incomingSessionOrphanTimeoutMs = 3000;
+    m_uploadIdleTimeoutMs = 45000;
+    m_connectionAttemptTimeoutMs = 3000;
+    m_reconnectFastStepMs = 250;
+    m_reconnectFastMaxMs = 750;
+    m_reconnectBaseMs = 1000;
+    m_reconnectMaxMs = 30000;
+    m_reconnectJitterPercent = 20;
+    m_leaseHealthCheckIntervalMs = 100;
+    m_sessionDeadlinePollIntervalMs = 250;
+    m_projectAutosaveDelayMs = 300;
+    m_projectCheckpointIntervalMs = 15000;
+    m_projectDeadlinePollIntervalMs = 250;
+    m_screenChangeDebounceMs = 150;
+    m_systemVolumePollIntervalMs = 1200;
+    m_fileWatchDebounceMs = 500;
+    m_sceneActivityRefreshIntervalMs = 1000;
+    m_videoStatePublishIntervalMs = 50;
+    m_videoSnapshotIntervalMs = 1000;
+    m_remoteWindowShowDelayMs = 10;
+    m_mediaProbeTimeoutMs = 5000;
+    m_incomingUploadCompletionTtlMs = 60000;
+    m_deferredCleanupRetryMs = 1000;
+    m_sceneLaunchTimeoutMarginMs = 1000;
+    m_instanceActivationConnectTimeoutMs = 100;
+    m_instanceActivationAckTimeoutMs = 250;
+    m_instanceActivationRetryIntervalMs = 25;
+    m_controlledDisconnectDrainTimeoutMs = 10000;
+    m_processStopTimeoutMs = 100;
+    m_uploadActionMinIntervalMs = 300;
+    m_uploadCancelGuardMs = 1000;
+    m_sceneSeekPositionToleranceMs = 120;
+    m_sceneStartFrameToleranceMs = 25;
+    m_sceneDecoderSyncToleranceMs = 25;
+    m_sceneVideoSyncPositionToleranceMs = 400;
+    m_sceneVideoSyncTransitMaxMs = 2000;
+    m_sceneAuthoritativeSeekGuardMs = 250;
+    m_sceneRepeatTriggerGuardMs = 500;
+    m_uiContentFadeDurationMs = 80;
+    m_uiSpinnerRotationDurationMs = 900;
+    m_uiScrollbarHideDelayMs = 500;
+    m_uiInputWatchdogIntervalMs = 120;
+    m_uiSnapFreezeCleanupDelayMs = 300;
+    m_toastDefaultDurationMs = 4000;
+    m_toastInfoDurationMs = 2000;
+    m_toastWarningDurationMs = 3500;
+    m_toastErrorDurationMs = 5000;
+    m_toastAnimationDurationMs = 300;
     m_uploadConcurrency = 2;
     m_autoUploadImportedMedia = false;
     m_qtMediaBackend = QStringLiteral("ffmpeg");
     m_allowMultipleInstances = false;
     m_cursorDebug = false;
     m_runtimeDiagnostics = false;
-    m_migrationTelemetry = false;
     m_canvasProfiling = false;
 }
 
@@ -498,6 +590,123 @@ bool AppConfig::load(const LoadOptions& options, QString* errorMessage) {
                       candidate.m_incomingSessionOrphanTimeoutMs, errorMessage)) {
         return false;
     }
+    qint64 uploadIdleTimeoutMs = 0;
+    if (!parseInteger(rawValues.at(Key::UploadIdleTimeoutMs),
+                      keyName(Key::UploadIdleTimeoutMs), 5000, 600000,
+                      uploadIdleTimeoutMs, errorMessage)) {
+        return false;
+    }
+    candidate.m_uploadIdleTimeoutMs = static_cast<int>(uploadIdleTimeoutMs);
+
+    const auto parseIntSetting = [&](Key key, qint64 minimum, qint64 maximum,
+                                     int* destination) {
+        qint64 parsed = 0;
+        if (!parseInteger(rawValues.at(key), keyName(key), minimum, maximum,
+                          parsed, errorMessage)) {
+            return false;
+        }
+        *destination = static_cast<int>(parsed);
+        return true;
+    };
+    if (!parseIntSetting(Key::ConnectionAttemptTimeoutMs, 250, 120000,
+                         &candidate.m_connectionAttemptTimeoutMs)
+        || !parseIntSetting(Key::ReconnectFastStepMs, 10, 10000,
+                            &candidate.m_reconnectFastStepMs)
+        || !parseIntSetting(Key::ReconnectFastMaxMs, 10, 30000,
+                            &candidate.m_reconnectFastMaxMs)
+        || !parseIntSetting(Key::ReconnectBaseMs, 50, 120000,
+                            &candidate.m_reconnectBaseMs)
+        || !parseIntSetting(Key::ReconnectMaxMs, 50, 600000,
+                            &candidate.m_reconnectMaxMs)
+        || !parseIntSetting(Key::ReconnectJitterPercent, 0, 50,
+                            &candidate.m_reconnectJitterPercent)
+        || !parseIntSetting(Key::LeaseHealthCheckIntervalMs, 10, 5000,
+                            &candidate.m_leaseHealthCheckIntervalMs)
+        || !parseIntSetting(Key::SessionDeadlinePollIntervalMs, 25, 5000,
+                            &candidate.m_sessionDeadlinePollIntervalMs)
+        || !parseIntSetting(Key::ProjectAutosaveDelayMs, 0, 60000,
+                            &candidate.m_projectAutosaveDelayMs)
+        || !parseIntSetting(Key::ProjectCheckpointIntervalMs, 1000, 3600000,
+                            &candidate.m_projectCheckpointIntervalMs)
+        || !parseIntSetting(Key::ProjectDeadlinePollIntervalMs, 25, 5000,
+                            &candidate.m_projectDeadlinePollIntervalMs)
+        || !parseIntSetting(Key::ScreenChangeDebounceMs, 10, 5000,
+                            &candidate.m_screenChangeDebounceMs)
+        || !parseIntSetting(Key::SystemVolumePollIntervalMs, 100, 60000,
+                            &candidate.m_systemVolumePollIntervalMs)
+        || !parseIntSetting(Key::FileWatchDebounceMs, 10, 10000,
+                            &candidate.m_fileWatchDebounceMs)
+        || !parseIntSetting(Key::SceneActivityRefreshIntervalMs, 100, 10000,
+                            &candidate.m_sceneActivityRefreshIntervalMs)
+        || !parseIntSetting(Key::VideoStatePublishIntervalMs, 10, 1000,
+                            &candidate.m_videoStatePublishIntervalMs)
+        || !parseIntSetting(Key::VideoSnapshotIntervalMs, 50, 10000,
+                            &candidate.m_videoSnapshotIntervalMs)
+        || !parseIntSetting(Key::RemoteWindowShowDelayMs, 1, 1000,
+                            &candidate.m_remoteWindowShowDelayMs)
+        || !parseIntSetting(Key::MediaProbeTimeoutMs, 500, 120000,
+                            &candidate.m_mediaProbeTimeoutMs)
+        || !parseIntSetting(Key::IncomingUploadCompletionTtlMs, 1000, 3600000,
+                            &candidate.m_incomingUploadCompletionTtlMs)
+        || !parseIntSetting(Key::DeferredCleanupRetryMs, 100, 60000,
+                            &candidate.m_deferredCleanupRetryMs)
+        || !parseIntSetting(Key::SceneLaunchTimeoutMarginMs, 0, 30000,
+                            &candidate.m_sceneLaunchTimeoutMarginMs)
+        || !parseIntSetting(Key::InstanceActivationConnectTimeoutMs, 10, 5000,
+                            &candidate.m_instanceActivationConnectTimeoutMs)
+        || !parseIntSetting(Key::InstanceActivationAckTimeoutMs, 10, 10000,
+                            &candidate.m_instanceActivationAckTimeoutMs)
+        || !parseIntSetting(Key::InstanceActivationRetryIntervalMs, 1, 1000,
+                            &candidate.m_instanceActivationRetryIntervalMs)
+        || !parseIntSetting(Key::ControlledDisconnectDrainTimeoutMs, 1000, 120000,
+                            &candidate.m_controlledDisconnectDrainTimeoutMs)
+        || !parseIntSetting(Key::ProcessStopTimeoutMs, 0, 10000,
+                            &candidate.m_processStopTimeoutMs)
+        || !parseIntSetting(Key::UploadActionMinIntervalMs, 0, 10000,
+                            &candidate.m_uploadActionMinIntervalMs)
+        || !parseIntSetting(Key::UploadCancelGuardMs, 0, 30000,
+                            &candidate.m_uploadCancelGuardMs)
+        || !parseIntSetting(Key::SceneSeekPositionToleranceMs, 0, 5000,
+                            &candidate.m_sceneSeekPositionToleranceMs)
+        || !parseIntSetting(Key::SceneStartFrameToleranceMs, 0, 5000,
+                            &candidate.m_sceneStartFrameToleranceMs)
+        || !parseIntSetting(Key::SceneDecoderSyncToleranceMs, 0, 5000,
+                            &candidate.m_sceneDecoderSyncToleranceMs)
+        || !parseIntSetting(Key::SceneVideoSyncPositionToleranceMs, 0, 10000,
+                            &candidate.m_sceneVideoSyncPositionToleranceMs)
+        || !parseIntSetting(Key::SceneVideoSyncTransitMaxMs, 0, 30000,
+                            &candidate.m_sceneVideoSyncTransitMaxMs)
+        || !parseIntSetting(Key::SceneAuthoritativeSeekGuardMs, 0, 10000,
+                            &candidate.m_sceneAuthoritativeSeekGuardMs)
+        || !parseIntSetting(Key::SceneRepeatTriggerGuardMs, 0, 10000,
+                            &candidate.m_sceneRepeatTriggerGuardMs)
+        || !parseIntSetting(Key::UiContentFadeDurationMs, 0, 5000,
+                            &candidate.m_uiContentFadeDurationMs)
+        || !parseIntSetting(Key::UiSpinnerRotationDurationMs, 100, 10000,
+                            &candidate.m_uiSpinnerRotationDurationMs)
+        || !parseIntSetting(Key::UiScrollbarHideDelayMs, 0, 10000,
+                            &candidate.m_uiScrollbarHideDelayMs)
+        || !parseIntSetting(Key::UiInputWatchdogIntervalMs, 25, 5000,
+                            &candidate.m_uiInputWatchdogIntervalMs)
+        || !parseIntSetting(Key::UiSnapFreezeCleanupDelayMs, 25, 10000,
+                            &candidate.m_uiSnapFreezeCleanupDelayMs)
+        || !parseIntSetting(Key::ToastDefaultDurationMs, 100, 60000,
+                            &candidate.m_toastDefaultDurationMs)
+        || !parseIntSetting(Key::ToastInfoDurationMs, 100, 60000,
+                            &candidate.m_toastInfoDurationMs)
+        || !parseIntSetting(Key::ToastWarningDurationMs, 100, 60000,
+                            &candidate.m_toastWarningDurationMs)
+        || !parseIntSetting(Key::ToastErrorDurationMs, 100, 60000,
+                            &candidate.m_toastErrorDurationMs)
+        || !parseIntSetting(Key::ToastAnimationDurationMs, 0, 5000,
+                            &candidate.m_toastAnimationDurationMs)) {
+        return false;
+    }
+    if (candidate.m_reconnectFastMaxMs < candidate.m_reconnectFastStepMs
+        || candidate.m_reconnectMaxMs < candidate.m_reconnectBaseMs) {
+        return setError(errorMessage,
+                        QStringLiteral("Reconnect maximum delays must be greater than or equal to their base delays"));
+    }
 
     qint64 uploadConcurrency = 0;
     if (!parseInteger(rawValues.at(Key::UploadConcurrency), keyName(Key::UploadConcurrency),
@@ -516,8 +725,6 @@ bool AppConfig::load(const LoadOptions& options, QString* errorMessage) {
                          candidate.m_cursorDebug, errorMessage)
         || !parseBoolean(rawValues.at(Key::RuntimeDiagnostics), keyName(Key::RuntimeDiagnostics),
                          candidate.m_runtimeDiagnostics, errorMessage)
-        || !parseBoolean(rawValues.at(Key::MigrationTelemetry), keyName(Key::MigrationTelemetry),
-                         candidate.m_migrationTelemetry, errorMessage)
         || !parseBoolean(rawValues.at(Key::CanvasProfiling), keyName(Key::CanvasProfiling),
                          candidate.m_canvasProfiling, errorMessage)) {
         return false;

@@ -193,7 +193,7 @@ ClientInfo ProjectTargetReference::toClientInfo(bool online) const
     ClientInfo client(endpointId, machineName, platform);
     client.setEndpointId(endpointId);
     client.setStatus(online ? QStringLiteral("Available")
-                            : QStringLiteral("Offline"));
+                            : QStringLiteral("Disconnected"));
     client.setAvailabilityStatus(client.getStatus());
     client.setVolumePercent(-1);
     client.setOnline(online);
@@ -238,13 +238,21 @@ bool ProjectMediaReference::fromJson(const QJsonObject& json,
 
 bool ProjectRecord::isValid() const
 {
-    return !projectId.trimmed().isEmpty()
+    const bool identityValid = !projectId.trimmed().isEmpty()
         && !targetEndpointId.trimmed().isEmpty()
         && target.isValid()
         && target.endpointId == targetEndpointId
         && state != ProjectLifecycleState::Deleted
         && createdAtMs >= 0
         && updatedAtMs >= 0;
+    if (!identityValid || savedVolumePercent < -1 || savedVolumePercent > 100
+        || snapshotRevision == 0 || snapshotCapturedAtMs < 1) {
+        return false;
+    }
+    for (const ScreenInfo& screen : savedScreens) {
+        if (!screen.isValid()) return false;
+    }
+    return true;
 }
 
 QJsonObject ProjectRecord::toJson() const
@@ -263,6 +271,11 @@ QJsonObject ProjectRecord::toJson() const
         screens.append(screen.toJson());
     }
     json.insert(QStringLiteral("savedScreens"), screens);
+    json.insert(QStringLiteral("savedVolumePercent"), savedVolumePercent);
+    json.insert(QStringLiteral("snapshotRevision"),
+                static_cast<double>(snapshotRevision));
+    json.insert(QStringLiteral("snapshotCapturedAtMs"),
+                static_cast<double>(snapshotCapturedAtMs));
     json.insert(QStringLiteral("state"), projectLifecycleStateToString(state));
     json.insert(QStringLiteral("createdAtMs"), static_cast<double>(createdAtMs));
     json.insert(QStringLiteral("updatedAtMs"), static_cast<double>(updatedAtMs));
@@ -287,6 +300,18 @@ bool ProjectRecord::fromJson(const QJsonObject& json, ProjectRecord* project, QS
     parsed.updatedAtMs = jsonInteger(json, "updatedAtMs");
     parsed.hiddenAtMs = jsonInteger(json, "hiddenAtMs");
     parsed.lastCheckpointAtMs = jsonInteger(json, "lastCheckpointAtMs");
+    const qint64 revision = jsonInteger(json, "snapshotRevision", 0);
+    parsed.savedVolumePercent =
+        json.value(QStringLiteral("savedVolumePercent")).toInt(-2);
+    parsed.snapshotRevision = revision > 0
+        ? static_cast<quint64>(revision) : 0;
+    parsed.snapshotCapturedAtMs =
+        jsonInteger(json, "snapshotCapturedAtMs");
+    if (parsed.savedVolumePercent < -1 || parsed.savedVolumePercent > 100
+        || parsed.snapshotRevision == 0 || parsed.snapshotCapturedAtMs < 1) {
+        setError(error, QStringLiteral("Project saved volume is invalid"));
+        return false;
+    }
     if (!projectLifecycleStateFromString(json.value(QStringLiteral("state")).toString(), &parsed.state)) {
         setError(error, QStringLiteral("Project contains an invalid lifecycle state"));
         return false;
@@ -301,22 +326,41 @@ bool ProjectRecord::fromJson(const QJsonObject& json, ProjectRecord* project, QS
         setError(error, QStringLiteral("Project.savedScreens must be an array"));
         return false;
     }
+    if (screensValue.toArray().size() > 64) {
+        setError(error, QStringLiteral("Project has too many saved screens"));
+        return false;
+    }
+    QSet<int> screenIds;
     for (const QJsonValue& value : screensValue.toArray()) {
         if (!value.isObject()) {
             setError(error, QStringLiteral("Project contains an invalid saved screen"));
             return false;
         }
-        parsed.savedScreens.append(ScreenInfo::fromJson(value.toObject()));
+        const ScreenInfo screen = ScreenInfo::fromJson(value.toObject());
+        if (!screen.isValid() || screenIds.contains(screen.id)) {
+            setError(error, QStringLiteral("Project contains an invalid or duplicate saved screen"));
+            return false;
+        }
+        screenIds.insert(screen.id);
+        parsed.savedScreens.append(screen);
     }
-    if (!json.value(QStringLiteral("canvasState")).isUndefined()
-        && !json.value(QStringLiteral("canvasState")).isObject()) {
+    if (!json.value(QStringLiteral("canvasState")).isObject()) {
         setError(error, QStringLiteral("Project.canvasState must be an object"));
         return false;
     }
-    parsed.canvasState = sanitizeDurableValue(json.value(QStringLiteral("canvasState"))).toObject();
+    const QJsonObject storedCanvasState =
+        json.value(QStringLiteral("canvasState")).toObject();
+    const QJsonObject sanitizedCanvasState =
+        sanitizeDurableValue(storedCanvasState).toObject();
+    if (storedCanvasState != sanitizedCanvasState) {
+        setError(error, QStringLiteral(
+            "Project.canvasState contains transient protocol state"));
+        return false;
+    }
+    parsed.canvasState = sanitizedCanvasState;
 
     const QJsonValue referencesValue = json.value(QStringLiteral("mediaReferences"));
-    if (!referencesValue.isUndefined() && !referencesValue.isArray()) {
+    if (!referencesValue.isArray()) {
         setError(error, QStringLiteral("Project.mediaReferences must be an array"));
         return false;
     }

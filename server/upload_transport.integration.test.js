@@ -47,8 +47,8 @@ function trackedSocket(url) {
     };
 }
 
-function assertV3Envelope(message, context) {
-    assert.equal(message.protocolVersion, 3);
+function assertEnvelope(message, context) {
+    assert.equal(message.protocolVersion, 4);
     assert.equal(message.serverBootId, context.serverBootId);
     assert.equal(message.connectionGeneration, context.connectionGeneration);
     assert.match(message.messageId,
@@ -76,7 +76,7 @@ async function connectDevice(url, machineName) {
     const endpointId = endpointIdForInstallation(installationId, instanceId);
     peer.ws.send(JSON.stringify({
         type: 'auth_response',
-        protocolVersion: 3,
+        protocolVersion: 4,
         serverBootId: challenge.serverBootId,
         messageId: crypto.randomUUID(),
         runtimeId,
@@ -96,7 +96,7 @@ async function connectDevice(url, machineName) {
     };
     peer.send = (type, body = {}) => peer.ws.send(JSON.stringify({
         type,
-        protocolVersion: 3,
+        protocolVersion: 4,
         serverBootId: peer.context.serverBootId,
         connectionGeneration: peer.context.connectionGeneration,
         messageId: crypto.randomUUID(),
@@ -104,7 +104,7 @@ async function connectDevice(url, machineName) {
     }));
     peer.send('endpoint_snapshot', {
         machineName, platform: 'test', instanceOrdinal: 1,
-        screens: [], volumePercent: null,
+        screens: [], systemUI: [], volumePercent: null,
     });
     await peer.next(message => message.type === 'endpoint_snapshot_applied');
     return peer;
@@ -133,6 +133,19 @@ async function connectDevice(url, machineName) {
             targetEndpointId: target.context.endpointId,
             requestId: 'open-1',
         });
+        const opening = await owner.next(message =>
+            message.type === 'remote_session_opening');
+        const offer = await target.next(message =>
+            message.type === 'remote_session_offer'
+            && message.remoteSessionId === opening.remoteSessionId);
+        target.send('remote_session_accept', {
+            remoteSessionId: offer.remoteSessionId,
+            generation: offer.generation,
+            snapshot: {
+                screens: [], systemUI: [], volumePercent: null,
+                revision: 1, capturedAtEpochMs: Date.now(),
+            },
+        });
         const opened = await owner.next(message => message.type === 'remote_session_opened');
         await target.next(message => message.type === 'remote_session_opened'
             && message.remoteSessionId === opened.remoteSessionId);
@@ -143,11 +156,11 @@ async function connectDevice(url, machineName) {
 
         owner.send('request_upload_channel');
         const token = await owner.next(message => message.type === 'upload_channel_token');
-        assertV3Envelope(token, owner.context);
+        assertEnvelope(token, owner.context);
         uploadChannel = trackedSocket(`${url}?channel=upload&token=${encodeURIComponent(token.token)}`);
         await uploadChannel.opened();
         const ready = await uploadChannel.next(message => message.type === 'upload_channel_ready');
-        assertV3Envelope(ready, owner.context);
+        assertEnvelope(ready, owner.context);
 
         const bytes = Buffer.alloc(128, 0x4d);
         const sha256 = crypto.createHash('sha256').update(bytes).digest('hex');
@@ -158,7 +171,7 @@ async function connectDevice(url, machineName) {
             mediaIds: ['media-integration-1'],
         };
         const uploadEnvelope = body => ({
-            protocolVersion: 3,
+            protocolVersion: 4,
             serverBootId: owner.context.serverBootId,
             messageId: crypto.randomUUID(),
             connectionGeneration: owner.context.connectionGeneration,
@@ -197,13 +210,13 @@ async function connectDevice(url, machineName) {
             'closing only the upload transport must preserve resumable state');
         owner.send('request_upload_channel');
         const replacementToken = await owner.next(message => message.type === 'upload_channel_token');
-        assertV3Envelope(replacementToken, owner.context);
+        assertEnvelope(replacementToken, owner.context);
         uploadChannel = trackedSocket(
             `${url}?channel=upload&token=${encodeURIComponent(replacementToken.token)}`);
         await uploadChannel.opened();
         const replacementReady = await uploadChannel.next(
             message => message.type === 'upload_channel_ready');
-        assertV3Envelope(replacementReady, owner.context);
+        assertEnvelope(replacementReady, owner.context);
         uploadChannel.ws.send(JSON.stringify(uploadEnvelope({
             type: 'upload_resume', uploadId,
         })));
@@ -275,8 +288,26 @@ async function connectDevice(url, machineName) {
             mediaIds: asset.mediaIds, sha256, size: asset.size,
         }];
         const scene = {
-            screens: [{ id: 'screen-integration-1' }],
-            media: [{ mediaId: asset.mediaIds[0], assetId: asset.assetId, type: 'image' }],
+            renderSchemaVersion: 2,
+            screens: [{ id: 1, x: 0, y: 0, width: 1920, height: 1080,
+                primary: true }],
+            media: [{
+                mediaId: asset.mediaIds[0], assetId: asset.assetId,
+                fileId: sha256, fileName: asset.name, type: 'image',
+                x: 0, y: 0, width: 1920, height: 1080,
+                baseWidth: 1920, baseHeight: 1080, visible: true, z: 1,
+                autoDisplay: false, autoDisplayDelayMs: 0,
+                autoHide: false, autoHideDelayMs: 0,
+                hideWhenVideoEnds: false, fadeInSeconds: 0,
+                fadeOutSeconds: 0, contentOpacity: 1,
+                spans: [{
+                    screenId: 1, normX: 0, normY: 0, normW: 1, normH: 1,
+                    spanDestNormX: 0, spanDestNormY: 0,
+                    spanDestNormW: 1, spanDestNormH: 1,
+                    spanSourceNormX: 0, spanSourceNormY: 0,
+                    spanSourceNormW: 1, spanSourceNormH: 1,
+                }],
+            }],
         };
         const digest = computeSceneDigest(1, manifest, scene);
         const sceneRunId = 'scene-run-integration-1';
@@ -286,7 +317,7 @@ async function connectDevice(url, machineName) {
         await target.next(message => message.type === 'scene_prepare'
             && message.sceneRunId === sceneRunId);
         const checklist = [
-            { itemId: 'screen_screen-integration-1', stage: 'screen_render_graph_ready', ready: true },
+            { itemId: 'screen_1', stage: 'screen_render_graph_ready', ready: true },
             { itemId: 'media-integration-1_file', stage: 'file_validated', ready: true },
             { itemId: 'media-integration-1_decode', stage: 'image_decoded', ready: true },
             { itemId: 'media-integration-1_texture', stage: 'image_texture_ready', ready: true },
@@ -334,7 +365,7 @@ async function connectDevice(url, machineName) {
             const output = peer.ws === owner.ws ? owner : target;
             // A representative post-auth message proves centralized envelopes.
             const clientList = await output.next(message => message.type === 'client_list');
-            assert.equal(clientList.protocolVersion, 3);
+            assert.equal(clientList.protocolVersion, 4);
             assert.equal(clientList.serverBootId, server.serverBootId);
             assert.equal(clientList.connectionGeneration,
                 output.context.connectionGeneration);
@@ -348,7 +379,7 @@ async function connectDevice(url, machineName) {
         await new Promise(resolve => server.wss.close(resolve));
     }
 })().then(() => {
-    console.log('upload transport v3 integration tests passed');
+    console.log('upload transport v4 integration tests passed');
 }).catch(error => {
     console.error(error);
     process.exitCode = 1;

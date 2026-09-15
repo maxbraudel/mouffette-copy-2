@@ -125,7 +125,7 @@ bool removeNativeSecret(const QByteArray& account, QString* diagnostic) {
     return true;
 }
 
-bool removeLegacyNativeSecret(QString* diagnostic) {
+bool removeObsoleteNativeSecret(QString* diagnostic) {
     return removeNativeSecret(QByteArray(kVaultAccount), diagnostic);
 }
 #elif defined(Q_OS_WIN)
@@ -187,7 +187,7 @@ bool removeNativeSecret(const QByteArray& account, QString* diagnostic) {
     return false;
 }
 
-bool removeLegacyNativeSecret(QString* diagnostic) {
+bool removeObsoleteNativeSecret(QString* diagnostic) {
     const std::wstring target = QString::fromLatin1(kVaultService).toStdWString();
     if (CredDeleteW(target.c_str(), CRED_TYPE_GENERIC, 0)) return true;
     const DWORD code = GetLastError();
@@ -202,7 +202,7 @@ bool removeLegacyNativeSecret(QString* diagnostic) {
 bool loadNativeSecret(const QByteArray&, QByteArray*, QString*) { return false; }
 bool saveNativeSecret(const QByteArray&, const QByteArray&, QString*) { return false; }
 bool removeNativeSecret(const QByteArray&, QString*) { return true; }
-bool removeLegacyNativeSecret(QString*) { return true; }
+bool removeObsoleteNativeSecret(QString*) { return true; }
 #endif
 
 QByteArray accountForNamespace(const QString& runtimeNamespace) {
@@ -596,9 +596,9 @@ QString DeviceIdentityStore::endpointIdForInstallation(const QString& installati
         QCryptographicHash::hash(material, QCryptographicHash::Sha256)));
 }
 
-bool DeviceIdentityStore::removeLegacyInstallationIdentity(QString* errorMessage) {
+bool DeviceIdentityStore::removeObsoleteInstallationIdentity(QString* errorMessage) {
     QString nativeError;
-    if (!removeLegacyNativeSecret(&nativeError)) {
+    if (!removeObsoleteNativeSecret(&nativeError)) {
         if (errorMessage) *errorMessage = nativeError;
         return false;
     }
@@ -613,7 +613,7 @@ bool DeviceIdentityStore::removeLegacyInstallationIdentity(QString* errorMessage
     const QFileInfo info(path);
     if ((info.exists() || info.isSymLink()) && !QFile::remove(path)) {
         if (errorMessage) {
-            *errorMessage = QStringLiteral("Cannot remove legacy device identity file");
+            *errorMessage = QStringLiteral("Cannot remove obsolete device identity file");
         }
         return false;
     }

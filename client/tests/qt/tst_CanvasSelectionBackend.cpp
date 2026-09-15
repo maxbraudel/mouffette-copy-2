@@ -14,7 +14,7 @@
 #include "frontend/rendering/canvas/MediaListModel.h"
 #include "frontend/rendering/canvas/QuickCanvasController.h"
 #include "frontend/rendering/canvas/QuickCanvasHost.h"
-#include "frontend/qml/CanvasSessionViewModel.h"
+#include "frontend/qml/ClientWorkspaceViewModel.h"
 
 namespace {
 QQuickItem* findQuickItemWithProperty(QQuickItem* root, const char* propertyName,
@@ -533,7 +533,7 @@ private slots:
         std::unique_ptr<QuickCanvasHost> host(QuickCanvasHost::create(&error));
         QVERIFY2(host, qPrintable(error));
         host->setProjectEditingEnabled(true);
-        CanvasSessionViewModel session(QStringLiteral("drag-session"), host.get(),
+        ClientWorkspaceViewModel session(QStringLiteral("drag-session"), host.get(),
             [] {}, nullptr, [] { return false; }, [] { return true; },
             [] { return true; });
         session.setLoading(false);

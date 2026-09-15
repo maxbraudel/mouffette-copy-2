@@ -25,8 +25,8 @@ public:
 
     void setFileManager(FileManager* manager) { m_fileManager = manager; }
     FileManager* fileManager() const { return m_fileManager; }
-    void setCanvasSessionId(const QString& id) { m_canvasSessionId = id; }
-    QString canvasSessionId() const { return m_canvasSessionId; }
+    void setClientWorkspaceId(const QString& id) { m_projectId = id; }
+    QString projectId() const { return m_projectId; }
 
     QList<CanvasMedia*> media() const { return m_media; }
     CanvasMedia* mediaById(const QString& mediaId) const;
@@ -95,7 +95,7 @@ private:
     QList<ScreenInfo> m_screens;
     QHash<int, QRectF> m_screenRects;
     FileManager* m_fileManager = nullptr;
-    QString m_canvasSessionId;
+    QString m_projectId;
     qreal m_cameraScale = 1.0;
     qreal m_cameraPanX = 0.0;
     qreal m_cameraPanY = 0.0;

@@ -30,7 +30,7 @@ public:
     virtual QList<CanvasMedia*> enumerateMediaItems() const = 0;
     virtual void deleteMediaItemCanonical(CanvasMedia* mediaItem) = 0;
 
-    virtual void setActiveIdeaId(const QString& canvasSessionId) = 0;
+    virtual void setActiveProjectId(const QString& projectId) = 0;
     virtual void setWebSocketClient(WebSocketClient* client) = 0;
     virtual void setUploadManager(UploadManager* manager) = 0;
     virtual void setFileManager(FileManager* manager) = 0;

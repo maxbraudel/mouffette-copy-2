@@ -15,11 +15,6 @@
 namespace {
 constexpr int kProjectTextSettingsSchemaVersion = 1;
 
-QString secondsText(int milliseconds)
-{
-    return QString::number(qMax(0, milliseconds) / 1000.0, 'f', 3);
-}
-
 QJsonObject spanForIntersection(int screenId, const QRectF& screen,
                                 const QRectF& media)
 {
@@ -102,8 +97,8 @@ CanvasMedia* CanvasDocument::addPreparedFile(
         media->setFileId(fileId);
         if (!fileId.isEmpty()) {
             m_fileManager->associateMediaWithFile(media->mediaId(), fileId);
-            if (!m_canvasSessionId.isEmpty()) {
-                m_fileManager->associateFileWithIdea(fileId, m_canvasSessionId);
+            if (!m_projectId.isEmpty()) {
+                m_fileManager->associateFileWithProject(fileId, m_projectId);
             }
         }
     }
@@ -319,10 +314,6 @@ void CanvasDocument::setContentAvailable(bool available)
 QJsonObject CanvasDocument::serializeSceneState() const
 {
     QJsonObject root{{QStringLiteral("renderSchemaVersion"), 2}};
-    if (!m_canvasSessionId.isEmpty()
-        && m_canvasSessionId != QLatin1String("default")) {
-        root.insert(QStringLiteral("canvasSessionId"), m_canvasSessionId);
-    }
     QJsonArray screens;
     for (const ScreenInfo& screen : m_screens) screens.append(screen.toJson());
     root.insert(QStringLiteral("screens"), screens);
@@ -376,15 +367,12 @@ QJsonObject CanvasDocument::serializeSceneState() const
         if (media->isText()) {
             item.insert(QStringLiteral("text"), media->text());
             item.insert(QStringLiteral("fontFamily"), media->fontFamily());
-            item.insert(QStringLiteral("fontSize"), media->fontPixelSize());
             item.insert(QStringLiteral("fontPixelSize"), media->fontPixelSize());
             item.insert(QStringLiteral("fontWeight"), media->renderedFontWeight());
-            item.insert(QStringLiteral("fontBold"), media->renderedFontWeight() >= 600);
             item.insert(QStringLiteral("fontItalic"), media->italic());
             item.insert(QStringLiteral("fontUnderline"), media->underline());
             item.insert(QStringLiteral("fontUppercase"), media->uppercase());
             item.insert(QStringLiteral("textColor"), media->renderedTextColor().name(QColor::HexArgb));
-            item.insert(QStringLiteral("textBorderWidthPercent"), media->renderedOutlineWidthPercent());
             item.insert(QStringLiteral("textOutlineWidthPx"),
                         media->renderedOutlineWidthPercent()
                             * media->fontPixelSize() / 100.0);
@@ -392,7 +380,6 @@ QJsonObject CanvasDocument::serializeSceneState() const
             item.insert(QStringLiteral("textHighlightEnabled"), media->highlightEnabled());
             item.insert(QStringLiteral("textHighlightColor"), media->highlightColor().name(QColor::HexArgb));
             item.insert(QStringLiteral("textFitToTextEnabled"), media->fitToTextEnabled());
-            item.insert(QStringLiteral("uniformScale"), media->scale());
             item.insert(QStringLiteral("horizontalAlignment"), media->horizontalAlignment());
             item.insert(QStringLiteral("verticalAlignment"), media->verticalAlignment());
         } else if (media->isVideo()) {
@@ -437,7 +424,6 @@ QJsonObject CanvasDocument::serializeSceneState() const
 QJsonObject CanvasDocument::serializeProjectState() const
 {
     QJsonObject root = serializeSceneState();
-    root.remove(QStringLiteral("canvasSessionId"));
     // Screen topology has an explicit ProjectRecord field. Keeping a second
     // copy in the document made session-only discovery leak into persistence.
     root.remove(QStringLiteral("screens"));
@@ -515,6 +501,53 @@ bool CanvasDocument::restoreProjectState(
             skip(id);
             continue;
         }
+        MediaSettingsState settings;
+        if (!MediaSettingsSerialization::fromProjectJson(
+                source.value(QStringLiteral("projectMediaSettings")).toObject(),
+                &settings)) {
+            skip(id);
+            continue;
+        }
+
+        QJsonObject projectText;
+        QColor storedTextColor;
+        QColor storedOutlineColor;
+        int storedFontWeight = 400;
+        qreal storedOutlineWidth = 0.0;
+        if (type == QLatin1String("text")) {
+            projectText = source.value(QStringLiteral("projectTextSettings")).toObject();
+            const QJsonValue fontWeightValue =
+                projectText.value(QStringLiteral("fontWeight"));
+            const QJsonValue outlineWidthValue =
+                projectText.value(QStringLiteral("textBorderWidthPercent"));
+            const double rawFontWeight = fontWeightValue.toDouble(-1.0);
+            storedOutlineWidth = outlineWidthValue.toDouble(-1.0);
+            storedTextColor = QColor(
+                projectText.value(QStringLiteral("textColor")).toString());
+            storedOutlineColor = QColor(
+                projectText.value(QStringLiteral("textBorderColor")).toString());
+            const bool textSettingsValid =
+                projectText.value(QStringLiteral("schemaVersion")).toInt(-1)
+                    == kProjectTextSettingsSchemaVersion
+                && projectText.value(QStringLiteral("textColorOverrideEnabled")).isBool()
+                && projectText.value(QStringLiteral("textColor")).isString()
+                && projectText.value(QStringLiteral("textBorderWidthOverrideEnabled")).isBool()
+                && outlineWidthValue.isDouble()
+                && std::isfinite(storedOutlineWidth)
+                && storedOutlineWidth >= 0.0 && storedOutlineWidth <= 100.0
+                && projectText.value(QStringLiteral("textBorderColorOverrideEnabled")).isBool()
+                && projectText.value(QStringLiteral("textBorderColor")).isString()
+                && projectText.value(QStringLiteral("fontWeightOverrideEnabled")).isBool()
+                && fontWeightValue.isDouble() && std::isfinite(rawFontWeight)
+                && std::floor(rawFontWeight) == rawFontWeight
+                && rawFontWeight >= 1.0 && rawFontWeight <= 1000.0
+                && storedTextColor.isValid() && storedOutlineColor.isValid();
+            if (!textSettingsValid) {
+                skip(id);
+                continue;
+            }
+            storedFontWeight = static_cast<int>(rawFontWeight);
+        }
         const QSize base(qMax(1, source.value(QStringLiteral("baseWidth")).toInt(
                                   qRound(source.value(QStringLiteral("width")).toDouble(1.0)))),
                          qMax(1, source.value(QStringLiteral("baseHeight")).toInt(
@@ -544,8 +577,8 @@ bool CanvasDocument::restoreProjectState(
         media->restoreMediaId(id);
         if (m_fileManager && !media->isText() && !media->fileId().isEmpty()) {
             m_fileManager->associateMediaWithFile(media->mediaId(), media->fileId());
-            if (!m_canvasSessionId.isEmpty()) {
-                m_fileManager->associateFileWithIdea(media->fileId(), m_canvasSessionId);
+            if (!m_projectId.isEmpty()) {
+                m_fileManager->associateFileWithProject(media->fileId(), m_projectId);
             }
         }
         media->setBaseSize(base);
@@ -560,71 +593,9 @@ bool CanvasDocument::restoreProjectState(
         media->setContentOpacity(std::clamp(
             source.value(QStringLiteral("contentOpacity")).toDouble(1.0), 0.0, 1.0));
 
-        MediaSettingsState settings;
-        settings.displayAutomatically = source.value(QStringLiteral("autoDisplay")).toBool(false);
-        const int displayDelay = source.value(QStringLiteral("autoDisplayDelayMs")).toInt();
-        settings.displayDelayEnabled = displayDelay > 0;
-        settings.displayDelayText = secondsText(displayDelay);
-        settings.hideDelayEnabled = source.value(QStringLiteral("autoHide")).toBool(false);
-        settings.hideDelayText = secondsText(source.value(QStringLiteral("autoHideDelayMs")).toInt());
-        settings.hideWhenVideoEnds = source.value(QStringLiteral("hideWhenVideoEnds")).toBool(false);
-        settings.fadeInEnabled = source.value(QStringLiteral("fadeInSeconds")).toDouble() > 0.0;
-        settings.fadeInText = QString::number(source.value(QStringLiteral("fadeInSeconds")).toDouble());
-        settings.fadeOutEnabled = source.value(QStringLiteral("fadeOutSeconds")).toDouble() > 0.0;
-        settings.fadeOutText = QString::number(source.value(QStringLiteral("fadeOutSeconds")).toDouble());
-        settings.opacityOverrideEnabled = true;
-        settings.opacityText = QString::number(qRound(media->contentOpacity() * 100.0));
-        if (media->isVideo()) {
-            settings.playAutomatically = source.value(QStringLiteral("autoPlay")).toBool(false);
-            const int playDelay = source.value(QStringLiteral("autoPlayDelayMs")).toInt();
-            settings.playDelayEnabled = playDelay > 0;
-            settings.playDelayText = secondsText(playDelay);
-            settings.pauseDelayEnabled = source.value(QStringLiteral("autoPause")).toBool(false);
-            settings.pauseDelayText = secondsText(source.value(QStringLiteral("autoPauseDelayMs")).toInt());
-            settings.repeatEnabled = source.value(QStringLiteral("repeatEnabled")).toBool(false);
-            settings.repeatCountText = QString::number(qMax(1, source.value(QStringLiteral("repeatCount")).toInt(1)));
-            settings.unmuteAutomatically = source.value(QStringLiteral("autoUnmute")).toBool(false);
-            const int unmuteDelay = source.value(QStringLiteral("autoUnmuteDelayMs")).toInt();
-            settings.unmuteDelayEnabled = unmuteDelay > 0;
-            settings.unmuteDelayText = secondsText(unmuteDelay);
-            settings.muteDelayEnabled = source.value(QStringLiteral("autoMute")).toBool(false);
-            settings.muteDelayText = secondsText(source.value(QStringLiteral("autoMuteDelayMs")).toInt());
-            settings.muteWhenVideoEnds = source.value(QStringLiteral("muteWhenVideoEnds")).toBool(false);
-        }
-        MediaSettingsSerialization::fromProjectJson(
-            source.value(QStringLiteral("projectMediaSettings")).toObject(), &settings);
         media->setSettings(settings);
 
         if (media->isText()) {
-            const QJsonObject projectText =
-                source.value(QStringLiteral("projectTextSettings")).toObject();
-            const bool hasProjectTextSettings =
-                projectText.value(QStringLiteral("schemaVersion")).toInt(-1)
-                    == kProjectTextSettingsSchemaVersion
-                && projectText.value(QStringLiteral("textColorOverrideEnabled")).isBool()
-                && projectText.value(QStringLiteral("textColor")).isString()
-                && projectText.value(QStringLiteral("textBorderWidthOverrideEnabled")).isBool()
-                && projectText.value(QStringLiteral("textBorderWidthPercent")).isDouble()
-                && projectText.value(QStringLiteral("textBorderColorOverrideEnabled")).isBool()
-                && projectText.value(QStringLiteral("textBorderColor")).isString()
-                && projectText.value(QStringLiteral("fontWeightOverrideEnabled")).isBool()
-                && projectText.value(QStringLiteral("fontWeight")).isDouble();
-
-            const int storedFontWeight = hasProjectTextSettings
-                ? projectText.value(QStringLiteral("fontWeight")).toInt(400)
-                : source.value(QStringLiteral("fontWeight")).toInt(400);
-            const QColor storedTextColor(hasProjectTextSettings
-                ? projectText.value(QStringLiteral("textColor")).toString()
-                : source.value(QStringLiteral("textColor")).toString(
-                      QStringLiteral("#FFFFFFFF")));
-            const qreal storedOutlineWidth = hasProjectTextSettings
-                ? projectText.value(QStringLiteral("textBorderWidthPercent")).toDouble()
-                : source.value(QStringLiteral("textBorderWidthPercent")).toDouble();
-            const QColor storedOutlineColor(hasProjectTextSettings
-                ? projectText.value(QStringLiteral("textBorderColor")).toString()
-                : source.value(QStringLiteral("textBorderColor")).toString(
-                      QStringLiteral("#FF000000")));
-
             media->setFontFamily(source.value(QStringLiteral("fontFamily")).toString(QStringLiteral("Impact")));
             media->setFontPixelSize(qMax(1, source.value(QStringLiteral("fontPixelSize")).toInt(64)));
             media->setFontWeight(storedFontWeight);
@@ -634,18 +605,14 @@ bool CanvasDocument::restoreProjectState(
             media->setTextColor(storedTextColor);
             media->setOutlineWidthPercent(storedOutlineWidth);
             media->setOutlineColor(storedOutlineColor);
-            media->setFontWeightOverrideEnabled(hasProjectTextSettings
-                ? projectText.value(QStringLiteral("fontWeightOverrideEnabled")).toBool()
-                : storedFontWeight != 400);
-            media->setTextColorOverrideEnabled(hasProjectTextSettings
-                ? projectText.value(QStringLiteral("textColorOverrideEnabled")).toBool()
-                : storedTextColor != QColor(Qt::white));
-            media->setOutlineWidthOverrideEnabled(hasProjectTextSettings
-                ? projectText.value(QStringLiteral("textBorderWidthOverrideEnabled")).toBool()
-                : !qFuzzyIsNull(storedOutlineWidth));
-            media->setOutlineColorOverrideEnabled(hasProjectTextSettings
-                ? projectText.value(QStringLiteral("textBorderColorOverrideEnabled")).toBool()
-                : storedOutlineColor != QColor(Qt::black));
+            media->setFontWeightOverrideEnabled(
+                projectText.value(QStringLiteral("fontWeightOverrideEnabled")).toBool());
+            media->setTextColorOverrideEnabled(
+                projectText.value(QStringLiteral("textColorOverrideEnabled")).toBool());
+            media->setOutlineWidthOverrideEnabled(
+                projectText.value(QStringLiteral("textBorderWidthOverrideEnabled")).toBool());
+            media->setOutlineColorOverrideEnabled(
+                projectText.value(QStringLiteral("textBorderColorOverrideEnabled")).toBool());
             media->setHighlightEnabled(source.value(QStringLiteral("textHighlightEnabled")).toBool(false));
             media->setHighlightColor(QColor(source.value(QStringLiteral("textHighlightColor")).toString(QStringLiteral("#80FFFF00"))));
             media->setHorizontalAlignment(source.value(QStringLiteral("horizontalAlignment")).toString());

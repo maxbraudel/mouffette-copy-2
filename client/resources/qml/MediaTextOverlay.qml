@@ -1,7 +1,7 @@
 import QtQuick
 // Bottom overlay panel for a selected text media item.
 // Row 1: fit-to-text toggle | [H-align group: left, center, right] | [V-align group: top, center, bottom]
-// Mirrors the legacy TextMediaItem alignment panel layout and segmented button style.
+// Text alignment panel with segmented controls.
 Item {
     id: root
 

@@ -1,4 +1,5 @@
 #include "backend/domain/media/MediaFilePolicy.h"
+#include "backend/config/AppConfig.h"
 #include "MediaFormatContract.h"
 
 #include <QAbstractEventDispatcher>
@@ -51,8 +52,6 @@ struct IsoParseBudget {
     static constexpr quint64 kMaximumBoxes = 65'536;
     quint64 remainingBoxes = kMaximumBoxes;
 };
-
-constexpr int kMp4FirstFrameDecodeTimeoutMs = 5'000;
 
 enum class VideoFrameProbeResult {
     Decoded,
@@ -126,7 +125,7 @@ VideoFrameProbe decodeFirstMp4Frame(const QString& path)
         eventLoop.quit();
     });
 
-    deadline.start(kMp4FirstFrameDecodeTimeoutMs);
+    deadline.start(AppConfig::instance().mediaProbeTimeoutMs());
     player.setVideoOutput(&sink);
     player.setSource(QUrl::fromLocalFile(path));
     player.play();

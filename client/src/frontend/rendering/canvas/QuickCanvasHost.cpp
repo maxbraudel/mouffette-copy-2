@@ -1,5 +1,6 @@
 #include "frontend/rendering/canvas/QuickCanvasHost.h"
 
+#include "backend/config/AppConfig.h"
 #include "backend/domain/canvas/CanvasDocument.h"
 #include "backend/domain/media/CanvasMedia.h"
 #include "backend/domain/media/MediaFilePolicy.h"
@@ -21,8 +22,6 @@
 #include <algorithm>
 
 namespace {
-constexpr int kStopTimeoutMs = 5000;
-
 void sceneToast(NotificationSeverity severity, const QString& message,
                 const QString& runId = {}, int duration = -1)
 {
@@ -83,7 +82,7 @@ QuickCanvasHost::QuickCanvasHost(CanvasDocument* document,
             publishActionState();
             sceneToast(NotificationSeverity::Warning,
                        QStringLiteral("Remote stop acknowledgement timed out; scene stopped locally"),
-                       runId, 5000);
+                       runId, AppConfig::instance().toastWarningDurationMs());
         } else if (m_sceneLaunching) {
             const QString message = !m_sceneAccepted
                 ? QStringLiteral("The server did not accept the remote scene request in time")
@@ -98,7 +97,8 @@ QuickCanvasHost::QuickCanvasHost(CanvasDocument* document,
             failScene(message, m_sceneAccepted);
         }
     });
-    m_videoSnapshotTimer.setInterval(1000);
+    m_videoSnapshotTimer.setInterval(
+        AppConfig::instance().videoSnapshotIntervalMs());
     connect(&m_videoSnapshotTimer, &QTimer::timeout,
             this, &QuickCanvasHost::sendVideoSnapshot);
 }
@@ -131,9 +131,9 @@ void QuickCanvasHost::deleteMediaItemCanonical(CanvasMedia* mediaItem)
     if (mediaItem) m_document->removeMedia(mediaItem->mediaId());
 }
 
-void QuickCanvasHost::setActiveIdeaId(const QString& id)
+void QuickCanvasHost::setActiveProjectId(const QString& id)
 {
-    m_document->setCanvasSessionId(id);
+    m_document->setClientWorkspaceId(id);
 }
 
 void QuickCanvasHost::setWebSocketClient(WebSocketClient* client)
@@ -203,7 +203,8 @@ void QuickCanvasHost::connectWebSocketSignals()
         const qint64 boundedDelay = std::max<qint64>(0, delay);
         // Preparation may consume almost its full deadline. Once COMMIT is
         // authoritative, replace it with a deadline scoped to presentation.
-        m_sceneTimeout.start(int(boundedDelay + startedTimeout + 1000));
+        m_sceneTimeout.start(int(boundedDelay + startedTimeout
+            + AppConfig::instance().sceneLaunchTimeoutMarginMs()));
         QTimer::singleShot(int(boundedDelay), this,
                            [this, scheduledRunId, scheduledDigest]() {
             if (!m_sceneLaunching || !m_sceneCommitScheduled
@@ -226,7 +227,7 @@ void QuickCanvasHost::connectWebSocketSignals()
         publishActionState();
         sceneToast(NotificationSeverity::Success,
                    QStringLiteral("Remote scene launched successfully!"),
-                   m_sceneRunId, 3000);
+                   m_sceneRunId);
     });
     connect(m_webSocket, &WebSocketClient::sceneStopReceived, this,
             [this](const QJsonObject& envelope) {
@@ -236,7 +237,8 @@ void QuickCanvasHost::connectWebSocketSignals()
         m_sceneLaunched = false;
         m_sceneStopping = true;
         m_webSocket->sendSceneStopped(m_sceneRunId, true);
-        m_sceneTimeout.start(kStopTimeoutMs);
+        m_sceneTimeout.start(m_webSocket->serverPolicy()
+            .value(QStringLiteral("sceneStopTimeoutMs")).toInt());
         publishActionState();
     });
     connect(m_webSocket, &WebSocketClient::sceneStoppedReceived, this,
@@ -258,13 +260,20 @@ void QuickCanvasHost::connectWebSocketSignals()
         publishActionState();
         sceneToast(NotificationSeverity::Success,
                    QStringLiteral("Remote scene stopped successfully"),
-                   runId, 3000);
+                   runId);
     });
     connect(m_webSocket, &WebSocketClient::sceneErrorReceived, this,
             [this](const QJsonObject& envelope) {
         if (matchesScene(envelope)) {
-            failScene(envelope.value(QStringLiteral("message")).toString(
-                          QStringLiteral("Remote scene protocol error")), false);
+            const QString code =
+                envelope.value(QStringLiteral("code")).toString();
+            const QString message = code
+                    == QLatin1String("target_scene_already_running")
+                ? QStringLiteral(
+                    "A scene is already running on this client. Try again shortly.")
+                : envelope.value(QStringLiteral("message")).toString(
+                    QStringLiteral("Remote scene protocol error"));
+            failScene(message, false);
         }
     });
     connect(m_webSocket, &WebSocketClient::remoteSessionResumed, this,
@@ -574,13 +583,13 @@ void QuickCanvasHost::triggerRemoteSceneAction()
         m_sceneStopping = true;
         m_videoSnapshotTimer.stop();
         m_webSocket->sendSceneStop(m_sceneRunId);
-        m_sceneTimeout.start(kStopTimeoutMs);
+        m_sceneTimeout.start(m_webSocket->serverPolicy()
+            .value(QStringLiteral("sceneStopTimeoutMs")).toInt());
         publishActionState();
         return;
     }
     if (!remoteSceneActionEnabled()) return;
     QJsonObject scene = m_document->serializeSceneState();
-    scene.remove(QStringLiteral("canvasSessionId"));
     QJsonArray media = scene.value(QStringLiteral("media")).toArray();
     for (qsizetype i = 0; i < media.size(); ++i) {
         QJsonObject item = media.at(i).toObject();
@@ -593,7 +602,8 @@ void QuickCanvasHost::triggerRemoteSceneAction()
     QString error;
     const QJsonArray manifest = buildSceneManifest(scene, &error);
     if (!error.isEmpty()) {
-        sceneToast(NotificationSeverity::Error, error, {}, 5000);
+        sceneToast(NotificationSeverity::Error, error, {},
+                   AppConfig::instance().toastErrorDurationMs());
         return;
     }
     bool ready = false;
@@ -604,7 +614,7 @@ void QuickCanvasHost::triggerRemoteSceneAction()
                    prepareError.isEmpty()
                        ? QStringLiteral("The local scene is not ready")
                        : prepareError,
-                   {}, 5000);
+                   {}, AppConfig::instance().toastErrorDurationMs());
         return;
     }
     m_sceneLaunching = true;
@@ -628,11 +638,11 @@ void QuickCanvasHost::triggerRemoteSceneAction()
         return;
     }
     const int timeout = m_webSocket->serverPolicy()
-        .value(QStringLiteral("scenePrepareTimeoutMs")).toInt(15000);
-    m_sceneTimeout.start(qMax(1000, timeout));
+        .value(QStringLiteral("scenePrepareTimeoutMs")).toInt();
+    m_sceneTimeout.start(timeout);
     sceneToast(NotificationSeverity::Info,
                QStringLiteral("Sending scene to remote client..."),
-               m_sceneRunId, 2000);
+               m_sceneRunId, AppConfig::instance().toastInfoDurationMs());
 }
 
 void QuickCanvasHost::triggerTestSceneAction()
@@ -775,7 +785,7 @@ void QuickCanvasHost::failScene(const QString& message, bool notifyServer)
     publishActionState();
     sceneToast(NotificationSeverity::Error,
                QStringLiteral("Scene launch failed: %1").arg(message),
-               runId, 5000);
+               runId, AppConfig::instance().toastErrorDurationMs());
 }
 
 void QuickCanvasHost::handleRemoteConnectionLost()
@@ -832,7 +842,6 @@ void QuickCanvasHost::sendVideoSnapshot()
     }
     static quint64 sequence = 0;
     QJsonObject scene = m_document->serializeSceneState();
-    scene.remove(QStringLiteral("canvasSessionId"));
     m_webSocket->sendSceneStateSnapshot(m_sceneRunId, ++sequence,
         m_webSocket->estimatedServerMonotonicMs(),
         QJsonObject{{QStringLiteral("scene"), scene},

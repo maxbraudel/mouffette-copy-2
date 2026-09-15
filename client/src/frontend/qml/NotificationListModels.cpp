@@ -1,12 +1,9 @@
 #include "frontend/qml/NotificationListModels.h"
+#include "backend/config/AppConfig.h"
 
 #include <QDateTime>
 #include <QTimer>
 #include <QUuid>
-
-namespace {
-constexpr int kToastAnimationDurationMs = 300;
-}
 
 HistoryListModel::HistoryListModel(QObject* parent)
     : QAbstractListModel(parent)
@@ -152,9 +149,11 @@ void ToastListModel::appendToast(const QString& message,
     m_rows.append(toast);
     endInsertRows();
 
-    const int lifetime = durationMs > 0 ? durationMs : 4000;
-    // The legacy timer started after its 300 ms entrance animation.
-    QTimer::singleShot(lifetime + kToastAnimationDurationMs,
+    const AppConfig& config = AppConfig::instance();
+    const int lifetime = durationMs > 0
+        ? durationMs : config.toastDefaultDurationMs();
+    // Begin expiry after the entrance animation finishes.
+    QTimer::singleShot(lifetime + config.toastAnimationDurationMs(),
                        this, [this, id = toast.id]() {
         beginDismissToast(id);
     });
@@ -168,7 +167,7 @@ void ToastListModel::beginDismissToast(const QString& id)
         toast.dismissing = true;
         const QModelIndex item = index(row);
         emit dataChanged(item, item, {DismissingRole});
-        QTimer::singleShot(kToastAnimationDurationMs, this,
+        QTimer::singleShot(AppConfig::instance().toastAnimationDurationMs(), this,
                            [this, id]() { removeToast(id); });
         return;
     }

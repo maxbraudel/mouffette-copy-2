@@ -53,9 +53,6 @@ QString RuntimeProfile::profileRoot()
     if (!g_context.rootPath.isEmpty()) {
         return QDir::cleanPath(g_context.rootPath);
     }
-    if (!g_context.temporaryRoot.isEmpty()) {
-        return QDir::cleanPath(g_context.temporaryRoot);
-    }
     return QDir::cleanPath(defaultPersistentRoot());
 }
 

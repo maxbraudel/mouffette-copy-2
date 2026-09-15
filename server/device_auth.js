@@ -2,8 +2,7 @@
 
 const crypto = require('node:crypto');
 
-const PROTOCOL_VERSION = 3;
-const CHALLENGE_TTL_MS = 10_000;
+const PROTOCOL_VERSION = 4;
 const RUNTIME_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const INSTANCE_ID_PATTERN = /^(?:primary|[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/i;
 const BASE64URL_PATTERN = /^[A-Za-z0-9_-]+$/;
@@ -43,14 +42,17 @@ function createChallenge(serverBootId, now = Date.now()) {
     });
 }
 
-function verifyAuthResponse(challenge, response, now = Date.now()) {
+function verifyAuthResponse(challenge, response, now, challengeTtlMs) {
+    if (!Number.isSafeInteger(challengeTtlMs) || challengeTtlMs <= 0) {
+        throw new TypeError('challengeTtlMs must be a positive integer');
+    }
     if (!challenge || !response || response.protocolVersion !== PROTOCOL_VERSION) {
         return { ok: false, error: 'protocol_version_mismatch' };
     }
     if (response.serverBootId !== challenge.serverBootId
         || !Number.isFinite(challenge.issuedAt)
         || now - challenge.issuedAt < 0
-        || now - challenge.issuedAt > CHALLENGE_TTL_MS) {
+        || now - challenge.issuedAt > challengeTtlMs) {
         return { ok: false, error: 'expired_or_mismatched_challenge' };
     }
     if (typeof response.runtimeId !== 'string'
@@ -105,7 +107,6 @@ function verifyAuthResponse(challenge, response, now = Date.now()) {
 
 module.exports = {
     PROTOCOL_VERSION,
-    CHALLENGE_TTL_MS,
     challengePayload,
     createChallenge,
     installationIdForPublicKey,

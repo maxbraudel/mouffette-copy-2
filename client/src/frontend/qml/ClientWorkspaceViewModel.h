@@ -1,5 +1,5 @@
-#ifndef CANVASSESSIONVIEWMODEL_H
-#define CANVASSESSIONVIEWMODEL_H
+#ifndef CLIENTWORKSPACEVIEWMODEL_H
+#define CLIENTWORKSPACEVIEWMODEL_H
 
 #include <QObject>
 #include <QPointer>
@@ -11,16 +11,16 @@ class MediaSettingsViewModel;
 class UploadManager;
 class QSortFilterProxyModel;
 
-class CanvasSessionViewModel : public QObject
+class ClientWorkspaceViewModel : public QObject
 {
     Q_OBJECT
     Q_PROPERTY(QString workspaceId READ workspaceId CONSTANT)
-    Q_PROPERTY(QString sessionId READ sessionId CONSTANT)
     Q_PROPERTY(QObject* mediaModel READ mediaModel NOTIFY mediaModelChanged)
     Q_PROPERTY(int mediaCount READ mediaCount NOTIFY mediaCountChanged)
     Q_PROPERTY(QObject* mediaSettings READ mediaSettings CONSTANT)
     Q_PROPERTY(QObject* canvasController READ canvasController NOTIFY mediaModelChanged)
     Q_PROPERTY(bool loading READ loading NOTIFY loadingChanged)
+    Q_PROPERTY(bool hasScreens READ hasScreens NOTIFY actionStateChanged)
     Q_PROPERTY(bool hasProject READ hasProject NOTIFY actionStateChanged)
     Q_PROPERTY(bool actionPending READ actionPending NOTIFY actionStateChanged)
     Q_PROPERTY(bool mediaEditingEnabled READ mediaEditingEnabled NOTIFY actionStateChanged)
@@ -70,7 +70,7 @@ public:
     };
     Q_ENUM(UploadState)
 
-    explicit CanvasSessionViewModel(QString sessionId,
+    explicit ClientWorkspaceViewModel(QString workspaceEndpointId,
                                     ICanvasHost* canvas,
                                     std::function<void()> uploadAction,
                                     UploadManager* uploadManager,
@@ -79,13 +79,13 @@ public:
                                     std::function<bool()> hasProject = {},
                                     QObject* parent = nullptr);
 
-    QString workspaceId() const { return m_sessionId; }
-    QString sessionId() const { return workspaceId(); }
+    QString workspaceId() const { return m_workspaceEndpointId; }
     QObject* mediaModel() const;
     int mediaCount() const;
     QObject* mediaSettings() const;
     QObject* canvasController() const;
     bool loading() const { return m_loading; }
+    bool hasScreens() const;
     bool hasProject() const;
     bool actionPending() const { return m_actionPending; }
     bool mediaEditingEnabled() const;
@@ -156,7 +156,7 @@ private:
     // Shared order with OverlayActionButton.Tone, covered by rendered-state tests.
     enum ActionTone { NormalTone, UploadingTone, UploadedTone, RemoteTone, TestTone };
 
-    QString m_sessionId;
+    QString m_workspaceEndpointId;
     QPointer<ICanvasHost> m_canvas;
     std::function<void()> m_uploadAction;
     QPointer<UploadManager> m_uploadManager;
@@ -173,12 +173,4 @@ private:
     int m_uploadFilesTotal = 0;
 };
 
-// Production UI uses workspace terminology. The base class keeps the former
-// name as a source-compatible facade for extensions while they migrate.
-class ClientWorkspaceViewModel final : public CanvasSessionViewModel
-{
-public:
-    using CanvasSessionViewModel::CanvasSessionViewModel;
-};
-
-#endif // CANVASSESSIONVIEWMODEL_H
+#endif // CLIENTWORKSPACEVIEWMODEL_H

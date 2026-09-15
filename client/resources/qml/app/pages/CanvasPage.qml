@@ -24,43 +24,22 @@ AppPanel {
 
     AppSpinner {
         anchors.centerIn: parent
-        visible: root.session && root.session.loading
+        visible: (!root.session && root.controller.remoteBusy)
+            || (root.session && root.session.loading)
         running: visible
     }
 
-    Column {
+    Text {
         anchors.centerIn: parent
-        width: Math.min(parent.width - 48, 560)
-        spacing: 18
-        visible: !root.session
-
-        Text {
-            width: parent.width
-            text: "No project has been created and no session has been launched"
-            color: Theme.text
-            font.pixelSize: Theme.titleFontSize
-            font.bold: true
-            horizontalAlignment: Text.AlignHCenter
-            wrapMode: Text.WordWrap
-        }
-        Row {
-            anchors.horizontalCenter: parent.horizontalCenter
-            spacing: 10
-            AppButton {
-                text: "Create Project"
-                enabled: root.controller.canCreateProject
-                unavailableReason: "A project already exists for this client"
-                onClicked: root.controller.createProject()
-            }
-            AppButton {
-                text: "Launch Session"
-                enabled: root.controller.canLaunchSession
-                unavailableReason: root.controller.connectionEnabled
-                    ? "The client is offline or unavailable"
-                    : "Enable the local client first"
-                onClicked: root.controller.launchSession()
-            }
-        }
+        width: Math.min(parent.width - 48, 640)
+        visible: root.session && !root.session.loading && !root.session.hasScreens
+        text: "No screens available"
+        color: Theme.mutedText
+        font.pixelSize: Math.max(28, Theme.titleFontSize * 1.5)
+        font.bold: true
+        horizontalAlignment: Text.AlignHCenter
+        wrapMode: Text.WordWrap
+        z: 99999
     }
 
     CanvasToolbar {

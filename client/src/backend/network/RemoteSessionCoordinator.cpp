@@ -1,6 +1,7 @@
 #include "backend/network/RemoteSessionCoordinator.h"
 
 #include <QRegularExpression>
+#include <QJsonArray>
 
 #include <cmath>
 
@@ -16,6 +17,79 @@ bool readPositiveGeneration(const QJsonValue& value, quint64* result)
         return false;
     }
     *result = static_cast<quint64>(raw);
+    return true;
+}
+
+bool isBoundedInteger(const QJsonValue& value, qint64 minimum, qint64 maximum)
+{
+    if (!value.isDouble()) return false;
+    const double raw = value.toDouble();
+    return std::isfinite(raw) && std::floor(raw) == raw
+        && raw >= static_cast<double>(minimum)
+        && raw <= static_cast<double>(maximum);
+}
+
+bool hasOnlyKeys(const QJsonObject& object,
+                 const QSet<QString>& required,
+                 const QSet<QString>& optional = {})
+{
+    for (const QString& key : required) {
+        if (!object.contains(key)) return false;
+    }
+    for (auto it = object.constBegin(); it != object.constEnd(); ++it) {
+        if (!required.contains(it.key()) && !optional.contains(it.key())) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool isValidUiZone(const QJsonValue& value)
+{
+    if (!value.isObject()) return false;
+    const QJsonObject zone = value.toObject();
+    static const QSet<QString> keys = {
+        QStringLiteral("type"), QStringLiteral("x"), QStringLiteral("y"),
+        QStringLiteral("width"), QStringLiteral("height")
+    };
+    static const QSet<QString> types = {
+        QStringLiteral("taskbar"), QStringLiteral("menu_bar"),
+        QStringLiteral("dock")
+    };
+    return hasOnlyKeys(zone, keys)
+        && zone.value(QStringLiteral("type")).isString()
+        && types.contains(zone.value(QStringLiteral("type")).toString())
+        && isBoundedInteger(zone.value(QStringLiteral("x")), -1'000'000, 1'000'000)
+        && isBoundedInteger(zone.value(QStringLiteral("y")), -1'000'000, 1'000'000)
+        && isBoundedInteger(zone.value(QStringLiteral("width")), 0, 100'000)
+        && isBoundedInteger(zone.value(QStringLiteral("height")), 0, 100'000);
+}
+
+bool isValidScreen(const QJsonValue& value)
+{
+    if (!value.isObject()) return false;
+    const QJsonObject screen = value.toObject();
+    static const QSet<QString> required = {
+        QStringLiteral("id"), QStringLiteral("width"),
+        QStringLiteral("height"), QStringLiteral("x"),
+        QStringLiteral("y"), QStringLiteral("primary")
+    };
+    static const QSet<QString> optional = {QStringLiteral("uiZones")};
+    if (!hasOnlyKeys(screen, required, optional)
+        || !isBoundedInteger(screen.value(QStringLiteral("id")), 0, 1'000'000)
+        || !isBoundedInteger(screen.value(QStringLiteral("width")), 1, 100'000)
+        || !isBoundedInteger(screen.value(QStringLiteral("height")), 1, 100'000)
+        || !isBoundedInteger(screen.value(QStringLiteral("x")), -1'000'000, 1'000'000)
+        || !isBoundedInteger(screen.value(QStringLiteral("y")), -1'000'000, 1'000'000)
+        || !screen.value(QStringLiteral("primary")).isBool()) {
+        return false;
+    }
+    const QJsonValue zones = screen.value(QStringLiteral("uiZones"));
+    if (zones.isUndefined()) return true;
+    if (!zones.isArray() || zones.toArray().size() > 16) return false;
+    for (const QJsonValue& zone : zones.toArray()) {
+        if (!isValidUiZone(zone)) return false;
+    }
     return true;
 }
 }
@@ -170,12 +244,6 @@ bool RemoteSessionCoordinator::upsert(const QJsonObject& envelope,
     if (!existingForPeer.isEmpty() && existingForPeer != binding.remoteSessionId) {
         return false;
     }
-    // B accepts one incoming controller at a time. An outgoing session to the
-    // same peer is intentionally independent and does not participate here.
-    if (!localIsOwner && existingForPeer.isEmpty()
-        && !m_incomingIdByPeer.isEmpty()) {
-        return false;
-    }
     if (!terminalPhase && binding.resumeToken.isEmpty()
         && previous != m_byId.cend()) {
         binding.resumeToken = previous->resumeToken;
@@ -186,6 +254,65 @@ bool RemoteSessionCoordinator::upsert(const QJsonObject& envelope,
     m_byId.insert(binding.remoteSessionId, binding);
     directionalIndex.insert(peer, binding.remoteSessionId);
     emit sessionChanged(binding.remoteSessionId, binding.generation, binding.phase);
+    return true;
+}
+
+bool RemoteSessionCoordinator::acceptSnapshot(
+    const QJsonObject& envelope, quint64 localConnectionGeneration)
+{
+    const QString remoteSessionId =
+        envelope.value(QStringLiteral("remoteSessionId")).toString();
+    const Binding binding = byId(remoteSessionId);
+    quint64 generation = 0;
+    quint64 sequence = 0;
+    const QJsonValue snapshotValue = envelope.value(QStringLiteral("snapshot"));
+    if (binding.remoteSessionId.isEmpty() || !binding.active
+        || binding.ownerEndpointId != m_localEndpointId
+        || !readPositiveGeneration(envelope.value(QStringLiteral("generation")),
+                                   &generation)
+        || generation != binding.generation
+        || !readPositiveGeneration(
+            envelope.value(QStringLiteral("snapshotSequence")), &sequence)
+        || sequence <= m_lastSnapshotSequenceBySession.value(remoteSessionId, 0)
+        || (localConnectionGeneration != 0
+            && binding.ownerConnectionGeneration != localConnectionGeneration)
+        || !snapshotValue.isObject()) {
+        return false;
+    }
+    const QJsonObject snapshot = snapshotValue.toObject();
+    const QJsonValue screens = snapshot.value(QStringLiteral("screens"));
+    const QJsonValue systemUI = snapshot.value(QStringLiteral("systemUI"));
+    const QJsonValue volume = snapshot.value(QStringLiteral("volumePercent"));
+    quint64 snapshotRevision = 0;
+    quint64 capturedAt = 0;
+    static const QSet<QString> snapshotKeys = {
+        QStringLiteral("screens"), QStringLiteral("systemUI"),
+        QStringLiteral("volumePercent"), QStringLiteral("revision"),
+        QStringLiteral("capturedAtEpochMs")
+    };
+    if (!hasOnlyKeys(snapshot, snapshotKeys)
+        || !screens.isArray() || !systemUI.isArray()
+        || screens.toArray().size() > 64
+        || systemUI.toArray().size() > 64
+        || !readPositiveGeneration(snapshot.value(QStringLiteral("revision")),
+                                   &snapshotRevision)
+        || snapshotRevision
+            <= m_lastSnapshotRevisionBySession.value(remoteSessionId, 0)
+        || !readPositiveGeneration(
+            snapshot.value(QStringLiteral("capturedAtEpochMs")), &capturedAt)
+        || !(volume.isNull()
+             || (volume.isDouble() && std::isfinite(volume.toDouble())
+                 && volume.toDouble() >= 0.0 && volume.toDouble() <= 100.0))) {
+        return false;
+    }
+    for (const QJsonValue& screen : screens.toArray()) {
+        if (!isValidScreen(screen)) return false;
+    }
+    for (const QJsonValue& zone : systemUI.toArray()) {
+        if (!isValidUiZone(zone)) return false;
+    }
+    m_lastSnapshotSequenceBySession.insert(remoteSessionId, sequence);
+    m_lastSnapshotRevisionBySession.insert(remoteSessionId, snapshotRevision);
     return true;
 }
 
@@ -276,6 +403,8 @@ void RemoteSessionCoordinator::remove(const QString& remoteSessionId)
 {
     if (isOpaqueId(remoteSessionId)) m_closedSessionIds.insert(remoteSessionId);
     const Binding binding = m_byId.take(remoteSessionId);
+    m_lastSnapshotSequenceBySession.remove(remoteSessionId);
+    m_lastSnapshotRevisionBySession.remove(remoteSessionId);
     if (binding.remoteSessionId.isEmpty()) return;
     const QString peer = m_localEndpointId == binding.ownerEndpointId
         ? binding.targetEndpointId : binding.ownerEndpointId;
@@ -294,6 +423,8 @@ void RemoteSessionCoordinator::clear()
     m_byId.clear();
     m_outgoingIdByPeer.clear();
     m_incomingIdByPeer.clear();
+    m_lastSnapshotSequenceBySession.clear();
+    m_lastSnapshotRevisionBySession.clear();
     m_closedSessionIds.clear();
     for (const QString& id : ids) emit sessionRemoved(id);
 }

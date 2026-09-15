@@ -14,9 +14,6 @@ struct RuntimeProfileContext {
     QString profileId = QStringLiteral("instance-1");
     QString rootPath;
     bool persistent = true;
-    // Compatibility alias for callers/tests that still inspect the temporary
-    // allocation directly. New code must use rootPath/RuntimeProfile::profileRoot().
-    QString temporaryRoot;
 
     bool isSecondary() const { return ordinal > 1; }
     bool isTemporary() const { return !persistent; }

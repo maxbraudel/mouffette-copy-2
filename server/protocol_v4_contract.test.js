@@ -43,7 +43,7 @@ function addClient(server, connectionId, endpointId, options = {}) {
 function envelope(server, type, extra = {}) {
     return {
         type,
-        protocolVersion: 3,
+        protocolVersion: 4,
         serverBootId: server.serverBootId,
         messageId: crypto.randomUUID(),
         connectionGeneration: 1,
@@ -56,13 +56,18 @@ function lastMessage(ws, type) {
     return ws.messages.filter(message => message.type === type).at(-1);
 }
 
-function containsLegacyWireKey(value, forbidden) {
+function screen(id = 1) {
+    return { id, width: 1920, height: 1080, x: 0, y: 0,
+        primary: id === 1 };
+}
+
+function containsRemovedWireKey(value, forbidden) {
     if (!value || typeof value !== 'object') return false;
     if (Array.isArray(value)) {
-        return value.some(item => containsLegacyWireKey(item, forbidden));
+        return value.some(item => containsRemovedWireKey(item, forbidden));
     }
     return Object.entries(value).some(([key, nested]) =>
-        forbidden.has(key) || containsLegacyWireKey(nested, forbidden));
+        forbidden.has(key) || containsRemovedWireKey(nested, forbidden));
 }
 
 // Envelope type is a bounded opaque scalar. In particular, an attacker cannot
@@ -113,7 +118,7 @@ function containsLegacyWireKey(value, forbidden) {
         connectionGeneration: 99,
     }));
     const outbound = lastMessage(recipient.ws, 'test_outbound');
-    assert.equal(outbound.protocolVersion, 3);
+    assert.equal(outbound.protocolVersion, 4);
     assert.equal(outbound.serverBootId, server.serverBootId);
     assert.equal(outbound.connectionGeneration, 99);
     assert.match(outbound.messageId,
@@ -138,13 +143,13 @@ function containsLegacyWireKey(value, forbidden) {
     });
     const mismatch = lastMessage(old.ws, 'error');
     assert.equal(mismatch.code, 'protocol_version_mismatch');
-    assert.equal(mismatch.protocolVersion, 3);
+    assert.equal(mismatch.protocolVersion, 4);
     assert.equal(mismatch.serverBootId, server.serverBootId);
     assert.equal(typeof mismatch.messageId, 'string');
     assert.deepEqual(old.ws.closes, [{ code: 1002, reason: 'Protocol version mismatch' }]);
 }
 
-// Device discovery uses only the v3 endpoint_snapshot family. It no longer
+// Device discovery uses only the v4 endpoint_snapshot family. It no longer
 // emits the registration/state-sync aliases or identity aliases in snapshots.
 {
     const server = new MouffetteServer(0);
@@ -155,7 +160,7 @@ function containsLegacyWireKey(value, forbidden) {
         requestId: 'snapshot-request',
         machineName: 'Owner device',
         platform: 'test-platform',
-        screens: [{ id: 'screen-1', width: 1920, height: 1080 }],
+        screens: [screen()],
         systemUI: [],
         volumePercent: 72,
     }));
@@ -172,14 +177,16 @@ function containsLegacyWireKey(value, forbidden) {
     const list = lastMessage(owner.ws, 'client_list');
     assert.equal(list.clients.some(device => device.endpointId === 'B'), true);
     assert.equal(Object.hasOwn(list.clients.find(device => device.endpointId === 'B'), 'id'), false);
-    assert.equal(Object.hasOwn(list.clients.find(device => device.endpointId === 'B'), 'runtimeId'), true);
+    assert.deepEqual(Object.keys(list.clients.find(device => device.endpointId === 'B')).sort(),
+        ['endpointId', 'lastSeenAt', 'machineName', 'platform', 'status']);
+    assert.equal(list.clients.find(device => device.endpointId === 'B').status, 'Available');
     const forbiddenOutputFields = new Set([
         'clientId', 'persistentClientId', 'persistentId', 'deviceId', 'sessionId',
         'canvasSessionId', 'targetClientId', 'targetPersistentClientId',
         'senderClientId', 'senderPersistentClientId', 'senderId', 'targetId',
     ]);
-    assert.equal(containsLegacyWireKey(applied, forbiddenOutputFields), false);
-    assert.equal(containsLegacyWireKey(list, forbiddenOutputFields), false);
+    assert.equal(containsRemovedWireKey(applied, forbiddenOutputFields), false);
+    assert.equal(containsRemovedWireKey(list, forbiddenOutputFields), false);
 }
 
 // Discovery distinguishes two endpoints belonging to the same installation.
@@ -200,19 +207,19 @@ function containsLegacyWireKey(value, forbidden) {
     server.sendClientList('primary-connection');
     const discovered = lastMessage(primary.ws, 'client_list').clients;
     assert.equal(discovered.length, 1);
-    assert.equal(discovered[0].installationId, installationId);
     assert.equal(discovered[0].endpointId, 'secondary-endpoint');
-    assert.equal(discovered[0].instanceOrdinal, 2);
+    assert.equal(Object.hasOwn(discovered[0], 'installationId'), false);
+    assert.equal(Object.hasOwn(discovered[0], 'instanceOrdinal'), false);
 }
 
 // A device snapshot is a complete replacement. Required fields may not be
 // omitted, and an explicitly empty topology clears the previous one.
 {
-    const requiredFields = ['machineName', 'platform', 'screens', 'volumePercent'];
+    const requiredFields = ['machineName', 'platform', 'screens', 'systemUI', 'volumePercent'];
     const complete = {
         machineName: 'Complete device',
         platform: 'test-platform',
-        screens: [{ id: 7, width: 1920, height: 1080 }],
+        screens: [screen(7)], systemUI: [],
         volumePercent: 41,
     };
     for (const field of requiredFields) {
@@ -234,13 +241,14 @@ function containsLegacyWireKey(value, forbidden) {
     const owner = addClient(server, 'owner-connection', 'A', { registered: false });
     server.handleMessage('owner-connection', envelope(server, 'endpoint_snapshot', {
         machineName: 'Before', platform: 'before-platform',
-        screens: [{ id: 1, width: 2560, height: 1440 }], volumePercent: 75,
+        screens: [{ ...screen(), width: 2560, height: 1440 }],
+        systemUI: [], volumePercent: 75,
     }));
     assert.equal(lastMessage(owner.ws, 'endpoint_snapshot_applied').snapshot.screens.length, 1);
 
     server.handleMessage(owner.client.id, envelope(server, 'endpoint_snapshot', {
         machineName: 'After', platform: 'after-platform',
-        screens: [], volumePercent: null,
+        screens: [], systemUI: [], volumePercent: null,
     }));
     const applied = lastMessage(owner.ws, 'endpoint_snapshot_applied');
     assert.equal(applied.snapshot.machineName, 'After');
@@ -256,7 +264,7 @@ function containsLegacyWireKey(value, forbidden) {
         const server = new MouffetteServer(0);
         const owner = addClient(server, 'owner-connection', 'A', { registered: false });
         server.handleMessage('owner-connection', envelope(server, 'endpoint_snapshot', {
-            machineName: 'Device', platform: 'test', screens: [],
+            machineName: 'Device', platform: 'test', screens: [], systemUI: [],
             volumePercent: invalidVolume,
         }));
         assert.equal(lastMessage(owner.ws, 'error').code, 'invalid_endpoint_snapshot');
@@ -271,7 +279,8 @@ function containsLegacyWireKey(value, forbidden) {
     const owner = addClient(server, 'owner-connection', 'A', { registered: false });
     server.handleMessage('owner-connection', envelope(server, 'endpoint_snapshot', {
         connectionGeneration: 2,
-        machineName: 'Stale mutation', platform: 'test', screens: [], volumePercent: 10,
+        machineName: 'Stale mutation', platform: 'test', screens: [],
+        systemUI: [], volumePercent: 10,
     }));
     assert.equal(lastMessage(owner.ws, 'error').code, 'stale_connection_generation');
     assert.equal(owner.client.machineName, null);
@@ -289,10 +298,10 @@ function containsLegacyWireKey(value, forbidden) {
         registered: false, runtimeId,
     });
     server.handleMessage('first-connection', envelope(server, 'endpoint_snapshot', {
-        machineName: 'First', platform: 'test', screens: [], volumePercent: 10,
+        machineName: 'First', platform: 'test', screens: [], systemUI: [], volumePercent: 10,
     }));
     server.handleMessage('second-connection', envelope(server, 'endpoint_snapshot', {
-        machineName: 'Second', platform: 'test', screens: [], volumePercent: 20,
+        machineName: 'Second', platform: 'test', screens: [], systemUI: [], volumePercent: 20,
     }));
     assert.equal(server.clients.get('first-connection'), first.client);
     assert.equal(server.clients.get('second-connection'), second.client);
@@ -338,13 +347,13 @@ function containsLegacyWireKey(value, forbidden) {
     assert.equal(old.ws.readyState, WebSocket.CLOSED);
 }
 
-// Every formerly routable v1 family is rejected before a legacy handler can
-// mutate state or relay a translated message. The healthy v3 socket stays up.
+// Every removed v1 family is rejected before any command handler can
+// mutate state or relay a translated message. The healthy v4 socket stays up.
 {
     const server = new MouffetteServer(0);
     const owner = addClient(server, 'owner-connection', 'A');
     const target = addClient(server, 'target-connection', 'B');
-    const legacyTypes = [
+    const removedTypes = [
         'register', 'device_register',
         'request_screens', 'watch_screens', 'unwatch_screens', 'cursor_update',
         'canvas_created', 'canvas_deleted',
@@ -356,54 +365,54 @@ function containsLegacyWireKey(value, forbidden) {
         'watch_status', 'data_request',
         'remote_scene_start', 'remote_scene_update', 'remote_scene_stop',
     ];
-    for (const type of legacyTypes) {
+    for (const type of removedTypes) {
         const targetMessageCount = target.ws.messages.length;
         server.handleMessage('owner-connection', envelope(server, type, {
             persistentClientId: 'B',
-            canvasSessionId: 'legacy-canvas',
+            canvasSessionId: 'removed-canvas',
             targetClientId: 'target-connection',
         }));
-        assert.equal(lastMessage(owner.ws, 'error').code, 'legacy_message_type', type);
+        assert.equal(lastMessage(owner.ws, 'error').code, 'removed_message_type', type);
         assert.equal(target.ws.messages.length, targetMessageCount,
             `${type} must not be relayed`);
     }
     assert.equal(owner.ws.readyState, WebSocket.OPEN);
 }
 
-// Canonical message names do not opt into field-level compatibility. Any v1
+// Canonical message names do not opt into field aliases. Any removed v1
 // identity/routing alias rejects the whole request instead of being ignored.
 {
-    const legacyFields = [
+    const removedFields = [
         'clientId', 'persistentClientId', 'persistentId', 'deviceId', 'sessionId',
         'canvasSessionId', 'targetClientId', 'targetPersistentClientId',
         'senderClientId', 'senderPersistentClientId', 'senderId', 'targetId',
     ];
-    for (const field of legacyFields) {
+    for (const field of removedFields) {
         const server = new MouffetteServer(0);
         const owner = addClient(server, 'owner-connection', 'A');
         addClient(server, 'target-connection', 'B');
         server.handleMessage('owner-connection', envelope(server, 'remote_session_open', {
             targetEndpointId: 'B',
             requestId: `request-${field}`,
-            [field]: 'legacy-alias',
+            [field]: 'removed-alias',
         }));
         const rejected = lastMessage(owner.ws, 'error');
-        assert.equal(rejected.code, 'legacy_protocol_field', field);
+        assert.equal(rejected.code, 'removed_protocol_field', field);
         assert.match(rejected.message, new RegExp(`${field}$`));
         assert.equal(server.remoteSessions.sessions.size, 0,
-            `${field} must not be translated into a v3 session open`);
+            `${field} must not be translated into a v4 session open`);
         assert.equal(owner.ws.readyState, WebSocket.OPEN);
     }
 
     const server = new MouffetteServer(0);
     const owner = addClient(server, 'owner-connection', 'A');
     server.handleMessage('owner-connection', envelope(server, 'endpoint_snapshot', {
-        machineName: 'Changed by legacy payload', platform: 'test',
-        screens: [{ id: 'screen-1', targetClientId: 'legacy-nested-alias' }],
+        machineName: 'Changed by removed payload', platform: 'test',
+        screens: [{ id: 'screen-1', targetClientId: 'removed-nested-alias' }],
     }));
-    assert.equal(lastMessage(owner.ws, 'error').code, 'legacy_protocol_field');
+    assert.equal(lastMessage(owner.ws, 'error').code, 'removed_protocol_field');
     assert.equal(owner.client.machineName, 'A',
-        'nested legacy routing fields reject the entire snapshot');
+        'nested removed routing fields reject the entire snapshot');
 }
 
 // Even when placed in a canonical field, an internal transport/session key is
@@ -422,4 +431,38 @@ function containsLegacyWireKey(value, forbidden) {
     assert.equal(server.remoteSessions.sessions.size, 0);
 }
 
-console.log('protocol v3 cut-over tests passed');
+// Disable is a server-authoritative drain: the endpoint disappears from
+// discovery before its transport closes, no new session can target it, and
+// every existing session enters exact-session teardown.
+{
+    const server = new MouffetteServer(0);
+    const owner = addClient(server, 'owner-connection', 'A');
+    const target = addClient(server, 'target-connection', 'B');
+    const session = server.remoteSessions.open({
+        ownerEndpointId: 'A', targetEndpointId: 'B',
+        ownerRuntimeId: owner.client.runtimeId,
+        targetRuntimeId: target.client.runtimeId,
+        ownerConnectionGeneration: 1,
+        targetConnectionGeneration: 1,
+    }).session;
+
+    server.handleMessage('target-connection',
+        envelope(server, 'endpoint_disable'));
+    assert.equal(target.client.draining, true);
+    assert.ok(lastMessage(target.ws, 'endpoint_disable_started'));
+    assert.ok(['Terminating', 'CleanupPending'].includes(session.phase));
+    assert.ok(lastMessage(target.ws, 'remote_session_terminating'));
+
+    server.handleMessage('owner-connection',
+        envelope(server, 'request_client_list'));
+    assert.equal(lastMessage(owner.ws, 'client_list').clients
+        .some(client => client.endpointId === 'B'), false);
+
+    server.handleMessage('owner-connection',
+        envelope(server, 'remote_session_open', {
+            targetEndpointId: 'B', requestId: 'open-draining-target',
+        }));
+    assert.equal(lastMessage(owner.ws, 'error').code, 'target_offline');
+}
+
+console.log('protocol v4 cut-over tests passed');

@@ -60,6 +60,25 @@ void AppConfigTest::loadsEmbeddedDefaults() {
     QCOMPARE(config.remoteSessionHiddenTimeoutMs(), qint64(60000));
     QCOMPARE(config.projectHiddenRetentionMs(), qint64(300000));
     QCOMPARE(config.incomingSessionOrphanTimeoutMs(), qint64(3000));
+    QCOMPARE(config.uploadActionMinIntervalMs(), 300);
+    QCOMPARE(config.uploadCancelGuardMs(), 1000);
+    QCOMPARE(config.sceneSeekPositionToleranceMs(), 120);
+    QCOMPARE(config.sceneStartFrameToleranceMs(), 25);
+    QCOMPARE(config.sceneDecoderSyncToleranceMs(), 25);
+    QCOMPARE(config.sceneVideoSyncPositionToleranceMs(), 400);
+    QCOMPARE(config.sceneVideoSyncTransitMaxMs(), 2000);
+    QCOMPARE(config.sceneAuthoritativeSeekGuardMs(), 250);
+    QCOMPARE(config.sceneRepeatTriggerGuardMs(), 500);
+    QCOMPARE(config.uiContentFadeDurationMs(), 80);
+    QCOMPARE(config.uiSpinnerRotationDurationMs(), 900);
+    QCOMPARE(config.uiScrollbarHideDelayMs(), 500);
+    QCOMPARE(config.uiInputWatchdogIntervalMs(), 120);
+    QCOMPARE(config.uiSnapFreezeCleanupDelayMs(), 300);
+    QCOMPARE(config.toastDefaultDurationMs(), 4000);
+    QCOMPARE(config.toastInfoDurationMs(), 2000);
+    QCOMPARE(config.toastWarningDurationMs(), 3500);
+    QCOMPARE(config.toastErrorDurationMs(), 5000);
+    QCOMPARE(config.toastAnimationDurationMs(), 300);
     QCOMPARE(config.uploadConcurrency(), 2);
     QVERIFY(config.allowMultipleInstances());
     QVERIFY(!config.cursorDebug());
@@ -134,7 +153,6 @@ void AppConfigTest::parsesFalseBooleansAsFalse() {
         "MOUFFETTE_CURSOR_DEBUG=false\n"
         "MOUFFETTE_ALLOW_MULTIPLE_INSTANCES=false\n"
         "MOUFFETTE_RUNTIME_DIAGNOSTICS=0\n"
-        "MOUFFETTE_MIGRATION_TELEMETRY=off\n"
         "MOUFFETTE_CANVAS_PROFILING=no\n");
     QVERIFY(!envPath.isEmpty());
 
@@ -145,7 +163,6 @@ void AppConfigTest::parsesFalseBooleansAsFalse() {
     QVERIFY(!config.cursorDebug());
     QVERIFY(!config.allowMultipleInstances());
     QVERIFY(!config.runtimeDiagnostics());
-    QVERIFY(!config.migrationTelemetry());
     QVERIFY(!config.canvasProfiling());
 }
 

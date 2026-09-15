@@ -15,6 +15,7 @@
 #include <memory>
 #include <limits>
 #include "backend/domain/models/ClientInfo.h"
+#include "backend/network/ProtocolConstants.h"
 
 class DeviceIdentityStore;
 class SceneRunCoordinator;
@@ -24,7 +25,7 @@ class WebSocketClient : public QObject {
     Q_OBJECT
 
 public:
-    static constexpr int ProtocolVersion = 3;
+    static constexpr int ProtocolVersion = MouffetteProtocol::Version;
     using SuspendInclusiveClock = std::function<qint64()>;
 
     explicit WebSocketClient(QObject *parent = nullptr);
@@ -47,7 +48,7 @@ public:
     void closeUploadChannel();  // closes m_uploadSocket if open
     bool isUploadChannelConnected() const;
     // Pins one already-connected transport shared by the admitted outgoing
-    // transfers. Calls are reference-counted, allowing protocol-v3's two
+    // transfers. Calls are reference-counted, allowing protocol v4's two
     // concurrent RemoteSession uploads without reordering either stream. This never
     // spins a nested event loop: if the dedicated channel is not ready yet, the
     // authenticated control channel is selected immediately and the dedicated
@@ -63,7 +64,7 @@ public:
     // Client registration
     void registerClient(const QString& machineName, const QString& platform, const QList<ScreenInfo>& screens, int volumePercent);
 
-    // Protocol-v3 uploads. Authenticated socket identity supplies the peer;
+    // Protocol-v4 uploads. Authenticated socket identity supplies the peer;
     // every command is correlated solely by RemoteSession + generation.
     bool sendUploadStart(const QString& remoteSessionId,
                          quint64 generation,
@@ -102,8 +103,17 @@ public:
     // exposed in generic logs or durable project state.
     bool openRemoteSession(const QString& targetEndpointId,
                            QString* requestId = nullptr);
+    // Accepts a server-authenticated offer as the target. The accepted
+    // snapshot is the most recently published complete endpoint snapshot.
+    bool acceptRemoteSessionOffer(const QJsonObject& offer);
+    bool sendRemoteSessionSnapshot(const QString& remoteSessionId,
+                                   quint64 generation,
+                                   const QJsonObject& targetSnapshot);
     bool resumeRemoteSession(const QString& remoteSessionId);
     void resumeAllRemoteSessions();
+    // Withdraws this endpoint from discovery and atomically asks the server
+    // to terminate all of its RemoteSessions before the socket is closed.
+    bool beginEndpointDisable();
     bool closeRemoteSession(const QString& remoteSessionId,
                             QString* requestId = nullptr,
                             const QString& reason = QStringLiteral("explicit_disconnect"));
@@ -116,7 +126,7 @@ public:
                                           const QString& errorCode = QString(),
                                           qint64 quarantinedBytes = 0);
 
-    // Protocol-v3 immutable SceneRun lifecycle. The coordinator resolves the
+    // Protocol-v4 immutable SceneRun lifecycle. The coordinator resolves the
     // active RemoteSession for a peer and supplies session generation/digest
     // correlation to every message.
     SceneRunCoordinator* sceneRunCoordinator() const { return m_sceneRuns.get(); }
@@ -174,7 +184,7 @@ signals:
     void disconnected();
     void transportConnected();
     void connectionError(const QString& error);
-    void fatalError(const QString& error); // PHASE 1: Non-recoverable errors (e.g., SSL handshake failure)
+    void fatalError(const QString& error);
     void connectionStatusChanged(const QString& status); // emitted whenever textual connection status updates
     void transportHealthChanged(bool degraded);
     void serverPolicyReceived(const QJsonObject& policy);
@@ -191,19 +201,22 @@ signals:
     void registrationConfirmed(const ClientInfo& clientInfo);
     void messageReceived(const QJsonObject& message);
 
-    // Canonical protocol-v3 upload envelope for both sender and target roles.
+    // Canonical protocol v4 upload envelope for both sender and target roles.
     void uploadMessageReceived(const QJsonObject& envelope);
     void uploadTransportBytesWritten(qint64 bytes);
     void uploadTransportLost(const QString& reason);
     void remoteSessionOpened(const QJsonObject& envelope);
+    void remoteSessionOfferReceived(const QJsonObject& envelope);
+    void remoteSessionSnapshotReceived(const QJsonObject& envelope);
     void remoteSessionResumed(const QJsonObject& envelope);
     void remoteSessionLeaseStateChanged(const QJsonObject& envelope);
     void remoteSessionTerminating(const QJsonObject& envelope);
     void remoteSessionClosed(const QJsonObject& envelope);
+    void endpointDisableAcknowledged();
     // Business/protocol rejection for a RemoteSession command. This must not
     // be interpreted as a transport failure by ConnectionManager.
     void remoteSessionError(const QJsonObject& envelope);
-    // Full correlated protocol-v3 scene envelopes. Keeping these as objects
+    // Full correlated protocol v4 scene envelopes. Keeping these as objects
     // makes new checklist fields additive without weakening validation.
     void scenePrepareReceived(const QJsonObject& envelope);
     void scenePrepareProgressReceived(const QJsonObject& envelope);
@@ -274,6 +287,9 @@ private:
     QString m_connectionStatus;
     QString m_registeredMachineName;
     QString m_registeredPlatform;
+    QJsonObject m_registeredTargetSnapshot;
+    quint64 m_targetSnapshotRevision = 0;
+    QHash<QString, quint64> m_targetSnapshotSequenceBySession;
     QTimer* m_heartbeatTimer;
     QTimer* m_leaseHealthTimer;
     QElapsedTimer m_processClock;
@@ -294,6 +310,7 @@ private:
     bool m_leaseExpired = false;
     bool m_degraded = false;
     bool m_disconnectSignalEmitted = false;
+    bool m_endpointDraining = false;
     QString m_identityInitializationError;
     bool m_uploadSessionActive = false;
     int m_uploadSessionRefCount = 0;

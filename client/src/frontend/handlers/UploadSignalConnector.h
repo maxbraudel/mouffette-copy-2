@@ -10,7 +10,7 @@ class WebSocketClient;
 /**
  * @brief Connects all upload-related signals from UploadManager and WebSocketClient to ApplicationRuntime handlers
  * 
- * [Phase 15] Extracted from ApplicationRuntime::connectUploadSignals() to reduce ApplicationRuntime size
+ * Connects upload-domain signals to workspace state and notifications.
  * This class encapsulates all upload signal wiring logic (~140 lines of connections)
  */
 class UploadSignalConnector : public QObject

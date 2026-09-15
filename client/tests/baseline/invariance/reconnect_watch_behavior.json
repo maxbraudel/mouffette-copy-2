@@ -5,7 +5,7 @@
       "file": "src/backend/handlers/ClientListEventHandler.cpp",
       "mustContain": [
         "clientListReceived",
-        "candidate.endpointId\\(\\) == activeSessionIdentity"
+        "candidate.endpointId\\(\\) == activeWorkspaceEndpointId"
       ]
     },
     {

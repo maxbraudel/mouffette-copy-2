@@ -223,61 +223,45 @@ const ProjectRecord* ProjectManager::projectById(const QString& projectId) const
     return projectForTarget(m_targetByProjectId.value(projectId));
 }
 
-QString ProjectManager::ensureProject(const ProjectTargetReference& target,
-                                      ProjectLifecycleState initialState,
-                                      qint64 atMs)
+QString ProjectManager::createProjectFromSnapshot(
+    const ProjectTargetReference& target,
+    const QList<ScreenInfo>& screens,
+    int volumePercent,
+    quint64 snapshotRevision,
+    qint64 snapshotCapturedAtMs,
+    qint64 atMs)
 {
-    if (!target.isValid() || initialState == ProjectLifecycleState::Deleted) {
+    if (!target.isValid() || hasProjectForTarget(target.endpointId)
+        || volumePercent < -1 || volumePercent > 100
+        || snapshotRevision == 0 || snapshotCapturedAtMs < 1) {
         return {};
     }
     const qint64 current = atMs >= 0 ? atMs : nowMs();
-    if (ProjectRecord* existing = mutableProjectForTarget(target.endpointId)) {
-        if (existing->state == ProjectLifecycleState::Hidden
-            && existing->hiddenAtMs >= 0
-            && current >= existing->hiddenAtMs + m_timing.projectHiddenRetentionMs) {
-            if (!removeProjectInternal(target.endpointId)) {
-                return {};
-            }
-            existing = nullptr;
-        }
-        if (!existing) {
-            // The expired project was removed; create a new stable project
-            // below instead of reviving an already terminal record.
-        } else {
-            const bool becomingVisible = initialState == ProjectLifecycleState::Visible
-                && existing->state != ProjectLifecycleState::Visible;
-            if (becomingVisible) {
-                existing->state = ProjectLifecycleState::Visible;
-                existing->hiddenAtMs = -1;
-                existing->lastCheckpointAtMs = current;
-            }
-            existing->target = mergeTargetPresentation(existing->target, target);
-            existing->updatedAtMs = current;
-            scheduleSave();
-            if (becomingVisible) {
-                emit projectVisibilityChanged(existing->projectId,
-                                              existing->targetEndpointId,
-                                              existing->state);
-            }
-            emit projectUpdated(existing->projectId, existing->targetEndpointId);
-            emit projectsChanged();
-            return existing->projectId;
-        }
-    }
-
     ProjectRecord project;
     project.projectId = QUuid::createUuid().toString(QUuid::WithoutBraces);
     project.targetEndpointId = target.endpointId;
     project.target = target;
-    project.state = initialState;
+    project.savedScreens = screens;
+    project.savedVolumePercent = volumePercent;
+    project.snapshotRevision = snapshotRevision;
+    project.snapshotCapturedAtMs = snapshotCapturedAtMs;
+    project.state = ProjectLifecycleState::Visible;
     project.createdAtMs = current;
     project.updatedAtMs = current;
     project.lastCheckpointAtMs = current;
-    project.hiddenAtMs = initialState == ProjectLifecycleState::Hidden ? current : -1;
+    project.hiddenAtMs = -1;
 
-    m_targetByProjectId.insert(project.projectId, project.targetEndpointId);
+    const bool hadPendingChanges = m_dirty;
     m_projectsByTarget.insert(project.targetEndpointId, project);
-    scheduleSave();
+    m_targetByProjectId.insert(project.projectId, project.targetEndpointId);
+    m_dirty = true;
+    if (!flush()) {
+        m_projectsByTarget.remove(project.targetEndpointId);
+        m_targetByProjectId.remove(project.projectId);
+        m_dirty = hadPendingChanges;
+        if (hadPendingChanges) scheduleSave();
+        return {};
+    }
     emit projectCreated(project.projectId, project.targetEndpointId);
     emit projectsChanged();
     return project.projectId;
@@ -438,6 +422,30 @@ bool ProjectManager::updateSavedScreens(const QString& targetEndpointId,
     return true;
 }
 
+bool ProjectManager::updateRemoteSnapshot(
+    const QString& targetEndpointId,
+    const QList<ScreenInfo>& screens,
+    int volumePercent,
+    quint64 snapshotRevision,
+    qint64 snapshotCapturedAtMs,
+    qint64 atMs)
+{
+    ProjectRecord* project = mutableProjectForTarget(targetEndpointId);
+    if (!project || volumePercent < -1 || volumePercent > 100
+        || snapshotRevision == 0 || snapshotCapturedAtMs < 0) {
+        return false;
+    }
+    project->savedScreens = screens;
+    project->savedVolumePercent = volumePercent;
+    project->snapshotRevision = snapshotRevision;
+    project->snapshotCapturedAtMs = snapshotCapturedAtMs;
+    project->updatedAtMs = atMs >= 0 ? atMs : nowMs();
+    scheduleSave();
+    emit projectUpdated(project->projectId, targetEndpointId);
+    emit projectsChanged();
+    return true;
+}
+
 qint64 ProjectManager::projectDeleteAtMs(const QString& targetEndpointId) const
 {
     const ProjectRecord* project = projectForTarget(targetEndpointId);
@@ -527,6 +535,8 @@ QList<ProjectClientEntry> ProjectManager::mergeDiscoveredClients(const QList<Cli
             if (client.getPlatform().trimmed().isEmpty()) {
                 client.setPlatform(fresh.platform);
             }
+            client.setScreens(project->savedScreens);
+            client.setVolumePercent(project->savedVolumePercent);
             entry.hasProject = true;
             entry.projectId = project->projectId;
             entry.projectState = project->state;
@@ -543,6 +553,7 @@ QList<ProjectClientEntry> ProjectManager::mergeDiscoveredClients(const QList<Cli
         ProjectClientEntry entry;
         entry.client = project.target.toClientInfo(false);
         entry.client.setScreens(project.savedScreens);
+        entry.client.setVolumePercent(project.savedVolumePercent);
         entry.endpointId = project.targetEndpointId;
         entry.projectId = project.projectId;
         entry.hasProject = true;

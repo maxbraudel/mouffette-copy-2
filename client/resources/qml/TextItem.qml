@@ -13,10 +13,7 @@ BaseMediaItem {
     property bool fontUnderline: false
     property bool fontUppercase: false
     property color textColor: "#FFFFFFFF"
-    property real outlineWidthPercent: 0.0
-    // Canonical value supplied by C++. A negative value keeps compatibility
-    // with older callers that only provide the percentage.
-    property real outlineWidthPx: -1.0
+    property real outlineWidthPx: 0.0
     property color outlineColor: "#FF000000"
     property bool highlightEnabled: false
     property color highlightColor: "#00000000"
@@ -34,13 +31,8 @@ BaseMediaItem {
     pointerEnabled: !root.editing
     doubleClickEnabled: true
 
-    // Outline thickness in scene-space pixels derived from font size.
     // Radius of the border around the glyph, in scene-space pixels.
-    readonly property real outlinePixels: root.outlineWidthPercent > 0
-        ? (root.outlineWidthPx >= 0
-            ? root.outlineWidthPx
-            : Math.max(1, Math.round(root.outlineWidthPercent * Math.max(1, root.fontPixelSize) / 100.0)))
-        : 0
+    readonly property real outlinePixels: Math.max(0, root.outlineWidthPx)
     // The model reserves this same safety margin in fit-to-text mode. It must
     // also surround the content, otherwise left/right/top/bottom borders clip.
     readonly property real textInset: 4 + (outlinePixels > 0 ? Math.ceil(outlinePixels) + 1 : 0)

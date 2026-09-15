@@ -1,6 +1,6 @@
 import QtQuick
 import QtQuick.Controls
-// Reusable overlay icon button matching the legacy OverlayButtonElement style.
+// Reusable overlay icon button.
 // Blocks pointer events from reaching the canvas DragHandler/PointHandler beneath it.
 Item {
     id: root
@@ -12,7 +12,7 @@ Item {
     property string unavailableReason: ""
     // Use Item.enabled; shadowing it leaves native input eligibility divergent.
     // "solo" | "leading" | "middle" | "trailing"
-    // Controls which corners are rounded, matching legacy SegmentRole behavior.
+    // Controls which corners are rounded within a segmented control.
     property string segmentRole: "solo"
 
     signal clicked()
@@ -81,7 +81,7 @@ Item {
         color: "#FF646464"
     }
 
-    // SVG icon — 60% of button size matches legacy OverlayButtonElement (buttonSize * 0.6).
+    // SVG icon uses 60% of the button size.
     // sourceSize at 4× for sharp rendering on HiDPI displays.
     Image {
         id: icon

@@ -2,6 +2,7 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Dialogs
 import Mouffette.App
+import Mouffette.Canvas
 import "../components"
 
 Rectangle {
@@ -577,7 +578,7 @@ Rectangle {
 
             Timer {
                 id: hideTimer
-                interval: 500
+                interval: UiTiming.scrollbarHideDelayMs
                 onTriggered: settingsScrollBar.recentlyActive = false
             }
         }

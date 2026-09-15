@@ -1,19 +1,9 @@
 #include "backend/handlers/ScreenEventHandler.h"
 #include "backend/runtime/ApplicationRuntime.h"
-#include "frontend/managers/ui/RemoteClientState.h"
 #include "backend/network/WebSocketClient.h"
-#include "backend/managers/system/SystemMonitor.h"
-#include "shared/rendering/ICanvasHost.h"
-#include "frontend/rendering/canvas/QuickCanvasHost.h"
-#include "frontend/rendering/navigation/ScreenNavigationManager.h"
-#include "backend/network/UploadManager.h"
-#include "backend/files/FileManager.h"
-#include "backend/domain/session/SessionManager.h"
-#include "backend/domain/project/ProjectManager.h"
 #include <QDebug>
 #include <QGuiApplication>
 #include <QScreen>
-#include <QDateTime>
 #include <cmath>
 
 #ifdef Q_OS_WIN
@@ -63,7 +53,6 @@ static BOOL CALLBACK ScreenEventEnumMonProc(HMONITOR hMon, HDC, LPRECT, LPARAM l
     ctx->monitors[ctx->count++] = entry;
     return TRUE;
 }
-
 } // namespace
 #endif
 
@@ -92,7 +81,7 @@ void ScreenEventHandler::syncRegistration()
 
     QString machineName = m_mainWindow->getMachineName();
     QString platform = m_mainWindow->getPlatformName();
-    // Protocol v3 publishes one complete authoritative device snapshot. Screen
+    // Protocol v4 publishes one complete authoritative device snapshot. Screen
     // and volume discovery is independent from projects and remote sessions;
     // there is deliberately no request/watch subscription protocol anymore.
     QList<ScreenInfo> screens = m_mainWindow->getLocalScreenInfo();
@@ -194,220 +183,4 @@ void ScreenEventHandler::syncRegistration()
              << "with" << screens.size() << "screens";
     
     m_webSocketClient->registerClient(machineName, platform, screens, volumePercent);
-}
-
-void ScreenEventHandler::onScreensInfoReceived(const ClientInfo& clientInfo)
-{
-    if (!m_mainWindow) return;
-
-    QString persistentId = clientInfo.endpointId();
-    if (persistentId.isEmpty()) {
-        qWarning() << "ScreenEventHandler::onScreensInfoReceived: client has no authenticated endpointId";
-        return;
-    }
-
-    ApplicationRuntime::CanvasSession* session = m_mainWindow->findCanvasSession(persistentId);
-    if (!session && !clientInfo.getId().isEmpty()) {
-        session = m_mainWindow->findCanvasSessionByServerClientId(clientInfo.getId());
-    }
-
-    if (!session) {
-        // Discovery is descriptive only. A screen snapshot must never create
-        // a workspace, project, canvas or RemoteSession implicitly.
-        return;
-    }
-    const SessionManager::RemoteSessionState remoteState = session->remoteSessionState;
-    if (remoteState == SessionManager::RemoteSessionState::Absent
-        || remoteState == SessionManager::RemoteSessionState::Closing) {
-        return;
-    }
-    {
-        if (m_mainWindow->getSessionManager()) {
-            m_mainWindow->getSessionManager()->updateSessionServerId(persistentId, clientInfo.getId());
-        } else {
-            session->serverAssignedId = clientInfo.getId();
-        }
-        session->lastClientInfo = clientInfo;
-        session->lastClientInfo.setEndpointId(persistentId);
-        session->lastClientInfo.setFromMemory(true);
-        session->lastClientInfo.setOnline(true);
-    }
-
-    if (!session->canvas) {
-        session = &m_mainWindow->ensureCanvasSession(session->lastClientInfo);
-        if (!session || !session->canvas) {
-            qWarning() << "ScreenEventHandler: Cannot create canvas session for" << persistentId;
-            return;
-        }
-    }
-
-    const QList<ScreenInfo> screens = clientInfo.getScreens();
-    const bool hasScreens = !screens.isEmpty();
-    m_mainWindow->recordCanvasLoadReady(session->persistentClientId, screens.size());
-
-    if (session->canvas) {
-        // A project is keyed exclusively by the authenticated endpoint
-        // identity. Socket ids are transport details and must never become
-        // durable canvas targets.
-        session->canvas->setRemoteSceneTarget(
-            persistentId, session->lastClientInfo.getMachineName());
-        session->canvas->setScreens(screens);
-    }
-
-    const bool isActiveSession = (session->persistentClientId == m_mainWindow->getActiveSessionIdentity());
-    if (isActiveSession) {
-        m_mainWindow->setActiveCanvas(session->canvas);
-        m_mainWindow->setSelectedClient(session->lastClientInfo);
-    }
-
-    session->lastClientInfo.setScreens(screens);
-
-    // Replace the cached device snapshot wholesale whenever that exact
-    // endpointId advertises fresh state. This preserves screens, UI zones and
-    // volume when the transport later disappears without ever reconciling by
-    // display name.
-    if (ProjectManager* projects = m_mainWindow->getProjectManager();
-        projects && projects->hasProjectForTarget(persistentId)) {
-        projects->updateTargetReference(
-            ProjectTargetReference::fromClientInfo(session->lastClientInfo),
-            QDateTime::currentMSecsSinceEpoch());
-        projects->updateSavedScreens(
-            persistentId, screens, QDateTime::currentMSecsSinceEpoch());
-    }
-
-    if (isActiveSession && session->canvas
-        && remoteState == SessionManager::RemoteSessionState::Active) {
-        if (!m_mainWindow->isCanvasRevealedForCurrentClient() && hasScreens) {
-            if (m_mainWindow->getNavigationManager()) {
-                m_mainWindow->getNavigationManager()->revealCanvas();
-            }
-
-            session->canvas->requestDeferredInitialRecenter(53);
-            if (!m_mainWindow->shouldPreserveViewportOnReconnect()) {
-                session->canvas->recenterWithMargin(53);
-            }
-
-            m_mainWindow->setPreserveViewportOnReconnect(false);
-            m_mainWindow->setCanvasRevealedForCurrentClient(true);
-            m_mainWindow->setCanvasContentEverLoaded(true);
-        }
-
-        m_mainWindow->stopInlineSpinner();
-
-        // Apply complete remote client state (atomic, no flicker)
-        RemoteClientState state = RemoteClientState::connected(
-            session->lastClientInfo,
-            session->lastClientInfo.getVolumePercent()
-        );
-        // Only show volume if we have screens
-        state.volumeVisible = hasScreens && (state.volumePercent >= 0);
-        
-        m_mainWindow->setRemoteClientState(state);
-    }
-}
-
-void ScreenEventHandler::onDataRequestReceived()
-{
-    if (!m_mainWindow || !m_webSocketClient || !m_webSocketClient->isConnected()) {
-        return;
-    }
-
-    // Target-side: server asked us to send fresh state now (screens + volume)
-    QList<ScreenInfo> screens = m_mainWindow->getLocalScreenInfo();
-    int volumePercent = m_mainWindow->getSystemVolumePercent();
-
-    // Build uiZones immediately for snapshot
-#if defined(Q_OS_WIN)
-    {
-        MonitorEnumContext ctx;
-        EnumDisplayMonitors(nullptr, nullptr, ScreenEventEnumMonProc, reinterpret_cast<LPARAM>(&ctx));
-        
-        auto findMatchingMon = [&](const ScreenInfo& s) -> const WinMonRect* {
-            for (size_t idx = 0; idx < ctx.count; ++idx) {
-                const auto &m = ctx.monitors[idx];
-                const int mw = m.rc.right - m.rc.left;
-                const int mh = m.rc.bottom - m.rc.top;
-                if (m.rc.left == s.x && m.rc.top == s.y && mw == s.width && mh == s.height) {
-                    return &m;
-                }
-            }
-            return nullptr;
-        };
-        
-        for (auto &screen : screens) {
-            const WinMonRect* mp = findMatchingMon(screen);
-            if (!mp) continue;
-            const auto &m = *mp;
-            const int screenW = m.rc.right - m.rc.left;
-            const int screenH = m.rc.bottom - m.rc.top;
-            const int workW = m.rcWork.right - m.rcWork.left;
-            const int workH = m.rcWork.bottom - m.rcWork.top;
-            
-            if (workH < screenH) {
-                const int h = screenH - workH; 
-                if (h > 0) {
-                    if (m.rcWork.top > m.rc.top) {
-                        screen.uiZones.append(ScreenInfo::UIZone{"taskbar", 0, 0, screenW, h});
-                    } else {
-                        screen.uiZones.append(ScreenInfo::UIZone{"taskbar", 0, screenH - h, screenW, h});
-                    }
-                }
-            } else if (workW < screenW) {
-                const int w = screenW - workW; 
-                if (w > 0) {
-                    if (m.rcWork.left > m.rc.left) {
-                        screen.uiZones.append(ScreenInfo::UIZone{"taskbar", 0, 0, w, screenH});
-                    } else {
-                        screen.uiZones.append(ScreenInfo::UIZone{"taskbar", screenW - w, 0, w, screenH});
-                    }
-                }
-            }
-        }
-    }
-#elif defined(Q_OS_MACOS)
-    {
-        QList<QScreen*> qScreens = QGuiApplication::screens();
-        for (auto &screen : screens) {
-            if (screen.id < 0 || screen.id >= qScreens.size()) continue; 
-            QScreen* qs = qScreens[screen.id]; 
-            if (!qs) continue;
-            
-            const qreal dpr = std::max<qreal>(1.0, qs->devicePixelRatio());
-            QRect geom = qs->geometry(); 
-            QRect avail = qs->availableGeometry();
-
-            const int geomWidthPx = static_cast<int>(std::lround(static_cast<qreal>(geom.width()) * dpr));
-            const int geomHeightPx = static_cast<int>(std::lround(static_cast<qreal>(geom.height()) * dpr));
-            
-            if (avail.y() > geom.y()) { 
-                int h = static_cast<int>(std::lround(static_cast<qreal>(avail.y() - geom.y()) * dpr)); 
-                if (h > 0) {
-                    screen.uiZones.append(ScreenInfo::UIZone{"menu_bar", 0, 0, geomWidthPx, h}); 
-                }
-            }
-            
-            if (avail.bottom() < geom.bottom()) { 
-                int h = static_cast<int>(std::lround(static_cast<qreal>(geom.bottom() - avail.bottom()) * dpr)); 
-                if (h > 0) {
-                    screen.uiZones.append(ScreenInfo::UIZone{"dock", 0, geomHeightPx - h, geomWidthPx, h}); 
-                }
-            } else if (avail.x() > geom.x()) { 
-                int w = static_cast<int>(std::lround(static_cast<qreal>(avail.x() - geom.x()) * dpr)); 
-                if (w > 0) {
-                    screen.uiZones.append(ScreenInfo::UIZone{"dock", 0, 0, w, geomHeightPx}); 
-                }
-            } else if (avail.right() < geom.right()) { 
-                int w = static_cast<int>(std::lround(static_cast<qreal>(geom.right() - avail.right()) * dpr)); 
-                if (w > 0) {
-                    screen.uiZones.append(ScreenInfo::UIZone{"dock", geomWidthPx - w, 0, w, geomHeightPx}); 
-                }
-            }
-        }
-    }
-#endif
-
-    // This entry point is no longer connected in protocol v3. If invoked by
-    // in-process compatibility code, publish the same complete authoritative
-    // snapshot as the regular timer instead of a partial legacy state message.
-    syncRegistration();
 }

@@ -1,4 +1,5 @@
 import QtQuick
+import Mouffette.Canvas
 // Shared loading surface for every raster media representation. Geometry is
 // owned by the caller; this component only guarantees that an exact-size grey
 // placeholder exists before the decoded pixels become available.
@@ -10,7 +11,7 @@ Item {
     // the decoded final content atomically behind it, then let the preview fade
     // away. Running both fades together would expose the grey placeholder.
     property bool revealImmediately: false
-    property int fadeDuration: 80
+    property int fadeDuration: UiTiming.contentFadeDurationMs
     property color placeholderColor: "#F2323232"
     default property alias content: contentHost.data
 

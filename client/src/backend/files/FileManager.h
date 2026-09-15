@@ -12,7 +12,6 @@
 
 #include "backend/network/RemoteCacheStore.h"
 
-// Phase 4.2: Forward declarations of specialized services
 class LocalFileRepository;
 class RemoteFileTracker;
 class FileMemoryCache;
@@ -20,18 +19,17 @@ class FileMemoryCache;
 /**
  * FileManager - Façade orchestrating file operations
  * 
- * Phase 4.2 Refactor: Delegates to 3 specialized services:
+ * Delegates storage concerns to three specialized services:
  * - LocalFileRepository: fileId ↔ filePath mapping
- * - RemoteFileTracker: remote client & canvasSessionId tracking
+ * - RemoteFileTracker: remote client & projectId tracking
  * - FileMemoryCache: memory caching for performance
  * 
- * Phase 4.3: Converted to dependency injection
  */
 class FileManager
 {
 public:
     explicit FileManager();
-    ~FileManager();
+    ~FileManager() = default;
     
     // Get or create file ID for a given file path
     QString getOrCreateFileId(const QString& filePath);
@@ -59,7 +57,7 @@ public:
     // Remove a previously registered received file mapping on the target side (called when sender asks to delete a file)
     void removeReceivedFileMapping(const QString& fileId);
 
-    // Protocol-v3 received files live in a RemoteSession scope and must never
+    // Protocol-v4 received files live in a RemoteSession scope and must never
     // share the local-source fileId namespace or another session's mapping.
     QString getReceivedFilePath(const RemoteCacheStore::Scope& scope,
                                 const QString& fileId) const;
@@ -97,13 +95,13 @@ public:
     void unmarkFileUploadedToClient(const QString& fileId, const QString& clientId);
 
 
-    // Associate/de-associate files with logical idea IDs (scenes/projects)
-    void associateFileWithIdea(const QString& fileId, const QString& canvasSessionId);
-    void dissociateFileFromIdea(const QString& fileId, const QString& canvasSessionId);
-    QSet<QString> getIdeaIdsForFile(const QString& fileId) const;
-    QSet<QString> getFileIdsForIdea(const QString& canvasSessionId) const;
-    void replaceIdeaFileSet(const QString& canvasSessionId, const QSet<QString>& fileIds);
-    void removeIdeaAssociations(const QString& canvasSessionId);
+    // Associate/de-associate files with logical project IDs (scenes/projects)
+    void associateFileWithProject(const QString& fileId, const QString& projectId);
+    void dissociateFileFromProject(const QString& fileId, const QString& projectId);
+    QSet<QString> getProjectIdsForFile(const QString& fileId) const;
+    QSet<QString> getFileIdsForProject(const QString& projectId) const;
+    void replaceProjectFileSet(const QString& projectId, const QSet<QString>& fileIds);
+    void removeProjectAssociations(const QString& projectId);
 
     // Clear all uploaded markers for a given client across all files
     void unmarkAllForClient(const QString& clientId);
@@ -112,7 +110,7 @@ public:
     void removeReceivedFileMappingsUnderPathPrefix(const QString& pathPrefix);
     
     // Set callback for when file should be deleted from remote clients
-    static void setFileRemovalNotifier(std::function<void(const QString& fileId, const QList<QString>& clientIds, const QList<QString>& canvasSessionIds)> cb);
+    static void setFileRemovalNotifier(std::function<void(const QString& fileId, const QList<QString>& clientIds, const QList<QString>& projectIds)> cb);
 
 private:
     struct ReceivedScopeFiles {
@@ -124,7 +122,7 @@ private:
     static QString receivedMemoryKey(const RemoteCacheStore::Scope& scope,
                                      const QString& fileId);
 
-    // Phase 4.2: Service references (initialized in constructor)
+    // Non-owning service references initialized in the constructor.
     LocalFileRepository* m_repository;
     RemoteFileTracker* m_tracker;
     FileMemoryCache* m_cache;

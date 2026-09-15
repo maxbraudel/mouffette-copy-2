@@ -33,30 +33,25 @@ QJsonObject textScene()
     span[QStringLiteral("normY")] = 0.0;
     span[QStringLiteral("normW")] = 1.0;
     span[QStringLiteral("normH")] = 1.0;
+    span[QStringLiteral("spanDestNormX")] = 0.0;
+    span[QStringLiteral("spanDestNormY")] = 0.0;
+    span[QStringLiteral("spanDestNormW")] = 1.0;
+    span[QStringLiteral("spanDestNormH")] = 1.0;
+    span[QStringLiteral("spanSourceNormX")] = 0.0;
+    span[QStringLiteral("spanSourceNormY")] = 0.0;
+    span[QStringLiteral("spanSourceNormW")] = 1.0;
+    span[QStringLiteral("spanSourceNormH")] = 1.0;
 
     QJsonObject media;
     media[QStringLiteral("mediaId")] = QStringLiteral("text-1");
+    media[QStringLiteral("fileId")] = QString();
+    media[QStringLiteral("fileName")] = QString();
     media[QStringLiteral("type")] = QStringLiteral("text");
     media[QStringLiteral("text")] = QStringLiteral("teardown-test");
     media[QStringLiteral("x")] = 0.0;
     media[QStringLiteral("y")] = 0.0;
     media[QStringLiteral("width")] = 320.0;
     media[QStringLiteral("height")] = 180.0;
-    media[QStringLiteral("spans")] = QJsonArray{span};
-
-    QJsonObject scene;
-    scene[QStringLiteral("sceneInstanceId")] = QStringLiteral("lifecycle-test-run");
-    scene[QStringLiteral("screens")] = QJsonArray{screen};
-    scene[QStringLiteral("media")] = QJsonArray{media};
-    return scene;
-}
-
-QJsonObject completeTextScene()
-{
-    QJsonObject scene = textScene();
-    scene[QStringLiteral("renderSchemaVersion")] = 2;
-    QJsonObject media = scene.value(QStringLiteral("media")).toArray().first().toObject();
-    media[QStringLiteral("fileId")] = QString();
     media[QStringLiteral("baseWidth")] = 320;
     media[QStringLiteral("baseHeight")] = 180;
     media[QStringLiteral("visible")] = true;
@@ -70,35 +65,32 @@ QJsonObject completeTextScene()
     media[QStringLiteral("fadeOutSeconds")] = 0.0;
     media[QStringLiteral("contentOpacity")] = 1.0;
     media[QStringLiteral("fontFamily")] = QStringLiteral("Arial");
-    media[QStringLiteral("fontSize")] = 20;
-    media[QStringLiteral("fontBold")] = false;
     media[QStringLiteral("fontItalic")] = false;
     media[QStringLiteral("fontUnderline")] = false;
     media[QStringLiteral("fontUppercase")] = false;
     media[QStringLiteral("fontWeight")] = 400;
     media[QStringLiteral("fontPixelSize")] = 20;
     media[QStringLiteral("textColor")] = QStringLiteral("#ffffffff");
-    media[QStringLiteral("textBorderWidthPercent")] = 0.0;
     media[QStringLiteral("textOutlineWidthPx")] = 0.0;
     media[QStringLiteral("textBorderColor")] = QStringLiteral("#00000000");
     media[QStringLiteral("textFitToTextEnabled")] = false;
     media[QStringLiteral("textHighlightEnabled")] = false;
     media[QStringLiteral("textHighlightColor")] = QStringLiteral("#00000000");
-    media[QStringLiteral("uniformScale")] = 1.0;
     media[QStringLiteral("horizontalAlignment")] = QStringLiteral("center");
     media[QStringLiteral("verticalAlignment")] = QStringLiteral("center");
-    QJsonObject span = media.value(QStringLiteral("spans")).toArray().first().toObject();
-    span[QStringLiteral("spanDestNormX")] = 0.0;
-    span[QStringLiteral("spanDestNormY")] = 0.0;
-    span[QStringLiteral("spanDestNormW")] = 1.0;
-    span[QStringLiteral("spanDestNormH")] = 1.0;
-    span[QStringLiteral("spanSourceNormX")] = 0.0;
-    span[QStringLiteral("spanSourceNormY")] = 0.0;
-    span[QStringLiteral("spanSourceNormW")] = 1.0;
-    span[QStringLiteral("spanSourceNormH")] = 1.0;
     media[QStringLiteral("spans")] = QJsonArray{span};
+
+    QJsonObject scene;
+    scene[QStringLiteral("renderSchemaVersion")] = 2;
+    scene[QStringLiteral("sceneInstanceId")] = QStringLiteral("lifecycle-test-run");
+    scene[QStringLiteral("screens")] = QJsonArray{screen};
     scene[QStringLiteral("media")] = QJsonArray{media};
     return scene;
+}
+
+QJsonObject completeTextScene()
+{
+    return textScene();
 }
 
 QJsonObject snapshotForScene(const QJsonObject& scene, const QJsonArray& videos = {})
@@ -124,6 +116,7 @@ QJsonObject videoScene(const QString& fileId)
 
     QJsonObject media;
     media[QStringLiteral("mediaId")] = QStringLiteral("video-1");
+    media[QStringLiteral("assetId")] = fileId;
     media[QStringLiteral("fileId")] = fileId;
     media[QStringLiteral("fileName")] = QStringLiteral("video-1080p.mp4");
     media[QStringLiteral("type")] = QStringLiteral("video");
@@ -193,6 +186,21 @@ class RemoteSceneControllerLifecycleTest final : public QObject {
     Q_OBJECT
 
 private slots:
+    void incompleteSceneSchemaIsRejectedBeforeRendererMutation()
+    {
+        RemoteSceneController controller(nullptr, nullptr);
+        QJsonObject incomplete = textScene();
+        incomplete.remove(QStringLiteral("renderSchemaVersion"));
+
+        QVERIFY(QMetaObject::invokeMethod(
+            &controller,
+            "onRemoteSceneStart",
+            Qt::DirectConnection,
+            Q_ARG(QString, QStringLiteral("schema-test-owner")),
+            Q_ARG(QJsonObject, incomplete)));
+        QVERIFY(!findRemoteWindow());
+    }
+
     void teardownDoesNotPumpNestedApplicationEvents()
     {
         RemoteSceneController controller(nullptr, nullptr);
@@ -349,10 +357,14 @@ private slots:
 
 		QPointer<QQuickWindow> remoteWindow = findRemoteWindow();
 		QVERIFY(remoteWindow);
-		QVERIFY(!controller.teardownRemoteSession(
+		QSignalSpy teardownSpy(&controller, &RemoteSceneController::teardownSettled);
+		QVERIFY(controller.teardownRemoteSession(
 			QStringLiteral("unrelated-remote-session")));
 		QCoreApplication::processEvents();
 		QVERIFY(remoteWindow);
+		QCOMPARE(teardownSpy.count(), 1);
+		QCOMPARE(teardownSpy.first().at(0).toString(),
+		         QStringLiteral("unrelated-remote-session"));
 
 		QVERIFY(QMetaObject::invokeMethod(
 			&controller, "onRemoteSceneStop", Qt::DirectConnection,

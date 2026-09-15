@@ -13,8 +13,6 @@ class SystemMonitor;
  * 
  * Responsibilities:
  * - Handle client registration with server
- * - Process incoming screen information from remote clients
- * - Handle data request events from server
  * - Coordinate screen info collection with SystemMonitor
  * 
  * This handler extracts screen event processing logic from ApplicationRuntime
@@ -39,11 +37,6 @@ public slots:
      * Collects machine name, platform, screens, and volume info
      */
     void syncRegistration();
-
-    // Internal compatibility entry points. Protocol v3 does not expose
-    // request/watch messages; both are intentionally disconnected.
-    void onScreensInfoReceived(const ClientInfo& clientInfo);
-    void onDataRequestReceived();
 
 private:
     ApplicationRuntime* m_mainWindow = nullptr;

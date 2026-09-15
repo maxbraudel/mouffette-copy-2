@@ -1,6 +1,6 @@
 # Mouffette Server
 
-Node.js WebSocket coordinator for Mouffette protocol v3.
+Node.js WebSocket coordinator for Mouffette protocol v4.
 
 ## Run and test
 
@@ -16,7 +16,7 @@ override it. Invalid critical values fail startup.
 ## Protocol envelope
 
 The server sends `auth_challenge` first. The client signs
-`mouffette-v3\n<serverBootId>\n<nonce>\n<runtimeId>\n<instanceId>` with its
+`mouffette-v4\n<serverBootId>\n<nonce>\n<runtimeId>\n<instanceId>` with its
 Ed25519 installation key and returns the SPKI public key and signature as
 base64url. The SHA-256 of the SPKI key is the stable `installationId`; the
 server domain-separates and hashes `installationId + instanceId` to derive and
@@ -95,7 +95,7 @@ independently at 50 ms; real compositor presentation may differ by up to 750 ms
 before the run is considered unsafe. A run becomes live only after both
 confirmations.
 
-The remaining v3 scene messages are `prepare_progress`, `state_snapshot`, `stop`, and
+The remaining v4 scene messages are `prepare_progress`, `state_snapshot`, `stop`, and
 `stopped`. The server derives both endpoints from the session, bounds payloads,
 rejects stale generations, and preserves terminal tombstones for idempotent
-retries. Legacy `remote_scene_*` message routes do not exist.
+retries. Removed `remote_scene_*` message routes do not exist.

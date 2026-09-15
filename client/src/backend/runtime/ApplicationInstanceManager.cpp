@@ -1,8 +1,11 @@
 #include "backend/runtime/ApplicationInstanceManager.h"
+#include "backend/config/AppConfig.h"
 
 #include <QCryptographicHash>
 #include <QCoreApplication>
 #include <QDir>
+#include <QElapsedTimer>
+#include <QEventLoop>
 #include <QFile>
 #include <QFileInfo>
 #include <QLocalServer>
@@ -142,7 +145,6 @@ bool ApplicationInstanceManager::createTemporaryProfile(QString* errorMessage)
         return false;
     }
     m_profile.rootPath = QDir(profilesRoot).filePath(m_profile.profileId);
-    m_profile.temporaryRoot = m_profile.rootPath;
     if (!QDir().mkpath(m_profile.rootPath)) {
         if (errorMessage) *errorMessage = QStringLiteral("Cannot create temporary instance profile");
         return false;
@@ -194,15 +196,37 @@ bool ApplicationInstanceManager::startActivationServer(QString* errorMessage)
 bool ApplicationInstanceManager::requestActivation() const
 {
     const QString name = activationServerName();
+    const AppConfig& config = AppConfig::instance();
     for (int attempt = 0; attempt < 30; ++attempt) {
         QLocalSocket socket;
         socket.connectToServer(name, QIODevice::ReadWrite);
-        if (socket.waitForConnected(100)) {
-            if (socket.write("activate\n") == 9 && socket.waitForBytesWritten(250)) {
-                return true;
+        if (socket.waitForConnected(config.instanceActivationConnectTimeoutMs())
+            && socket.write("activate\n") == 9) {
+            socket.flush();
+            QElapsedTimer acknowledgementDeadline;
+            acknowledgementDeadline.start();
+            while (acknowledgementDeadline.elapsed()
+                   < config.instanceActivationAckTimeoutMs()) {
+                const int remainingMs = config.instanceActivationAckTimeoutMs()
+                    - static_cast<int>(acknowledgementDeadline.elapsed());
+                const int waitSliceMs = qMax(
+                    1, qMin(config.instanceActivationRetryIntervalMs(),
+                            remainingMs));
+                // This also makes the class deterministic when two managers
+                // are exercised on the same application thread.
+                QCoreApplication::processEvents(QEventLoop::AllEvents,
+                                                waitSliceMs);
+                if (socket.canReadLine()
+                    && socket.readLine().trimmed() == QByteArrayLiteral("ok")) {
+                    return true;
+                }
+                if (socket.state() == QLocalSocket::UnconnectedState) {
+                    break;
+                }
+                socket.waitForReadyRead(waitSliceMs);
             }
         }
-        QThread::msleep(25);
+        QThread::msleep(config.instanceActivationRetryIntervalMs());
     }
     return false;
 }

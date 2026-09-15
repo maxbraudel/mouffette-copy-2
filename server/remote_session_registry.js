@@ -10,8 +10,15 @@ class RemoteSessionRegistry {
             && options.leaseTimeoutMs > 0 ? options.leaseTimeoutMs : 3000;
         this.tombstoneTtlMs = Number.isSafeInteger(options.tombstoneTtlMs)
             && options.tombstoneTtlMs > 0 ? options.tombstoneTtlMs : 5 * 60 * 1000;
+        this.openTimeoutMs = Number.isSafeInteger(options.openTimeoutMs)
+            && options.openTimeoutMs > 0 ? options.openTimeoutMs : 3000;
+        this.openRequestTtlMs = Number.isSafeInteger(options.openRequestTtlMs)
+            && options.openRequestTtlMs > 0
+            ? options.openRequestTtlMs : this.tombstoneTtlMs;
         this.maximumTombstones = Number.isSafeInteger(options.maximumTombstones)
             && options.maximumTombstones > 0 ? options.maximumTombstones : 4096;
+        this.maximumOpenRequests = Number.isSafeInteger(options.maximumOpenRequests)
+            && options.maximumOpenRequests > 0 ? options.maximumOpenRequests : 4096;
         // `now` is retained as the deterministic-test alias. Production passes
         // an explicitly monotonic provider so wall-clock corrections cannot
         // extend or shorten a strict network lease.
@@ -19,8 +26,10 @@ class RemoteSessionRegistry {
         this.epochNow = options.epochNow || options.now || (() => Date.now());
         this.idFactory = options.idFactory || (() => randomUUID());
         this.sessions = new Map();
-        this.incomingByTarget = new Map();
+        this.incomingByTarget = new Map(); // targetEndpointId -> Set(remoteSessionId)
         this.outgoingByOwner = new Map();
+        this.sessionByOwnerTarget = new Map(); // ownerEndpointId -> Map(targetEndpointId -> id)
+        this.openRequests = new Map(); // owner/runtime/request tuple -> bounded replay binding
         this.tombstones = new Map();
     }
 
@@ -40,18 +49,70 @@ class RemoteSessionRegistry {
             || targetConnectionGeneration <= 0) {
             return { ok: false, error: 'invalid_connection_generation' };
         }
-        const existingId = this.incomingByTarget.get(binding.targetEndpointId);
-        const existing = existingId && this.sessions.get(existingId);
-        if (existing && existing.phase !== 'Closed') {
-            return { ok: false, error: 'target_in_use', remoteSessionId: existing.remoteSessionId };
-        }
 
         const now = this.now();
+        this.#trimOpenRequests(now);
+        const requestId = typeof binding.requestId === 'string'
+            && binding.requestId.length > 0 && binding.requestId.length <= 128
+            ? binding.requestId : null;
+        const requestKey = requestId ? this.#openRequestKey(binding, requestId) : null;
+        const recorded = requestKey ? this.openRequests.get(requestKey) : null;
+        if (recorded) {
+            if (recorded.ownerEndpointId !== binding.ownerEndpointId
+                || recorded.ownerRuntimeId !== binding.ownerRuntimeId
+                || recorded.targetEndpointId !== binding.targetEndpointId) {
+                return { ok: false, error: 'request_id_conflict' };
+            }
+            const recordedSession = this.get(recorded.remoteSessionId)
+                || this.getTombstone(recorded.remoteSessionId);
+            if (recordedSession) {
+                return {
+                    ok: true,
+                    replay: true,
+                    requestReplay: true,
+                    session: recordedSession,
+                };
+            }
+            this.openRequests.delete(requestKey);
+        }
+
+        const existing = this.forOwnerTarget(
+            binding.ownerEndpointId, binding.targetEndpointId);
+        if (existing) {
+            if (existing.ownerRuntimeId !== binding.ownerRuntimeId
+                || existing.targetRuntimeId !== binding.targetRuntimeId) {
+                return {
+                    ok: false,
+                    error: TERMINAL_PHASES.has(existing.phase)
+                        ? 'session_cleanup_pending' : 'session_runtime_conflict',
+                    remoteSessionId: existing.remoteSessionId,
+                };
+            }
+            if (existing.phase === 'Grace') {
+                return {
+                    ok: false,
+                    error: 'session_requires_resume',
+                    remoteSessionId: existing.remoteSessionId,
+                };
+            }
+            if (existing.phase === 'Terminating'
+                || existing.phase === 'CleanupPending') {
+                return {
+                    ok: false,
+                    error: 'session_cleanup_pending',
+                    remoteSessionId: existing.remoteSessionId,
+                };
+            }
+            if (requestKey) this.#rememberOpenRequest(requestKey, binding, existing, now);
+            return { ok: true, replay: true, pairReplay: true, session: existing };
+        }
+
         const remoteSessionId = this.idFactory();
+        const awaitingTargetAcceptance = binding.awaitTargetAcceptance === true;
         const session = {
             remoteSessionId,
             resumeToken: this.idFactory(),
-            phase: 'Active',
+            phase: awaitingTargetAcceptance ? 'Opening' : 'Active',
             generation: 1,
             ownerKnownGeneration: 1,
             targetKnownGeneration: 1,
@@ -73,17 +134,32 @@ class RemoteSessionRegistry {
             teardownReason: null,
             sceneRunId: null,
             activeUploadIds: new Set(),
+            openRequestId: requestId,
+            openingDeadlineAt: awaitingTargetAcceptance
+                ? now + this.openTimeoutMs : null,
             createdAt: now,
             updatedAt: now,
         };
         this.sessions.set(remoteSessionId, session);
-        this.incomingByTarget.set(binding.targetEndpointId, remoteSessionId);
+        let incoming = this.incomingByTarget.get(binding.targetEndpointId);
+        if (!incoming) {
+            incoming = new Set();
+            this.incomingByTarget.set(binding.targetEndpointId, incoming);
+        }
+        incoming.add(remoteSessionId);
         let outgoing = this.outgoingByOwner.get(binding.ownerEndpointId);
         if (!outgoing) {
             outgoing = new Set();
             this.outgoingByOwner.set(binding.ownerEndpointId, outgoing);
         }
         outgoing.add(remoteSessionId);
+        let targets = this.sessionByOwnerTarget.get(binding.ownerEndpointId);
+        if (!targets) {
+            targets = new Map();
+            this.sessionByOwnerTarget.set(binding.ownerEndpointId, targets);
+        }
+        targets.set(binding.targetEndpointId, remoteSessionId);
+        if (requestKey) this.#rememberOpenRequest(requestKey, binding, session, now);
         return { ok: true, session };
     }
 
@@ -95,15 +171,59 @@ class RemoteSessionRegistry {
         return this.tombstones.get(remoteSessionId) || null;
     }
 
-    activeIncomingFor(targetEndpointId) {
-        const id = this.incomingByTarget.get(targetEndpointId);
+    incomingForTarget(targetEndpointId) {
+        const ids = this.incomingByTarget.get(targetEndpointId);
+        if (!ids) return [];
+        return Array.from(ids, id => this.get(id)).filter(Boolean);
+    }
+
+    forOwnerTarget(ownerEndpointId, targetEndpointId) {
+        const id = this.sessionByOwnerTarget.get(ownerEndpointId)?.get(targetEndpointId);
         return id ? this.get(id) : null;
     }
 
     sessionsForEndpoint(endpointId) {
-        return Array.from(this.sessions.values()).filter(session =>
-            session.phase !== 'Closed'
-            && (session.ownerEndpointId === endpointId || session.targetEndpointId === endpointId));
+        const ids = new Set(this.outgoingByOwner.get(endpointId) || []);
+        for (const id of this.incomingByTarget.get(endpointId) || []) ids.add(id);
+        return Array.from(ids, id => this.get(id))
+            .filter(session => session && session.phase !== 'Closed');
+    }
+
+    accept({ remoteSessionId, targetEndpointId, targetRuntimeId,
+             generation, connectionGeneration }, now = this.now()) {
+        const session = this.get(remoteSessionId);
+        if (!session) return { ok: false, error: 'unknown_remote_session' };
+        if (session.targetEndpointId !== targetEndpointId
+            || session.targetRuntimeId !== targetRuntimeId) {
+            return { ok: false, error: 'not_session_target' };
+        }
+        if (session.generation !== generation) {
+            return { ok: false, error: 'stale_remote_session_generation' };
+        }
+        if (session.targetConnectionGeneration !== connectionGeneration) {
+            return { ok: false, error: 'stale_connection_generation' };
+        }
+        if (session.phase === 'Active') {
+            return { ok: true, replay: true, session };
+        }
+        if (session.phase !== 'Opening') {
+            return { ok: false, error: 'remote_session_not_opening' };
+        }
+        if (now >= session.openingDeadlineAt) {
+            const terminated = this.terminate(remoteSessionId, 'open_timeout', now);
+            return {
+                ok: false,
+                error: 'remote_session_open_timeout',
+                session: terminated.session,
+                terminalTransition: terminated.ok && !terminated.replay,
+            };
+        }
+        session.phase = 'Active';
+        session.openingDeadlineAt = null;
+        session.snapshotSequence = 1;
+        session.lastContact.set(targetEndpointId, now);
+        session.updatedAt = now;
+        return { ok: true, replay: false, session };
     }
 
     validateLease(remoteSessionId, now = this.now()) {
@@ -180,6 +300,11 @@ class RemoteSessionRegistry {
         const changed = [];
         for (const session of this.sessionsForEndpoint(endpointId)) {
             if (TERMINAL_PHASES.has(session.phase)) continue;
+            if (session.phase === 'Opening') {
+                changed.push(this.terminate(
+                    session.remoteSessionId, 'open_party_disconnected', now).session);
+                continue;
+            }
             if (this.#leaseExpired(session, now)) {
                 changed.push(this.terminate(session.remoteSessionId, 'lease_expired', now).session);
                 continue;
@@ -290,6 +415,7 @@ class RemoteSessionRegistry {
         session.teardownReason = String(reason || 'closed').slice(0, 128);
         session.graceDeadlineAt = null;
         session.graceDeadlineEpochMs = null;
+        session.openingDeadlineAt = null;
         session.graceEndpoints.clear();
         session.degradedEndpoints.clear();
         session.updatedAt = now;
@@ -337,11 +463,22 @@ class RemoteSessionRegistry {
         session.cleanupResult = { ...result };
         delete session.cleanupError;
         session.updatedAt = now;
-        this.incomingByTarget.delete(session.targetEndpointId);
+        const incoming = this.incomingByTarget.get(session.targetEndpointId);
+        if (incoming) {
+            incoming.delete(remoteSessionId);
+            if (incoming.size === 0) this.incomingByTarget.delete(session.targetEndpointId);
+        }
         const outgoing = this.outgoingByOwner.get(session.ownerEndpointId);
         if (outgoing) {
             outgoing.delete(remoteSessionId);
             if (outgoing.size === 0) this.outgoingByOwner.delete(session.ownerEndpointId);
+        }
+        const targets = this.sessionByOwnerTarget.get(session.ownerEndpointId);
+        if (targets && targets.get(session.targetEndpointId) === remoteSessionId) {
+            targets.delete(session.targetEndpointId);
+            if (targets.size === 0) {
+                this.sessionByOwnerTarget.delete(session.ownerEndpointId);
+            }
         }
         this.sessions.delete(remoteSessionId);
         this.tombstones.set(remoteSessionId, session);
@@ -352,11 +489,19 @@ class RemoteSessionRegistry {
     tick(now = this.now()) {
         const expired = [];
         for (const session of this.sessions.values()) {
-            if (!TERMINAL_PHASES.has(session.phase) && this.#leaseExpired(session, now)) {
-                expired.push(this.terminate(session.remoteSessionId, 'lease_expired', now).session);
+            if (TERMINAL_PHASES.has(session.phase)) continue;
+            if (session.phase === 'Opening'
+                && Number.isFinite(session.openingDeadlineAt)
+                && now >= session.openingDeadlineAt) {
+                expired.push(this.terminate(
+                    session.remoteSessionId, 'open_timeout', now).session);
+            } else if (this.#leaseExpired(session, now)) {
+                expired.push(this.terminate(
+                    session.remoteSessionId, 'lease_expired', now).session);
             }
         }
         this.#trimTombstones(now);
+        this.#trimOpenRequests(now);
         return expired;
     }
 
@@ -390,6 +535,34 @@ class RemoteSessionRegistry {
             && result.sceneStopped === true
             && result.uploadsAborted === true
             && result.cacheQuarantined === true;
+    }
+
+    #openRequestKey(binding, requestId) {
+        return JSON.stringify([
+            binding.ownerEndpointId,
+            binding.ownerRuntimeId,
+            requestId,
+        ]);
+    }
+
+    #rememberOpenRequest(key, binding, session, now) {
+        this.openRequests.set(key, {
+            ownerEndpointId: binding.ownerEndpointId,
+            ownerRuntimeId: binding.ownerRuntimeId,
+            targetEndpointId: binding.targetEndpointId,
+            remoteSessionId: session.remoteSessionId,
+            expiresAt: now + this.openRequestTtlMs,
+        });
+        this.#trimOpenRequests(now);
+    }
+
+    #trimOpenRequests(now) {
+        for (const [key, request] of this.openRequests) {
+            if (now >= request.expiresAt) this.openRequests.delete(key);
+        }
+        while (this.openRequests.size > this.maximumOpenRequests) {
+            this.openRequests.delete(this.openRequests.keys().next().value);
+        }
     }
 
     #trimTombstones(now) {

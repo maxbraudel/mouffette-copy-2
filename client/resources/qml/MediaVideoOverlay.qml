@@ -1,7 +1,7 @@
 import QtQuick
 import QtQuick.Layouts
 // Bottom overlay panel attached below a selected video media item.
-// Mirrors the legacy ResizableVideoItem controls panel:
+// Video controls panel:
 //   Row 1: play/pause | stop | repeat | mute | volume slider
 //   Row 2: progress bar (full width)
 // Positioned in item-local coordinates: y = parent.height + gap

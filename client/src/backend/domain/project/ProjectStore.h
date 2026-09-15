@@ -9,7 +9,7 @@
 /** Atomic, versioned JSON persistence for local projects. */
 class ProjectStore {
 public:
-    static constexpr int SchemaVersion = 3;
+    static constexpr int SchemaVersion = 4;
 
     explicit ProjectStore(QString filePath = defaultFilePath());
 

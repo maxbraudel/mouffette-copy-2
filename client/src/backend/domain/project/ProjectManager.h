@@ -44,9 +44,12 @@ public:
     const ProjectRecord* projectForTarget(const QString& targetEndpointId) const;
     const ProjectRecord* projectById(const QString& projectId) const;
 
-    QString ensureProject(const ProjectTargetReference& target,
-                          ProjectLifecycleState initialState = ProjectLifecycleState::Visible,
-                          qint64 nowMs = -1);
+    QString createProjectFromSnapshot(const ProjectTargetReference& target,
+                                      const QList<ScreenInfo>& screens,
+                                      int volumePercent,
+                                      quint64 snapshotRevision,
+                                      qint64 snapshotCapturedAtMs,
+                                      qint64 nowMs = -1);
     bool setVisible(const QString& targetEndpointId, qint64 nowMs = -1);
     bool setHidden(const QString& targetEndpointId, qint64 nowMs = -1);
     void markAllHidden(qint64 nowMs = -1);
@@ -62,6 +65,12 @@ public:
     bool updateSavedScreens(const QString& targetEndpointId,
                             const QList<ScreenInfo>& screens,
                             qint64 nowMs = -1);
+    bool updateRemoteSnapshot(const QString& targetEndpointId,
+                              const QList<ScreenInfo>& screens,
+                              int volumePercent,
+                              quint64 snapshotRevision,
+                              qint64 snapshotCapturedAtMs,
+                              qint64 nowMs = -1);
 
     qint64 projectDeleteAtMs(const QString& targetEndpointId) const;
 

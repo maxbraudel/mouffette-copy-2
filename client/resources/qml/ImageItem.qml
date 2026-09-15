@@ -12,7 +12,6 @@ BaseMediaItem {
         anchors.fill: parent
         contentReady: handoffPoster.hasFrame || image.status === Image.Ready
         revealImmediately: root.handoffCovered
-        fadeDuration: 80
 
         // The exact drag pixels become part of the final item during handoff.
         // This closes the scene-graph gap between Image.Ready and the first

@@ -149,14 +149,8 @@ bool settingsAreValid()
     if (!info.isFile() || info.isSymLink() || info.size() > 1024 * 1024) return false;
     QSettings settings(info.absoluteFilePath(), QSettings::IniFormat);
     if (settings.status() != QSettings::NoError) return false;
-    // One-way storage compatibility for profiles created before Qt Quick
-    // became the sole renderer. The obsolete value is accepted only long
-    // enough to remove it; it no longer controls any runtime path.
-    const QString obsoleteRendererKey = QStringLiteral("useQuickCanvas")
-        + QStringLiteral("Renderer");
     const QSet<QString> allowed{
-        QStringLiteral("serverUrl"), QStringLiteral("autoUploadImportedMedia"),
-        obsoleteRendererKey};
+        QStringLiteral("serverUrl"), QStringLiteral("autoUploadImportedMedia")};
     const QStringList keys = settings.allKeys();
     for (const QString& key : keys) {
         if (!allowed.contains(key)) return false;
@@ -167,20 +161,10 @@ bool settingsAreValid()
     }
     const QVariant serverUrl = settings.value(QStringLiteral("serverUrl"));
     const QVariant autoUpload = settings.value(QStringLiteral("autoUploadImportedMedia"));
-    if (settings.contains(obsoleteRendererKey)
-        && settings.value(obsoleteRendererKey).metaType().id() != QMetaType::Bool) {
-        return false;
-    }
     QString ignored;
-    const bool valid = serverUrl.metaType().id() == QMetaType::QString
+    return serverUrl.metaType().id() == QMetaType::QString
         && autoUpload.metaType().id() == QMetaType::Bool
         && AppConfig::validateServerUrl(serverUrl.toString(), nullptr, &ignored);
-    if (valid && settings.contains(obsoleteRendererKey)) {
-        settings.remove(obsoleteRendererKey);
-        settings.sync();
-        return settings.status() == QSettings::NoError;
-    }
-    return valid;
 }
 
 bool resetProjectsToEmpty()
@@ -201,20 +185,20 @@ bool projectsAreValid()
     return store.load(&projects);
 }
 
-bool removeLegacyStorage(QString* error)
+bool removeObsoleteStorage(QString* error)
 {
-    QSettings legacy(QStringLiteral("Mouffette"),
-                     QStringLiteral(MOUFFETTE_SETTINGS_APPLICATION));
-    const QString legacySettingsPath = legacy.fileName();
-    legacy.clear();
-    legacy.sync();
-    if (legacy.status() != QSettings::NoError) {
-        if (error) *error = QStringLiteral("legacy_settings_reset_failed");
+    QSettings obsolete(QStringLiteral("Mouffette"),
+                       QStringLiteral(MOUFFETTE_SETTINGS_APPLICATION));
+    const QString obsoleteSettingsPath = obsolete.fileName();
+    obsolete.clear();
+    obsolete.sync();
+    if (obsolete.status() != QSettings::NoError) {
+        if (error) *error = QStringLiteral("obsolete_settings_reset_failed");
         return false;
     }
-    if (!legacySettingsPath.isEmpty()
-        && !removeEntry(QFileInfo(legacySettingsPath))) {
-        if (error) *error = QStringLiteral("legacy_settings_reset_failed");
+    if (!obsoleteSettingsPath.isEmpty()
+        && !removeEntry(QFileInfo(obsoleteSettingsPath))) {
+        if (error) *error = QStringLiteral("obsolete_settings_reset_failed");
         return false;
     }
 
@@ -222,17 +206,17 @@ bool removeLegacyStorage(QString* error)
         QStandardPaths::AppDataLocation);
     const QString oldCache = QStandardPaths::writableLocation(
         QStandardPaths::CacheLocation);
-    const QList<QString> legacyPaths{
+    const QList<QString> obsoletePaths{
         QDir(oldData).filePath(QStringLiteral("projects-v2.json")),
         QDir(oldData).filePath(QStringLiteral("history-v1.json")),
         QDir(oldCache).filePath(QStringLiteral("Mouffette/Uploads"))};
-    for (const QString& path : legacyPaths) {
+    for (const QString& path : obsoletePaths) {
         if (!removeEntry(QFileInfo(path))) {
-            if (error) *error = QStringLiteral("legacy_storage_reset_failed");
+            if (error) *error = QStringLiteral("obsolete_storage_reset_failed");
             return false;
         }
     }
-    if (!DeviceIdentityStore::removeLegacyInstallationIdentity(error)) return false;
+    if (!DeviceIdentityStore::removeObsoleteInstallationIdentity(error)) return false;
     return true;
 }
 
@@ -304,9 +288,9 @@ RuntimeStorageBootstrap::Result RuntimeStorageBootstrap::run(
                         QStringLiteral("The incompatible runtime could not be reset."));
         }
         if (m_context.isPersistent() && manifestState == ManifestState::Missing) {
-            QString legacyError;
-            if (!removeLegacyStorage(&legacyError)) {
-                return fail(legacyError, QStringLiteral(
+            QString obsoleteStorageError;
+            if (!removeObsoleteStorage(&obsoleteStorageError)) {
+                return fail(obsoleteStorageError, QStringLiteral(
                     "The previous storage layout could not be removed."));
             }
         }

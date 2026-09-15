@@ -40,7 +40,7 @@ public:
     QHash<int, QByteArray> roleNames() const override;
 
     // Diff-update the model from a freshly-built QVariantList.
-    // Each element must be a QVariantMap containing at least "mediaId".
+    // Each element must be a QVariantMap containing a unique "rowKey".
     void updateFromList(const QVariantList& newList);
 
     // Reset to empty (e.g. on scene teardown).
@@ -60,14 +60,14 @@ public:
 
 private:
     struct Row {
-        QString    mediaId;
+        QString    rowKey;
         QVariantMap data;
     };
 
     QVector<Row> m_rows;
 
-    // Returns the current row index for a given mediaId, or -1.
-    int rowForId(const QString& mediaId) const;
+    // Returns the current row index for a given row key, or -1.
+    int rowForKey(const QString& rowKey) const;
 };
 
 #endif // MEDIALISTMODEL_H

@@ -1,9 +1,41 @@
 #include "backend/domain/models/ClientInfo.h"
 #include <QDateTime>
 #include <QJsonArray>
+#include <QSet>
 #include <QStringList>
 
+#include <cmath>
+
 // ScreenInfo implementation
+bool ScreenInfo::UIZone::isValid() const {
+    static const QSet<QString> allowedTypes = {
+        QStringLiteral("taskbar"), QStringLiteral("menu_bar"),
+        QStringLiteral("dock")
+    };
+    const auto bounded = [](qreal value, qreal minimum, qreal maximum) {
+        return std::isfinite(value) && std::floor(value) == value
+            && value >= minimum && value <= maximum;
+    };
+    return allowedTypes.contains(type)
+        && bounded(x, -1'000'000, 1'000'000)
+        && bounded(y, -1'000'000, 1'000'000)
+        && bounded(width, 0, 100'000)
+        && bounded(height, 0, 100'000);
+}
+
+bool ScreenInfo::isValid() const {
+    if (id < 0 || id > 1'000'000 || width < 1 || width > 100'000
+        || height < 1 || height > 100'000 || x < -1'000'000
+        || x > 1'000'000 || y < -1'000'000 || y > 1'000'000
+        || uiZones.size() > 16) {
+        return false;
+    }
+    for (const UIZone& zone : uiZones) {
+        if (!zone.isValid()) return false;
+    }
+    return true;
+}
+
 QJsonObject ScreenInfo::toJson() const {
     QJsonObject obj;
     obj["id"] = id;
@@ -94,12 +126,11 @@ ClientInfo ClientInfo::fromJson(const QJsonObject& json) {
     client.m_id = client.m_endpointId;
     client.m_machineName = json["machineName"].toString();
     client.m_platform = json["platform"].toString();
-    client.m_status = json["status"].toString();
+    client.m_status = json.value("status").toString(QStringLiteral("Available"));
     client.m_volumePercent = json.contains("volumePercent") ? json["volumePercent"].toInt(-1) : -1;
     client.m_fromMemory = false;
     client.m_isOnline = true;
-    client.m_availabilityStatus = json.value("remoteSessionState")
-        .toString(QStringLiteral("Available"));
+    client.m_availabilityStatus = client.m_status;
     
     QJsonArray screensArray = json["screens"].toArray();
     for (const auto& screenValue : screensArray) {
@@ -132,10 +163,13 @@ QString ClientInfo::getIdentityDisplayText() const {
 
 QString ClientInfo::availabilityBadgeText() const
 {
-    // Network presence always wins over stale session state. In particular,
-    // a durable project remains selectable while its target is Offline.
+    // Network presence always wins over stale session state. A durable project
+    // remains selectable while its target is disconnected.
     if (!m_isOnline) {
-        return QStringLiteral("Offline");
+        return m_availabilityStatus.compare(
+                   QStringLiteral("Unreachable"), Qt::CaseInsensitive) == 0
+            ? QStringLiteral("Unreachable")
+            : QStringLiteral("Disconnected");
     }
 
     const auto normalize = [](const QString& raw) -> QString {
@@ -160,17 +194,11 @@ QString ClientInfo::availabilityBadgeText() const
             || value.compare(QStringLiteral("cleanup_pending"), Qt::CaseInsensitive) == 0) {
             return QStringLiteral("Disconnecting");
         }
-        if (value.compare(QStringLiteral("in use"), Qt::CaseInsensitive) == 0
-            || value.compare(QStringLiteral("in_use"), Qt::CaseInsensitive) == 0
-            || value.compare(QStringLiteral("busy"), Qt::CaseInsensitive) == 0) {
-            return QStringLiteral("In use");
+        if (value.compare(QStringLiteral("disconnected"), Qt::CaseInsensitive) == 0) {
+            return QStringLiteral("Disconnected");
         }
-        if (value.compare(QStringLiteral("offline"), Qt::CaseInsensitive) == 0) {
-            return QStringLiteral("Offline");
-        }
-        if (value.compare(QStringLiteral("unavailable"), Qt::CaseInsensitive) == 0
-            || value.compare(QStringLiteral("cleanup_error"), Qt::CaseInsensitive) == 0) {
-            return QStringLiteral("Unavailable");
+        if (value.compare(QStringLiteral("unreachable"), Qt::CaseInsensitive) == 0) {
+            return QStringLiteral("Unreachable");
         }
         return {};
     };
@@ -179,7 +207,7 @@ QString ClientInfo::availabilityBadgeText() const
     if (normalized.isEmpty()) {
         normalized = normalize(m_status);
     }
-    return normalized.isEmpty() ? QStringLiteral("Unavailable") : normalized;
+    return normalized.isEmpty() ? QStringLiteral("Unreachable") : normalized;
 }
 
 QString ClientInfo::formatRemainingTime(qint64 remainingMs)

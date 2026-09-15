@@ -65,7 +65,7 @@ function setup() {
 
 function envelope(context, extra = {}) {
     return {
-        protocolVersion: 3,
+        protocolVersion: 4,
         serverBootId: context.server.serverBootId,
         messageId: crypto.randomUUID(),
         remoteSessionId: context.session.remoteSessionId,
@@ -361,7 +361,7 @@ function messages(ws, type) {
     assert.equal(pending.deadlineAt, fixedDeadline);
     assert.equal(messages(context.target, 'upload_remove').at(-1).replay, true);
 
-    context.server.sweepAssetRemovalsV3(fixedDeadline);
+    context.server.sweepAssetRemovals(fixedDeadline);
     assert.equal(context.server.pendingAssetRemovals.has(request.removalId), false);
     assert.equal(context.server.sessionAssets.get(context.session.remoteSessionId)
         .has(context.asset.assetId), true);
@@ -370,4 +370,4 @@ function messages(ws, type) {
     assert.equal(messages(context.target, 'remote_session_terminating').length, 1);
 }
 
-console.log('asset removal protocol v3 tests passed');
+console.log('asset removal protocol v4 tests passed');

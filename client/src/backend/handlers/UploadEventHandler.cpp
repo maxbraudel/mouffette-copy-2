@@ -1,4 +1,5 @@
 #include "UploadEventHandler.h"
+#include "backend/config/AppConfig.h"
 #include "backend/runtime/ApplicationRuntime.h"
 #include "backend/network/UploadManager.h"
 #include "backend/files/FileManager.h"
@@ -8,7 +9,7 @@
 #include "backend/domain/media/CanvasMedia.h"
 #include "backend/domain/media/MediaFilePolicy.h"
 #include "frontend/ui/notifications/ToastNotificationSystem.h"
-#include "backend/domain/session/SessionManager.h"
+#include "backend/domain/workspace/WorkspaceManager.h"
 #include <QFileInfo>
 #include <QDebug>
 
@@ -23,7 +24,7 @@ void UploadEventHandler::onUploadButtonClicked()
     UploadManager* uploadManager = m_mainWindow->getUploadManager();
     if (!uploadManager) return;
 
-    ApplicationRuntime::CanvasSession* session = m_mainWindow->findCanvasSession(m_mainWindow->getActiveSessionIdentity());
+    ApplicationRuntime::ClientWorkspace* session = m_mainWindow->findWorkspace(m_mainWindow->activeWorkspaceEndpointId());
     if (!session || !session->canvas) return;
 
     ICanvasHost* canvas = session->canvas;
@@ -31,10 +32,10 @@ void UploadEventHandler::onUploadButtonClicked()
 
     if (uploadManager->isBusy()) {
         if (uploadManager->isUploading()
-            && m_mainWindow->getActiveUploadSessionIdentity() == session->persistentClientId
+            && m_mainWindow->activeUploadWorkspaceEndpointId() == session->targetEndpointId
             && uploadManager->canRequestCancel()) {
             uploadManager->requestCancel();
-        } else if (m_mainWindow->getActiveUploadSessionIdentity() != session->persistentClientId) {
+        } else if (m_mainWindow->activeUploadWorkspaceEndpointId() != session->targetEndpointId) {
             TOAST_WARNING("Another client upload is currently in progress. Please wait for it to finish.");
         } else {
             qInfo() << "UploadManager: Duplicate upload click ignored in state"
@@ -43,13 +44,12 @@ void UploadEventHandler::onUploadButtonClicked()
         return;
     }
 
-    const QString targetClientId = session->serverAssignedId;
+    const QString targetClientId = session->targetEndpointId;
     if (targetClientId.isEmpty()) {
         TOAST_ERROR("No remote client selected for upload");
         return;
     }
     uploadManager->setTargetClientId(targetClientId);
-    uploadManager->setActiveIdeaId(session->canvasSessionId);
 
     const QString clientLabel = session->lastClientInfo.getDisplayText().isEmpty()
         ? targetClientId
@@ -126,7 +126,7 @@ void UploadEventHandler::onUploadButtonClicked()
         }
 
         currentFileIds.insert(fileId);
-        fileManager->associateFileWithIdea(fileId, session->canvasSessionId);
+        fileManager->associateFileWithProject(fileId, session->projectId);
 
         const bool alreadyOnTarget = fileManager->isFileUploadedToClient(fileId, targetClientId);
         if (!processedFileIds.contains(fileId) && !alreadyOnTarget) {
@@ -163,19 +163,20 @@ void UploadEventHandler::onUploadButtonClicked()
 
     if (!rejectedMedia.isEmpty()) {
         TOAST_ERROR(QStringLiteral("Upload blocked: %1")
-                        .arg(rejectedMedia.join(QStringLiteral("; "))), 5000);
+                        .arg(rejectedMedia.join(QStringLiteral("; "))),
+                    AppConfig::instance().toastErrorDurationMs());
         return;
     }
 
-    m_mainWindow->reconcileRemoteFilesForSession(*session, currentFileIds);
+    m_mainWindow->reconcileRemoteFilesForWorkspace(*session, currentFileIds);
 
     if (files.isEmpty()) {
         if (hasRemoteFiles) {
-            // This is the Unload half of the button state machine. Protocol v3
-            // no longer has the legacy unscoped remove-all command, so remove
+            // This is the Unload half of the button state machine. Protocol v4
+            // has no unscoped remove-all command, so remove
             // the session's exact validated assets through their authenticated
             // inventory tuples and wait for each target acknowledgement.
-            uploadManager->setActiveSessionIdentity(session->persistentClientId);
+            uploadManager->setActiveWorkspaceEndpointId(session->targetEndpointId);
             QSet<QString> knownRemoteFileIds = session->knownRemoteFileIds;
             knownRemoteFileIds.unite(currentFileIds);
             if (uploadManager->requestUnload(targetClientId,
@@ -183,7 +184,8 @@ void UploadEventHandler::onUploadButtonClicked()
                 TOAST_INFO(QString("Removing remote media from %1…")
                                .arg(clientLabel));
             } else if (!uploadManager->isRemoving()) {
-                TOAST_ERROR("Remote media could not be unloaded safely", 5000);
+                TOAST_ERROR("Remote media could not be unloaded safely",
+                            AppConfig::instance().toastErrorDurationMs());
             }
         } else {
             TOAST_INFO("No new media to upload");
@@ -203,15 +205,15 @@ void UploadEventHandler::onUploadButtonClicked()
     }
 
     upload.remoteFilesPresent = hasRemoteFiles;
-    m_mainWindow->setActiveUploadSessionIdentity(session->persistentClientId);
-    uploadManager->setActiveSessionIdentity(session->persistentClientId);
+    m_mainWindow->setActiveUploadWorkspaceEndpointId(session->targetEndpointId);
+    uploadManager->setActiveWorkspaceEndpointId(session->targetEndpointId);
 
     const bool accepted = uploadManager->toggleUpload(files);
 
     if (accepted && uploadManager->isUploading()) {
         upload.activeUploadId = uploadManager->currentUploadId();
         if (!upload.activeUploadId.isEmpty()) {
-            m_mainWindow->setUploadSessionByUploadId(upload.activeUploadId, session->persistentClientId);
+            m_mainWindow->setUploadWorkspaceByUploadId(upload.activeUploadId, session->targetEndpointId);
         }
 
         for (CanvasMedia* media : canvas->enumerateMediaItems()) {
@@ -223,9 +225,9 @@ void UploadEventHandler::onUploadButtonClicked()
         }
         TOAST_INFO(QString("Starting upload of %1 file(s) to %2...")
                        .arg(files.size()).arg(clientLabel));
-    } else if (m_mainWindow->getActiveUploadSessionIdentity() == session->persistentClientId) {
-        m_mainWindow->setActiveUploadSessionIdentity(QString());
-        uploadManager->setActiveSessionIdentity(QString());
+    } else if (m_mainWindow->activeUploadWorkspaceEndpointId() == session->targetEndpointId) {
+        m_mainWindow->setActiveUploadWorkspaceEndpointId(QString());
+        uploadManager->setActiveWorkspaceEndpointId(QString());
     }
 }
 
@@ -234,7 +236,7 @@ void UploadEventHandler::updateIndividualProgressFromServer(int globalPercent, i
     Q_UNUSED(totalFiles);
     if (totalFiles == 0) return;
 
-    auto* session = m_mainWindow->sessionForActiveUpload();
+    auto* session = m_mainWindow->workspaceForActiveUpload();
     if (!session || !session->canvas) return;
 
     const int desired = qMax(0, filesCompleted);

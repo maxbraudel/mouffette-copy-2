@@ -96,7 +96,6 @@ BaseMediaItem {
         anchors.fill: parent
         contentReady: root.hasHandoffPoster || root.hasLiveFrame
         revealImmediately: root.handoffCovered
-        fadeDuration: 80
 
         RemoteVideoFrameItem {
             id: handoffPoster

@@ -7,12 +7,12 @@
 #include "backend/domain/models/ClientInfo.h"
 
 class ApplicationRuntime;
-class SessionManager;
+class WorkspaceManager;
 
 /**
  * @brief Builds the display client list by merging connected clients with offline session history
  * 
- * [Phase 16] Extracted from ApplicationRuntime::buildDisplayClientList() to reduce ApplicationRuntime size
+ * Builds the visible union of available endpoints and durable project targets.
  * This class handles the logic of building a unified client list that includes:
  * - Currently connected clients (online)
  * - Previously connected clients from session history (offline)
