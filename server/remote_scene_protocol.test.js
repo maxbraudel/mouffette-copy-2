@@ -234,6 +234,34 @@ const checklist = Object.freeze([
     assert.equal(committed.run.activationLeadMs, 860,
         'base lead plus a complete worst reported RTT is reserved');
     assert.equal(committed.run.startServerMonotonicMs, 20_860);
+
+    const scheduledStart = committed.run.startServerMonotonicMs;
+    const scheduledLead = committed.run.activationLeadMs;
+    const replayed = registry.arm(binding.sceneRunId, 'A', digest, 220);
+    assert.equal(replayed.ok, true);
+    assert.equal(replayed.replay, true);
+    assert.equal(replayed.scheduled, true);
+    assert.equal(replayed.run.armedClockUncertaintyByEndpoint.get('A'), 220,
+        'a rebound transport replaces the reporter clock bound');
+    assert.equal(replayed.run.startServerMonotonicMs, scheduledStart,
+        'replaying ARMED must not reschedule an already published COMMIT');
+    assert.equal(replayed.run.activationLeadMs, scheduledLead);
+
+    const rejectedReplay = registry.arm(binding.sceneRunId, 'A', digest, 251);
+    assert.equal(rejectedReplay.error, 'clock_uncertainty_too_high');
+    assert.equal(committed.run.armedClockUncertaintyByEndpoint.get('A'), 220,
+        'an invalid replay must not replace the last validated reporter bound');
+
+    monotonic = scheduledStart;
+    assert.equal(registry.markStarted(
+        binding.sceneRunId, 'A', digest, true, scheduledStart).live, false);
+    assert.equal(registry.markStarted(
+        binding.sceneRunId, 'B', digest, true, scheduledStart).live, true);
+    const liveReplay = registry.arm(binding.sceneRunId, 'B', digest, 230);
+    assert.equal(liveReplay.ok, true);
+    assert.equal(liveReplay.replay, true);
+    assert.equal(liveReplay.run.armedClockUncertaintyByEndpoint.get('B'), 230);
+    assert.equal(liveReplay.run.startServerMonotonicMs, scheduledStart);
 }
 
 // A transport departure only puts the RemoteSession in Grace. A prepared or

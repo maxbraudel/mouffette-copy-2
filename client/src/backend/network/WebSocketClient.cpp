@@ -432,10 +432,7 @@ void WebSocketClient::connectToServer(const QString& serverUrl) {
     m_clockSyncBurstRemaining = 0;
     m_lastClockSyncBurstStartedAtMs = -1;
     m_pendingServerBootId.clear();
-    m_heartbeatSentAt.clear();
-    m_clockSamples.clear();
-    m_clockUncertaintyMs = std::numeric_limits<qint64>::max();
-    m_serverMonotonicOffsetMs = 0;
+    resetSceneClockEstimate();
     if (m_webSocket) {
         QWebSocket* const obsoleteSocket = m_webSocket;
         m_webSocket = nullptr;
@@ -1277,9 +1274,36 @@ bool WebSocketClient::sendSceneStopped(const QString& sceneRunId,
     return sendControlMessage(message);
 }
 
+bool WebSocketClient::hasFreshSceneClockSample() const
+{
+    if (!m_processClock.isValid() || m_leaseTimeoutMs <= 0
+        || m_selectedClockSampleReceivedAtMs < 0) {
+        return false;
+    }
+    const qint64 now = m_processClock.elapsed();
+    return now >= m_selectedClockSampleReceivedAtMs
+        && now - m_selectedClockSampleReceivedAtMs < m_leaseTimeoutMs;
+}
+
+void WebSocketClient::resetSceneClockEstimate()
+{
+    m_heartbeatSentAt.clear();
+    m_clockSamples.clear();
+    m_serverMonotonicOffsetMs = 0;
+    m_clockUncertaintyMs = std::numeric_limits<qint64>::max();
+    m_selectedClockSampleReceivedAtMs = -1;
+}
+
+qint64 WebSocketClient::sceneClockUncertaintyMs() const
+{
+    return hasFreshSceneClockSample()
+        ? m_clockUncertaintyMs : std::numeric_limits<qint64>::max();
+}
+
 qint64 WebSocketClient::estimatedServerMonotonicMs() const
 {
-    return m_processClock.isValid() ? m_processClock.elapsed() + m_serverMonotonicOffsetMs : -1;
+    return hasFreshSceneClockSample()
+        ? m_processClock.elapsed() + m_serverMonotonicOffsetMs : -1;
 }
 
 bool WebSocketClient::requestSceneClockSynchronization()
@@ -1310,9 +1334,7 @@ RemoteSessionCoordinator* WebSocketClient::remoteSessionCoordinator() const
 void WebSocketClient::onConnected() {
     qDebug() << "Control transport connected; waiting for signed authentication challenge";
     m_authenticated = false;
-    m_clockUncertaintyMs = std::numeric_limits<qint64>::max();
-    m_serverMonotonicOffsetMs = 0;
-    m_clockSamples.clear();
+    resetSceneClockEstimate();
     setConnectionStatus("Authenticating...");
     emit transportConnected();
 }
@@ -1324,6 +1346,7 @@ void WebSocketClient::onDisconnected() {
     m_heartbeatTimer->stop();
     m_clockSyncBurstTimer->stop();
     m_clockSyncBurstRemaining = 0;
+    resetSceneClockEstimate();
     setConnectionStatus("Disconnected");
     if (!m_disconnectSignalEmitted) {
         m_disconnectSignalEmitted = true;
@@ -1648,6 +1671,7 @@ void WebSocketClient::expireLease() {
     m_heartbeatTimer->stop();
     m_clockSyncBurstTimer->stop();
     m_clockSyncBurstRemaining = 0;
+    resetSceneClockEstimate();
     if (!m_degraded) {
         m_degraded = true;
         emit transportHealthChanged(true);
@@ -1731,7 +1755,10 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
         if (sentAt >= 0 && echoedAt == sentAt && serverAt >= 0 && receivedAt >= sentAt) {
             const qint64 rtt = receivedAt - sentAt;
             qint64 offset = serverAt - (sentAt + rtt / 2);
-            qint64 uncertainty = (rtt + 1) / 2;
+            // Add one millisecond for the independent integer timestamp
+            // quantization at the two clocks; the value remains a conservative
+            // bound instead of merely a rounded RTT statistic.
+            qint64 uncertainty = (rtt + 1) / 2 + 1;
 
             // Protocol-v4 servers include both their receive and transmit
             // timestamps. Removing server-side processing time from the RTT is
@@ -1744,7 +1771,9 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
             const qint64 serverTransmittedAt = boundedInteger(
                 message.value(QStringLiteral("serverTransmitMonotonicMs")), 0,
                 9007199254740991LL);
-            if (serverReceivedAt >= 0 && serverTransmittedAt >= serverReceivedAt) {
+            if (serverReceivedAt >= 0
+                && serverTransmittedAt >= serverReceivedAt
+                && serverTransmittedAt == serverAt) {
                 const qint64 serverProcessingMs =
                     serverTransmittedAt - serverReceivedAt;
                 // Millisecond quantization can make the measured server span
@@ -1756,7 +1785,7 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
                         std::max<qint64>(0, rtt - serverProcessingMs);
                     offset = ((serverReceivedAt - sentAt)
                               + (serverTransmittedAt - receivedAt)) / 2;
-                    uncertainty = (networkRoundTripMs + 1) / 2;
+                    uncertainty = (networkRoundTripMs + 1) / 2 + 1;
                 }
             }
 
@@ -1766,13 +1795,12 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
             // replacing a precise estimate with the latest outlier. The
             // window is bounded by both time and count, and is reset for every
             // transport/authentication generation.
-            const qint64 sampleWindowMs = std::max<qint64>(
-                m_leaseTimeoutMs, static_cast<qint64>(m_heartbeatIntervalMs) * 8);
+            const qint64 sampleWindowMs = std::max<qint64>(1, m_leaseTimeoutMs);
             m_clockSamples.append({receivedAt, offset, uncertainty});
             while (!m_clockSamples.isEmpty()
                    && (m_clockSamples.size() > 8
                        || receivedAt - m_clockSamples.constFirst().receivedAtMs
-                              > sampleWindowMs)) {
+                              >= sampleWindowMs)) {
                 m_clockSamples.removeFirst();
             }
             const auto best = std::min_element(
@@ -1786,6 +1814,7 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
             if (best != m_clockSamples.cend()) {
                 m_serverMonotonicOffsetMs = best->offsetMs;
                 m_clockUncertaintyMs = best->uncertaintyMs;
+                m_selectedClockSampleReceivedAtMs = best->receivedAtMs;
             }
             emit heartbeatSampleReceived(sequence, rtt, offset, uncertainty);
         }

@@ -92,8 +92,8 @@ QuickCanvasHost::QuickCanvasHost(CanvasDocument* document,
                     : (!m_sceneArmed
                         ? QStringLiteral("The clients' clocks did not synchronize within the scene preparation deadline")
                         : (!m_sceneCommitScheduled
-                        ? QStringLiteral("The remote clients did not complete launch synchronization in time")
-                        : QStringLiteral("The remote scene did not present its first frame in time"))));
+                            ? QStringLiteral("The remote clients did not complete launch synchronization in time")
+                            : QStringLiteral("The remote scene did not present its first frame in time"))));
             // An unaccepted request has no authoritative server-side SceneRun.
             // Let the server's own preparation deadline discard a lost ACK
             // instead of generating an "unknown scene run" error.

@@ -18,6 +18,8 @@
 #include <openssl/evp.h>
 #include <openssl/x509.h>
 
+#include <limits>
+
 class ConnectionManagerTest : public QObject {
     Q_OBJECT
 
@@ -104,16 +106,19 @@ void ConnectionManagerTest::signedHandshakeAndHeartbeat() {
         QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals));
     bool signatureVerified = false;
     bool heartbeatReceived = false;
+    bool acknowledgeHeartbeats = true;
     bool delayNextHeartbeat = false;
     int processNextHeartbeatOnServerMs = 0;
     int heartbeatCount = 0;
     int authenticationCount = 0;
     qint64 serverMonotonicOffsetMs = 4'000'000'000'000LL;
     qint64 serverEpochMs = 1;
+    QPointer<QWebSocket> latestConnection;
 
     connect(&server, &QWebSocketServer::newConnection, this, [&]() {
         QWebSocket* const connection = server.nextPendingConnection();
         QVERIFY(connection != nullptr);
+        latestConnection = connection;
         QJsonObject challenge{
             {"type", "auth_challenge"},
             {"protocolVersion", 4},
@@ -197,6 +202,7 @@ void ConnectionManagerTest::signedHandshakeAndHeartbeat() {
                 QCOMPARE(message.value("serverBootId").toString(), bootId);
                 heartbeatReceived = true;
                 ++heartbeatCount;
+                if (!acknowledgeHeartbeats) return;
                 QJsonObject ack{
                     {"type", "heartbeat_ack"},
                     {"protocolVersion", 4},
@@ -335,6 +341,48 @@ void ConnectionManagerTest::signedHandshakeAndHeartbeat() {
     disconnect(reconnectSampleConnection);
     QCOMPARE(client.serverBootId(), bootId);
     QVERIFY(client.hasUnexpiredLease());
+
+    // Non-clock traffic may keep a transport lease healthy even if heartbeat
+    // acknowledgements are selectively lost. The last precise mapping must
+    // still expire on its own lease-sized freshness boundary.
+    acknowledgeHeartbeats = false;
+    QTimer keepAlive;
+    keepAlive.setInterval(200);
+    connect(&keepAlive, &QTimer::timeout, this, [&]() {
+        if (!latestConnection) return;
+        const QJsonObject message{
+            {"type", "client_list"},
+            {"protocolVersion", 4},
+            {"serverBootId", bootId},
+            {"messageId", QUuid::createUuid().toString(QUuid::WithoutBraces)},
+            {"connectionGeneration", static_cast<double>(client.connectionGeneration())},
+            {"clients", QJsonArray{}},
+        };
+        latestConnection->sendTextMessage(QString::fromUtf8(
+            QJsonDocument(message).toJson(QJsonDocument::Compact)));
+    });
+    keepAlive.start();
+    QTRY_VERIFY_WITH_TIMEOUT(client.sceneClockUncertaintyMs() > 50, 4000);
+    QCOMPARE(client.estimatedServerMonotonicMs(), qint64(-1));
+    QVERIFY(client.hasUnexpiredLease());
+
+    // When sampling resumes, the expired low-delay entry must not win the
+    // minimum-delay filter again over the new (deliberately slower) sample.
+    const int samplesBeforeFreshMapping = heartbeatSpy.count();
+    delayNextHeartbeat = true;
+    acknowledgeHeartbeats = true;
+    QTRY_VERIFY_WITH_TIMEOUT([&]() {
+        for (int index = samplesBeforeFreshMapping;
+             index < heartbeatSpy.count(); ++index) {
+            if (heartbeatSpy.at(index).at(1).toLongLong() >= 120) return true;
+        }
+        return false;
+    }(), 2000);
+    QVERIFY(client.sceneClockUncertaintyMs() > 50);
+    QVERIFY(client.sceneClockUncertaintyMs()
+            < std::numeric_limits<qint64>::max());
+    QVERIFY(client.estimatedServerMonotonicMs() >= 0);
+    keepAlive.stop();
     client.disconnect();
 }
 

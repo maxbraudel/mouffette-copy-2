@@ -202,16 +202,22 @@ class SceneRunRegistry {
         }
         if (!this.#isParty(run, endpointId)) return { ok: false, error: 'not_a_scene_party' };
         if (digest !== run.digest) return { ok: false, error: 'scene_digest_mismatch' };
-        if (![SCENE_PHASES.PREPARED, SCENE_PHASES.ARMED].includes(run.phase)) {
-            if (run.armedEndpoints.has(endpointId)
-                && [SCENE_PHASES.SCHEDULED, SCENE_PHASES.LIVE].includes(run.phase)) {
-                return { ok: true, replay: true, scheduled: true, run };
-            }
-            return { ok: false, error: 'scene_not_prepared' };
-        }
         if (!Number.isFinite(clockUncertaintyMs) || clockUncertaintyMs < 0
             || clockUncertaintyMs > this.maximumClockUncertaintyMs) {
             return { ok: false, error: 'clock_uncertainty_too_high' };
+        }
+        if (![SCENE_PHASES.PREPARED, SCENE_PHASES.ARMED].includes(run.phase)) {
+            if (run.armedEndpoints.has(endpointId)
+                && [SCENE_PHASES.SCHEDULED, SCENE_PHASES.LIVE].includes(run.phase)) {
+                // A resumed transport has acquired a new clock mapping. Keep
+                // the immutable COMMIT deadline, but use the new reporter bound
+                // when validating any subsequent STARTED timestamp.
+                run.armedClockUncertaintyByEndpoint.set(
+                    endpointId, clockUncertaintyMs);
+                run.updatedAt = this.epochNow();
+                return { ok: true, replay: true, scheduled: true, run };
+            }
+            return { ok: false, error: 'scene_not_prepared' };
         }
         const replay = run.armedEndpoints.has(endpointId);
         run.armedEndpoints.add(endpointId);

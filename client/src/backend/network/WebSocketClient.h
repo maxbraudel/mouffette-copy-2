@@ -175,7 +175,7 @@ public:
                           bool success,
                           const QString& message = QString());
 
-    qint64 sceneClockUncertaintyMs() const { return m_clockUncertaintyMs; }
+    qint64 sceneClockUncertaintyMs() const;
     qint64 estimatedServerMonotonicMs() const;
     // Starts a short, coalesced burst of heartbeat probes. Scene preparation
     // uses this when the passive heartbeat sample is absent or too noisy; the
@@ -277,6 +277,8 @@ private:
     void noteServerContact();
     qint64 suspendInclusiveNowMs() const;
     qint64 leaseElapsedMs() const;
+    bool hasFreshSceneClockSample() const;
+    void resetSceneClockEstimate();
     void expireLease();
     void sendMessage(const QJsonObject& message);
     bool sendControlMessage(const QJsonObject& message);
@@ -322,6 +324,7 @@ private:
     qint64 m_lastClockSyncBurstStartedAtMs = -1;
     qint64 m_serverMonotonicOffsetMs = 0;
     qint64 m_clockUncertaintyMs = std::numeric_limits<qint64>::max();
+    qint64 m_selectedClockSampleReceivedAtMs = -1;
     // Protocol timing is unavailable until an authenticated welcome supplies
     // the authoritative server policy. Keeping these at zero makes any
     // accidental pre-welcome use fail closed instead of duplicating policy.
