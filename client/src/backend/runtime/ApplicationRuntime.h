@@ -24,6 +24,7 @@ class ICanvasHost;
 class IncomingSessionOrphanWatchdog;
 class NotificationCenter;
 class ProjectManager;
+class RemoteSceneController;
 class CanvasMedia;
 class SceneActivityModel;
 class ScreenEventHandler;
@@ -257,6 +258,7 @@ private:
     FileWatcher* m_fileWatcher = nullptr;
     ScreenNavigationManager* m_navigationManager = nullptr;
     ToastNotificationSystem* m_toastSystem = nullptr;
+    RemoteSceneController* m_remoteSceneController = nullptr;
     ICanvasHost* m_activeCanvas = nullptr;
 
     IncomingSessionOrphanWatchdog* m_incomingSessionOrphanWatchdog = nullptr;

@@ -175,8 +175,6 @@ QString sha256ForPath(const QString& canonicalPath) {
 #include <QProcess>
 #endif
 
-static RemoteSceneController* g_remoteSceneController = nullptr; // Remote scene controller global instance
-
 // Z-ordering constants used throughout the scene
 namespace {
 constexpr qreal Z_SCREENS = -1000.0;
@@ -345,11 +343,9 @@ ApplicationRuntime::ApplicationRuntime(const RuntimeProfileContext& runtimeProfi
             }
         });
     }
-    // Initialize remote scene controller once
-    if (!g_remoteSceneController) {
-        g_remoteSceneController = new RemoteSceneController(m_fileManager, m_webSocketClient, this);
-    }
-    connect(g_remoteSceneController, &RemoteSceneController::teardownSettled,
+    m_remoteSceneController = new RemoteSceneController(
+        m_fileManager, m_webSocketClient, this);
+    connect(m_remoteSceneController, &RemoteSceneController::teardownSettled,
             this, &ApplicationRuntime::handleRemoteRendererTeardownSettled,
             Qt::UniqueConnection);
     if (m_systemTrayManager) {
@@ -1588,9 +1584,9 @@ void ApplicationRuntime::handleRemoteSessionReady(const QJsonObject& envelope,
             m_locallyTerminatingRemoteSessions.insert(remoteSessionId);
             m_webSocketClient->closeRemoteSession(
                 remoteSessionId, nullptr, QStringLiteral("clean_shutdown"));
-            if (targetEndpointId == localEndpointId && g_remoteSceneController) {
+            if (targetEndpointId == localEndpointId && m_remoteSceneController) {
                 m_cleanShutdownRendererPendingSessionIds.insert(remoteSessionId);
-                g_remoteSceneController->teardownRemoteSession(remoteSessionId);
+                m_remoteSceneController->teardownRemoteSession(remoteSessionId);
             }
         }
         return;
@@ -1702,15 +1698,26 @@ void ApplicationRuntime::handleRemoteSessionReady(const QJsonObject& envelope,
         if (!session->canvas) ensureWorkspace(session->lastClientInfo);
         session = m_workspaceManager->findWorkspace(peerEndpointId);
         if (!session) return;
-        if (!hadProject) restoreProjectCanvas(*session);
+        if (!hadProject) {
+            // This canvas is the initial in-memory state of the Project just
+            // created from the snapshot; there is no older authoring graph to
+            // restore. Mark it initialized so later navigation cannot attempt
+            // to restore into the already-live document.
+            m_restoredProjectIds.insert(peerEndpointId);
+        }
         if (session->canvas) {
             session->canvas->setScreens(session->lastClientInfo.getScreens());
             switchToWorkspace(peerEndpointId);
         }
+        // The authenticated snapshot is the first authoritative presentation
+        // state for a new Project. Publish only after the canvas, topology and
+        // volume have all been installed; the initial page transition happened
+        // earlier while the workspace intentionally had no canvas.
+        m_selectedClient = session->lastClientInfo;
+        m_remoteVolumePercent = session->lastClientInfo.getVolumePercent();
         m_remoteClientConnected = true;
         setRemoteConnectionStatus(QStringLiteral("CONNECTED"), false);
         updateWorkspaceCapabilities(peerEndpointId);
-        m_remoteVolumePercent = session->lastClientInfo.getVolumePercent();
         if (session->canvas && !m_canvasRevealedForCurrentClient) {
             if (m_navigationManager) m_navigationManager->revealCanvas();
             if (!hadProject) {
@@ -1721,6 +1728,7 @@ void ApplicationRuntime::handleRemoteSessionReady(const QJsonObject& envelope,
             m_canvasRevealedForCurrentClient = true;
             m_canvasContentEverLoaded = true;
         }
+        emit activeWorkspaceChanged(peerEndpointId);
     }
 }
 
@@ -1860,8 +1868,8 @@ void ApplicationRuntime::handleRemoteSessionTerminating(const QJsonObject& envel
     rendererTeardown.teardownId = teardownId;
     rendererTeardown.generation = generation;
     m_pendingRendererTeardowns.insert(remoteSessionId, rendererTeardown);
-    const bool accepted = g_remoteSceneController
-        && g_remoteSceneController->teardownRemoteSession(remoteSessionId);
+    const bool accepted = m_remoteSceneController
+        && m_remoteSceneController->teardownRemoteSession(remoteSessionId);
     if (!accepted) {
         handleRemoteRendererTeardownSettled(remoteSessionId, false);
     }
@@ -1913,8 +1921,8 @@ void ApplicationRuntime::beginTerminalIncomingCacheCleanup(const QString& reason
             continue;
         }
         m_terminalRendererPendingSessionIds.insert(binding.remoteSessionId);
-        if (!g_remoteSceneController
-            || !g_remoteSceneController->teardownRemoteSession(
+        if (!m_remoteSceneController
+            || !m_remoteSceneController->teardownRemoteSession(
                 binding.remoteSessionId)) {
             // Keep the id pending and the receiver unadvertised. Clearing it
             // here would permit cache quarantine without renderer settlement.
@@ -1931,8 +1939,8 @@ void ApplicationRuntime::beginTerminalIncomingCacheCleanup(const QString& reason
             continue;
         }
         m_terminalRendererPendingSessionIds.insert(remoteSessionId);
-        if (!g_remoteSceneController
-            || !g_remoteSceneController->teardownRemoteSession(
+        if (!m_remoteSceneController
+            || !m_remoteSceneController->teardownRemoteSession(
                 remoteSessionId)) {
             qCritical() << "Captured orphan renderer teardown could not start for"
                         << remoteSessionId;
@@ -2646,10 +2654,10 @@ void ApplicationRuntime::prepareCleanShutdown()
                 QStringLiteral("clean_shutdown"));
         }
         if (binding.targetEndpointId == localEndpointId
-            && g_remoteSceneController) {
+            && m_remoteSceneController) {
             m_cleanShutdownRendererPendingSessionIds.insert(
                 binding.remoteSessionId);
-            g_remoteSceneController->teardownRemoteSession(
+            m_remoteSceneController->teardownRemoteSession(
                 binding.remoteSessionId);
         }
     }
