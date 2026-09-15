@@ -24,7 +24,7 @@ struct SettingSpec {
     bool boolean;
 };
 
-constexpr std::array<SettingSpec, 58> kSpecs{{
+constexpr std::array<SettingSpec, 59> kSpecs{{
     {Key::ServerUrl, "MOUFFETTE_SERVER_URL", "server-url", "serverUrl", "ws://localhost:8080", false},
     {Key::RemoteSessionHiddenTimeoutMs, "MOUFFETTE_REMOTE_SESSION_HIDDEN_TIMEOUT_MS", "remote-session-hidden-timeout-ms", nullptr, "60000", false},
     {Key::ProjectHiddenRetentionMs, "MOUFFETTE_PROJECT_HIDDEN_RETENTION_MS", "project-hidden-retention-ms", nullptr, "300000", false},
@@ -45,6 +45,7 @@ constexpr std::array<SettingSpec, 58> kSpecs{{
     {Key::SystemVolumePollIntervalMs, "MOUFFETTE_SYSTEM_VOLUME_POLL_INTERVAL_MS", "system-volume-poll-interval-ms", nullptr, "1200", false},
     {Key::FileWatchDebounceMs, "MOUFFETTE_FILE_WATCH_DEBOUNCE_MS", "file-watch-debounce-ms", nullptr, "500", false},
     {Key::SceneActivityRefreshIntervalMs, "MOUFFETTE_SCENE_ACTIVITY_REFRESH_INTERVAL_MS", "scene-activity-refresh-interval-ms", nullptr, "1000", false},
+    {Key::ClientCountdownRefreshIntervalMs, "MOUFFETTE_CLIENT_COUNTDOWN_REFRESH_INTERVAL_MS", "client-countdown-refresh-interval-ms", nullptr, "1000", false},
     {Key::VideoStatePublishIntervalMs, "MOUFFETTE_VIDEO_STATE_PUBLISH_INTERVAL_MS", "video-state-publish-interval-ms", nullptr, "50", false},
     {Key::VideoSnapshotIntervalMs, "MOUFFETTE_VIDEO_SNAPSHOT_INTERVAL_MS", "video-snapshot-interval-ms", nullptr, "1000", false},
     {Key::RemoteWindowShowDelayMs, "MOUFFETTE_REMOTE_WINDOW_SHOW_DELAY_MS", "remote-window-show-delay-ms", nullptr, "10", false},
@@ -384,6 +385,7 @@ void AppConfig::resetToCompiledDefaults() {
     m_systemVolumePollIntervalMs = 1200;
     m_fileWatchDebounceMs = 500;
     m_sceneActivityRefreshIntervalMs = 1000;
+    m_clientCountdownRefreshIntervalMs = 1000;
     m_videoStatePublishIntervalMs = 50;
     m_videoSnapshotIntervalMs = 1000;
     m_remoteWindowShowDelayMs = 10;
@@ -638,6 +640,8 @@ bool AppConfig::load(const LoadOptions& options, QString* errorMessage) {
                             &candidate.m_fileWatchDebounceMs)
         || !parseIntSetting(Key::SceneActivityRefreshIntervalMs, 100, 10000,
                             &candidate.m_sceneActivityRefreshIntervalMs)
+        || !parseIntSetting(Key::ClientCountdownRefreshIntervalMs, 100, 5000,
+                            &candidate.m_clientCountdownRefreshIntervalMs)
         || !parseIntSetting(Key::VideoStatePublishIntervalMs, 10, 1000,
                             &candidate.m_videoStatePublishIntervalMs)
         || !parseIntSetting(Key::VideoSnapshotIntervalMs, 50, 10000,

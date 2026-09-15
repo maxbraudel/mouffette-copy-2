@@ -55,6 +55,7 @@ QVariant SceneActivityListModel::data(const QModelIndex& index, int role) const
     case PeerEndpointIdRole: return activity.peerEndpointId;
     case StartedAtRole: return activity.startedAtEpochMs;
     case DegradedRole: return activity.degraded;
+    case HasProjectRole: return false;
     case IdentifierRole: return activity.sceneRunId;
     default: return {};
     }
@@ -73,6 +74,7 @@ QHash<int, QByteArray> SceneActivityListModel::roleNames() const
         { PeerEndpointIdRole, QByteArrayLiteral("peerEndpointId") },
         { StartedAtRole, QByteArrayLiteral("startedAt") },
         { DegradedRole, QByteArrayLiteral("degraded") },
+        { HasProjectRole, QByteArrayLiteral("hasProject") },
         { IdentifierRole, QByteArrayLiteral("identifier") }
     };
 }

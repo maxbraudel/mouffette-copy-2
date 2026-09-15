@@ -3,8 +3,11 @@
 
 #include <QAbstractListModel>
 #include <QList>
+#include <QSet>
 
 #include "backend/domain/models/ClientInfo.h"
+
+class QTimer;
 
 class ClientListModel final : public QAbstractListModel
 {
@@ -21,6 +24,7 @@ public:
         OnlineRole,
         PlatformRole,
         ProjectIdRole,
+        HasProjectRole,
         IdentifierRole
     };
 
@@ -36,8 +40,14 @@ public:
 
 private:
     static int badgeKind(const QString& status);
+    static QString endpointIdFor(const ClientInfo& client);
+    QSet<QString> activeCountdownEndpointIds(qint64 nowMs) const;
+    void refreshCountdowns();
+    void updateCountdownTimer();
 
     QList<ClientInfo> m_clients;
+    QTimer* m_countdownTimer = nullptr;
+    QSet<QString> m_countdownEndpointIds;
 };
 
 #endif // CLIENTLISTMODEL_H

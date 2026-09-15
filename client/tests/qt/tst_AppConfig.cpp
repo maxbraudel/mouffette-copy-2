@@ -74,6 +74,7 @@ void AppConfigTest::loadsEmbeddedDefaults() {
     QCOMPARE(config.uiScrollbarHideDelayMs(), 500);
     QCOMPARE(config.uiInputWatchdogIntervalMs(), 120);
     QCOMPARE(config.uiSnapFreezeCleanupDelayMs(), 300);
+    QCOMPARE(config.clientCountdownRefreshIntervalMs(), 1000);
     QCOMPARE(config.toastDefaultDurationMs(), 4000);
     QCOMPARE(config.toastInfoDurationMs(), 2000);
     QCOMPARE(config.toastWarningDurationMs(), 3500);

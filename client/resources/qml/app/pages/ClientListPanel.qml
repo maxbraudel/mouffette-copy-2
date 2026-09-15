@@ -31,6 +31,7 @@ AppPanel {
             required property string badgeText
             required property int badgeKind
             required property bool selectable
+            required property bool hasProject
 
             readonly property string rowIdentifier: identifier
             readonly property string primaryValue: primaryText
@@ -38,6 +39,7 @@ AppPanel {
             readonly property string badgeValue: badgeText
             readonly property int badgeKindValue: badgeKind
             readonly property bool canActivate: selectable
+            readonly property bool ongoingProject: hasProject && !root.sceneMode
             readonly property bool availableBadge: badgeValue.trim().toUpperCase() === "AVAILABLE"
 
             width: list.width
@@ -57,7 +59,7 @@ AppPanel {
                     id: primary
                     anchors.left: parent.left
                     anchors.leftMargin: 12
-                    anchors.right: badge.left
+                    anchors.right: projectBadge.left
                     anchors.rightMargin: 10
                     anchors.top: parent.top
                     anchors.topMargin: 7
@@ -67,6 +69,28 @@ AppPanel {
                     font.weight: Font.DemiBold
                     verticalAlignment: Text.AlignVCenter
                     elide: Text.ElideRight
+                }
+
+                Rectangle {
+                    id: projectBadge
+                    visible: row.ongoingProject
+                    anchors.right: badge.left
+                    anchors.rightMargin: visible ? 8 : 0
+                    anchors.top: parent.top
+                    anchors.topMargin: 7
+                    width: visible ? projectBadgeLabel.implicitWidth + 18 : 0
+                    height: 22
+                    radius: height / 2
+                    color: Theme.brandBlueLight
+
+                    Text {
+                        id: projectBadgeLabel
+                        anchors.centerIn: parent
+                        text: "Ongoing project"
+                        color: Theme.brandBlue
+                        font.pixelSize: 12
+                        font.weight: Font.DemiBold
+                    }
                 }
 
                 Rectangle {

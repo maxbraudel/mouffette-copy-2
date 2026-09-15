@@ -25,6 +25,7 @@ public:
         PeerEndpointIdRole,
         StartedAtRole,
         DegradedRole,
+        HasProjectRole,
         IdentifierRole
     };
 

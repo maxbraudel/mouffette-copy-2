@@ -3,6 +3,7 @@
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QTemporaryDir>
+#include <QTimer>
 
 #include "backend/runtime/ApplicationRuntime.h"
 #include "backend/runtime/RuntimeProfile.h"
@@ -74,6 +75,45 @@ private slots:
         navigation.showClientList();
         QVERIFY(!navigation.isOnScreenView());
         QVERIFY(!navigation.canvasVisible());
+    }
+
+    void projectDeadlinesRefreshAsLiveCountdowns()
+    {
+        ClientListModel model;
+        ClientInfo client = onlineClient(
+            QStringLiteral("endpoint-countdown"),
+            QStringLiteral("Countdown client"));
+        const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+        client.setHasProject(true);
+        client.setRemoteSessionCloseAtMs(nowMs + 4'000);
+        client.setProjectDeleteAtMs(nowMs + 8'000);
+
+        QSignalSpy changes(&model, &QAbstractItemModel::dataChanged);
+        model.setClients({client});
+        QCOMPARE(model.data(model.index(0), ClientListModel::HasProjectRole)
+                     .toBool(), true);
+
+        QTimer* refreshTimer = model.findChild<QTimer*>(
+            QStringLiteral("clientCountdownRefreshTimer"));
+        QVERIFY(refreshTimer);
+        QVERIFY(refreshTimer->isActive());
+        const QString initial = model.data(
+            model.index(0), ClientListModel::SecondaryTextRole).toString();
+
+        QTRY_VERIFY_WITH_TIMEOUT(changes.count() >= 1, 1'500);
+        const QString refreshed = model.data(
+            model.index(0), ClientListModel::SecondaryTextRole).toString();
+        QVERIFY2(refreshed != initial,
+                 qPrintable(QStringLiteral("Countdown stayed frozen at '%1'")
+                                .arg(initial)));
+
+        client.setRemoteSessionCloseAtMs(0);
+        client.setProjectDeleteAtMs(0);
+        client.setHasProject(false);
+        model.setClients({client});
+        QCOMPARE(model.data(model.index(0), ClientListModel::HasProjectRole)
+                     .toBool(), false);
+        QVERIFY(!refreshTimer->isActive());
     }
 
     void clickingClientWaitsForAuthenticatedSnapshotBeforeCreatingProject()

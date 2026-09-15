@@ -43,6 +43,7 @@ public:
         SystemVolumePollIntervalMs,
         FileWatchDebounceMs,
         SceneActivityRefreshIntervalMs,
+        ClientCountdownRefreshIntervalMs,
         VideoStatePublishIntervalMs,
         VideoSnapshotIntervalMs,
         RemoteWindowShowDelayMs,
@@ -150,6 +151,9 @@ public:
     int systemVolumePollIntervalMs() const { return m_systemVolumePollIntervalMs; }
     int fileWatchDebounceMs() const { return m_fileWatchDebounceMs; }
     int sceneActivityRefreshIntervalMs() const { return m_sceneActivityRefreshIntervalMs; }
+    int clientCountdownRefreshIntervalMs() const {
+        return m_clientCountdownRefreshIntervalMs;
+    }
     int videoStatePublishIntervalMs() const { return m_videoStatePublishIntervalMs; }
     int videoSnapshotIntervalMs() const { return m_videoSnapshotIntervalMs; }
     int remoteWindowShowDelayMs() const { return m_remoteWindowShowDelayMs; }
@@ -216,6 +220,7 @@ private:
     int m_systemVolumePollIntervalMs = 1200;
     int m_fileWatchDebounceMs = 500;
     int m_sceneActivityRefreshIntervalMs = 1000;
+    int m_clientCountdownRefreshIntervalMs = 1000;
     int m_videoStatePublishIntervalMs = 50;
     int m_videoSnapshotIntervalMs = 1000;
     int m_remoteWindowShowDelayMs = 10;
