@@ -25,6 +25,9 @@
 #include "backend/domain/media/CanvasMedia.h"
 #include "backend/files/FileManager.h"
 #include "backend/network/UploadManager.h"
+#ifdef Q_OS_MACOS
+#include "backend/platform/macos/MacWindowManager.h"
+#endif
 
 class MediaOverlayTest final : public QObject
 {
@@ -512,7 +515,11 @@ void MediaOverlayTest::mediaPanelVisibilityAnchorInteractionAndScroll()
 
     window.show();
     QVERIFY(QTest::qWaitForWindowExposed(&window));
+#ifdef Q_OS_MACOS
+    MacWindowManager::activateApplicationWindow(&window);
+#else
     window.requestActivate();
+#endif
     QVERIFY(QTest::qWaitForWindowActive(&window));
     harness->setSize(window.size());
     QCoreApplication::processEvents();
@@ -1324,8 +1331,17 @@ void MediaOverlayTest::videoVolumeAndMuteStayIndependentAndSyncWithSettings()
     page->setSize(window.size());
     window.show();
     QVERIFY(QTest::qWaitForWindowExposed(&window));
+    // Cocoa can constrain the requested size on scaled displays. Keep both
+    // settings and transport controls inside the actual native window.
+    page->setSize(window.size());
+#ifdef Q_OS_MACOS
+    MacWindowManager::activateApplicationWindow(&window);
+#else
+    window.requestActivate();
+#endif
+    QVERIFY(QTest::qWaitForWindowActive(&window));
     CanvasMedia* video = host->document()->addPreparedFile(
-        videoPath, QSize(320, 180), true, QPointF(500, 300));
+        videoPath, QSize(160, 90), true, QPointF(window.width() / 2, 30));
     QVERIFY(video);
     auto* panel = findVisualItem(page, QStringLiteral("canvasSceneElementPanel"));
     QVERIFY(panel);

@@ -15,6 +15,9 @@
 #include "frontend/rendering/canvas/QuickCanvasController.h"
 #include "frontend/rendering/canvas/QuickCanvasHost.h"
 #include "frontend/qml/ClientWorkspaceViewModel.h"
+#ifdef Q_OS_MACOS
+#include "backend/platform/macos/MacWindowManager.h"
+#endif
 
 namespace {
 QQuickItem* findQuickItemWithProperty(QQuickItem* root, const char* propertyName,
@@ -556,6 +559,12 @@ private slots:
         page->setPosition({37, 29});
         window.show();
         QVERIFY(QTest::qWaitForWindowExposed(&window));
+#ifdef Q_OS_MACOS
+        MacWindowManager::activateApplicationWindow(&window);
+#else
+        window.requestActivate();
+#endif
+        QVERIFY(QTest::qWaitForWindowActive(&window));
         page->setSize(QSizeF(window.width() - 74, window.height() - 58));
         auto* root = findQuickItemWithProperty(page, "canvasController",
             QVariant::fromValue<QObject*>(host->controller()));
