@@ -178,6 +178,24 @@ public:
         });
     }
 
+    bool sendTerminating(const QString& remoteSessionId,
+                         const QString& targetEndpointId)
+    {
+        return send(QJsonObject{
+            {QStringLiteral("type"), QStringLiteral("remote_session_terminating")},
+            {QStringLiteral("remoteSessionId"), remoteSessionId},
+            {QStringLiteral("generation"), 1},
+            {QStringLiteral("ownerConnectionGeneration"),
+             static_cast<double>(connectionGeneration)},
+            {QStringLiteral("targetConnectionGeneration"), 1},
+            {QStringLiteral("phase"), QStringLiteral("CleanupPending")},
+            {QStringLiteral("teardownId"),
+             QStringLiteral("teardown-") + remoteSessionId},
+            {QStringLiteral("ownerEndpointId"), ownerEndpointId},
+            {QStringLiteral("targetEndpointId"), targetEndpointId}
+        });
+    }
+
     bool sendClosed(const QString& remoteSessionId,
                     const QString& targetEndpointId)
     {
@@ -1741,6 +1759,611 @@ private slots:
                      .value(QStringLiteral("targetEndpointId")).toString(),
                  targetEndpointId);
         QCOMPARE(runtime.remoteStatusText(), QStringLiteral("CONNECTING"));
+
+        ApplicationRuntime::ClientWorkspace* workspace =
+            runtime.findWorkspace(targetEndpointId);
+        runtime.handleApplicationAboutToQuit();
+        runtime.getNavigationManager()->setActiveCanvas(nullptr);
+        runtime.setActiveCanvas(nullptr);
+        QVERIFY(workspace && workspace->canvas);
+        delete workspace->canvas;
+        workspace->canvas = nullptr;
+    }
+
+    void activeCanvasAutomaticallyReopensRecoveredPeer_data()
+    {
+        QTest::addColumn<bool>("discoveryBeforeClosed");
+        QTest::addColumn<bool>("hasTerminatingEnvelope");
+        QTest::newRow("discovery-before-closed") << true << false;
+        QTest::newRow("closed-before-discovery") << false << false;
+        QTest::newRow("discovery-before-fenced-closed") << true << true;
+        QTest::newRow("fenced-closed-before-discovery") << false << true;
+    }
+
+    void activeCanvasAutomaticallyReopensRecoveredPeer()
+    {
+        QFETCH(bool, discoveryBeforeClosed);
+        QFETCH(bool, hasTerminatingEnvelope);
+        QTemporaryDir root;
+        QVERIFY(root.isValid());
+        RuntimeProfileContext context;
+        context.ordinal = 2;
+        context.instanceId = QStringLiteral("active-peer-recovery");
+        context.profileId = context.instanceId;
+        context.rootPath = root.path();
+        context.persistent = false;
+        RuntimeProfile::configure(context);
+
+        ApplicationRuntime runtime(context);
+        runtime.getWorkspaceManager()->stopAutomaticTimersForTesting();
+        runtime.getProjectManager()->stopAutomaticTimersForTesting();
+        runtime.setQmlWindowVisible(true);
+        runtime.setPointerInsideControlWindow(true);
+        RemoteSessionTestServer server(runtime.getWebSocketClient()->endpointId());
+        QVERIFY(server.listen());
+        ConnectionManager* connections = runtime.findChild<ConnectionManager*>();
+        QVERIFY(connections);
+        QSignalSpy connectedSpy(runtime.getWebSocketClient(),
+                                &WebSocketClient::connected);
+        QSignalSpy listSpy(runtime.getWebSocketClient(),
+                           &WebSocketClient::clientListReceived);
+        QSignalSpy closedSpy(runtime.getWebSocketClient(),
+                             &WebSocketClient::remoteSessionClosed);
+        connections->connectToServer(server.url());
+        QTRY_COMPARE_WITH_TIMEOUT(connectedSpy.count(), 1, 2'000);
+
+        const QString targetEndpointId(43, QLatin1Char('R'));
+        const QString firstSessionId = QStringLiteral("recovered-peer-session-1");
+        const QString secondSessionId = QStringLiteral("recovered-peer-session-2");
+        ClientInfo client = onlineClient(targetEndpointId,
+                                        QStringLiteral("Recovered foreground peer"));
+        client.setScreens({});
+        client.setVolumePercent(-1);
+        QVERIFY(server.sendClientList(client));
+        QTRY_COMPARE_WITH_TIMEOUT(listSpy.count(), 1, 1'000);
+        runtime.activateClient(targetEndpointId);
+        QTRY_COMPARE_WITH_TIMEOUT(server.openCommands.size(), 1, 1'000);
+        QVERIFY(server.sendOpened(
+            firstSessionId,
+            server.openCommands.constFirst().value(QStringLiteral("requestId")).toString(),
+            targetEndpointId, ScreenInfo(91, 1920, 1080, 0, 0, true), 42));
+        QTRY_VERIFY_WITH_TIMEOUT(runtime.isRemoteClientConnected(), 1'000);
+        ICanvasHost* const originalCanvas = runtime.getActiveCanvas();
+        QVERIFY(originalCanvas);
+
+        // Discovery can disappear before the session's terminal result. The
+        // retained project and page survive both possible recovery orderings.
+        QVERIFY(server.send(QJsonObject{
+            {QStringLiteral("type"), QStringLiteral("client_list")},
+            {QStringLiteral("clients"), QJsonArray{}}
+        }));
+        QTRY_COMPARE_WITH_TIMEOUT(listSpy.count(), 2, 1'000);
+        if (hasTerminatingEnvelope) {
+            QVERIFY(server.sendTerminating(firstSessionId, targetEndpointId));
+            QTRY_COMPARE_WITH_TIMEOUT(
+                runtime.getWebSocketClient()->remoteSessionCoordinator()
+                    ->outgoingForPeer(targetEndpointId).phase,
+                QStringLiteral("CleanupPending"), 1'000);
+        }
+        if (discoveryBeforeClosed) {
+            QVERIFY(server.sendClientList(client));
+            QTRY_COMPARE_WITH_TIMEOUT(listSpy.count(), 3, 1'000);
+            QTest::qWait(25);
+            QCOMPARE(server.openCommands.size(), 1);
+        }
+
+        QVERIFY(server.sendClosed(firstSessionId, targetEndpointId));
+        QTRY_COMPARE_WITH_TIMEOUT(closedSpy.count(), 1, 1'000);
+        if (!discoveryBeforeClosed) {
+            QTest::qWait(25);
+            QCOMPARE(server.openCommands.size(), 1);
+            QVERIFY(server.sendClientList(client));
+            QTRY_COMPARE_WITH_TIMEOUT(listSpy.count(), 3, 1'000);
+        }
+        QTRY_COMPARE_WITH_TIMEOUT(server.openCommands.size(), 2, 1'000);
+        const QString replacementRequestId = server.openCommands.constLast()
+            .value(QStringLiteral("requestId")).toString();
+        QVERIFY(!replacementRequestId.isEmpty());
+        QVERIFY(replacementRequestId != server.openCommands.constFirst()
+                    .value(QStringLiteral("requestId")).toString());
+        QCOMPARE(server.openCommands.constLast()
+                     .value(QStringLiteral("targetEndpointId")).toString(),
+                 targetEndpointId);
+        QCOMPARE(runtime.getActiveCanvas(), originalCanvas);
+        QVERIFY(runtime.activeProjectExists());
+        QVERIFY(!runtime.isRemoteClientConnected());
+        QCOMPARE(runtime.remoteStatusText(), QStringLiteral("CONNECTING"));
+
+        // Repeated discovery and a delayed old terminal message must neither
+        // duplicate nor erase the in-flight replacement before Ready arrives.
+        QVERIFY(server.sendClientList(client));
+        QVERIFY(server.sendClosed(firstSessionId, targetEndpointId));
+        QVERIFY(server.sendClientList(client));
+        QTRY_COMPARE_WITH_TIMEOUT(listSpy.count(), 5, 1'000);
+        QTest::qWait(25);
+        QCOMPARE(server.openCommands.size(), 2);
+        QVERIFY(server.sendOpened(
+            secondSessionId, replacementRequestId, targetEndpointId,
+            ScreenInfo(92, 2560, 1440, 0, 0, true), 77));
+        QTRY_VERIFY_WITH_TIMEOUT(runtime.isRemoteClientConnected(), 1'000);
+        QCOMPARE(runtime.getActiveCanvas(), originalCanvas);
+        QCOMPARE(runtime.remoteVolumePercent(), 77);
+        QVERIFY(runtime.isRemoteOverlayActionsEnabled());
+
+        QVERIFY(server.sendClosed(firstSessionId, targetEndpointId));
+        QVERIFY(server.sendClientList(client));
+        QTRY_COMPARE_WITH_TIMEOUT(listSpy.count(), 6, 1'000);
+        QTest::qWait(25);
+        QCOMPARE(server.openCommands.size(), 2);
+        QCOMPARE(runtime.remoteStatusText(), QStringLiteral("CONNECTED"));
+        QCOMPARE(runtime.getWebSocketClient()->remoteSessionCoordinator()
+                     ->outgoingForPeer(targetEndpointId).remoteSessionId,
+                 secondSessionId);
+        QCOMPARE(runtime.remoteVolumePercent(), 77);
+
+        ApplicationRuntime::ClientWorkspace* workspace =
+            runtime.findWorkspace(targetEndpointId);
+        runtime.handleApplicationAboutToQuit();
+        runtime.getNavigationManager()->setActiveCanvas(nullptr);
+        runtime.setActiveCanvas(nullptr);
+        QVERIFY(workspace && workspace->canvas);
+        delete workspace->canvas;
+        workspace->canvas = nullptr;
+    }
+
+    void foregroundRecoveryRequiresCurrentActivityAndCanvas_data()
+    {
+        QTest::addColumn<int>("blocker");
+        QTest::addColumn<bool>("leaveAfterDiscovery");
+        QTest::newRow("pointer-outside") << 0 << false;
+        QTest::newRow("window-hidden") << 1 << false;
+        QTest::newRow("clients-page") << 2 << false;
+        QTest::newRow("pointer-leaves-during-close") << 0 << true;
+        QTest::newRow("window-hides-during-close") << 1 << true;
+        QTest::newRow("clients-page-during-close") << 2 << true;
+    }
+
+    void foregroundRecoveryRequiresCurrentActivityAndCanvas()
+    {
+        QFETCH(int, blocker);
+        QFETCH(bool, leaveAfterDiscovery);
+        QTemporaryDir root;
+        QVERIFY(root.isValid());
+        RuntimeProfileContext context;
+        context.ordinal = 2;
+        context.instanceId = QStringLiteral("gated-peer-recovery");
+        context.profileId = context.instanceId;
+        context.rootPath = root.path();
+        context.persistent = false;
+        RuntimeProfile::configure(context);
+
+        ApplicationRuntime runtime(context);
+        runtime.getWorkspaceManager()->stopAutomaticTimersForTesting();
+        runtime.getProjectManager()->stopAutomaticTimersForTesting();
+        runtime.setQmlWindowVisible(true);
+        runtime.setPointerInsideControlWindow(true);
+        RemoteSessionTestServer server(runtime.getWebSocketClient()->endpointId());
+        QVERIFY(server.listen());
+        ConnectionManager* connections = runtime.findChild<ConnectionManager*>();
+        QVERIFY(connections);
+        QSignalSpy connectedSpy(runtime.getWebSocketClient(),
+                                &WebSocketClient::connected);
+        QSignalSpy listSpy(runtime.getWebSocketClient(),
+                           &WebSocketClient::clientListReceived);
+        QSignalSpy closedSpy(runtime.getWebSocketClient(),
+                             &WebSocketClient::remoteSessionClosed);
+        connections->connectToServer(server.url());
+        QTRY_COMPARE_WITH_TIMEOUT(connectedSpy.count(), 1, 2'000);
+
+        const QString targetEndpointId(43, QLatin1Char('S'));
+        const QString firstSessionId = QStringLiteral("gated-peer-session-1");
+        ClientInfo client = onlineClient(targetEndpointId,
+                                        QStringLiteral("Gated foreground peer"));
+        client.setScreens({});
+        client.setVolumePercent(-1);
+        QVERIFY(server.sendClientList(client));
+        QTRY_COMPARE_WITH_TIMEOUT(listSpy.count(), 1, 1'000);
+        runtime.activateClient(targetEndpointId);
+        QTRY_COMPARE_WITH_TIMEOUT(server.openCommands.size(), 1, 1'000);
+        QVERIFY(server.sendOpened(
+            firstSessionId,
+            server.openCommands.constFirst().value(QStringLiteral("requestId")).toString(),
+            targetEndpointId, ScreenInfo(93, 1920, 1080, 0, 0, true), 42));
+        QTRY_VERIFY_WITH_TIMEOUT(runtime.isRemoteClientConnected(), 1'000);
+        ICanvasHost* const originalCanvas = runtime.getActiveCanvas();
+        QVERIFY(originalCanvas);
+        QVERIFY(server.sendTerminating(firstSessionId, targetEndpointId));
+        QTRY_COMPARE_WITH_TIMEOUT(
+            runtime.getWebSocketClient()->remoteSessionCoordinator()
+                ->outgoingForPeer(targetEndpointId).phase,
+            QStringLiteral("CleanupPending"), 1'000);
+
+        const auto leave = [&]() {
+            if (blocker == 0) runtime.setPointerInsideControlWindow(false);
+            else if (blocker == 1) runtime.setQmlWindowVisible(false);
+            else runtime.navigateToClients();
+        };
+        if (!leaveAfterDiscovery) leave();
+        QVERIFY(server.sendClientList(client));
+        QTRY_COMPARE_WITH_TIMEOUT(listSpy.count(), 2, 1'000);
+        if (leaveAfterDiscovery) leave();
+        QVERIFY(server.sendClosed(firstSessionId, targetEndpointId));
+        QTRY_COMPARE_WITH_TIMEOUT(closedSpy.count(), 1, 1'000);
+        QVERIFY(server.sendClientList(client));
+        QTRY_COMPARE_WITH_TIMEOUT(listSpy.count(), 3, 1'000);
+        QTest::qWait(25);
+        QCOMPARE(server.openCommands.size(), 1);
+        QVERIFY(runtime.getProjectManager()->hasProjectForTarget(targetEndpointId));
+        QCOMPARE(runtime.findWorkspace(targetEndpointId)->canvas, originalCanvas);
+
+        // No inactivity deadline expired: returning activity must reconcile a
+        // peer-driven loss as well, while an unrelated page stays quiescent.
+        if (blocker == 0) runtime.setPointerInsideControlWindow(true);
+        else if (blocker == 1) {
+            runtime.setQmlWindowVisible(true);
+            runtime.setPointerInsideControlWindow(true);
+        } else {
+            runtime.setPointerInsideControlWindow(false);
+            runtime.setPointerInsideControlWindow(true);
+        }
+        if (blocker == 2) {
+            QTest::qWait(25);
+            QCOMPARE(server.openCommands.size(), 1);
+            QVERIFY(!runtime.getNavigationManager()->isOnScreenView());
+        } else {
+            QTRY_COMPARE_WITH_TIMEOUT(server.openCommands.size(), 2, 1'000);
+            QVERIFY(server.sendOpened(
+                QStringLiteral("gated-peer-session-2"),
+                server.openCommands.constLast().value(QStringLiteral("requestId")).toString(),
+                targetEndpointId, ScreenInfo(94, 2560, 1440, 0, 0, true), 75));
+            QTRY_VERIFY_WITH_TIMEOUT(runtime.isRemoteClientConnected(), 1'000);
+            QCOMPARE(runtime.getActiveCanvas(), originalCanvas);
+            QCOMPARE(runtime.remoteVolumePercent(), 75);
+        }
+
+        ApplicationRuntime::ClientWorkspace* workspace =
+            runtime.findWorkspace(targetEndpointId);
+        runtime.handleApplicationAboutToQuit();
+        runtime.getNavigationManager()->setActiveCanvas(nullptr);
+        runtime.setActiveCanvas(nullptr);
+        QVERIFY(workspace && workspace->canvas);
+        delete workspace->canvas;
+        workspace->canvas = nullptr;
+    }
+
+    void automaticReplacementOpenReplaysItsIdentityAfterTransportRecovery()
+    {
+        QTemporaryDir root;
+        QVERIFY(root.isValid());
+        RuntimeProfileContext context;
+        context.ordinal = 2;
+        context.instanceId = QStringLiteral("automatic-open-transport-replay");
+        context.profileId = context.instanceId;
+        context.rootPath = root.path();
+        context.persistent = false;
+        RuntimeProfile::configure(context);
+
+        ApplicationRuntime runtime(context);
+        runtime.getWorkspaceManager()->stopAutomaticTimersForTesting();
+        runtime.getProjectManager()->stopAutomaticTimersForTesting();
+        runtime.setQmlWindowVisible(true);
+        runtime.setPointerInsideControlWindow(true);
+        RemoteSessionTestServer server(runtime.getWebSocketClient()->endpointId());
+        QVERIFY(server.listen());
+        ConnectionManager* connections = runtime.findChild<ConnectionManager*>();
+        QVERIFY(connections);
+        QSignalSpy connectedSpy(runtime.getWebSocketClient(),
+                                &WebSocketClient::connected);
+        QSignalSpy disconnectedSpy(runtime.getWebSocketClient(),
+                                   &WebSocketClient::disconnected);
+        QSignalSpy listSpy(runtime.getWebSocketClient(),
+                           &WebSocketClient::clientListReceived);
+        connections->connectToServer(server.url());
+        QTRY_COMPARE_WITH_TIMEOUT(connectedSpy.count(), 1, 2'000);
+
+        const QString targetEndpointId(43, QLatin1Char('T'));
+        const QString firstSessionId = QStringLiteral("automatic-replay-session-1");
+        ClientInfo client = onlineClient(targetEndpointId,
+                                        QStringLiteral("Automatic replay peer"));
+        client.setScreens({});
+        client.setVolumePercent(-1);
+        QVERIFY(server.sendClientList(client));
+        QTRY_COMPARE_WITH_TIMEOUT(listSpy.count(), 1, 1'000);
+        runtime.activateClient(targetEndpointId);
+        QTRY_COMPARE_WITH_TIMEOUT(server.openCommands.size(), 1, 1'000);
+        QVERIFY(server.sendOpened(
+            firstSessionId,
+            server.openCommands.constFirst().value(QStringLiteral("requestId")).toString(),
+            targetEndpointId, ScreenInfo(95, 1920, 1080, 0, 0, true), 42));
+        QTRY_VERIFY_WITH_TIMEOUT(runtime.isRemoteClientConnected(), 1'000);
+        ICanvasHost* const originalCanvas = runtime.getActiveCanvas();
+        QVERIFY(originalCanvas);
+
+        QVERIFY(server.sendClosed(firstSessionId, targetEndpointId));
+        QTRY_COMPARE_WITH_TIMEOUT(server.openCommands.size(), 2, 1'000);
+        const QString replacementRequestId = server.openCommands.constLast()
+            .value(QStringLiteral("requestId")).toString();
+        QVERIFY(!replacementRequestId.isEmpty());
+
+        // The server received OPEN but neither Opening nor Ready reached A.
+        // Recovering the transport must resolve that same idempotent request,
+        // even though no resumable session identity has been learned yet.
+        server.connectionGeneration = 2;
+        server.closePeer();
+        QTRY_COMPARE_WITH_TIMEOUT(disconnectedSpy.count(), 1, 2'000);
+        QTRY_COMPARE_WITH_TIMEOUT(connectedSpy.count(), 2, 3'000);
+        QTRY_COMPARE_WITH_TIMEOUT(server.openCommands.size(), 3, 1'000);
+        QCOMPARE(server.openCommands.constLast()
+                     .value(QStringLiteral("requestId")).toString(),
+                 replacementRequestId);
+        QCOMPARE(server.openCommands.constLast()
+                     .value(QStringLiteral("targetEndpointId")).toString(),
+                 targetEndpointId);
+        QCOMPARE(server.openCommands.constLast()
+                     .value(QStringLiteral("connectionGeneration")).toInt(), 2);
+        QVERIFY(server.sendClientList(client));
+        QVERIFY(server.sendClientList(client));
+        QTRY_COMPARE_WITH_TIMEOUT(listSpy.count(), 3, 1'000);
+        QTest::qWait(25);
+        QCOMPARE(server.openCommands.size(), 3);
+
+        QVERIFY(server.sendOpened(
+            QStringLiteral("automatic-replay-session-2"), replacementRequestId,
+            targetEndpointId, ScreenInfo(96, 2560, 1440, 0, 0, true), 76));
+        QTRY_VERIFY_WITH_TIMEOUT(runtime.isRemoteClientConnected(), 1'000);
+        QCOMPARE(runtime.getActiveCanvas(), originalCanvas);
+        QCOMPARE(runtime.remoteVolumePercent(), 76);
+        QCOMPARE(runtime.remoteStatusText(), QStringLiteral("CONNECTED"));
+
+        ApplicationRuntime::ClientWorkspace* workspace =
+            runtime.findWorkspace(targetEndpointId);
+        runtime.handleApplicationAboutToQuit();
+        runtime.getNavigationManager()->setActiveCanvas(nullptr);
+        runtime.setActiveCanvas(nullptr);
+        QVERIFY(workspace && workspace->canvas);
+        delete workspace->canvas;
+        workspace->canvas = nullptr;
+    }
+
+    void automaticConvergenceRetryStopsWhenPointerLeaves_data()
+    {
+        QTest::addColumn<QString>("errorCode");
+        QTest::newRow("cleanup-pending") << QStringLiteral("session_cleanup_pending");
+        QTest::newRow("requires-resume") << QStringLiteral("session_requires_resume");
+    }
+
+    void automaticConvergenceRetryStopsWhenPointerLeaves()
+    {
+        QFETCH(QString, errorCode);
+        QTemporaryDir root;
+        QVERIFY(root.isValid());
+        RuntimeProfileContext context;
+        context.ordinal = 2;
+        context.instanceId = QStringLiteral("automatic-convergence-activity");
+        context.profileId = context.instanceId;
+        context.rootPath = root.path();
+        context.persistent = false;
+        RuntimeProfile::configure(context);
+
+        ApplicationRuntime runtime(context);
+        runtime.getWorkspaceManager()->stopAutomaticTimersForTesting();
+        runtime.getProjectManager()->stopAutomaticTimersForTesting();
+        runtime.setQmlWindowVisible(true);
+        runtime.setPointerInsideControlWindow(true);
+        RemoteSessionTestServer server(runtime.getWebSocketClient()->endpointId());
+        QVERIFY(server.listen());
+        ConnectionManager* connections = runtime.findChild<ConnectionManager*>();
+        QVERIFY(connections);
+        QSignalSpy connectedSpy(runtime.getWebSocketClient(),
+                                &WebSocketClient::connected);
+        QSignalSpy listSpy(runtime.getWebSocketClient(),
+                           &WebSocketClient::clientListReceived);
+        QSignalSpy errorSpy(runtime.getWebSocketClient(),
+                            &WebSocketClient::remoteSessionError);
+        connections->connectToServer(server.url());
+        QTRY_COMPARE_WITH_TIMEOUT(connectedSpy.count(), 1, 2'000);
+
+        const QString targetEndpointId(43, QLatin1Char('U'));
+        const QString firstSessionId = QStringLiteral("automatic-convergence-session-1");
+        ClientInfo client = onlineClient(targetEndpointId,
+                                        QStringLiteral("Automatic convergence peer"));
+        client.setScreens({});
+        client.setVolumePercent(-1);
+        QVERIFY(server.sendClientList(client));
+        QTRY_COMPARE_WITH_TIMEOUT(listSpy.count(), 1, 1'000);
+        runtime.activateClient(targetEndpointId);
+        QTRY_COMPARE_WITH_TIMEOUT(server.openCommands.size(), 1, 1'000);
+        QVERIFY(server.sendOpened(
+            firstSessionId,
+            server.openCommands.constFirst().value(QStringLiteral("requestId")).toString(),
+            targetEndpointId, ScreenInfo(97, 1920, 1080, 0, 0, true), 42));
+        QTRY_VERIFY_WITH_TIMEOUT(runtime.isRemoteClientConnected(), 1'000);
+        ICanvasHost* const originalCanvas = runtime.getActiveCanvas();
+        QVERIFY(originalCanvas);
+
+        QVERIFY(server.sendClosed(firstSessionId, targetEndpointId));
+        QTRY_COMPARE_WITH_TIMEOUT(server.openCommands.size(), 2, 1'000);
+        const QString automaticRequestId = server.openCommands.constLast()
+            .value(QStringLiteral("requestId")).toString();
+        QVERIFY(server.send(QJsonObject{
+            {QStringLiteral("type"), QStringLiteral("error")},
+            {QStringLiteral("scope"), QStringLiteral("remote_session")},
+            {QStringLiteral("code"), errorCode},
+            {QStringLiteral("message"), QStringLiteral("The peer is still converging")},
+            {QStringLiteral("requestId"), automaticRequestId}
+        }));
+        QTRY_COMPARE_WITH_TIMEOUT(errorSpy.count(), 1, 1'000);
+        QTest::qWait(25);
+        QCOMPARE(server.openCommands.size(), 2);
+
+        // An automatic request cannot become a sticky explicit selection just
+        // because it encountered a transient server convergence response.
+        runtime.setPointerInsideControlWindow(false);
+        QVERIFY(server.sendClientList(client));
+        QVERIFY(server.sendClientList(client));
+        QTRY_COMPARE_WITH_TIMEOUT(listSpy.count(), 3, 1'000);
+        QTest::qWait(25);
+        QCOMPARE(server.openCommands.size(), 2);
+        QVERIFY(runtime.getNavigationManager()->isOnScreenView());
+        QCOMPARE(runtime.getActiveCanvas(), originalCanvas);
+
+        runtime.setPointerInsideControlWindow(true);
+        QTRY_COMPARE_WITH_TIMEOUT(server.openCommands.size(), 3, 1'000);
+        const QString retryRequestId = server.openCommands.constLast()
+            .value(QStringLiteral("requestId")).toString();
+        QVERIFY(retryRequestId != automaticRequestId);
+        QVERIFY(server.sendOpened(
+            QStringLiteral("automatic-convergence-session-2"), retryRequestId,
+            targetEndpointId, ScreenInfo(98, 2560, 1440, 0, 0, true), 78));
+        QTRY_VERIFY_WITH_TIMEOUT(runtime.isRemoteClientConnected(), 1'000);
+        QCOMPARE(runtime.getActiveCanvas(), originalCanvas);
+        QCOMPARE(runtime.remoteVolumePercent(), 78);
+
+        ApplicationRuntime::ClientWorkspace* workspace =
+            runtime.findWorkspace(targetEndpointId);
+        runtime.handleApplicationAboutToQuit();
+        runtime.getNavigationManager()->setActiveCanvas(nullptr);
+        runtime.setActiveCanvas(nullptr);
+        QVERIFY(workspace && workspace->canvas);
+        delete workspace->canvas;
+        workspace->canvas = nullptr;
+    }
+
+    void invalidAutomaticReplacementRequiresExplicitRetry_data()
+    {
+        QTest::addColumn<bool>("invalidSnapshot");
+        QTest::newRow("malformed-snapshot") << true;
+        QTest::newRow("permanent-open-rejection") << false;
+    }
+
+    void invalidAutomaticReplacementRequiresExplicitRetry()
+    {
+        QFETCH(bool, invalidSnapshot);
+        QTemporaryDir root;
+        QVERIFY(root.isValid());
+        RuntimeProfileContext context;
+        context.ordinal = 2;
+        context.instanceId = QStringLiteral("invalid-automatic-replacement");
+        context.profileId = context.instanceId;
+        context.rootPath = root.path();
+        context.persistent = false;
+        RuntimeProfile::configure(context);
+
+        ApplicationRuntime runtime(context);
+        runtime.getWorkspaceManager()->stopAutomaticTimersForTesting();
+        runtime.getProjectManager()->stopAutomaticTimersForTesting();
+        runtime.setQmlWindowVisible(true);
+        runtime.setPointerInsideControlWindow(true);
+        RemoteSessionTestServer server(runtime.getWebSocketClient()->endpointId());
+        QVERIFY(server.listen());
+        ConnectionManager* connections = runtime.findChild<ConnectionManager*>();
+        QVERIFY(connections);
+        QSignalSpy connectedSpy(runtime.getWebSocketClient(),
+                                &WebSocketClient::connected);
+        QSignalSpy listSpy(runtime.getWebSocketClient(),
+                           &WebSocketClient::clientListReceived);
+        QSignalSpy errorSpy(runtime.getWebSocketClient(),
+                            &WebSocketClient::remoteSessionError);
+        QSignalSpy closedSpy(runtime.getWebSocketClient(),
+                             &WebSocketClient::remoteSessionClosed);
+        connections->connectToServer(server.url());
+        QTRY_COMPARE_WITH_TIMEOUT(connectedSpy.count(), 1, 2'000);
+
+        const QString targetEndpointId(43, QLatin1Char('V'));
+        const QString firstSessionId = QStringLiteral("invalid-auto-session-1");
+        const QString rejectedSessionId = QStringLiteral("invalid-auto-session-2");
+        ClientInfo client = onlineClient(targetEndpointId,
+                                        QStringLiteral("Invalid automatic replacement peer"));
+        client.setScreens({});
+        client.setVolumePercent(-1);
+        QVERIFY(server.sendClientList(client));
+        QTRY_COMPARE_WITH_TIMEOUT(listSpy.count(), 1, 1'000);
+        runtime.activateClient(targetEndpointId);
+        QTRY_COMPARE_WITH_TIMEOUT(server.openCommands.size(), 1, 1'000);
+        QVERIFY(server.sendOpened(
+            firstSessionId,
+            server.openCommands.constFirst().value(QStringLiteral("requestId")).toString(),
+            targetEndpointId, ScreenInfo(99, 1920, 1080, 0, 0, true), 42));
+        QTRY_VERIFY_WITH_TIMEOUT(runtime.isRemoteClientConnected(), 1'000);
+        ICanvasHost* const originalCanvas = runtime.getActiveCanvas();
+        QVERIFY(originalCanvas);
+        QVERIFY(server.sendClosed(firstSessionId, targetEndpointId));
+        QTRY_COMPARE_WITH_TIMEOUT(server.openCommands.size(), 2, 1'000);
+        const QString rejectedRequestId = server.openCommands.constLast()
+            .value(QStringLiteral("requestId")).toString();
+
+        if (invalidSnapshot) {
+            // A valid Active envelope carrying an invalid snapshot must close
+            // its exact identity without repeatedly reopening on every list.
+            QVERIFY(server.send(QJsonObject{
+                {QStringLiteral("type"), QStringLiteral("remote_session_opened")},
+                {QStringLiteral("requestId"), rejectedRequestId},
+                {QStringLiteral("remoteSessionId"), rejectedSessionId},
+                {QStringLiteral("generation"), 1},
+                {QStringLiteral("ownerConnectionGeneration"), 1},
+                {QStringLiteral("targetConnectionGeneration"), 1},
+                {QStringLiteral("phase"), QStringLiteral("Active")},
+                {QStringLiteral("ownerEndpointId"),
+                 runtime.getWebSocketClient()->endpointId()},
+                {QStringLiteral("targetEndpointId"), targetEndpointId},
+                {QStringLiteral("resumeToken"), QStringLiteral("invalid-auto-resume")},
+                {QStringLiteral("snapshotSequence"), 1},
+                {QStringLiteral("snapshot"), QJsonObject{
+                    {QStringLiteral("screens"), QJsonArray{
+                         ScreenInfo(100, 2560, 1440, 0, 0, true).toJson()}},
+                    {QStringLiteral("systemUI"), QJsonArray{}},
+                    {QStringLiteral("volumePercent"), 67},
+                    {QStringLiteral("revision"), 1}
+                    // capturedAtEpochMs is intentionally missing.
+                }}
+            }));
+        } else {
+            QVERIFY(server.send(QJsonObject{
+                {QStringLiteral("type"), QStringLiteral("error")},
+                {QStringLiteral("scope"), QStringLiteral("remote_session")},
+                {QStringLiteral("code"), QStringLiteral("request_id_conflict")},
+                {QStringLiteral("message"), QStringLiteral("OPEN request identity conflict")},
+                {QStringLiteral("requestId"), rejectedRequestId}
+            }));
+        }
+        QTRY_COMPARE_WITH_TIMEOUT(errorSpy.count(), 1, 1'000);
+        QVERIFY(!runtime.isRemoteClientConnected());
+        QVERIFY(!runtime.isRemoteOverlayActionsEnabled());
+        QVERIFY(runtime.activeProjectExists());
+        QCOMPARE(runtime.getActiveCanvas(), originalCanvas);
+        if (invalidSnapshot) {
+            QTRY_VERIFY_WITH_TIMEOUT(!server.closeCommands.isEmpty(), 1'000);
+            QCOMPARE(server.closeCommands.constLast()
+                         .value(QStringLiteral("remoteSessionId")).toString(),
+                     rejectedSessionId);
+            QVERIFY(server.sendClosed(rejectedSessionId, targetEndpointId));
+            QTRY_COMPARE_WITH_TIMEOUT(closedSpy.count(), 2, 1'000);
+        }
+
+        QVERIFY(server.sendClientList(client));
+        QVERIFY(server.sendClientList(client));
+        QTRY_COMPARE_WITH_TIMEOUT(listSpy.count(), 3, 1'000);
+        runtime.setPointerInsideControlWindow(false);
+        runtime.setPointerInsideControlWindow(true);
+        QTest::qWait(25);
+        QCOMPARE(server.openCommands.size(), 2);
+        QVERIFY(!runtime.isRemoteClientConnected());
+        QCOMPARE(runtime.getActiveCanvas(), originalCanvas);
+
+        // An explicit selection is the recovery boundary after validation or
+        // permanent rejection; it admits a fresh request and valid snapshot.
+        runtime.activateClient(targetEndpointId);
+        QTRY_COMPARE_WITH_TIMEOUT(server.openCommands.size(), 3, 1'000);
+        const QString explicitRequestId = server.openCommands.constLast()
+            .value(QStringLiteral("requestId")).toString();
+        QVERIFY(explicitRequestId != rejectedRequestId);
+        QVERIFY(server.sendOpened(
+            QStringLiteral("invalid-auto-session-3"), explicitRequestId,
+            targetEndpointId, ScreenInfo(101, 2560, 1440, 0, 0, true), 79));
+        QTRY_VERIFY_WITH_TIMEOUT(runtime.isRemoteClientConnected(), 1'000);
+        QCOMPARE(runtime.getActiveCanvas(), originalCanvas);
+        QCOMPARE(runtime.remoteVolumePercent(), 79);
+        QVERIFY(runtime.isRemoteOverlayActionsEnabled());
 
         ApplicationRuntime::ClientWorkspace* workspace =
             runtime.findWorkspace(targetEndpointId);

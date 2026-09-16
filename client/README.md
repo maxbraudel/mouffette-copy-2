@@ -142,6 +142,10 @@ complete release contract and validation checklist.
 - ✅ Multi-screen detection
 - ✅ **Auto-connect on startup**
 
+Active Canvas sessions recover automatically when a peer becomes available.
+See [session recovery](docs/remote-session-recovery.md) for the activity policy,
+close barriers, and regression coverage.
+
 ## Usage
 
 1. **Start the Server**: Make sure the Mouffette server is running on `localhost:8080`

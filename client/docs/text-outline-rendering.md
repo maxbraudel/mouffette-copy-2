@@ -62,6 +62,15 @@ by the test and depend on the machine and concurrent load. In the complete
 native validation run, the corrected Retina zoom-in measured 2.05 ms p95 and
 2.61 ms maximum; zoom-out measured 7.62 ms p95 and 10.43 ms maximum.
 
+Both Development and Release applications built successfully. The complete
+native suite passed 33 of 35 test suites. All outline tests and the new selected
+camera-zoom case passed, including scale factor 2. Two existing scaled suites
+failed and were independently reproduced using the pre-change Debug test
+binaries: `CanvasInteractionScaled` clicks outside the available 720 × 374
+window in five caret-selection fixtures, and `MediaOverlayScaled` has an
+unrelated empty-screen-hint pixel mismatch. The architecture gate, baseline,
+render schema and deterministic/randomized input checks passed.
+
 ```sh
 cmake --build out/build/macos-release
 ctest --test-dir out/build/macos-release --output-on-failure

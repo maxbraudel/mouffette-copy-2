@@ -202,6 +202,8 @@ private:
     void updateHistoryVisibilityState();
     void persistProjectCanvas(const QString& targetEndpointId);
     void restoreProjectCanvas(ClientWorkspace& workspace);
+    bool wantsForegroundRemoteSession(const QString& targetEndpointId) const;
+    void reconcileForegroundRemoteSession();
     void terminateProjectRemoteSession(const QString& targetEndpointId,
                                        bool attemptRemote);
     bool hasPendingOutgoingSessionClose(
@@ -318,16 +320,16 @@ private:
     QList<ClientInfo> m_displayClients;
     QSet<QString> m_restoredProjectIds;
     QHash<QString, QString> m_remoteSessionOpenTargetByRequestId;
+    QSet<QString> m_automaticRemoteSessionOpenRequestIds;
+    // Validation/permanent failures require a new explicit selection. Ordinary
+    // peer/transport loss must not block activity-driven foreground recovery.
+    QSet<QString> m_remoteSessionAutoOpenBlockedTargets;
     QSet<QString> m_remoteSessionOpenPendingTargets;
     QSet<QString> m_remoteSessionOpenSuppressedTargets;
     // An explicit selection made while the previous session is still being
     // torn down is durable until exactly one replacement OPEN is dispatched.
     // This is intentionally separate from discovery and Project state.
     QSet<QString> m_remoteSessionOpenDesiredTargets;
-    // A session closed specifically by WorkspaceManager's inactivity deadline
-    // gets one automatic foreground reopen when UI activity resumes. Other
-    // terminal causes never populate this set.
-    QSet<QString> m_inactivityExpiredSessionTargets;
     // Cancellation is correlated to the exact OPEN request and, once known,
     // the exact session. A target-only flag can incorrectly cancel a later
     // user-initiated OPEN for the same device.
