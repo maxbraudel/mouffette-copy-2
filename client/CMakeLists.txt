@@ -190,6 +190,8 @@ set(SOURCES
     src/frontend/qml/NotificationListModels.cpp
     src/frontend/qml/MediaSettingsViewModel.cpp
     src/frontend/qml/QmlRuntime.cpp
+    src/frontend/qml/WindowPresentation.cpp
+    src/frontend/qml/WindowPresentation.h
     src/frontend/qml/SceneActivityListModel.cpp
     
     # ═══════════════════════════════════════════════════════
@@ -309,6 +311,7 @@ endif()
 
 if(WIN32)
     list(APPEND SOURCES
+        src/backend/platform/windows/WindowsWindowManager.cpp
         src/backend/managers/system/SystemLifecycleMonitor_windows.cpp
     )
 elseif(UNIX AND NOT APPLE AND TARGET Qt6::DBus)
@@ -627,6 +630,22 @@ endif()
 include(CTest)
 if(BUILD_TESTING)
     find_package(Qt6 REQUIRED COMPONENTS Test)
+
+    add_executable(tst_WindowPresentation
+        tests/qt/tst_WindowPresentation.cpp
+        src/frontend/qml/WindowPresentation.cpp
+        src/frontend/qml/WindowPresentation.h)
+    target_include_directories(tst_WindowPresentation PRIVATE src)
+    target_link_libraries(tst_WindowPresentation PRIVATE Qt6::Quick Qt6::Test)
+    if(APPLE)
+        target_sources(tst_WindowPresentation PRIVATE src/backend/platform/macos/MacWindowManager.mm)
+        set_source_files_properties(tests/qt/tst_WindowPresentation.cpp PROPERTIES LANGUAGE OBJCXX)
+        target_link_libraries(tst_WindowPresentation PRIVATE "-framework AppKit")
+    elseif(WIN32)
+        target_sources(tst_WindowPresentation PRIVATE src/backend/platform/windows/WindowsWindowManager.cpp)
+        target_link_libraries(tst_WindowPresentation PRIVATE ole32 uuid user32)
+    endif()
+    add_test(NAME WindowPresentation COMMAND tst_WindowPresentation)
 
     add_executable(tst_MediaBackendBootstrap tests/qt/tst_MediaBackendBootstrap.cpp)
     target_link_libraries(tst_MediaBackendBootstrap PRIVATE MouffetteResidentMedia Qt6::Test)

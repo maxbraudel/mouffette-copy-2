@@ -20,10 +20,19 @@ QtObject {
         width: 600
         height: 500
         minimumWidth: 480
-        visibility: root.controller.ready ? Window.Maximized : Window.Hidden
+        visible: false
+        flags: Qt.Window | Qt.WindowStaysOnTopHint
         title: "Mouffette"
         color: Theme.windowBackground
         palette: Theme.controlPalette
+
+        WindowPresentation {
+            id: presentation
+            window: window
+        }
+        Component.onCompleted: {
+            if (root.controller.ready) presentation.open()
+        }
 
         Overlay.modal: Rectangle { color: Theme.modalScrim }
 
@@ -179,6 +188,9 @@ QtObject {
         }
         Connections {
             target: root.controller
+            function onReadyChanged() {
+                if (root.controller.ready) presentation.open()
+            }
             function onDialogRequested() { confirmation.open() }
             function onRaiseRequested() {
                 if (!root.controller.ready) {
@@ -187,9 +199,7 @@ QtObject {
                     root.bootstrap.requestActivate()
                     return
                 }
-                window.show()
-                window.raise()
-                window.requestActivate()
+                presentation.open()
             }
             function onHideRequested() { window.hide() }
         }

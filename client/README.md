@@ -166,6 +166,10 @@ regression coverage and the required client/server update.
 - **Background operation**: Runs silently in the background
 - **Quick access**: Click tray icon to show/hide main window
 
+The control window stays above other application windows across desktops and
+opens centered at 90% of the available screen width and height. See
+[window presentation](docs/window-presentation.md) for platform behavior and validation.
+
 ## Media memory
 
 Images and videos are completely decoded before they become available. Videos

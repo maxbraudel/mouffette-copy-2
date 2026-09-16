@@ -21,9 +21,44 @@ NSWindow* nativeWindowFor(QWindow* qtWindow)
 void MacWindowManager::setWindowAlwaysOnTop(QWindow* qtWindow) {
     NSWindow* window = nativeWindowFor(qtWindow);
     if (!window) return;
-    [window setLevel:NSFloatingWindowLevel];
-    [window setCollectionBehavior:NSWindowCollectionBehaviorCanJoinAllSpaces |
-                                 NSWindowCollectionBehaviorFullScreenAuxiliary];
+    // Above normal windows, floating panels, menus and our remote overlays.
+    // This affects window stacking, never process/scheduler priority.
+    [window setLevel:NSScreenSaverWindowLevel];
+    NSWindowCollectionBehavior behavior = NSWindowCollectionBehaviorCanJoinAllSpaces |
+        NSWindowCollectionBehaviorFullScreenAuxiliary |
+        NSWindowCollectionBehaviorFullScreenDisallowsTiling |
+        NSWindowCollectionBehaviorStationary |
+        NSWindowCollectionBehaviorParticipatesInCycle;
+    if (@available(macOS 13.0, *)) {
+        behavior |= NSWindowCollectionBehaviorCanJoinAllApplications;
+    }
+    [window setCollectionBehavior:behavior];
+    [window setHidesOnDeactivate:NO];
+    if (![window isVisible] || [window isMiniaturized] || [NSApp isHidden]) return;
+
+    [window orderFrontRegardless];
+    // Native sheets/pickers and Qt popup windows must remain usable above the
+    // control window. Raising priority must never bury our own modal UI.
+    for (NSWindow* child in [NSApp windows]) {
+        if (child == window || ![child isVisible]) continue;
+        bool ownedPopup = false;
+        for (QWindow* candidate : QGuiApplication::topLevelWindows()) {
+            if (!candidate->isVisible()) continue;
+            for (QWindow* owner = candidate->transientParent(); owner; owner = owner->transientParent()) {
+                if (owner == qtWindow) {
+                    ownedPopup = nativeWindowFor(candidate) == child;
+                    break;
+                }
+            }
+            if (ownedPopup) break;
+        }
+        if ([child parentWindow] == window || [child sheetParent] == window
+            || child == [NSApp modalWindow] || ownedPopup
+            || [child isKindOfClass:[NSColorPanel class]]) {
+            [child setLevel:NSScreenSaverWindowLevel + 1];
+            [child orderFrontRegardless];
+        }
+    }
 }
 
 void MacWindowManager::setWindowAsGlobalOverlay(QWindow* qtWindow, bool clickThrough) {
