@@ -938,7 +938,16 @@ private slots:
         QTest::keyClick(&fixture.view, Qt::Key_V, Qt::ControlModifier);
         QTRY_COMPARE(fixture.document.media().size(), 2);
         QSignalSpy deleted(&fixture.controller, &QuickCanvasController::mediaDeleteRequested);
+#ifdef Q_OS_MACOS
         QTest::keyClick(&fixture.view, Qt::Key_Backspace);
+        QTest::keyClick(&fixture.view, Qt::Key_Delete);
+        QTest::keyClick(&fixture.view, Qt::Key_Backspace, Qt::MetaModifier);
+        QCOMPARE(fixture.document.media().size(), 2);
+        QCOMPARE(deleted.size(), 0);
+        QTest::keyClick(&fixture.view, Qt::Key_Backspace, Qt::ControlModifier);
+#else
+        QTest::keyClick(&fixture.view, Qt::Key_Backspace);
+#endif
         QTRY_COMPARE(fixture.document.media().size(), 1);
         QCOMPARE(deleted.size(), 1);
 #ifdef Q_OS_MACOS
@@ -962,11 +971,19 @@ private slots:
         QCOMPARE(fixture.document.media().size(), 1);
         QTest::keyClick(&fixture.view, Qt::Key_V, Qt::ControlModifier);
         QTRY_COMPARE(text->text(), QStringLiteral("Words"));
+#ifdef Q_OS_MACOS
+        QTest::keyClick(&fixture.view, Qt::Key_Backspace, Qt::ControlModifier);
+        QCOMPARE(fixture.document.media().size(), 1);
+#endif
         QTest::mouseClick(&fixture.view, Qt::LeftButton, Qt::NoModifier, {800,500});
         QTRY_VERIFY(!root->property("anyMediaEditing").toBool());
         fixture.document.select(text->mediaId());
         root->forceActiveFocus();
+#ifdef Q_OS_MACOS
+        QTest::keyClick(&fixture.view, Qt::Key_Backspace, Qt::ControlModifier);
+#else
         QTest::keyClick(&fixture.view, Qt::Key_Delete);
+#endif
         QTRY_VERIFY(fixture.document.media().isEmpty());
 #ifdef Q_OS_MACOS
         QCOMPARE(deleted.size(), 1);
@@ -1024,6 +1041,9 @@ private slots:
         QTest::keyClick(&fixture.view, Qt::Key_M);
         QVERIFY(!video->muted());
         QTest::keyClick(&fixture.view, Qt::Key_Delete);
+#ifdef Q_OS_MACOS
+        QTest::keyClick(&fixture.view, Qt::Key_Backspace, Qt::ControlModifier);
+#endif
         QCOMPARE(fixture.document.media().size(), 1);
         fixture.document.setEditsLocked(false);
         QQmlComponent inputComponent(fixture.view.engine());
@@ -1040,6 +1060,9 @@ private slots:
         QTest::keyClick(&fixture.view, Qt::Key_A, Qt::ControlModifier);
         QTest::keyClick(&fixture.view, Qt::Key_C, Qt::ControlModifier);
         QTest::keyClick(&fixture.view, Qt::Key_V, Qt::ControlModifier);
+#ifdef Q_OS_MACOS
+        QTest::keyClick(&fixture.view, Qt::Key_Backspace, Qt::ControlModifier);
+#endif
         QCOMPARE(fixture.document.media().size(), 1);
         QVERIFY(!video->isPlaying());
         QVERIFY(!video->muted());

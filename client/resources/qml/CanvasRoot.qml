@@ -178,7 +178,8 @@ Rectangle {
         onActivated: root.canvasController.pasteMedia()
     }
     CanvasShortcut {
-        sequences: ["Delete", "Backspace"]
+        // Qt's Ctrl modifier maps to the physical Command key on macOS.
+        sequences: Qt.platform.os === "osx" ? ["Ctrl+Backspace"] : ["Delete", "Backspace"]
         applicable: root.selectionChromeModel.length > 0
         onActivated: root.canvasController.deleteSelectedMedia()
     }
