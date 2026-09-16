@@ -530,7 +530,7 @@ QJsonObject CanvasDocument::serializeSceneState() const
                      settings.displayDelayEnabled, settings.displayDelayText)},
             {QStringLiteral("autoHide"), settings.hideDelayEnabled},
             {QStringLiteral("autoHideDelayMs"),
-                 MediaSettingsSerialization::delayMilliseconds(
+                 MediaSettingsSerialization::signedDelayMilliseconds(
                      settings.hideDelayEnabled, settings.hideDelayText)},
             {QStringLiteral("hideWhenVideoEnds"), settings.hideWhenVideoEnds},
             {QStringLiteral("fadeInSeconds"),
@@ -587,7 +587,7 @@ QJsonObject CanvasDocument::serializeSceneState() const
                             settings.unmuteDelayEnabled, settings.unmuteDelayText));
             item.insert(QStringLiteral("autoMute"), settings.muteDelayEnabled);
             item.insert(QStringLiteral("autoMuteDelayMs"),
-                        MediaSettingsSerialization::delayMilliseconds(
+                        MediaSettingsSerialization::signedDelayMilliseconds(
                             settings.muteDelayEnabled, settings.muteDelayText));
             item.insert(QStringLiteral("muteWhenVideoEnds"), settings.muteWhenVideoEnds);
             item.insert(QStringLiteral("audioFadeInSeconds"),

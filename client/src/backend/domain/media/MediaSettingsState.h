@@ -44,5 +44,6 @@ namespace MediaSettingsSerialization {
 QJsonObject toProjectJson(const MediaSettingsState& settings);
 bool fromProjectJson(const QJsonObject& object, MediaSettingsState* settings);
 int delayMilliseconds(bool enabled, const QString& secondsText);
+int signedDelayMilliseconds(bool enabled, const QString& secondsText);
 double durationSeconds(bool enabled, const QString& secondsText);
 }

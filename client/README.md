@@ -166,6 +166,9 @@ shows loading, memory use and pressure-driven eviction. See
 [media residency](docs/MEDIA_RESIDENCY.md) for the memory policy, playback contract
 and protocol v5 deployment requirements.
 
+See [scene playback](docs/scene-playback.md) for timing, fades, end actions and
+the editor controls' lifecycle during test and remote scenes.
+
 ## Architecture
 
 The complete application interface is Qt Quick/QML. One

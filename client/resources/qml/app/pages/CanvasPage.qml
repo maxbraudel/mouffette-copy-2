@@ -7,6 +7,7 @@ AppPanel {
     id: root
     required property var controller
     readonly property var session: controller.activeWorkspace
+    property int settingsTab: 0
 
     Loader {
         id: canvasLoader
@@ -45,29 +46,39 @@ AppPanel {
         z: 99999
     }
 
-    CanvasToolbar {
+    // Scene playback owns the canvas. Unload editor controls completely so
+    // they cannot render, retain focus, or remain exposed to accessibility.
+    Loader {
         anchors.left: parent.left
         anchors.top: parent.top
         anchors.margins: 10
         z: 100000
-        visible: root.session !== null && root.session !== undefined
-        session: root.session
+        active: !!root.session && root.session.mediaEditingEnabled
+        sourceComponent: CanvasToolbar {
+            session: root.session
+        }
     }
 
-    SceneElementPanel {
-        id: sceneElementPanel
-        objectName: "canvasSceneElementPanel"
+    Loader {
+        id: settingsLoader
         anchors.left: parent.left
         anchors.top: parent.top
         anchors.leftMargin: 10
         anchors.topMargin: 52
         z: 100001
-        maximumHeight: Math.max(0, root.height - y - 10)
-        session: root.session
-        presentationReady: {
-            var canvas = canvasLoader.item
-            var media = canvas ? canvas.mediaDelegateById(sceneElementPanel.selectedMediaId) : null
-            return !!media && media.initialFramePresented
+        active: !!root.session && root.session.mediaEditingEnabled
+        sourceComponent: SceneElementPanel {
+            id: sceneElementPanel
+            objectName: "canvasSceneElementPanel"
+            maximumHeight: Math.max(0, root.height - settingsLoader.y - 10)
+            session: root.session
+            activeTab: root.settingsTab
+            onActiveTabChanged: root.settingsTab = activeTab
+            presentationReady: {
+                var canvas = canvasLoader.item
+                var media = canvas ? canvas.mediaDelegateById(sceneElementPanel.selectedMediaId) : null
+                return !!media && media.initialFramePresented
+            }
         }
     }
 

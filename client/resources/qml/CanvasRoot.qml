@@ -43,6 +43,8 @@ Rectangle {
     readonly property var canvasController: sessionViewModel
                                             ? sessionViewModel.canvasController : null
     readonly property bool editingEnabled: canvasController ? canvasController.editingEnabled : true
+    readonly property var selectionChrome: selectionLayerLoader.item
+                                           ? selectionLayerLoader.item.chromeItem : null
     readonly property var liveTransforms: canvasController ? canvasController.liveTransforms : ({})
     readonly property var hostingWindow: root.Window.window
     property bool remoteActive: canvasController
@@ -396,7 +398,7 @@ Rectangle {
             // Clear guides only when no active snapped interaction is alive.
             // During fast Shift-release + mouse-release races, clearing unconditionally
             // can hide guides while snap state is still authoritative for the current gesture.
-            if (!root.liveSnapDragActive && !selectionChrome.interacting) {
+            if (!root.liveSnapDragActive && (!selectionChrome || !selectionChrome.interacting)) {
                 root.snapGuidesModel = []
             }
             // Do NOT touch liveSnapDragMediaId here. liveSnapDragActive is derived
@@ -1020,49 +1022,29 @@ Rectangle {
 
             }
 
-            RemoteCursor {
-                cursorVisible: root.remoteCursorVisible
-                cursorX: root.remoteCursorX
-                cursorY: root.remoteCursorY
-                diameter: root.remoteCursorDiameter
-                fillColor: root.remoteCursorFill
-                borderColor: root.remoteCursorBorder
-                borderWidth: root.remoteCursorBorderWidth
+            Loader {
+                active: root.editingEnabled
+                z: 11500
+                sourceComponent: RemoteCursor {
+                    objectName: "canvasRemoteCursor"
+                    cursorVisible: root.remoteCursorVisible
+                    cursorX: root.remoteCursorX
+                    cursorY: root.remoteCursorY
+                    diameter: root.remoteCursorDiameter
+                    fillColor: root.remoteCursorFill
+                    borderColor: root.remoteCursorBorder
+                    borderWidth: root.remoteCursorBorderWidth
+                }
             }
 
-        SelectionLayer {
-            id: selectionLayer
+        Loader {
+            id: selectionLayerLoader
             parent: viewport
             anchors.fill: parent
-            contentItem: viewport.contentRootItem
-            viewportItem: viewport
-            interactionController: root
-            inputCoordinator: inputLayer ? inputLayer.inputCoordinator : null
-            mediaModel: root.mediaModel
-            selectionModel: root.selectionChromeModel
-            snapGuidesModel: root.snapGuidesModel
-            draggedMediaId: root.liveDragMediaId
-            dragOffsetViewX: root.liveDragViewOffsetX
-            dragOffsetViewY: root.liveDragViewOffsetY
-            onMediaResizeRequested: function(mediaId, handleId, sceneX, sceneY, snap, altPressed) {
-                root.mediaResizeRequested(mediaId, handleId, sceneX, sceneY, snap, altPressed)
-            }
-            onMediaResizeEnded: function(mediaId) {
-                root.mediaResizeEnded(mediaId)
-            }
-
-            SnapGuides {
-                id: snapGuides
-                anchors.fill: parent
-                contentItem: viewport.contentRootItem
-                viewportItem: viewport
-                guidesModel: root.snapGuidesModel
-                z: 89000
-            }
-
-            SelectionChrome {
-                id: selectionChrome
-                objectName: "canvasSelectionChrome"
+            active: root.editingEnabled
+            sourceComponent: SelectionLayer {
+                id: selectionLayer
+                readonly property alias chromeItem: selectionChromeItem
                 anchors.fill: parent
                 contentItem: viewport.contentRootItem
                 viewportItem: viewport
@@ -1070,16 +1052,48 @@ Rectangle {
                 inputCoordinator: inputLayer ? inputLayer.inputCoordinator : null
                 mediaModel: root.mediaModel
                 selectionModel: root.selectionChromeModel
-                // Live drag offset: chrome visually follows the moving item without model repush
+                snapGuidesModel: root.snapGuidesModel
                 draggedMediaId: root.liveDragMediaId
                 dragOffsetViewX: root.liveDragViewOffsetX
                 dragOffsetViewY: root.liveDragViewOffsetY
-                z: 90000
-                onResizeRequested: function(mediaId, handleId, sceneX, sceneY, snap, altPressed) {
+                onMediaResizeRequested: function(mediaId, handleId, sceneX, sceneY, snap, altPressed) {
                     root.mediaResizeRequested(mediaId, handleId, sceneX, sceneY, snap, altPressed)
                 }
-                onResizeEnded: function(mediaId) {
+                onMediaResizeEnded: function(mediaId) {
                     root.mediaResizeEnded(mediaId)
+                }
+
+                SnapGuides {
+                    id: snapGuides
+                    objectName: "canvasSnapGuides"
+                    anchors.fill: parent
+                    contentItem: viewport.contentRootItem
+                    viewportItem: viewport
+                    guidesModel: root.snapGuidesModel
+                    z: 89000
+                }
+
+                SelectionChrome {
+                    id: selectionChromeItem
+                    objectName: "canvasSelectionChrome"
+                    anchors.fill: parent
+                    contentItem: viewport.contentRootItem
+                    viewportItem: viewport
+                    interactionController: root
+                    inputCoordinator: inputLayer ? inputLayer.inputCoordinator : null
+                    mediaModel: root.mediaModel
+                    selectionModel: root.selectionChromeModel
+                    // Live drag offset: chrome visually follows the moving item without model repush
+                    draggedMediaId: root.liveDragMediaId
+                    dragOffsetViewX: root.liveDragViewOffsetX
+                    dragOffsetViewY: root.liveDragViewOffsetY
+                    z: 90000
+                    onResizeRequested: function(mediaId, handleId, sceneX, sceneY, snap, altPressed) {
+                        root.mediaResizeRequested(mediaId, handleId, sceneX, sceneY, snap, altPressed)
+                    }
+                    onResizeEnded: function(mediaId) {
+                        root.mediaResizeEnded(mediaId)
+                    }
                 }
             }
         }
@@ -1090,7 +1104,7 @@ Rectangle {
             anchors.fill: parent
             interactionController: root
             textToolActive: root.textToolActive
-            selectionHandlePriorityActive: selectionChrome.interacting
+            selectionHandlePriorityActive: !!selectionChrome && selectionChrome.interacting
             liveDragMediaId: root.liveDragMediaId
             onTextCreateRequested: function(viewX, viewY) {
                 root.textCreateRequested(viewX, viewY)
@@ -1106,9 +1120,9 @@ Rectangle {
                 containmentMask: QtObject {
                     function contains(p: point): bool {
                         if (!inputLayer.inputCoordinator || root.textToolActive
-                                || selectionChrome.interacting)
+                                || (selectionChrome && selectionChrome.interacting))
                             return false
-                        if (selectionChrome.hitTestHandle(p.x, p.y))
+                        if (selectionChrome && selectionChrome.hitTestHandle(p.x, p.y))
                             return false
                         var mediaId = root.mediaIdAtPoint(p.x, p.y)
                         if (!mediaId)
@@ -1219,7 +1233,7 @@ Rectangle {
                     }
 
                     var coordinator = inputLayer.inputCoordinator
-                    if (!coordinator || selectionChrome.interacting) {
+                    if (!coordinator || (selectionChrome && selectionChrome.interacting)) {
                         activeMoveMediaId = ""
                         return
                     }
@@ -1304,7 +1318,7 @@ Rectangle {
 
                     if (active) {
                         var viewPoint = point ? point.position : centroid.position
-                        var handle = selectionChrome.hitTestHandle(viewPoint.x, viewPoint.y)
+                        var handle = selectionChrome ? selectionChrome.hitTestHandle(viewPoint.x, viewPoint.y) : null
                         var mediaId = root.mediaIdAtPoint(viewPoint.x, viewPoint.y)
                         var editor = textEditSession.activeEditor
                         if (editor && (editor.mediaId !== mediaId || handle)) {
@@ -1533,179 +1547,185 @@ Rectangle {
     // Driven by selectionChromeModel whose x/y/width/height already have
     // item scale baked in (width = base * itemScale * sceneUnitScale).
     // Extra metadata (displayName, mediaType, etc.) is looked up from mediaModel.
-    Item {
-        id: overlayLayer
-        enabled: root.editingEnabled
+    Loader {
         anchors.fill: parent
         z: 99000
+        active: root.editingEnabled
+        sourceComponent: Item {
+            id: overlayLayer
+            objectName: "canvasMediaOverlays"
+            anchors.fill: parent
 
-        Repeater {
-            // One overlay pair per selected item — selectionChromeModel
-            // is the authoritative source for selected-item geometry.
-            model: root.selectionChromeModel
-            delegate: Item {
-                id: overlayDelegate
+            Repeater {
+                // One overlay pair per selected item — selectionChromeModel
+                // is the authoritative source for selected-item geometry.
+                model: root.selectionChromeModel
+                delegate: Item {
+                    id: overlayDelegate
 
-                // selectionChromeModel entry — has baked width/height
-                readonly property var chromeEntry: modelData
-                readonly property string mid: chromeEntry ? (chromeEntry.mediaId || "") : ""
-                readonly property var liveTransform: root.liveTransforms[mid] || null
+                    // selectionChromeModel entry — has baked width/height
+                    readonly property var chromeEntry: modelData
+                    readonly property string mid: chromeEntry ? (chromeEntry.mediaId || "") : ""
+                    readonly property var liveTransform: root.liveTransforms[mid] || null
 
-                // Look up the matching mediaModel entry for metadata
-                readonly property var mediaEntry: {
-                    var m = mid
-                    if (!m) return null
-                    for (var i = 0; i < root.mediaModel.length; ++i) {
-                        if (root.mediaModel[i].mediaId === m) return root.mediaModel[i]
+                    // Look up the matching mediaModel entry for metadata
+                    readonly property var mediaEntry: {
+                        var m = mid
+                        if (!m) return null
+                        for (var i = 0; i < root.mediaModel.length; ++i) {
+                            if (root.mediaModel[i].mediaId === m) return root.mediaModel[i]
+                        }
+                        return null
                     }
-                    return null
-                }
 
-                // Is a live (uniform) resize active for this item?
-                readonly property bool isLiveResizing: root.liveResizeActive && root.liveResizeMediaId === mid
-                // Is a live alt-resize (base-size change) active for this item?
-                readonly property bool isLiveAltResizing: root.liveAltResizeActive && root.liveAltResizeMediaId === mid
+                    // Is a live (uniform) resize active for this item?
+                    readonly property bool isLiveResizing: root.liveResizeActive && root.liveResizeMediaId === mid
+                    // Is a live alt-resize (base-size change) active for this item?
+                    readonly property bool isLiveAltResizing: root.liveAltResizeActive && root.liveAltResizeMediaId === mid
 
-                // Is this item being dragged?
-                readonly property bool isDragging: !liveTransform && root.liveDragMediaId === mid
-                // isSnapDragging intentionally does NOT require isDragging.
-                // liveDragMediaId is cleared before commitMediaTransform updates the model,
-                // so gating on isDragging causes a flicker. The snap freeze clears via
-                // onMediaChanged once the committed position arrives in the model.
-                readonly property bool isSnapDragging: !liveTransform && root.liveSnapDragActive
-                                                       && root.liveSnapDragMediaId === mid
+                    // Is this item being dragged?
+                    readonly property bool isDragging: !liveTransform && root.liveDragMediaId === mid
+                    // isSnapDragging intentionally does NOT require isDragging.
+                    // liveDragMediaId is cleared before commitMediaTransform updates the model,
+                    // so gating on isDragging causes a flicker. The snap freeze clears via
+                    // onMediaChanged once the committed position arrives in the model.
+                    readonly property bool isSnapDragging: !liveTransform && root.liveSnapDragActive
+                                                           && root.liveSnapDragMediaId === mid
 
-                // Scene position — switch to live resize/alt-resize coords when active.
-                // chromeEntry.x/y are already in QML scene units (scenePos * sceneUnitScale).
-                readonly property real sceneX: liveTransform ? liveTransform.x : isLiveAltResizing ? root.liveAltResizeX
-                                             : (isLiveResizing   ? root.liveResizeX
-                                                                  : (chromeEntry ? (chromeEntry.x || 0) : 0))
-                readonly property real sceneY: liveTransform ? liveTransform.y : isLiveAltResizing ? root.liveAltResizeY
-                                             : (isLiveResizing   ? root.liveResizeY
-                                                                  : (chromeEntry ? (chromeEntry.y || 0) : 0))
+                    // Scene position — switch to live resize/alt-resize coords when active.
+                    // chromeEntry.x/y are already in QML scene units (scenePos * sceneUnitScale).
+                    readonly property real sceneX: liveTransform ? liveTransform.x : isLiveAltResizing ? root.liveAltResizeX
+                                                 : (isLiveResizing   ? root.liveResizeX
+                                                                      : (chromeEntry ? (chromeEntry.x || 0) : 0))
+                    readonly property real sceneY: liveTransform ? liveTransform.y : isLiveAltResizing ? root.liveAltResizeY
+                                                 : (isLiveResizing   ? root.liveResizeY
+                                                                      : (chromeEntry ? (chromeEntry.y || 0) : 0))
 
-                // Rendered screen size — chromeEntry.width/height = base * itemScale * sceneUnitScale,
-                // so multiply by viewScale only to get screen pixels.
-                // During live alt-resize use the live width/height directly (already in scene units).
-                // During live uniform resize, recompute from mediaEntry base size * liveResizeScale.
-                readonly property real screenW: {
-                    if (liveTransform) return liveTransform.width * liveTransform.scale * root.viewScale
-                    if (isLiveAltResizing)
-                        return root.liveAltResizeWidth * root.liveAltResizeScale * root.viewScale
-                    if (isLiveResizing && mediaEntry)
-                        return (mediaEntry.width || 0) * root.liveResizeScale * root.viewScale
-                    return (chromeEntry ? (chromeEntry.width || 0) : 0) * root.viewScale
-                }
-                readonly property real screenH: {
-                    if (liveTransform) return liveTransform.height * liveTransform.scale * root.viewScale
-                    if (isLiveAltResizing)
-                        return root.liveAltResizeHeight * root.liveAltResizeScale * root.viewScale
-                    if (isLiveResizing && mediaEntry)
-                        return (mediaEntry.height || 0) * root.liveResizeScale * root.viewScale
-                    return (chromeEntry ? (chromeEntry.height || 0) : 0) * root.viewScale
-                }
-
-                // Effective drag offset in screen pixels.
-                // When snap is active, derive from snapped scene position so overlay
-                // tracks the item precisely; otherwise use raw viewport delta.
-                readonly property real effectiveDragOffsetX: isSnapDragging
-                    ? (root.liveSnapDragX - sceneX) * root.viewScale
-                    : root.liveDragViewOffsetX
-                readonly property real effectiveDragOffsetY: isSnapDragging
-                    ? (root.liveSnapDragY - sceneY) * root.viewScale
-                    : root.liveDragViewOffsetY
-
-                // Screen-space top-left (add live drag offset if dragging or snap-frozen).
-                // isSnapDragging outlives isDragging by design (snap freeze is cleared by
-                // onMediaChanged after drag ends), so we apply the offset for both states.
-                readonly property real screenLeft: sceneX * root.viewScale + root.panX
-                                                   + ((isDragging || isSnapDragging) ? effectiveDragOffsetX : 0)
-                readonly property real screenTop:  sceneY * root.viewScale + root.panY
-                                                   + ((isDragging || isSnapDragging) ? effectiveDragOffsetY : 0)
-
-                // Derived screen anchors
-                readonly property real screenCentreX: screenLeft + screenW * 0.5
-                readonly property real screenBottom:  screenTop  + screenH
-
-                // Video state for this item — looked up by mediaId in the state dictionary.
-                // Evaluates to null when no state has been pushed for this id.
-                readonly property var videoState: root.videoStateModel[mid] || null
-
-                // Top overlay: filename + utility buttons
-                MediaTopOverlay {
-                    id: topOverlay
-                    mediaId: overlayDelegate.mid
-                    displayName: overlayDelegate.mediaEntry ? (overlayDelegate.mediaEntry.displayName || "") : ""
-                    actionsAvailable: !!overlayDelegate.mediaEntry
-                    contentVisible: overlayDelegate.mediaEntry ? (overlayDelegate.mediaEntry.contentVisible !== false) : true
-                    visible: true
-
-                    x: overlayDelegate.screenCentreX - panelWidth  * 0.5
-                    y: overlayDelegate.screenTop      - panelHeight - 8
-
-                    onVisibilityToggleRequested: function(m, v) { root.overlayVisibilityToggleRequested(m, v) }
-                    onBringForwardRequested:     function(m)    { root.overlayBringForwardRequested(m) }
-                    onBringBackwardRequested:    function(m)    { root.overlayBringBackwardRequested(m) }
-                    onDeleteRequested:           function(m)    { root.overlayDeleteRequested(m) }
-                    onOverlayHoveredChanged:     function(h)    { /* input handled by overlay's own MouseArea */ }
-                }
-
-                // Bottom overlay: video transport controls (video only)
-                MediaVideoOverlay {
-                    id: bottomOverlay
-                    mediaId: overlayDelegate.mid
-                    visible: root.mediaPlaybackControlsReady(overlayDelegate.mid, overlayDelegate.mediaEntry)
-                             && overlayDelegate.mediaEntry.mediaType === "video"
-                    enabled: visible
-
-                    isPlaying: overlayDelegate.videoState ? !!overlayDelegate.videoState.isPlaying : false
-                    isMuted:   overlayDelegate.videoState ? !!overlayDelegate.videoState.isMuted   : false
-                    isLooping: overlayDelegate.videoState ? !!overlayDelegate.videoState.isLooping : false
-                    progress:  overlayDelegate.videoState ? (overlayDelegate.videoState.progress || 0.0) : 0.0
-                    startProgress: overlayDelegate.videoState ? overlayDelegate.videoState.startProgress : -1.0
-                    endProgress: overlayDelegate.videoState ? overlayDelegate.videoState.endProgress : -1.0
-                    volume: overlayDelegate.videoState && overlayDelegate.videoState.volume !== undefined
-                            ? overlayDelegate.videoState.volume : 1.0
-
-                    x: overlayDelegate.screenCentreX - panelWidth * 0.5
-                    y: overlayDelegate.screenBottom   + 8
-
-                    onPlayPauseRequested:    function(m)    { root.overlayPlayPauseRequested(m) }
-                    onStopRequested:         function(m)    { root.overlayStopRequested(m) }
-                    onRepeatToggleRequested: function(m)    { root.overlayRepeatToggleRequested(m) }
-                    onMuteToggleRequested:   function(m)    { root.overlayMuteToggleRequested(m) }
-                    onVolumeChangeRequested:  function(m, v) { root.overlayVolumeChangeRequested(m, v) }
-                    onSeekBeginRequested:     function(m, r) { root.overlaySeekBeginRequested(m, r) }
-                    onSeekUpdateRequested:    function(m, r) { root.overlaySeekUpdateRequested(m, r) }
-                    onSeekEndRequested:       function(m, r) { root.overlaySeekEndRequested(m, r) }
-                    onOverlayHoveredChanged:  function(h)    { /* input handled by overlay's own MouseArea */ }
-                }
-
-                // Bottom overlay: text alignment controls (text only)
-                MediaTextOverlay {
-                    id: textOverlay
-                    mediaId: overlayDelegate.mid
-                    visible: overlayDelegate.mediaEntry
-                             && overlayDelegate.mediaEntry.mediaType === "text"
-
-                    fitToTextEnabled: {
-                        var entry = overlayDelegate.mediaEntry
-                        if (!entry)
-                            return true
-                        if (entry.fitToTextEnabled === undefined || entry.fitToTextEnabled === null)
-                            return true
-                        return !!entry.fitToTextEnabled
+                    // Rendered screen size — chromeEntry.width/height = base * itemScale * sceneUnitScale,
+                    // so multiply by viewScale only to get screen pixels.
+                    // During live alt-resize use the live width/height directly (already in scene units).
+                    // During live uniform resize, recompute from mediaEntry base size * liveResizeScale.
+                    readonly property real screenW: {
+                        if (liveTransform) return liveTransform.width * liveTransform.scale * root.viewScale
+                        if (isLiveAltResizing)
+                            return root.liveAltResizeWidth * root.liveAltResizeScale * root.viewScale
+                        if (isLiveResizing && mediaEntry)
+                            return (mediaEntry.width || 0) * root.liveResizeScale * root.viewScale
+                        return (chromeEntry ? (chromeEntry.width || 0) : 0) * root.viewScale
                     }
-                    horizontalAlignment: overlayDelegate.mediaEntry ? (overlayDelegate.mediaEntry.textHorizontalAlignment || "center") : "center"
-                    verticalAlignment:   overlayDelegate.mediaEntry ? (overlayDelegate.mediaEntry.textVerticalAlignment   || "center") : "center"
+                    readonly property real screenH: {
+                        if (liveTransform) return liveTransform.height * liveTransform.scale * root.viewScale
+                        if (isLiveAltResizing)
+                            return root.liveAltResizeHeight * root.liveAltResizeScale * root.viewScale
+                        if (isLiveResizing && mediaEntry)
+                            return (mediaEntry.height || 0) * root.liveResizeScale * root.viewScale
+                        return (chromeEntry ? (chromeEntry.height || 0) : 0) * root.viewScale
+                    }
 
-                    x: overlayDelegate.screenCentreX - panelWidth * 0.5
-                    y: overlayDelegate.screenBottom   + 8
+                    // Effective drag offset in screen pixels.
+                    // When snap is active, derive from snapped scene position so overlay
+                    // tracks the item precisely; otherwise use raw viewport delta.
+                    readonly property real effectiveDragOffsetX: isSnapDragging
+                        ? (root.liveSnapDragX - sceneX) * root.viewScale
+                        : root.liveDragViewOffsetX
+                    readonly property real effectiveDragOffsetY: isSnapDragging
+                        ? (root.liveSnapDragY - sceneY) * root.viewScale
+                        : root.liveDragViewOffsetY
 
-                    onFitToTextToggleRequested:  function(m)    { root.overlayFitToTextToggleRequested(m) }
-                    onHorizontalAlignRequested:  function(m, a) { root.overlayHorizontalAlignRequested(m, a) }
-                    onVerticalAlignRequested:    function(m, a) { root.overlayVerticalAlignRequested(m, a) }
-                    onOverlayHoveredChanged:     function(h)    { /* input handled by overlay's own MouseArea */ }
+                    // Screen-space top-left (add live drag offset if dragging or snap-frozen).
+                    // isSnapDragging outlives isDragging by design (snap freeze is cleared by
+                    // onMediaChanged after drag ends), so we apply the offset for both states.
+                    readonly property real screenLeft: sceneX * root.viewScale + root.panX
+                                                       + ((isDragging || isSnapDragging) ? effectiveDragOffsetX : 0)
+                    readonly property real screenTop:  sceneY * root.viewScale + root.panY
+                                                       + ((isDragging || isSnapDragging) ? effectiveDragOffsetY : 0)
+
+                    // Derived screen anchors
+                    readonly property real screenCentreX: screenLeft + screenW * 0.5
+                    readonly property real screenBottom:  screenTop  + screenH
+
+                    // Video state for this item — looked up by mediaId in the state dictionary.
+                    // Evaluates to null when no state has been pushed for this id.
+                    readonly property var videoState: root.videoStateModel[mid] || null
+
+                    // Top overlay: filename + utility buttons
+                    MediaTopOverlay {
+                        id: topOverlay
+                        mediaId: overlayDelegate.mid
+                        displayName: overlayDelegate.mediaEntry ? (overlayDelegate.mediaEntry.displayName || "") : ""
+                        actionsAvailable: !!overlayDelegate.mediaEntry
+                        contentVisible: overlayDelegate.mediaEntry ? (overlayDelegate.mediaEntry.contentVisible !== false) : true
+                        visible: true
+
+                        x: overlayDelegate.screenCentreX - panelWidth  * 0.5
+                        y: overlayDelegate.screenTop      - panelHeight - 8
+
+                        onVisibilityToggleRequested: function(m, v) { root.overlayVisibilityToggleRequested(m, v) }
+                        onBringForwardRequested:     function(m)    { root.overlayBringForwardRequested(m) }
+                        onBringBackwardRequested:    function(m)    { root.overlayBringBackwardRequested(m) }
+                        onDeleteRequested:           function(m)    { root.overlayDeleteRequested(m) }
+                        onOverlayHoveredChanged:     function(h)    { /* input handled by overlay's own MouseArea */ }
+                    }
+
+                    // Bottom overlay: video transport controls (video only)
+                    MediaVideoOverlay {
+                        id: bottomOverlay
+                        objectName: "mediaVideoOverlay"
+                        mediaId: overlayDelegate.mid
+                        visible: root.mediaPlaybackControlsReady(overlayDelegate.mid, overlayDelegate.mediaEntry)
+                                 && overlayDelegate.mediaEntry.mediaType === "video"
+                        enabled: visible
+
+                        isPlaying: overlayDelegate.videoState ? !!overlayDelegate.videoState.isPlaying : false
+                        isMuted:   overlayDelegate.videoState ? !!overlayDelegate.videoState.isMuted   : false
+                        isLooping: overlayDelegate.videoState ? !!overlayDelegate.videoState.isLooping : false
+                        progress:  overlayDelegate.videoState ? (overlayDelegate.videoState.progress || 0.0) : 0.0
+                        startProgress: overlayDelegate.videoState ? overlayDelegate.videoState.startProgress : -1.0
+                        endProgress: overlayDelegate.videoState ? overlayDelegate.videoState.endProgress : -1.0
+                        volume: overlayDelegate.videoState && overlayDelegate.videoState.volume !== undefined
+                                ? overlayDelegate.videoState.volume : 1.0
+
+                        x: overlayDelegate.screenCentreX - panelWidth * 0.5
+                        y: overlayDelegate.screenBottom   + 8
+
+                        onPlayPauseRequested:    function(m)    { root.overlayPlayPauseRequested(m) }
+                        onStopRequested:         function(m)    { root.overlayStopRequested(m) }
+                        onRepeatToggleRequested: function(m)    { root.overlayRepeatToggleRequested(m) }
+                        onMuteToggleRequested:   function(m)    { root.overlayMuteToggleRequested(m) }
+                        onVolumeChangeRequested:  function(m, v) { root.overlayVolumeChangeRequested(m, v) }
+                        onSeekBeginRequested:     function(m, r) { root.overlaySeekBeginRequested(m, r) }
+                        onSeekUpdateRequested:    function(m, r) { root.overlaySeekUpdateRequested(m, r) }
+                        onSeekEndRequested:       function(m, r) { root.overlaySeekEndRequested(m, r) }
+                        onOverlayHoveredChanged:  function(h)    { /* input handled by overlay's own MouseArea */ }
+                    }
+
+                    // Bottom overlay: text alignment controls (text only)
+                    MediaTextOverlay {
+                        id: textOverlay
+                        objectName: "mediaTextOverlay"
+                        mediaId: overlayDelegate.mid
+                        visible: overlayDelegate.mediaEntry
+                                 && overlayDelegate.mediaEntry.mediaType === "text"
+
+                        fitToTextEnabled: {
+                            var entry = overlayDelegate.mediaEntry
+                            if (!entry)
+                                return true
+                            if (entry.fitToTextEnabled === undefined || entry.fitToTextEnabled === null)
+                                return true
+                            return !!entry.fitToTextEnabled
+                        }
+                        horizontalAlignment: overlayDelegate.mediaEntry ? (overlayDelegate.mediaEntry.textHorizontalAlignment || "center") : "center"
+                        verticalAlignment:   overlayDelegate.mediaEntry ? (overlayDelegate.mediaEntry.textVerticalAlignment   || "center") : "center"
+
+                        x: overlayDelegate.screenCentreX - panelWidth * 0.5
+                        y: overlayDelegate.screenBottom   + 8
+
+                        onFitToTextToggleRequested:  function(m)    { root.overlayFitToTextToggleRequested(m) }
+                        onHorizontalAlignRequested:  function(m, a) { root.overlayHorizontalAlignRequested(m, a) }
+                        onVerticalAlignRequested:    function(m, a) { root.overlayVerticalAlignRequested(m, a) }
+                        onOverlayHoveredChanged:     function(h)    { /* input handled by overlay's own MouseArea */ }
+                    }
                 }
             }
         }

@@ -179,7 +179,7 @@ function isCanonicalSceneMedia(item, screenIds) {
         || typeof item.autoDisplay !== 'boolean'
         || !isBoundedInteger(item.autoDisplayDelayMs, 0, 604_800_000)
         || typeof item.autoHide !== 'boolean'
-        || !isBoundedInteger(item.autoHideDelayMs, 0, 604_800_000)
+        || !isBoundedInteger(item.autoHideDelayMs, -604_800_000, 604_800_000)
         || typeof item.hideWhenVideoEnds !== 'boolean'
         || !isFiniteInRange(item.fadeInSeconds, 0, 3600)
         || !isFiniteInRange(item.fadeOutSeconds, 0, 3600)
@@ -241,7 +241,7 @@ function isCanonicalSceneMedia(item, screenIds) {
         && typeof item.autoUnmute === 'boolean'
         && isBoundedInteger(item.autoUnmuteDelayMs, 0, 604_800_000)
         && typeof item.autoMute === 'boolean'
-        && isBoundedInteger(item.autoMuteDelayMs, 0, 604_800_000)
+        && isBoundedInteger(item.autoMuteDelayMs, -604_800_000, 604_800_000)
         && typeof item.muteWhenVideoEnds === 'boolean'
         && isFiniteInRange(item.audioFadeInSeconds, 0, 3600)
         && isFiniteInRange(item.audioFadeOutSeconds, 0, 3600)

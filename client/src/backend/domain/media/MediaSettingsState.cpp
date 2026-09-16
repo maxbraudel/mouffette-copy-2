@@ -110,11 +110,21 @@ double MediaSettingsSerialization::durationSeconds(
     if (!enabled) return 0.0;
     bool ok = false;
     const double seconds = secondsText.trimmed().toDouble(&ok);
-    return ok && std::isfinite(seconds) ? qBound(0.0, seconds, 86400.0) : 0.0;
+    return ok && std::isfinite(seconds) ? qBound(0.0, seconds, 3600.0) : 0.0;
 }
 
 int MediaSettingsSerialization::delayMilliseconds(
     bool enabled, const QString& secondsText)
 {
-    return qRound64(durationSeconds(enabled, secondsText) * 1000.0);
+    return qMax(0, signedDelayMilliseconds(enabled, secondsText));
+}
+
+int MediaSettingsSerialization::signedDelayMilliseconds(
+    bool enabled, const QString& secondsText)
+{
+    if (!enabled) return 0;
+    bool ok = false;
+    const double seconds = secondsText.trimmed().toDouble(&ok);
+    return ok && std::isfinite(seconds)
+        ? qRound64(qBound(-86400.0, seconds, 86400.0) * 1000.0) : 0;
 }

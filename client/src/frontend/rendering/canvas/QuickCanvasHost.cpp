@@ -15,16 +15,204 @@
 #include "frontend/ui/notifications/ToastNotificationSystem.h"
 
 #include <QDateTime>
+#include <QAudioOutput>
 #include <QFileInfo>
 #include <QJsonArray>
 #include <QMap>
 #include <QQuickWindow>
 #include <QRegularExpression>
 #include <QStringList>
+#include <QVariantAnimation>
 
 #include <algorithm>
 
 namespace {
+// One cancellable timeline per occurrence, shared by test playback and the
+// local participant of a remote scene. Its parent is the scene lifetime, so
+// stopping a scene cancels every pending action and animation before restoring
+// the editor draft.
+class SceneMediaPlayback final : public QObject
+{
+public:
+    SceneMediaPlayback(CanvasMedia* media, QObject* scene)
+        : QObject(scene), m_media(media), m_settings(media->settings())
+    {
+        connect(&m_visualFade, &QVariantAnimation::valueChanged, this,
+                [this](const QVariant& value) {
+            if (m_media) m_media->setAnimatedDisplayOpacity(value.toReal());
+        });
+        connect(&m_visualFade, &QVariantAnimation::finished, this, [this]() {
+            if (m_media && m_hiding) m_media->setContentVisible(false);
+        });
+        connect(&m_audioFade, &QVariantAnimation::valueChanged, this,
+                [this](const QVariant& value) {
+            if (m_media && m_media->audioOutput())
+                m_media->audioOutput()->setVolume(value.toReal());
+        });
+        connect(&m_audioFade, &QVariantAnimation::finished, this, [this]() {
+            if (m_media && m_media->audioOutput())
+                m_media->audioOutput()->setMuted(m_media->muted());
+        });
+
+        media->setContentVisible(false);
+        media->setAnimatedDisplayOpacity(0.0);
+        if (m_settings.displayAutomatically) {
+            QTimer::singleShot(delay(m_settings.displayDelayEnabled,
+                                    m_settings.displayDelayText), this,
+                               [this]() { display(); });
+        }
+        if (!media->isVideo() || !media->player()) return;
+
+        media->beginScenePlayback();
+        media->setMuted(true);
+        if (media->audioOutput()) {
+            media->audioOutput()->setMuted(true);
+            media->audioOutput()->setVolume(0.0);
+        }
+        connect(media, &CanvasMedia::playbackFinished, this, [this]() {
+            if (m_endHandled) return;
+            m_endHandled = true;
+            if (m_settings.hideWhenVideoEnds && !m_hideEndTriggered) {
+                m_hideEndTriggered = true;
+                QTimer::singleShot(qMax(0, hideDelay()), this, [this]() { hide(); });
+            }
+            if (m_settings.muteWhenVideoEnds && !m_muteEndTriggered) {
+                m_muteEndTriggered = true;
+                QTimer::singleShot(qMax(0, muteDelay()), this,
+                                   [this]() { mute(true); });
+            }
+        });
+        connect(media->player(), &ResidentVideoPlayer::positionChanged, this,
+                [this]() { applyPreEndActions(); });
+
+        if (m_settings.playAutomatically) {
+            QTimer::singleShot(delay(m_settings.playDelayEnabled,
+                                    m_settings.playDelayText), this, [this]() {
+                if (!m_media || !m_media->player()) return;
+                m_media->player()->play();
+                applyPreEndActions();
+                if (m_settings.pauseDelayEnabled) {
+                    QTimer::singleShot(delay(true, m_settings.pauseDelayText), this,
+                                       [this]() {
+                        if (m_media && m_media->player()) m_media->player()->pause();
+                    });
+                }
+            });
+        }
+        if (m_settings.unmuteAutomatically) {
+            QTimer::singleShot(delay(m_settings.unmuteDelayEnabled,
+                                    m_settings.unmuteDelayText), this,
+                               [this]() { mute(false); });
+        }
+        if (m_settings.muteDelayEnabled && !m_settings.muteWhenVideoEnds) {
+            QTimer::singleShot(qMax(0, muteDelay()), this,
+                               [this]() { mute(true); });
+        }
+    }
+
+private:
+    static int delay(bool enabled, const QString& text)
+    {
+        return MediaSettingsSerialization::delayMilliseconds(enabled, text);
+    }
+    static int fadeDuration(bool enabled, const QString& text)
+    {
+        return qRound64(MediaSettingsSerialization::durationSeconds(enabled, text) * 1000.0);
+    }
+    int hideDelay() const
+    {
+        return MediaSettingsSerialization::signedDelayMilliseconds(
+            m_settings.hideDelayEnabled, m_settings.hideDelayText);
+    }
+    int muteDelay() const
+    {
+        return MediaSettingsSerialization::signedDelayMilliseconds(
+            m_settings.muteDelayEnabled, m_settings.muteDelayText);
+    }
+    void display()
+    {
+        if (!m_media) return;
+        m_hiding = false;
+        m_media->setContentVisible(true);
+        fadeVisual(1.0, fadeDuration(m_settings.fadeInEnabled, m_settings.fadeInText));
+        // Hide delay is relative to the start of appearance, including fade-in.
+        if (m_settings.hideDelayEnabled
+            && !(m_media->isVideo() && m_settings.hideWhenVideoEnds)) {
+            QTimer::singleShot(qMax(0, hideDelay()), this, [this]() { hide(); });
+        }
+    }
+    void hide()
+    {
+        if (!m_media || m_hiding) return;
+        m_hiding = true;
+        fadeVisual(0.0, fadeDuration(m_settings.fadeOutEnabled, m_settings.fadeOutText));
+    }
+    void fadeVisual(qreal target, int duration)
+    {
+        m_visualFade.stop();
+        if (duration <= 10) {
+            m_media->setAnimatedDisplayOpacity(target);
+            if (m_hiding) m_media->setContentVisible(false);
+            return;
+        }
+        m_visualFade.setStartValue(m_media->animatedDisplayOpacity());
+        m_visualFade.setEndValue(target);
+        m_visualFade.setDuration(duration);
+        m_visualFade.start();
+    }
+    void mute(bool muted)
+    {
+        if (!m_media) return;
+        QAudioOutput* audio = m_media->audioOutput();
+        const qreal start = audio && !audio->isMuted() ? audio->volume() : 0.0;
+        const qreal target = muted ? 0.0 : m_media->volume();
+        const int duration = muted
+            ? fadeDuration(m_settings.audioFadeOutEnabled, m_settings.audioFadeOutText)
+            : fadeDuration(m_settings.audioFadeInEnabled, m_settings.audioFadeInText);
+        m_audioFade.stop();
+        m_media->setMuted(muted, false);
+        if (!audio) return;
+        if (duration <= 0 || qFuzzyCompare(start, target)) {
+            audio->setVolume(target);
+            audio->setMuted(muted);
+            return;
+        }
+        audio->setVolume(start);
+        audio->setMuted(false);
+        m_audioFade.setStartValue(start);
+        m_audioFade.setEndValue(target);
+        m_audioFade.setDuration(duration);
+        m_audioFade.start();
+    }
+    void applyPreEndActions()
+    {
+        if (!m_media || !m_media->isPlaying() || m_media->repeatAvailable()
+            || m_endHandled || m_media->playbackEndMs() <= 0) return;
+        // Read the actual cursor after CanvasMedia has processed repeats. The
+        // position signal can still carry the end of the previous iteration.
+        const qint64 remaining = m_media->playbackEndMs() - m_media->positionMs();
+        if (m_settings.hideWhenVideoEnds && !m_hideEndTriggered
+            && hideDelay() < 0 && remaining <= -qint64(hideDelay())) {
+            m_hideEndTriggered = true;
+            hide();
+        }
+        if (m_settings.muteWhenVideoEnds && !m_muteEndTriggered
+            && muteDelay() < 0 && remaining <= -qint64(muteDelay())) {
+            m_muteEndTriggered = true;
+            mute(true);
+        }
+    }
+
+    QPointer<CanvasMedia> m_media;
+    const MediaSettingsState m_settings;
+    QVariantAnimation m_visualFade;
+    QVariantAnimation m_audioFade;
+    bool m_hiding = false;
+    bool m_endHandled = false;
+    bool m_hideEndTriggered = false;
+    bool m_muteEndTriggered = false;
+};
+
 void sceneToast(NotificationSeverity severity, const QString& message,
                 const QString& runId = {}, int duration = -1)
 {
@@ -864,27 +1052,7 @@ void QuickCanvasHost::beginScenePresentation(bool remote)
     m_sceneContext = new QObject(this);
     rememberDraftState();
     for (CanvasMedia* media : m_document->media()) {
-        if (media->isVideo()) media->beginScenePlayback();
-        media->setContentVisible(false);
-        media->setAnimatedDisplayOpacity(0.0);
-        const MediaSettingsState settings = media->settings();
-        const int displayDelay = MediaSettingsSerialization::delayMilliseconds(
-            settings.displayDelayEnabled, settings.displayDelayText);
-        QTimer::singleShot(displayDelay, m_sceneContext, [media, settings]() {
-            if (!media) return;
-            media->setContentVisible(settings.displayAutomatically);
-            media->setAnimatedDisplayOpacity(1.0);
-        });
-        if (media->isVideo()) {
-            media->setMuted(!settings.unmuteAutomatically);
-            if (settings.playAutomatically) {
-                const int playDelay = MediaSettingsSerialization::delayMilliseconds(
-                    settings.playDelayEnabled, settings.playDelayText);
-                QTimer::singleShot(playDelay, m_sceneContext, [media]() {
-                    if (media && media->player()) media->player()->play();
-                });
-            }
-        }
+        new SceneMediaPlayback(media, m_sceneContext);
     }
     m_document->clearSelection();
     m_document->setEditsLocked(true);
@@ -911,6 +1079,10 @@ void QuickCanvasHost::stopScenePresentation()
             media->endScenePlayback();
             media->setPositionMs(draft.positionMs);
             media->setMuted(draft.muted);
+            if (media->audioOutput()) {
+                media->audioOutput()->setVolume(media->volume());
+                media->audioOutput()->setMuted(draft.muted);
+            }
             if (draft.playing) media->player()->play();
         }
     }

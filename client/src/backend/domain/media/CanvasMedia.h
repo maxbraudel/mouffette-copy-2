@@ -130,7 +130,7 @@ public:
     QAudioOutput* audioOutput() const { return m_audioOutput; }
     bool isPlaying() const;
     bool muted() const;
-    void setMuted(bool muted);
+    void setMuted(bool muted, bool updateAudioOutput = true);
     qreal volume() const;
     void setVolume(qreal volume);
     bool repeatEnabled() const { return m_repeatEnabled; }
@@ -159,6 +159,8 @@ signals:
     void changed();
     void uploadStateChanged();
     void runtimeStateChanged();
+    // Final natural or marked end, after all configured repeats are consumed.
+    void playbackFinished();
     void audioStateChanged();
     void residencyChanged();
     void identityReady(const QString& fileId);

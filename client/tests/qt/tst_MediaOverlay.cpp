@@ -7,6 +7,7 @@
 #include <QQmlComponent>
 #include <QQmlEngine>
 #include <QQuickItem>
+#include <QPointer>
 #include <QQuickWindow>
 #include <QScopeGuard>
 #include <QTemporaryDir>
@@ -62,6 +63,8 @@ private slots:
     void mediaRowsAndProgress();
     void uploadActionLocksBeforeDispatchAndRecovers();
     void toolbarToolsAndGlobalMemoryUsage();
+    void scenePlaybackUnloadsEditorOverlays_data();
+    void scenePlaybackUnloadsEditorOverlays();
     void mediaSettingsPanelRestoresTabsAndBindings();
     void videoVolumeAndMuteStayIndependentAndSyncWithSettings();
     void toastUsesBottomLeftDoubleBackground();
@@ -1247,6 +1250,130 @@ void MediaOverlayTest::toolbarToolsAndGlobalMemoryUsage()
     appWindow->resize(900, 650);
     QTRY_COMPARE(topBar->property("columns").toInt(), 2);
     QTRY_COMPARE(memory->mapToScene({0, 0}).y(), toolbarY);
+}
+
+void MediaOverlayTest::scenePlaybackUnloadsEditorOverlays_data()
+{
+    QTest::addColumn<bool>("launchTestScene");
+    QTest::addColumn<bool>("videoSelected");
+    QTest::newRow("test-scene-text") << true << false;
+    QTest::newRow("test-scene-video") << true << true;
+    // Remote preparation/running/stopping hold this same document lock.
+    QTest::newRow("remote-scene-lock-text") << false << false;
+    QTest::newRow("remote-scene-lock-video") << false << true;
+}
+
+void MediaOverlayTest::scenePlaybackUnloadsEditorOverlays()
+{
+    QFETCH(bool, launchTestScene);
+    QFETCH(bool, videoSelected);
+    QString error;
+    std::unique_ptr<QuickCanvasHost> host(QuickCanvasHost::create(&error));
+    QVERIFY2(host, qPrintable(error));
+    host->setProjectEditingEnabled(true);
+    ClientWorkspaceViewModel session(
+        QStringLiteral("scene-overlays"), host.get(), [] {}, nullptr,
+        [] { return false; }, [] { return true; }, [] { return true; });
+    session.setLoading(false);
+    session.setSettingsVisible(true);
+
+    QQmlEngine engine;
+    QQuickWindow window;
+    window.resize(900, 650);
+    QQmlComponent component(&engine, QUrl(QStringLiteral(
+        "qrc:/qt/qml/Mouffette/App/resources/qml/app/pages/CanvasPage.qml")));
+    std::unique_ptr<QObject> pageObject(component.createWithInitialProperties({
+        {QStringLiteral("controller"), QVariantMap{
+             {QStringLiteral("activeWorkspace"), QVariant::fromValue(&session)},
+             {QStringLiteral("remoteBusy"), false}}}
+    }));
+    auto* page = qobject_cast<QQuickItem*>(pageObject.get());
+    QVERIFY2(page, qPrintable(component.errorString()));
+    page->setParentItem(window.contentItem());
+    page->setSize(window.size());
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    host->controller()->updateCamera(1.0, 0.0, 0.0);
+
+    CanvasMedia* media = nullptr;
+    if (videoSelected) {
+        const QString overridePath = qEnvironmentVariable("MOUFFETTE_TEST_VIDEO_FILE");
+        const QString videoPath = overridePath.isEmpty()
+            ? QFINDTESTDATA("../fixtures/resident-timeline.mp4") : overridePath;
+        QVERIFY(!videoPath.isEmpty());
+        media = host->document()->addPreparedFile(
+            videoPath, QSize(160, 90), true, QPointF(360, 260));
+        QVERIFY(media);
+        QTRY_VERIFY2_WITH_TIMEOUT(media->residencyReady(),
+            qPrintable(media->residencyState() + ": " + media->residencyError()), 30000);
+    } else {
+        media = host->document()->addText(QPointF(360, 260), QStringLiteral("Scene"));
+        QVERIFY(media);
+    }
+    host->controller()->selectMedia(media->mediaId());
+    const QStringList editorNames{
+        QStringLiteral("canvasSettingsButton"),
+        QStringLiteral("canvasSelectionToolButton"),
+        QStringLiteral("canvasTextToolButton"),
+        QStringLiteral("canvasSceneElementPanel"),
+        QStringLiteral("canvasSelectionChrome"),
+        QStringLiteral("canvasSnapGuides"),
+        QStringLiteral("canvasRemoteCursor"),
+        QStringLiteral("canvasMediaOverlays"),
+        QStringLiteral("mediaTopOverlay"),
+        QStringLiteral("mediaVideoOverlay"),
+        QStringLiteral("mediaTextOverlay"),
+        QStringLiteral("videoProgressSlider"),
+        QStringLiteral("videoVolumeSlider")};
+    QList<QPointer<QQuickItem>> previousControls;
+    for (const auto& name : editorNames) {
+        QQuickItem* item = nullptr;
+        QTRY_VERIFY2((item = findVisualItem(page, name)), qPrintable(name));
+        previousControls.append(item);
+    }
+    auto* panel = findVisualItem(page, QStringLiteral("canvasSceneElementPanel"));
+    panel->setProperty("activeTab", 1);
+    QPointer<QQuickItem> mediaList = findVisualItem(page, QStringLiteral("mediaListPanel"));
+    QVERIFY(mediaList);
+    QVERIFY(mediaList->isVisible());
+    if (videoSelected) {
+        QTRY_VERIFY_WITH_TIMEOUT(findVisualItem(page, QStringLiteral("videoProgressSlider"))->isVisible(), 8000);
+    }
+
+    if (launchTestScene) {
+        QTRY_VERIFY(host->testSceneActionEnabled());
+        host->triggerTestSceneAction();
+        QVERIFY(host->testSceneLaunched());
+    } else {
+        host->document()->setEditsLocked(true);
+    }
+    QVERIFY(!host->controller()->editingEnabled());
+    // Checking object destruction (rather than visible/enabled) catches the
+    // old disabled-but-rendered controls and stale accessibility subtrees.
+    for (const auto& item : previousControls)
+        QTRY_VERIFY(item.isNull());
+    for (const auto& name : editorNames)
+        QVERIFY2(!findVisualItem(page, name), qPrintable(name));
+    QVERIFY(mediaList);
+    QVERIFY(mediaList->isVisible());
+    CanvasMedia* selectionBeforeInput = host->document()->selectedMedia();
+
+    // Panning/keyboard input still traverses CanvasRoot while chrome is absent.
+    QTest::keyRelease(&window, Qt::Key_Shift);
+    QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier, QPoint(30, 300));
+    QCOMPARE(host->document()->selectedMedia(), selectionBeforeInput);
+
+    if (launchTestScene)
+        host->triggerTestSceneAction();
+    else
+        host->document()->setEditsLocked(false);
+    QTRY_VERIFY(host->controller()->editingEnabled());
+    host->controller()->selectMedia(media->mediaId());
+    for (const auto& name : editorNames)
+        QTRY_VERIFY2(findVisualItem(page, name), qPrintable(name));
+    QCOMPARE(findVisualItem(page, QStringLiteral("canvasSceneElementPanel"))
+                 ->property("activeTab").toInt(), 1);
+    QCOMPARE(findVisualItem(page, QStringLiteral("mediaListPanel")), mediaList.data());
 }
 
 void MediaOverlayTest::mediaSettingsPanelRestoresTabsAndBindings()

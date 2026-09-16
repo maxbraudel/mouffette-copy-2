@@ -843,7 +843,7 @@ bool RemoteSceneController::applyAuthoritativeStateSnapshot(
                                    0,
                                    static_cast<int>(kMaxVideoPositionMs), automationDelay)
             || !readBoundedInteger(state, "autoHideDelayMs",
-                                   0,
+                                   -static_cast<int>(kMaxVideoPositionMs),
                                    static_cast<int>(kMaxVideoPositionMs), automationDelay)
             || !requiredFinite(state, "fadeInSeconds", 0.0, 3600.0)
             || !requiredFinite(state, "fadeOutSeconds", 0.0, 3600.0)) {
@@ -958,7 +958,7 @@ bool RemoteSceneController::applyAuthoritativeStateSnapshot(
                                        0,
                                        static_cast<int>(kMaxVideoPositionMs), delay)
                 || !readBoundedInteger(state, "autoMuteDelayMs",
-                                       0,
+                                       -static_cast<int>(kMaxVideoPositionMs),
                                        static_cast<int>(kMaxVideoPositionMs), delay)
                 || !requiredFinite(state, "volume", 0.0, 1.0)
                 || !requiredFinite(state, "audioFadeInSeconds", 0.0, 3600.0)
@@ -1102,12 +1102,31 @@ bool RemoteSceneController::applyAuthoritativeStateSnapshot(
         const bool visible = item->type == QLatin1String("video")
             ? stagedState.video.value(QStringLiteral("visible")).toBool()
             : state.value(QStringLiteral("visible")).toBool();
-        item->contentVisible = visible;
-        item->displayReady = visible;
-        item->displayStarted = visible;
-        item->hiding = false;
+        if (m_sceneActivated && item->contentVisible == visible) {
+            // Full scene snapshots are also the periodic synchronization path.
+            // Matching logical visibility must preserve the current envelope,
+            // hide-in-progress flag and pending display/hide timers.
+            if (!item->visualFadeAnimation && item->displayStarted && !item->hiding) {
+                setRemoteMediaVisualState(item, item->contentOpacity, true);
+            }
+        } else if (m_sceneActivated && visible) {
+            item->displayStarted = false;
+            fadeIn(item);
+        } else {
+            if (item->visualFadeAnimation) {
+                QVariantAnimation* animation = item->visualFadeAnimation.data();
+                QObject::disconnect(animation, nullptr, this, nullptr);
+                animation->stop();
+                animation->deleteLater();
+                item->visualFadeAnimation = nullptr;
+            }
+            item->contentVisible = visible;
+            item->displayReady = visible;
+            item->displayStarted = visible;
+            item->hiding = false;
+            setRemoteMediaVisualState(item, visible ? item->contentOpacity : 0.0, visible);
+        }
         updatePublishedMediaItem(item);
-        setRemoteMediaVisualState(item, visible ? item->contentOpacity : 0.0, visible);
     }
 
     if (expectedVideoCount > 0) {
@@ -1531,9 +1550,11 @@ void RemoteSceneController::onRemoteSceneStart(const QString& senderClientId, co
 
         const auto requiredDelayIsValid = [&](const char* key) {
             double delay = 0.0;
+            const bool permitsEndOffset = qstrcmp(key, "autoHideDelayMs") == 0
+                || qstrcmp(key, "autoMuteDelayMs") == 0;
             return readFiniteNumber(mediaObject, key, delay)
                 && std::floor(delay) == delay
-                && delay >= 0.0
+                && delay >= (permitsEndOffset ? -static_cast<double>(kMaxVideoPositionMs) : 0.0)
                 && delay <= static_cast<double>(kMaxVideoPositionMs);
         };
         for (const char* delayKey : {"autoDisplayDelayMs", "autoHideDelayMs"}) {
@@ -2097,9 +2118,18 @@ void RemoteSceneController::onRemoteSceneVideoSync(const QString& senderClientId
         const bool visible = state.value("visible").toBool(false);
         const bool repeatAvailable = state.value("repeatAvailable").toBool(false);
 
-        applyAudioMuteState(item, muted, true);
+        // The owner's logical mute target changes when its envelope starts.
+        // Repeated clock snapshots must not flatten an in-progress fade.
+        if (item->muted != muted || !item->audioFadeAnimation) {
+            applyAudioMuteState(item, muted);
+        }
 
-        if (item->contentVisible != visible) {
+        if (item->contentVisible != visible && visible && m_sceneActivated) {
+            // A host display timer can win the clock-snapshot race by a frame.
+            // Showing its media must still enter the configured fade-in.
+            item->displayStarted = false;
+            fadeIn(item);
+        } else if (item->contentVisible != visible) {
             if (item->visualFadeAnimation) {
                 QVariantAnimation* animation = item->visualFadeAnimation.data();
                 QObject::disconnect(animation, nullptr, this, nullptr);
@@ -3474,6 +3504,7 @@ void RemoteSceneController::setRemoteMediaVisualState(const std::shared_ptr<Remo
             if (map.value(QStringLiteral("spanId")).toString() != span.spanId) continue;
             map.insert(QStringLiteral("renderOpacity"), item->renderOpacity);
             map.insert(QStringLiteral("renderVisible"), item->renderVisible);
+            map.insert(QStringLiteral("contentVisible"), item->contentVisible);
             entry = map;
             changedScreens.insert(span.screenId);
             break;
@@ -4008,6 +4039,7 @@ void RemoteSceneController::cancelAudioFade(const std::shared_ptr<RemoteMediaIte
 void RemoteSceneController::applyAudioMuteState(const std::shared_ptr<RemoteMediaItem>& item, bool muted, bool skipFade) {
     if (!item) return;
     if (!item->audio) return;
+    if (!skipFade && muted == item->muted && item->audioFadeAnimation) return;
 
     const qreal clampedTargetVolume = muted ? 0.0 : std::clamp<qreal>(item->volume, 0.0, 1.0);
     const double fadeSeconds = skipFade ? 0.0 : (muted ? item->audioFadeOutSeconds : item->audioFadeInSeconds);
@@ -4096,10 +4128,6 @@ void RemoteSceneController::scheduleMuteTimer(const std::shared_ptr<RemoteMediaI
     if (item->muteTimer) {
         item->muteTimer->stop();
     }
-    if (delayMs == 0) {
-        applyAudioMuteState(item, true);
-        return;
-    }
     if (!item->muteTimer) {
         item->muteTimer = new QTimer(this);
         item->muteTimer->setSingleShot(true);
@@ -4122,6 +4150,15 @@ void RemoteSceneController::fadeOutAndHide(const std::shared_ptr<RemoteMediaItem
     if (item->hideTimer) {
         item->hideTimer->stop();
     }
+    // Even an instantaneous hide must cancel an earlier fade-in, otherwise its
+    // next animation tick makes the media visible again after finalization.
+    if (item->visualFadeAnimation) {
+        QVariantAnimation* previous = item->visualFadeAnimation.data();
+        QObject::disconnect(previous, nullptr, this, nullptr);
+        previous->stop();
+        previous->deleteLater();
+        item->visualFadeAnimation = nullptr;
+    }
     const int durMs = int(std::max(0.0, item->fadeOutSeconds) * 1000.0);
     std::weak_ptr<RemoteMediaItem> weakItem = item;
     auto finalize = [this, weakItem]() {
@@ -4142,14 +4179,6 @@ void RemoteSceneController::fadeOutAndHide(const std::shared_ptr<RemoteMediaItem
     if (durMs <= 10) {
         finalize();
         return;
-    }
-
-    if (item->visualFadeAnimation) {
-        QVariantAnimation* previous = item->visualFadeAnimation.data();
-        QObject::disconnect(previous, nullptr, this, nullptr);
-        previous->stop();
-        previous->deleteLater();
-        item->visualFadeAnimation = nullptr;
     }
 
     auto* animation = new QVariantAnimation(this);

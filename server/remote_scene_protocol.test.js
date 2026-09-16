@@ -774,10 +774,19 @@ for (const invalidCase of [
         'scene_prepare_ack_delivery_failed');
 }
 
-// Video bounds survive canonical validation; empty/inverted or malformed ranges fail.
-for (const [endPositionMs, accepted] of [
-    [undefined, true], [1800, true], [1000, false], [999, false],
-    [-1, false], [1800.5, false], ['1800', false], [604_800_001, false],
+// Video bounds and signed end offsets survive canonical validation; malformed
+// ranges and offsets still fail before any remote preparation is created.
+for (const [overrides, accepted] of [
+    [{}, true], [{ endPositionMs: 1800 }, true],
+    [{ endPositionMs: 1000 }, false], [{ endPositionMs: 999 }, false],
+    [{ endPositionMs: -1 }, false], [{ endPositionMs: 1800.5 }, false],
+    [{ endPositionMs: '1800' }, false], [{ endPositionMs: 604_800_001 }, false],
+    [{ autoHide: true, hideWhenVideoEnds: true, autoHideDelayMs: -250,
+        autoMute: true, muteWhenVideoEnds: true, autoMuteDelayMs: -400 }, true],
+    [{ autoHideDelayMs: -604_800_001 }, false],
+    [{ autoMuteDelayMs: -604_800_001 }, false],
+    [{ autoHideDelayMs: -0.5 }, false], [{ autoMuteDelayMs: '-400' }, false],
+    [{ autoDisplayDelayMs: -250 }, false], [{ autoPlayDelayMs: -250 }, false],
 ]) {
     const server = new MouffetteServer({ port: 0, metricLogger: () => {} });
     const owner = addClient(server, 'range-owner', 'A');
@@ -796,7 +805,7 @@ for (const [endPositionMs, accepted] of [
         autoUnmute: false, autoUnmuteDelayMs: 0, autoMute: false, autoMuteDelayMs: 0,
         muteWhenVideoEnds: false, audioFadeInSeconds: 0, audioFadeOutSeconds: 0,
         startPositionMs: 1000,
-        ...(endPositionMs === undefined ? {} : { endPositionMs }),
+        ...overrides,
     };
     const rangedScene = { ...scene, media: [video] };
     session.mediaResidency = { generation: session.generation, sequence: 1,
@@ -813,7 +822,10 @@ for (const [endPositionMs, accepted] of [
     }));
     if (accepted) {
         assert.equal(messages(target, 'scene_prepare').length, 1, JSON.stringify(messages(owner, 'error')));
-        assert.equal(messages(target, 'scene_prepare')[0].scene.media[0].endPositionMs, endPositionMs);
+        const forwarded = messages(target, 'scene_prepare')[0].scene.media[0];
+        assert.equal(forwarded.endPositionMs, overrides.endPositionMs);
+        assert.equal(forwarded.autoHideDelayMs, video.autoHideDelayMs);
+        assert.equal(forwarded.autoMuteDelayMs, video.autoMuteDelayMs);
     } else {
         assert.equal(messages(owner, 'error').at(-1).code, 'invalid_scene_manifest');
         assert.equal(messages(target, 'scene_prepare').length, 0);

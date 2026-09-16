@@ -579,21 +579,23 @@ bool CanvasMedia::isPlaying() const
 
 bool CanvasMedia::muted() const
 {
-    return m_audioOutput ? m_audioOutput->isMuted() : m_muted;
+    // The device can remain audible during a scene fade-out. Synchronization
+    // and persistence consume the requested state, not that transient envelope.
+    return m_muted;
 }
 
-void CanvasMedia::setMuted(bool muted)
+void CanvasMedia::setMuted(bool muted, bool updateAudioOutput)
 {
     if (this->muted() == muted) return;
     m_muted = muted;
-    if (m_audioOutput) m_audioOutput->setMuted(muted);
+    if (m_audioOutput && updateAudioOutput) m_audioOutput->setMuted(muted);
     emit audioStateChanged();
     emit runtimeStateChanged();
 }
 
 qreal CanvasMedia::volume() const
 {
-    return m_audioOutput ? m_audioOutput->volume() : m_volume;
+    return m_volume;
 }
 
 void CanvasMedia::setVolume(qreal volume)
@@ -701,9 +703,12 @@ void CanvasMedia::enforcePlaybackEnd(qint64 position, bool atEnd)
         if (!m_repeatEnabled) --m_repeatRemaining;
         setPositionMs(playbackStartMs());
         m_player->play();
-    } else if (m_endMarkerMs >= 0) {
-        m_player->pause();
-        m_player->setPosition(end);
+    } else {
+        if (m_endMarkerMs >= 0) {
+            m_player->pause();
+            m_player->setPosition(end);
+        }
+        emit playbackFinished();
     }
     m_handlingPlaybackEnd = false;
 }

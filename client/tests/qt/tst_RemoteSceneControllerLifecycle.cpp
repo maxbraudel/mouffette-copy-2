@@ -11,7 +11,9 @@
 #include <QPointer>
 #include <QQuickItem>
 #include <QQuickWindow>
+#include <QTemporaryDir>
 #include <QTimer>
+#include <QVariantAnimation>
 #include <QVideoSink>
 #include <QtTest>
 
@@ -212,6 +214,353 @@ private slots:
             Q_ARG(QString, QStringLiteral("schema-test-owner")),
             Q_ARG(QJsonObject, incomplete)));
         QVERIFY(!findRemoteWindow());
+    }
+
+    void visualAutomation_data()
+    {
+        QTest::addColumn<QString>("type");
+        QTest::addColumn<int>("hideMode");
+        for (const QString& type : {QStringLiteral("text"), QStringLiteral("image"), QStringLiteral("video")}) {
+            QTest::newRow(qPrintable(type + "-fade-in")) << type << 0;
+            QTest::newRow(qPrintable(type + "-immediate-hide-during-fade")) << type << 1;
+            QTest::newRow(qPrintable(type + "-fade-out-during-fade")) << type << 2;
+        }
+    }
+
+    void visualAutomation()
+    {
+        QFETCH(QString, type);
+        QFETCH(int, hideMode);
+        QTemporaryDir temporary;
+        QVERIFY(temporary.isValid());
+        const QString fileId(64, QLatin1Char('d'));
+        FileManager files;
+        auto& residency = MediaResidencyManager::instance();
+        QString owner;
+        QString fixture;
+        if (type != QLatin1String("text")) {
+            fixture = QString::fromUtf8(TEST_VIDEO_FILE);
+            if (type == QLatin1String("image")) {
+                fixture = temporary.filePath(QStringLiteral("fade.png"));
+                QImage image(32, 32, QImage::Format_ARGB32);
+                image.fill(Qt::red);
+                QVERIFY(image.save(fixture));
+            }
+            files.registerReceivedFilePath(fileId, fixture);
+            owner = UploadManager::residencyOwnerId({}, 0, fileId);
+            residency.acquire(owner, fixture);
+            QTRY_VERIFY_WITH_TIMEOUT(residency.ready(owner), 60000);
+        }
+        RemoteSceneController controller(&files, nullptr);
+        auto scene = type == QLatin1String("video") ? videoScene(fileId) : textScene();
+        auto entry = scene.value("media").toArray().at(0).toObject();
+        entry["type"] = type;
+        if (type == QLatin1String("image")) {
+            entry["assetId"] = fileId;
+            entry["fileId"] = fileId;
+            entry["fileName"] = QStringLiteral("fade.png");
+        }
+        entry["autoDisplay"] = true;
+        entry["visible"] = false;
+        entry["autoDisplayDelayMs"] = 180;
+        entry["autoPlay"] = false;
+        entry["fadeInSeconds"] = 0.4;
+        entry["contentOpacity"] = 0.6;
+        entry["autoHide"] = hideMode != 0;
+        entry["autoHideDelayMs"] = 150;
+        entry["fadeOutSeconds"] = hideMode == 2 ? 0.12 : 0.0;
+        scene["media"] = QJsonArray{entry};
+        controller.onRemoteSceneStart(QStringLiteral("automation-owner"), scene);
+        QTRY_VERIFY_WITH_TIMEOUT(controller.m_sceneActivationRequested, 5000);
+        QCOMPARE(controller.m_mediaItems.size(), 1);
+        const auto item = controller.m_mediaItems.first();
+        // PREPARE must not consume display delays or animation time.
+        QTest::qWait(220);
+        QCOMPARE(item->renderOpacity, 0.0);
+        QVERIFY(!item->displayStarted);
+        controller.activateScene();
+        QVERIFY(controller.m_sceneActivated);
+        int fadeInSnapshots = 0;
+        int fadeOutSnapshots = 0;
+        bool allSnapshotsApplied = true;
+        bool envelopesPreserved = true;
+        quint64 sequence = 0;
+        QTimer snapshots;
+        snapshots.setInterval(25);
+        connect(&snapshots, &QTimer::timeout, &controller, [&]() {
+            auto currentScene = scene;
+            auto currentEntry = entry;
+            currentEntry["visible"] = item->contentVisible;
+            currentScene["media"] = QJsonArray{currentEntry};
+            QJsonArray videos;
+            if (item->player) {
+                videos.append(QJsonObject{
+                    {"mediaId", item->mediaId}, {"positionMs", double(item->player->position())},
+                    {"durationMs", double(item->player->duration())}, {"playing", false},
+                    {"muted", item->muted}, {"visible", item->contentVisible},
+                    {"repeatAvailable", false}
+                });
+            }
+            const auto fade = item->visualFadeAnimation;
+            const qreal opacity = item->renderOpacity;
+            const bool hiding = item->hiding;
+            const bool displayStarted = item->displayStarted;
+            allSnapshotsApplied &= controller.applyAuthoritativeStateSnapshot(
+                snapshotForScene(currentScene, videos), ++sequence, 0);
+            envelopesPreserved &= item->visualFadeAnimation == fade
+                && item->renderOpacity == opacity && item->hiding == hiding
+                && item->displayStarted == displayStarted;
+            if (fade) {
+                if (hiding) ++fadeOutSnapshots;
+                else ++fadeInSnapshots;
+            }
+        });
+        snapshots.start();
+        QTest::qWait(80);
+        QCOMPARE(item->renderOpacity, 0.0);
+        QTRY_VERIFY_WITH_TIMEOUT(item->renderOpacity > 0.0 && item->renderOpacity < 0.6, 1000);
+        auto* model = findRemoteWindow()->findChild<MediaListModel*>();
+        QVERIFY(model);
+        const QVariantMap rendered = model->data(model->index(0, 0), MediaListModel::ModelDataRole).toMap();
+        QVERIFY(rendered.value(QStringLiteral("contentVisible")).toBool());
+        QVERIFY(rendered.value(QStringLiteral("renderVisible")).toBool());
+        if (hideMode == 0) {
+            QTRY_COMPARE_WITH_TIMEOUT(item->renderOpacity, 0.6, 1000);
+            QVERIFY(item->renderVisible);
+        } else {
+            QTRY_VERIFY_WITH_TIMEOUT(!item->renderVisible, 1000);
+            QCOMPARE(item->renderOpacity, 0.0);
+            // The cancelled fade-in must never revive the already hidden item.
+            QTest::qWait(450);
+            QVERIFY(!item->renderVisible);
+            QCOMPARE(item->renderOpacity, 0.0);
+        }
+        snapshots.stop();
+        QVERIFY(allSnapshotsApplied);
+        QVERIFY(envelopesPreserved);
+        QVERIFY(fadeInSnapshots > 0);
+        if (hideMode == 2) QVERIFY(fadeOutSnapshots > 0);
+        controller.onRemoteSceneStop(QStringLiteral("automation-owner"),
+                                     scene.value("sceneInstanceId").toString());
+        QTRY_VERIFY_WITH_TIMEOUT(!findRemoteWindow(), 2000);
+        if (!owner.isEmpty()) {
+            files.removeReceivedFileMapping(fileId);
+            residency.release(owner);
+        }
+    }
+
+    void authoritativeVisibilityChangesUseFades()
+    {
+        RemoteSceneController controller(nullptr, nullptr);
+        auto scene = textScene();
+        auto entry = scene.value("media").toArray().first().toObject();
+        entry["visible"] = false;
+        entry["fadeInSeconds"] = 0.4;
+        scene["media"] = QJsonArray{entry};
+        controller.onRemoteSceneStart(QStringLiteral("visibility-owner"), scene);
+        QTRY_VERIFY_WITH_TIMEOUT(controller.m_sceneActivationRequested, 5000);
+        controller.activateScene();
+        QVERIFY(controller.m_sceneActivated);
+        const auto item = controller.m_mediaItems.first();
+        entry["visible"] = true;
+        scene["media"] = QJsonArray{entry};
+        QVERIFY(controller.applyAuthoritativeStateSnapshot(snapshotForScene(scene), 1, 0));
+        QVERIFY(item->visualFadeAnimation);
+        QVERIFY(item->contentVisible);
+        QCOMPARE(item->renderOpacity, 0.0);
+        QTRY_VERIFY_WITH_TIMEOUT(item->renderOpacity > 0.0 && item->renderOpacity < 1.0, 1000);
+        const auto fade = item->visualFadeAnimation;
+        const qreal opacity = item->renderOpacity;
+        QVERIFY(controller.applyAuthoritativeStateSnapshot(snapshotForScene(scene), 2, 0));
+        QCOMPARE(item->visualFadeAnimation, fade);
+        QCOMPARE(item->renderOpacity, opacity);
+        entry["visible"] = false;
+        scene["media"] = QJsonArray{entry};
+        QVERIFY(controller.applyAuthoritativeStateSnapshot(snapshotForScene(scene), 3, 0));
+        QVERIFY(!item->visualFadeAnimation);
+        QVERIFY(!item->renderVisible);
+        QTest::qWait(450);
+        QVERIFY(!item->renderVisible);
+        QCOMPARE(item->renderOpacity, 0.0);
+        controller.onRemoteSceneStop(QStringLiteral("visibility-owner"),
+                                     scene.value("sceneInstanceId").toString());
+        QTRY_VERIFY_WITH_TIMEOUT(!findRemoteWindow(), 2000);
+    }
+
+    void playbackAutomation_data()
+    {
+        QTest::addColumn<int>("endDelayMs");
+        QTest::addColumn<bool>("pauseEarly");
+        QTest::addColumn<bool>("repeat");
+        QTest::newRow("hide-and-mute-before-end") << -250 << false << false;
+        QTest::newRow("hide-and-mute-at-end") << 0 << false << false;
+        QTest::newRow("hide-and-mute-after-end") << 180 << false << false;
+        QTest::newRow("hide-and-mute-only-after-final-repeat") << 0 << false << true;
+        QTest::newRow("pause-delay-after-play-delay") << 0 << true << false;
+    }
+
+    void playbackAutomation()
+    {
+        QFETCH(int, endDelayMs);
+        QFETCH(bool, pauseEarly);
+        QFETCH(bool, repeat);
+        const QString fixture = QString::fromUtf8(TEST_VIDEO_FILE);
+        const QString fileId(64, QLatin1Char('e'));
+        FileManager files;
+        files.registerReceivedFilePath(fileId, fixture);
+        const QString owner = UploadManager::residencyOwnerId({}, 0, fileId);
+        auto& residency = MediaResidencyManager::instance();
+        residency.acquire(owner, fixture);
+        QTRY_VERIFY_WITH_TIMEOUT(residency.ready(owner), 60000);
+        RemoteSceneController controller(&files, nullptr);
+        auto scene = videoScene(fileId);
+        auto entry = scene.value("media").toArray().at(0).toObject();
+        entry["startPositionMs"] = 1000;
+        entry["endPositionMs"] = 1900;
+        entry["autoPlayDelayMs"] = 180;
+        entry["autoPause"] = pauseEarly;
+        entry["autoPauseDelayMs"] = 260;
+        entry["autoUnmute"] = true;
+        entry["autoUnmuteDelayMs"] = 100;
+        entry["audioFadeInSeconds"] = 0.1;
+        entry["hideWhenVideoEnds"] = true;
+        entry["muteWhenVideoEnds"] = true;
+        entry["autoHideDelayMs"] = endDelayMs;
+        entry["autoMuteDelayMs"] = endDelayMs;
+        entry["repeatEnabled"] = repeat;
+        entry["repeatCount"] = repeat ? 1 : 0;
+        scene["media"] = QJsonArray{entry};
+        controller.onRemoteSceneStart(QStringLiteral("playback-owner"), scene);
+        QTRY_VERIFY_WITH_TIMEOUT(controller.m_sceneActivationRequested, 5000);
+        const auto item = controller.m_mediaItems.first();
+        QVERIFY(item->player);
+        if (endDelayMs < 0) {
+            // Signed end offsets must also survive authoritative resume snapshots.
+            const QJsonArray videos{QJsonObject{
+                {"mediaId", "video-1"}, {"positionMs", 1000.0},
+                {"durationMs", double(item->player->duration())}, {"playing", false},
+                {"muted", true}, {"visible", true}, {"repeatAvailable", false}
+            }};
+            QVERIFY(controller.applyAuthoritativeStateSnapshot(snapshotForScene(scene, videos), 1, 0));
+        }
+        int wraps = 0;
+        qint64 previous = 1000;
+        bool hiddenBeforeFinalRepeat = false;
+        connect(item->player, &ResidentVideoPlayer::positionChanged, &controller, [&](qint64 position) {
+            if (previous >= 1600 && position == 1000) {
+                ++wraps;
+                hiddenBeforeFinalRepeat = hiddenBeforeFinalRepeat || !item->renderVisible;
+            }
+            previous = position;
+        });
+        controller.activateScene();
+        QVERIFY(controller.m_sceneActivated);
+        QTest::qWait(70);
+        QCOMPARE(item->player->playbackState(), QMediaPlayer::PausedState);
+        QVERIFY(item->audio->isMuted());
+        QTRY_COMPARE_WITH_TIMEOUT(item->player->playbackState(), QMediaPlayer::PlayingState, 1000);
+        QTRY_VERIFY_WITH_TIMEOUT(!item->audio->isMuted() && item->audio->volume() > 0.0, 1000);
+        if (pauseEarly) {
+            QTRY_COMPARE_WITH_TIMEOUT(item->player->playbackState(), QMediaPlayer::PausedState, 1000);
+            QVERIFY(item->player->position() > 1000);
+            QVERIFY(item->player->position() < 1700);
+            QVERIFY(item->renderVisible);
+            QTest::qWait(200);
+            QCOMPARE(item->player->playbackState(), QMediaPlayer::PausedState);
+        } else {
+            if (endDelayMs > 0) {
+                QTRY_COMPARE_WITH_TIMEOUT(item->player->playbackState(), QMediaPlayer::PausedState, 3000);
+                QVERIFY(item->renderVisible);
+                QVERIFY(!item->audio->isMuted());
+            }
+            QTRY_VERIFY_WITH_TIMEOUT(!item->renderVisible, 3500);
+            if (endDelayMs < 0) {
+                QVERIFY(item->player->position() < 1900);
+                QCOMPARE(item->player->playbackState(), QMediaPlayer::PlayingState);
+            }
+            QTRY_VERIFY_WITH_TIMEOUT(item->audio->isMuted(), 1000);
+            QTRY_COMPARE_WITH_TIMEOUT(item->player->playbackState(), QMediaPlayer::PausedState, 1000);
+            QCOMPARE(item->player->position(), 1900);
+            QCOMPARE(wraps, repeat ? 1 : 0);
+            QVERIFY(!hiddenBeforeFinalRepeat);
+        }
+        controller.onRemoteSceneStop(QStringLiteral("playback-owner"),
+                                     scene.value("sceneInstanceId").toString());
+        QTRY_VERIFY_WITH_TIMEOUT(!findRemoteWindow(), 2000);
+        files.removeReceivedFileMapping(fileId);
+        residency.release(owner);
+    }
+
+    void clockSnapshotsPreserveFades()
+    {
+        RemoteSceneController controller(nullptr, nullptr);
+        auto item = std::make_shared<RemoteSceneController::RemoteMediaItem>();
+        item->mediaId = QStringLiteral("video-1");
+        item->type = QStringLiteral("video");
+        item->player = new ResidentVideoPlayer(&controller);
+        item->audio = new QAudioOutput(&controller);
+        item->player->setAudioOutput(item->audio);
+        item->muted = true;
+        item->audio->setMuted(true);
+        item->audio->setVolume(0.0);
+        item->volume = 0.75;
+        item->audioFadeInSeconds = 0.4;
+        item->audioFadeOutSeconds = 0.4;
+        item->fadeInSeconds = 0.4;
+        item->contentVisible = false;
+        item->renderVisible = false;
+        item->spans.append(RemoteSceneController::RemoteMediaItem::Span{});
+        controller.m_mediaItems.append(item);
+        controller.m_sceneActivated = true;
+        controller.m_pendingSenderClientId = QStringLiteral("audio-owner");
+        controller.m_pendingSceneInstanceId = QStringLiteral("audio-run");
+        qint64 sequence = 0;
+        auto sync = [&](bool muted) {
+            controller.onRemoteSceneVideoSync(QStringLiteral("audio-owner"), QStringLiteral("audio-run"),
+                ++sequence, QDateTime::currentMSecsSinceEpoch(), QJsonArray{QJsonObject{
+                    {"mediaId", "video-1"}, {"positionMs", 0.0}, {"durationMs", 0.0},
+                    {"playing", false}, {"muted", muted}, {"visible", true},
+                    {"repeatAvailable", false}
+                }});
+        };
+        sync(false);
+        QTRY_VERIFY_WITH_TIMEOUT(item->audio->volume() > 0.0 && item->audio->volume() < 0.75, 1000);
+        QVERIFY(item->renderOpacity > 0.0 && item->renderOpacity < 1.0);
+        QPointer<QVariantAnimation> fade = item->audioFadeAnimation;
+        QPointer<QVariantAnimation> visualFade = item->visualFadeAnimation;
+        QVERIFY(fade);
+        QVERIFY(visualFade);
+        sync(false);
+        QCOMPARE(item->audioFadeAnimation, fade);
+        QCOMPARE(item->visualFadeAnimation, visualFade);
+        QVERIFY(item->audio->volume() < 0.75);
+        QTRY_COMPARE_WITH_TIMEOUT(item->audio->volume(), 0.75, 1000);
+        sync(true);
+        QTRY_VERIFY_WITH_TIMEOUT(item->audio->volume() > 0.0 && item->audio->volume() < 0.75, 1000);
+        fade = item->audioFadeAnimation;
+        sync(true);
+        QCOMPARE(item->audioFadeAnimation, fade);
+        QTRY_VERIFY_WITH_TIMEOUT(item->audio->isMuted(), 1000);
+        QCOMPARE(item->audio->volume(), 0.0);
+    }
+
+    void simultaneousUnmuteAndMuteEndsMuted()
+    {
+        RemoteSceneController controller(nullptr, nullptr);
+        auto item = std::make_shared<RemoteSceneController::RemoteMediaItem>();
+        item->sceneEpoch = controller.m_sceneEpoch;
+        item->audio = new QAudioOutput(&controller);
+        item->muted = true;
+        item->audio->setMuted(true);
+        item->autoMute = true;
+        item->autoMuteDelayMs = 0;
+        controller.m_mediaItems.append(item);
+        // Match activation's insertion order: unmute first, then auto-mute.
+        QTimer::singleShot(0, &controller, [&] { controller.applyAudioMuteState(item, false); });
+        controller.scheduleMuteTimer(item);
+        QTest::qWait(50);
+        QVERIFY(item->muted);
+        QVERIFY(item->audio->isMuted());
     }
 
     void teardownDoesNotPumpNestedApplicationEvents()

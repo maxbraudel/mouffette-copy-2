@@ -1,5 +1,6 @@
 #include <QApplication>
 #include <QAudioOutput>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QMediaPlayer>
 #include <QJsonArray>
@@ -7,6 +8,7 @@
 #include "frontend/rendering/canvas/QuickCanvasHost.h"
 #include <QQuickItem>
 #include <QQuickView>
+#include <QScopeGuard>
 #include <QVideoSink>
 #include <QtTest>
 
@@ -275,6 +277,312 @@ private slots:
             host->triggerTestSceneAction();
             QCOMPARE(video->positionMs(), 2200);
         }
+    }
+
+    void testScenePlayAndPauseDelays()
+    {
+        std::unique_ptr<QuickCanvasHost> host(QuickCanvasHost::create());
+        QVERIFY(host);
+        host->setProjectEditingEnabled(true);
+        auto* video = host->document()->addPreparedFile(videoFixture(), QSize(160, 90), true, {});
+        QVERIFY(video);
+        QTRY_VERIFY_WITH_TIMEOUT(video->residencyReady() && video->player()->duration() > 3000, 5000);
+        auto settings = video->settings();
+        settings.unmuteAutomatically = false;
+        settings.playDelayEnabled = true;
+        settings.playDelayText = QStringLiteral("0.3");
+        settings.pauseDelayEnabled = true;
+        settings.pauseDelayText = QStringLiteral("0.4");
+        video->setSettings(settings);
+        video->setPositionMs(2200);
+        QElapsedTimer playingFor;
+        const auto playingConnection = connect(video->player(), &ResidentVideoPlayer::playbackStateChanged, this,
+                [&](QMediaPlayer::PlaybackState state) {
+            if (state == QMediaPlayer::PlayingState && !playingFor.isValid()) playingFor.start();
+        });
+        const auto disconnectPlaying = qScopeGuard([playingConnection] {
+            QObject::disconnect(playingConnection);
+        });
+
+        host->triggerTestSceneAction();
+        QVERIFY(host->testSceneLaunched());
+        QTRY_VERIFY_WITH_TIMEOUT(video->contentVisible() && video->muted(), 5000);
+        QVERIFY(!video->isPlaying());
+        QTest::qWait(100);
+        QVERIFY(!video->isPlaying());
+        QTRY_VERIFY_WITH_TIMEOUT(video->isPlaying(), 1000);
+        QTRY_VERIFY_WITH_TIMEOUT(!video->isPlaying(), 1500);
+        QVERIFY(playingFor.elapsed() >= 330);
+        QVERIFY(video->positionMs() >= 250);
+        QVERIFY(video->positionMs() < 700);
+        const qint64 pausedAt = video->positionMs();
+        QTest::qWait(200);
+        QCOMPARE(video->positionMs(), pausedAt);
+        host->triggerTestSceneAction();
+        QCOMPARE(video->positionMs(), 2200);
+        QVERIFY(!video->isPlaying());
+    }
+
+    void testSceneAudioDelaysAndFadesPreserveConfiguredVolume()
+    {
+        std::unique_ptr<QuickCanvasHost> host(QuickCanvasHost::create());
+        QVERIFY(host);
+        host->setProjectEditingEnabled(true);
+        auto* video = host->document()->addPreparedFile(videoFixture(), QSize(160, 90), true, {});
+        QVERIFY(video);
+        QTRY_VERIFY_WITH_TIMEOUT(video->residencyReady() && video->audioOutput(), 5000);
+        auto settings = video->settings();
+        settings.playAutomatically = false;
+        settings.volumeOverrideEnabled = true;
+        settings.volumeText = QStringLiteral("37");
+        settings.unmuteDelayEnabled = true;
+        settings.unmuteDelayText = QStringLiteral("0.25");
+        settings.audioFadeInEnabled = true;
+        settings.audioFadeInText = QStringLiteral("0.3");
+        settings.muteDelayEnabled = true;
+        settings.muteDelayText = QStringLiteral("1");
+        settings.audioFadeOutEnabled = true;
+        settings.audioFadeOutText = QStringLiteral("0.3");
+        video->setSettings(settings);
+        video->setMuted(false);
+        auto* audio = video->audioOutput();
+
+        host->triggerTestSceneAction();
+        QVERIFY(host->testSceneLaunched());
+        QTRY_VERIFY_WITH_TIMEOUT(video->contentVisible() && video->muted(), 5000);
+        QTest::qWait(100);
+        QVERIFY(video->muted());
+        QTRY_VERIFY_WITH_TIMEOUT(!video->muted() && audio->volume() > 0.02
+            && audio->volume() < 0.35, 1000);
+        QCOMPARE(video->volume(), 0.37);
+        QTRY_VERIFY_WITH_TIMEOUT(qAbs(audio->volume() - 0.37) < 0.001, 1000);
+        QVERIFY(!video->muted());
+        QTRY_VERIFY_WITH_TIMEOUT(video->muted() && !audio->isMuted()
+            && audio->volume() > 0.02 && audio->volume() < 0.35, 1000);
+        QCOMPARE(video->volume(), 0.37);
+        QTRY_VERIFY_WITH_TIMEOUT(audio->isMuted(), 1000);
+        QVERIFY(video->muted());
+        QVERIFY(audio->volume() < 0.001);
+        QCOMPARE(video->volume(), 0.37);
+
+        host->triggerTestSceneAction();
+        QVERIFY(!video->muted());
+        QVERIFY(qAbs(audio->volume() - 0.37) < 0.001);
+        QCOMPARE(video->volume(), 0.37);
+    }
+
+    void testSceneDisabledAutomaticActionsStayDisabled()
+    {
+        std::unique_ptr<QuickCanvasHost> host(QuickCanvasHost::create());
+        QVERIFY(host);
+        host->setProjectEditingEnabled(true);
+        auto* video = host->document()->addPreparedFile(videoFixture(), QSize(160, 90), true, {});
+        QVERIFY(video);
+        QTRY_VERIFY_WITH_TIMEOUT(video->residencyReady() && video->audioOutput(), 5000);
+        auto settings = video->settings();
+        settings.displayAutomatically = false;
+        settings.playAutomatically = false;
+        settings.unmuteAutomatically = false;
+        settings.displayDelayEnabled = true;
+        settings.displayDelayText = QStringLiteral("0.1");
+        settings.playDelayEnabled = true;
+        settings.playDelayText = QStringLiteral("0.1");
+        settings.unmuteDelayEnabled = true;
+        settings.unmuteDelayText = QStringLiteral("0.1");
+        settings.fadeInEnabled = true;
+        settings.fadeInText = QStringLiteral("0.2");
+        settings.audioFadeInEnabled = true;
+        settings.audioFadeInText = QStringLiteral("0.2");
+        video->setSettings(settings);
+        video->setMuted(false);
+        video->setPositionMs(2200);
+
+        host->triggerTestSceneAction();
+        QVERIFY(host->testSceneLaunched());
+        QTRY_VERIFY_WITH_TIMEOUT(!video->contentVisible() && video->muted(), 5000);
+        QTest::qWait(600);
+        QVERIFY(!video->contentVisible());
+        QCOMPARE(video->animatedDisplayOpacity(), 0.0);
+        QVERIFY(!video->isPlaying());
+        QCOMPARE(video->positionMs(), 0);
+        QVERIFY(video->muted());
+        host->triggerTestSceneAction();
+        QVERIFY(video->contentVisible());
+        QVERIFY(!video->muted());
+        QCOMPARE(video->positionMs(), 2200);
+    }
+
+    void testSceneEndActionsWaitForLastRepeat_data()
+    {
+        QTest::addColumn<bool>("explicitEndMarker");
+        QTest::addColumn<int>("endDelayMs");
+        QTest::newRow("marker-before-end") << true << -250;
+        QTest::newRow("marker-at-end") << true << 0;
+        QTest::newRow("marker-after-end") << true << 250;
+        QTest::newRow("natural-before-end") << false << -250;
+        QTest::newRow("natural-at-end") << false << 0;
+        QTest::newRow("natural-after-end") << false << 250;
+    }
+
+    void testSceneEndActionsWaitForLastRepeat()
+    {
+        QFETCH(bool, explicitEndMarker);
+        QFETCH(int, endDelayMs);
+        std::unique_ptr<QuickCanvasHost> host(QuickCanvasHost::create());
+        QVERIFY(host);
+        host->setProjectEditingEnabled(true);
+        auto* video = host->document()->addPreparedFile(videoFixture(), QSize(160, 90), true, {});
+        QVERIFY(video);
+        QTRY_VERIFY_WITH_TIMEOUT(video->residencyReady() && video->audioOutput()
+            && video->player()->duration() > 3000, 5000);
+        const qint64 end = explicitEndMarker ? 1600 : video->player()->duration();
+        const qint64 start = end - 700;
+        QVERIFY(video->setPlaybackRange(start, explicitEndMarker ? end : -1));
+        auto settings = video->settings();
+        settings.repeatEnabled = true;
+        settings.repeatCountText = QStringLiteral("1");
+        settings.hideWhenVideoEnds = true;
+        settings.muteWhenVideoEnds = true;
+        settings.hideDelayEnabled = true;
+        settings.hideDelayText = QString::number(endDelayMs / 1000.0);
+        settings.muteDelayEnabled = true;
+        settings.muteDelayText = settings.hideDelayText;
+        settings.fadeOutEnabled = true;
+        settings.fadeOutText = QStringLiteral("0.1");
+        settings.audioFadeOutEnabled = true;
+        settings.audioFadeOutText = QStringLiteral("0.1");
+        video->setSettings(settings);
+        int wraps = 0;
+        qint64 previous = start;
+        const auto wrapConnection = connect(video->player(), &ResidentVideoPlayer::positionChanged, this, [&](qint64 position) {
+            if (previous > start + 350 && position == start) ++wraps;
+            previous = position;
+        });
+        const auto disconnectWrap = qScopeGuard([wrapConnection] {
+            QObject::disconnect(wrapConnection);
+        });
+        qint64 hiddenAtPosition = -1;
+        qint64 mutedAtPosition = -1;
+        const auto hiddenConnection = connect(video, &CanvasMedia::changed, this, [&] {
+            if (wraps > 0 && !video->contentVisible() && hiddenAtPosition < 0)
+                hiddenAtPosition = video->positionMs();
+        });
+        const auto mutedConnection = connect(video->audioOutput(), &QAudioOutput::mutedChanged, this, [&](bool muted) {
+            if (wraps > 0 && muted && mutedAtPosition < 0) mutedAtPosition = video->positionMs();
+        });
+        const auto disconnectEndActions = qScopeGuard([hiddenConnection, mutedConnection] {
+            QObject::disconnect(hiddenConnection);
+            QObject::disconnect(mutedConnection);
+        });
+
+        host->triggerTestSceneAction();
+        QVERIFY(host->testSceneLaunched());
+        QTRY_VERIFY_WITH_TIMEOUT(video->isPlaying() && video->contentVisible() && !video->muted(), 5000);
+        QTRY_COMPARE_WITH_TIMEOUT(wraps, 1, 3000);
+        // Reaching the first end, including a natural EOF, must only repeat.
+        QVERIFY(video->contentVisible());
+        QVERIFY(!video->muted());
+        if (endDelayMs > 0) {
+            QTRY_VERIFY_WITH_TIMEOUT(!video->isPlaying() && video->positionMs() == end, 3000);
+            QVERIFY(video->contentVisible());
+            QVERIFY(!video->muted());
+        }
+        QTRY_VERIFY_WITH_TIMEOUT(!video->contentVisible() && video->audioOutput()->isMuted(), 3000);
+        QVERIFY(video->muted());
+        QCOMPARE(wraps, 1);
+        if (endDelayMs < 0) {
+            QVERIFY(hiddenAtPosition >= end + endDelayMs);
+            QVERIFY(hiddenAtPosition < end);
+            QVERIFY(mutedAtPosition >= end + endDelayMs);
+            QVERIFY(mutedAtPosition < end);
+        } else {
+            QCOMPARE(hiddenAtPosition, end);
+            QCOMPARE(mutedAtPosition, end);
+        }
+        QTRY_VERIFY_WITH_TIMEOUT(!video->isPlaying() && video->positionMs() == end, 3000);
+        host->triggerTestSceneAction();
+        QVERIFY(video->contentVisible());
+        QVERIFY(!video->muted());
+        QCOMPARE(video->animatedDisplayOpacity(), 1.0);
+    }
+
+    void testSceneStopCancelsVideoTimersAndAudioFade_data()
+    {
+        QTest::addColumn<bool>("stopDuringFade");
+        QTest::newRow("pending-unmute-and-play") << false;
+        QTest::newRow("active-audio-fade") << true;
+    }
+
+    void testSceneStopCancelsVideoTimersAndAudioFade()
+    {
+        QFETCH(bool, stopDuringFade);
+        std::unique_ptr<QuickCanvasHost> host(QuickCanvasHost::create());
+        QVERIFY(host);
+        host->setProjectEditingEnabled(true);
+        auto* video = host->document()->addPreparedFile(videoFixture(), QSize(160, 90), true, {});
+        QVERIFY(video);
+        QTRY_VERIFY_WITH_TIMEOUT(video->residencyReady() && video->audioOutput(), 5000);
+        auto settings = video->settings();
+        settings.volumeOverrideEnabled = true;
+        settings.volumeText = QStringLiteral("37");
+        settings.playDelayEnabled = true;
+        settings.playDelayText = QStringLiteral("1");
+        settings.pauseDelayEnabled = true;
+        settings.pauseDelayText = QStringLiteral("0.3");
+        settings.unmuteDelayEnabled = true;
+        settings.unmuteDelayText = QStringLiteral("0.25");
+        settings.audioFadeInEnabled = true;
+        settings.audioFadeInText = QStringLiteral("0.6");
+        settings.muteDelayEnabled = true;
+        settings.muteDelayText = QStringLiteral("1");
+        settings.audioFadeOutEnabled = true;
+        settings.audioFadeOutText = QStringLiteral("0.6");
+        video->setSettings(settings);
+        video->setMuted(false);
+        video->setContentVisible(false);
+        video->setPositionMs(2200);
+        auto* audio = video->audioOutput();
+        host->triggerTestSceneAction();
+        QVERIFY(host->testSceneLaunched());
+        QTRY_VERIFY_WITH_TIMEOUT(video->contentVisible() && video->muted(), 5000);
+        if (stopDuringFade) {
+            QTRY_VERIFY_WITH_TIMEOUT(!video->muted() && audio->volume() > 0.02
+                && audio->volume() < 0.35, 1500);
+        }
+        host->triggerTestSceneAction();
+        QVERIFY(!video->contentVisible());
+        QVERIFY(!video->muted());
+        QVERIFY(!video->isPlaying());
+        QCOMPARE(video->positionMs(), 2200);
+        QVERIFY(qAbs(audio->volume() - 0.37) < 0.001);
+
+        settings.displayAutomatically = false;
+        settings.playAutomatically = false;
+        settings.unmuteAutomatically = false;
+        settings.muteDelayEnabled = false;
+        video->setSettings(settings);
+        host->triggerTestSceneAction();
+        QVERIFY(host->testSceneLaunched());
+        QTRY_VERIFY_WITH_TIMEOUT(video->muted(), 5000);
+        bool unmutedUnexpectedly = false;
+        const auto unmuteConnection = connect(audio, &QAudioOutput::mutedChanged, this, [&](bool muted) {
+            unmutedUnexpectedly |= !muted;
+        });
+        const auto disconnectUnmute = qScopeGuard([unmuteConnection] {
+            QObject::disconnect(unmuteConnection);
+        });
+        QTest::qWait(1700);
+        QVERIFY(!unmutedUnexpectedly);
+        QVERIFY(!video->contentVisible());
+        QVERIFY(video->muted());
+        QVERIFY(!video->isPlaying());
+        QCOMPARE(video->positionMs(), 0);
+        QCOMPARE(video->volume(), 0.37);
+        host->triggerTestSceneAction();
+        QVERIFY(!video->contentVisible());
+        QVERIFY(!video->muted());
+        QCOMPARE(video->positionMs(), 2200);
+        QVERIFY(qAbs(audio->volume() - 0.37) < 0.001);
     }
 
     void qmlVideoOutputUsesDocumentRuntimeAndPreservesAudioState()

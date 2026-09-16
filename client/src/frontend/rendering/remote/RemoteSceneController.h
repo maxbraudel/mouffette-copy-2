@@ -79,6 +79,7 @@ private slots:
 	bool remoteRenderGraphsReady() const;
 
 private:
+	friend class RemoteSceneControllerLifecycleTest;
 	struct ScreenWindow {
 		QPointer<QQuickWindow> window;
 		QPointer<MediaListModel> mediaModel;

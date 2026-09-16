@@ -1013,6 +1013,220 @@ private slots:
         QCOMPARE(media->animatedDisplayOpacity(), 1.0);
     }
 
+    void testSceneAppliesDisplayAndHideFades_data()
+    {
+        QTest::addColumn<QString>("mediaType");
+        QTest::newRow("text") << QStringLiteral("text");
+        QTest::newRow("image") << QStringLiteral("image");
+        QTest::newRow("video") << QStringLiteral("video");
+    }
+
+    void testSceneAppliesDisplayAndHideFades()
+    {
+        QFETCH(QString, mediaType);
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        std::unique_ptr<QuickCanvasHost> host(QuickCanvasHost::create());
+        QVERIFY(host);
+        host->setProjectEditingEnabled(true);
+        CanvasMedia* media = nullptr;
+        if (mediaType == QLatin1String("text")) {
+            media = host->document()->addText({}, QStringLiteral("Fading title"));
+        } else if (mediaType == QLatin1String("image")) {
+            QImage image(32, 24, QImage::Format_RGBA8888);
+            image.fill(Qt::cyan);
+            const QString path = directory.filePath(QStringLiteral("fade.png"));
+            QVERIFY(image.save(path));
+            media = host->document()->addPreparedFile(path, image.size(), false, {});
+        } else {
+            const QString override = qEnvironmentVariable("MOUFFETTE_TEST_VIDEO_FILE");
+            const QString path = override.isEmpty() ? QString::fromUtf8(TEST_VIDEO_FILE) : override;
+            QVERIFY(QFile::exists(path));
+            media = host->document()->addPreparedFile(path, QSize(160, 90), true, {});
+        }
+        QVERIFY(media);
+        QTRY_VERIFY_WITH_TIMEOUT(media->residencyReady(), 5000);
+        auto settings = media->settings();
+        settings.playAutomatically = false;
+        settings.unmuteAutomatically = false;
+        settings.displayDelayEnabled = true;
+        settings.displayDelayText = QStringLiteral("0.25");
+        settings.fadeInEnabled = true;
+        settings.fadeInText = QStringLiteral("0.3");
+        settings.hideDelayEnabled = true;
+        settings.hideDelayText = QStringLiteral("0.65");
+        settings.fadeOutEnabled = true;
+        settings.fadeOutText = QStringLiteral("0.25");
+        settings.opacityOverrideEnabled = true;
+        settings.opacityText = QStringLiteral("40");
+        media->setSettings(settings);
+        QElapsedTimer displayedFor;
+        const auto displayConnection = connect(media, &CanvasMedia::changed, this, [&] {
+            if (media->contentVisible() && !displayedFor.isValid()) displayedFor.start();
+        });
+        const auto disconnectDisplay = qScopeGuard([displayConnection] {
+            QObject::disconnect(displayConnection);
+        });
+
+        host->triggerTestSceneAction();
+        QVERIFY(host->testSceneLaunched());
+        QTRY_VERIFY_WITH_TIMEOUT(!media->contentVisible(), 5000);
+        QCOMPARE(media->animatedDisplayOpacity(), 0.0);
+        QTest::qWait(100);
+        QVERIFY(!media->contentVisible());
+        QTRY_VERIFY_WITH_TIMEOUT(media->contentVisible()
+            && media->animatedDisplayOpacity() > 0.05
+            && media->animatedDisplayOpacity() < 0.95, 1000);
+        QCOMPARE(media->contentOpacity(), 0.4);
+        QTRY_COMPARE_WITH_TIMEOUT(media->animatedDisplayOpacity(), 1.0, 1000);
+        QVERIFY(media->contentVisible());
+        QTRY_VERIFY_WITH_TIMEOUT(media->contentVisible()
+            && media->animatedDisplayOpacity() > 0.0
+            && media->animatedDisplayOpacity() < 0.95, 1000);
+        // Hide starts relative to appearance, including the fade-in duration.
+        QVERIFY(displayedFor.elapsed() >= 580);
+        QTRY_VERIFY_WITH_TIMEOUT(!media->contentVisible(), 1000);
+        QCOMPARE(media->animatedDisplayOpacity(), 0.0);
+        QCOMPARE(media->contentOpacity(), 0.4);
+
+        host->triggerTestSceneAction();
+        QVERIFY(media->contentVisible());
+        QCOMPARE(media->animatedDisplayOpacity(), 1.0);
+        QCOMPARE(media->contentOpacity(), 0.4);
+    }
+
+    void testSceneRelaunchCancelsPreviousDisplayTimersAndFades_data()
+    {
+        QTest::addColumn<bool>("stopDuringFade");
+        QTest::newRow("pending-display") << false;
+        QTest::newRow("active-fade") << true;
+    }
+
+    void testSceneRelaunchCancelsPreviousDisplayTimersAndFades()
+    {
+        QFETCH(bool, stopDuringFade);
+        std::unique_ptr<QuickCanvasHost> host(QuickCanvasHost::create());
+        QVERIFY(host);
+        host->setProjectEditingEnabled(true);
+        auto* media = host->document()->addText({}, QStringLiteral("Relaunch"));
+        QVERIFY(media);
+        auto settings = media->settings();
+        settings.displayDelayEnabled = true;
+        settings.displayDelayText = QStringLiteral("0.25");
+        settings.fadeInEnabled = true;
+        settings.fadeInText = QStringLiteral("0.6");
+        settings.hideDelayEnabled = true;
+        settings.hideDelayText = QStringLiteral("0.8");
+        settings.fadeOutEnabled = true;
+        settings.fadeOutText = QStringLiteral("0.4");
+        media->setSettings(settings);
+        host->triggerTestSceneAction();
+        QVERIFY(host->testSceneLaunched());
+        if (stopDuringFade) {
+            QTRY_VERIFY_WITH_TIMEOUT(media->contentVisible()
+                && media->animatedDisplayOpacity() > 0.1
+                && media->animatedDisplayOpacity() < 0.9, 1500);
+        } else {
+            QVERIFY(!media->contentVisible());
+        }
+        host->triggerTestSceneAction();
+        QVERIFY(!host->testSceneLaunched());
+        QVERIFY(media->contentVisible());
+        QCOMPARE(media->animatedDisplayOpacity(), 1.0);
+
+        settings.displayAutomatically = false;
+        media->setSettings(settings);
+        host->triggerTestSceneAction();
+        QVERIFY(host->testSceneLaunched());
+        QVERIFY(!media->contentVisible());
+        bool appearedUnexpectedly = false;
+        const auto appearanceConnection = connect(media, &CanvasMedia::changed, this, [&] {
+            appearedUnexpectedly |= media->contentVisible() || media->animatedDisplayOpacity() > 0.0;
+        });
+        const auto disconnectAppearance = qScopeGuard([appearanceConnection] {
+            QObject::disconnect(appearanceConnection);
+        });
+        // Pass every deadline of the first scene: its callbacks and animations
+        // must neither expose the new scene nor overwrite the restored draft.
+        QTest::qWait(1600);
+        QVERIFY(!appearedUnexpectedly);
+        QVERIFY(!media->contentVisible());
+        QCOMPARE(media->animatedDisplayOpacity(), 0.0);
+        host->triggerTestSceneAction();
+        QVERIFY(media->contentVisible());
+        QCOMPARE(media->animatedDisplayOpacity(), 1.0);
+    }
+
+    void sceneSerializationNormalizesTimingWithoutChangingEditorValues_data()
+    {
+        QTest::addColumn<QString>("rawSeconds");
+        QTest::addColumn<bool>("enabled");
+        QTest::addColumn<int>("signedDelayMs");
+        QTest::addColumn<double>("fadeSeconds");
+        QTest::newRow("negative-end-offset") << QStringLiteral(" -0.25 ") << true << -250 << 0.0;
+        QTest::newRow("positive-delay") << QStringLiteral("0.375") << true << 375 << 0.375;
+        QTest::newRow("disabled-value") << QStringLiteral("4.25") << false << 0 << 0.0;
+        QTest::newRow("invalid-value") << QStringLiteral("invalid") << true << 0 << 0.0;
+        QTest::newRow("non-finite-value") << QStringLiteral("nan") << true << 0 << 0.0;
+        QTest::newRow("positive-cap") << QStringLiteral("100000") << true << 86400000 << 3600.0;
+        QTest::newRow("negative-cap") << QStringLiteral("-100000") << true << -86400000 << 0.0;
+    }
+
+    void sceneSerializationNormalizesTimingWithoutChangingEditorValues()
+    {
+        QFETCH(QString, rawSeconds);
+        QFETCH(bool, enabled);
+        QFETCH(int, signedDelayMs);
+        QFETCH(double, fadeSeconds);
+        CanvasDocument document;
+        const QString override = qEnvironmentVariable("MOUFFETTE_TEST_VIDEO_FILE");
+        const QString fixture = override.isEmpty() ? QString::fromUtf8(TEST_VIDEO_FILE) : override;
+        auto* video = document.addPreparedFile(fixture, QSize(160, 90), true, {});
+        QVERIFY(video);
+        auto settings = video->settings();
+        settings.displayDelayEnabled = enabled;
+        settings.playDelayEnabled = enabled;
+        settings.pauseDelayEnabled = enabled;
+        settings.unmuteDelayEnabled = enabled;
+        settings.hideDelayEnabled = enabled;
+        settings.muteDelayEnabled = enabled;
+        settings.hideWhenVideoEnds = true;
+        settings.muteWhenVideoEnds = true;
+        settings.fadeInEnabled = enabled;
+        settings.fadeOutEnabled = enabled;
+        settings.audioFadeInEnabled = enabled;
+        settings.audioFadeOutEnabled = enabled;
+        settings.displayDelayText = rawSeconds;
+        settings.playDelayText = rawSeconds;
+        settings.pauseDelayText = rawSeconds;
+        settings.unmuteDelayText = rawSeconds;
+        settings.hideDelayText = rawSeconds;
+        settings.muteDelayText = rawSeconds;
+        settings.fadeInText = rawSeconds;
+        settings.fadeOutText = rawSeconds;
+        settings.audioFadeInText = rawSeconds;
+        settings.audioFadeOutText = rawSeconds;
+        video->setSettings(settings);
+        const QJsonObject scene = document.serializeSceneState()
+            .value(QStringLiteral("media")).toArray().first().toObject();
+        QCOMPARE(scene.value(QStringLiteral("autoHideDelayMs")).toInt(), signedDelayMs);
+        QCOMPARE(scene.value(QStringLiteral("autoMuteDelayMs")).toInt(), signedDelayMs);
+        for (const char* key : {"autoDisplayDelayMs", "autoPlayDelayMs",
+                                "autoPauseDelayMs", "autoUnmuteDelayMs"}) {
+            QCOMPARE(scene.value(QLatin1String(key)).toInt(), qMax(0, signedDelayMs));
+        }
+        for (const char* key : {"fadeInSeconds", "fadeOutSeconds",
+                                "audioFadeInSeconds", "audioFadeOutSeconds"}) {
+            QCOMPARE(scene.value(QLatin1String(key)).toDouble(), fadeSeconds);
+        }
+        const QJsonObject saved = MediaSettingsSerialization::toProjectJson(video->settings());
+        for (const char* key : {"displayDelayText", "playDelayText", "pauseDelayText",
+                                "unmuteDelayText", "hideDelayText", "muteDelayText",
+                                "fadeInText", "fadeOutText", "audioFadeInText", "audioFadeOutText"}) {
+            QCOMPARE(saved.value(QLatin1String(key)).toString(), rawSeconds);
+        }
+    }
+
     void projectRoundTripPreservesTypedSettingsGeometryAndText()
     {
         std::unique_ptr<QuickCanvasHost> source(QuickCanvasHost::create());
