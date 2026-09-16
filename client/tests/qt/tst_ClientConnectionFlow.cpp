@@ -20,6 +20,7 @@
 #include "backend/runtime/RuntimeProfile.h"
 #include "backend/runtime/RuntimeStorageBootstrap.h"
 #include "backend/domain/canvas/CanvasDocument.h"
+#include "backend/domain/media/CanvasMedia.h"
 #include "backend/domain/models/ClientInfo.h"
 #include "backend/domain/project/ProjectManager.h"
 #include "backend/managers/network/ConnectionManager.h"
@@ -336,6 +337,102 @@ class ClientConnectionFlowTest final : public QObject
     Q_OBJECT
 
 private slots:
+    void localTestSurvivesRemoteSessionCleanup_data()
+    {
+        QTest::addColumn<QString>("cause");
+        QTest::newRow("peer-session-closed") << QStringLiteral("peer-closed");
+        QTest::newRow("connection-lease-expired") << QStringLiteral("lease-expired");
+        QTest::newRow("remote-session-inactivity") << QStringLiteral("inactivity");
+    }
+
+    void localTestSurvivesRemoteSessionCleanup()
+    {
+        QFETCH(QString, cause);
+        QTemporaryDir root;
+        QVERIFY(root.isValid());
+        RuntimeProfileContext context;
+        context.ordinal = 2;
+        context.instanceId = QStringLiteral("local-scene-network-loss");
+        context.profileId = context.instanceId;
+        context.rootPath = root.path();
+        context.persistent = false;
+        RuntimeProfile::configure(context);
+        ApplicationRuntime runtime(context);
+        runtime.getWorkspaceManager()->stopAutomaticTimersForTesting();
+        runtime.getProjectManager()->stopAutomaticTimersForTesting();
+        auto* websocket = runtime.getWebSocketClient();
+        RemoteSessionTestServer server(websocket->endpointId());
+        server.heartbeatIntervalMs = 250;
+        server.leaseTimeoutMs = 1000;
+        QVERIFY(server.listen());
+        auto* connections = runtime.findChild<ConnectionManager*>();
+        QVERIFY(connections);
+        connections->connectToServer(server.url());
+        QTRY_VERIFY_WITH_TIMEOUT(websocket->isConnected(), 2000);
+        const QString target(43, QLatin1Char('L'));
+        const QString sessionId = QStringLiteral("local-test-remote-session");
+        QVERIFY(server.sendClientList(onlineClient(target, QStringLiteral("Remote peer"))));
+        QTRY_COMPARE_WITH_TIMEOUT(runtime.displayClients().size(), 1, 1000);
+        runtime.activateClient(target);
+        QTRY_COMPARE_WITH_TIMEOUT(server.openCommands.size(), 1, 1000);
+        QVERIFY(server.sendOpened(sessionId,
+            server.openCommands.last().value(QStringLiteral("requestId")).toString(),
+            target, ScreenInfo(0, 1920, 1080, 0, 0, true), 50));
+        QTRY_VERIFY_WITH_TIMEOUT(runtime.isRemoteClientConnected(), 1000);
+        ICanvasHost* canvas = runtime.getActiveCanvas();
+        QVERIFY(canvas && runtime.activeProjectExists());
+        CanvasMedia* media = canvas->document()->addText({}, QStringLiteral("Local demo"));
+        QVERIFY(media);
+        auto settings = media->settings();
+        settings.displayAutomatically = false;
+        media->setSettings(settings);
+        canvas->triggerTestSceneAction();
+        QVERIFY(canvas->testSceneLaunched());
+        QVERIFY(canvas->document()->editsLocked());
+        QVERIFY(!media->contentVisible());
+
+        if (cause == QLatin1String("lease-expired")) {
+            QSignalSpy expired(websocket, &WebSocketClient::leaseExpired);
+            server.acknowledgeHeartbeats = false;
+            QTRY_COMPARE_WITH_TIMEOUT(expired.count(), 1, 3000);
+        } else if (cause == QLatin1String("inactivity")) {
+            runtime.getWorkspaceManager()->setRemoteSessionHiddenTimeoutMs(10);
+            runtime.getWorkspaceManager()->markAllWorkspacesHidden();
+            runtime.getWorkspaceManager()->processDeadlines(
+                runtime.getWorkspaceManager()->remoteSessionCloseAtMs(target));
+            QTRY_COMPARE_WITH_TIMEOUT(server.closeCommands.size(), 1, 1000);
+        } else {
+            QVERIFY(server.send(QJsonObject{{QStringLiteral("type"), QStringLiteral("client_list")},
+                                           {QStringLiteral("clients"), QJsonArray{}}}));
+            QVERIFY(server.sendTerminating(sessionId, target));
+            QTRY_COMPARE_WITH_TIMEOUT(websocket->remoteSessionCoordinator()->byId(sessionId).phase,
+                                     QStringLiteral("CleanupPending"), 1000);
+            QVERIFY(canvas->testSceneLaunched());
+            QVERIFY(canvas->document()->editsLocked());
+            QVERIFY(server.sendClosed(sessionId, target));
+            QTRY_VERIFY_WITH_TIMEOUT(websocket->remoteSessionCoordinator()
+                ->outgoingForPeer(target).remoteSessionId.isEmpty(), 1000);
+        }
+        QCOMPARE(runtime.getActiveCanvas(), canvas);
+        QVERIFY(canvas->testSceneLaunched());
+        QVERIFY(canvas->testSceneActionEnabled());
+        QVERIFY(canvas->document()->editsLocked());
+        QVERIFY(!media->contentVisible());
+        QVERIFY(!canvas->remoteSceneActionEnabled());
+        canvas->triggerTestSceneAction();
+        QVERIFY(!canvas->testSceneLaunched());
+        QVERIFY(!canvas->document()->editsLocked());
+        QVERIFY(media->contentVisible());
+
+        auto* workspace = runtime.findWorkspace(target);
+        runtime.handleApplicationAboutToQuit();
+        runtime.getNavigationManager()->setActiveCanvas(nullptr);
+        runtime.setActiveCanvas(nullptr);
+        QVERIFY(workspace && workspace->canvas);
+        delete workspace->canvas;
+        workspace->canvas = nullptr;
+    }
+
     void remoteCursorStreamsWithoutSceneAndRecoversAfterStaleOrResumedSession()
     {
         QTemporaryDir root;

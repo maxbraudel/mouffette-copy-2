@@ -983,6 +983,88 @@ private slots:
         client.disconnect();
     }
 
+    void localTestSurvivesRemoteConnectionLoss_data()
+    {
+        QTest::addColumn<bool>("video");
+        QTest::addColumn<bool>("disconnectImmediately");
+        QTest::newRow("text-timeline") << false << true;
+        QTest::newRow("video-preparation") << true << true;
+        QTest::newRow("video-playback") << true << false;
+    }
+
+    void localTestSurvivesRemoteConnectionLoss()
+    {
+        QFETCH(bool, video);
+        QFETCH(bool, disconnectImmediately);
+        std::unique_ptr<QuickCanvasHost> host(QuickCanvasHost::create());
+        QVERIFY(host);
+        host->setProjectEditingEnabled(true);
+        host->setOverlayActionsEnabled(true);
+        CanvasMedia* media = video
+            ? host->document()->addPreparedFile(QString::fromUtf8(TEST_VIDEO_FILE),
+                                                QSize(160, 90), true, {})
+            : host->document()->addText({}, QStringLiteral("Local timeline"));
+        QVERIFY(media);
+        QTRY_VERIFY_WITH_TIMEOUT(media->residencyReady(), 5000);
+        media->setContentVisible(true);
+        media->setMuted(true);
+        auto settings = media->settings();
+        settings.displayDelayEnabled = true;
+        settings.displayDelayText = QStringLiteral("0.2");
+        settings.hideDelayEnabled = true;
+        settings.hideDelayText = QStringLiteral("0.4");
+        settings.playAutomatically = true;
+        settings.unmuteAutomatically = false;
+        media->setSettings(settings);
+        bool sceneHidden = false, sceneDisplayed = false, sceneHiddenAgain = false;
+        QObject timelineObserver;
+        connect(media, &CanvasMedia::changed, &timelineObserver, [&] {
+            if (!media->contentVisible()) {
+                if (sceneDisplayed) sceneHiddenAgain = true;
+                else sceneHidden = true;
+            } else if (sceneHidden) {
+                sceneDisplayed = true;
+            }
+        });
+        host->triggerTestSceneAction();
+        QVERIFY(host->testSceneLaunched());
+        if (!disconnectImmediately) QTRY_VERIFY_WITH_TIMEOUT(media->isPlaying(), 5000);
+
+        host->handleRemoteConnectionLost();
+        host->handleRemoteConnectionLost(); // Terminal cleanup may be repeated.
+        QVERIFY(host->testSceneLaunched());
+        QVERIFY(host->testSceneActionEnabled());
+        QVERIFY(host->document()->editsLocked());
+        QVERIFY(!host->overlayActionsEnabled());
+        QVERIFY(!host->remoteSceneActionEnabled());
+        // Verify the timeline itself survives, not just the UI's running flag.
+        // Record transitions even if native video preparation completes between
+        // event-loop polls; the draft's initial visibility is not scene playback.
+        QTRY_VERIFY_WITH_TIMEOUT(sceneHiddenAgain, 5000);
+        if (video) {
+            QTRY_VERIFY_WITH_TIMEOUT(media->isPlaying(), 1500);
+            const qint64 position = media->positionMs();
+            QTRY_VERIFY_WITH_TIMEOUT(media->positionMs() > position + 100, 1500);
+        }
+        host->showContentAfterReconnect();
+        host->setOverlayActionsEnabled(true);
+        QVERIFY(host->testSceneLaunched());
+        QVERIFY(host->document()->editsLocked());
+
+        host->triggerTestSceneAction();
+        QVERIFY(!host->testSceneLaunched());
+        QVERIFY(!host->document()->editsLocked());
+        QVERIFY(media->contentVisible()); // Draft restored only on explicit stop.
+        if (video) QVERIFY(!media->isPlaying());
+
+        host->triggerTestSceneAction();
+        QVERIFY(host->testSceneLaunched());
+        host->stopScenesForSourceInvalidation();
+        QVERIFY(!host->testSceneLaunched());
+        QVERIFY(!host->document()->editsLocked());
+        QVERIFY(media->contentVisible());
+    }
+
     void testSceneRestoresImmutableDraftState()
     {
         std::unique_ptr<QuickCanvasHost> host(QuickCanvasHost::create());

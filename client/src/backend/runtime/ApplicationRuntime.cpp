@@ -2910,8 +2910,9 @@ void ApplicationRuntime::clearRemoteSessionRuntimeState(
     }
     if (session) {
         if (session->canvas) {
-            if (connectionLost) session->canvas->handleRemoteConnectionLost();
-            else session->canvas->stopScenesForSourceInvalidation();
+            // Every terminal remote-session path clears only remote playback.
+            // Local sources and a running test remain valid after peer loss.
+            session->canvas->handleRemoteConnectionLost();
         }
         session->knownRemoteFileIds.clear();
         session->expectedProjectFileIds.clear();
@@ -3352,8 +3353,9 @@ void ApplicationRuntime::terminateProjectRemoteSession(const QString& targetEndp
     ClientWorkspace* session = m_workspaceManager
         ? m_workspaceManager->findWorkspace(targetEndpointId) : nullptr;
     if (session && session->canvas) {
-        if (attemptRemote) session->canvas->stopScenesForSourceInvalidation();
-        else session->canvas->handleRemoteConnectionLost();
+        // Closing the wire session below also stops its remote SceneRun.
+        // An inactivity timeout does not invalidate the local test's sources.
+        session->canvas->handleRemoteConnectionLost();
     }
 
     RemoteSessionCoordinator* coordinator = m_webSocketClient

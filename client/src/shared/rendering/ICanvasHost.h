@@ -52,7 +52,9 @@ public:
     virtual bool overlayActionsEnabled() const = 0;
     virtual void setProjectEditingEnabled(bool enabled) = 0;
     virtual bool projectEditingEnabled() const = 0;
+    // Remote-session cleanup preserves local test preparation and playback.
     virtual void handleRemoteConnectionLost() = 0;
+    // Invalid local sources stop both local tests and remote playback.
     virtual void stopScenesForSourceInvalidation() = 0;
 
     virtual Tool currentTool() const = 0;

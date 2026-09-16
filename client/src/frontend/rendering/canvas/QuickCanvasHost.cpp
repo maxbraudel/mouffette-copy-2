@@ -1161,7 +1161,9 @@ void QuickCanvasHost::failScene(const QString& message, bool notifyServer)
 
 void QuickCanvasHost::handleRemoteConnectionLost()
 {
-    stopScenePresentation();
+    // The presentation/priming context can belong to a wholly local test.
+    // Network cleanup must preserve its timeline, draft state and RAM pins.
+    if (!m_testSceneLaunched) stopScenePresentation();
     m_sceneTimeout.stop();
     m_sceneLaunching = false;
     m_sceneStopping = false;

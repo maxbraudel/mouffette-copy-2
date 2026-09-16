@@ -4,6 +4,13 @@ Test scenes and the local participant of remote scenes use the same
 `SceneMediaPlayback` timeline in `QuickCanvasHost`. The remote renderer follows
 the same timing rules after the synchronized activation barrier.
 
+Local test playback is independent of the remote session. Peer loss, expired
+connection leases, terminal session messages and session inactivity cleanup
+stop only remote playback. Local tests retain their preparation, timers, video
+playback, draft state, editing lock and RAM protection until explicitly stopped.
+Invalid local media, project deletion, application shutdown and sustained memory
+pressure still stop the affected local test.
+
 | Setting | Reference time |
 | --- | --- |
 | Display delay | Scene activation; starts the visual fade-in |
@@ -28,10 +35,12 @@ envelopes rather than jump to their final values.
 All local timers and animations belong to the scene lifetime. Stop destroys
 them before restoring draft visibility, position, playback and audio state.
 Scene preparation locks editing synchronously. QML loaders unload the toolbar,
-settings panel, selection chrome, guides, remote cursor and media controls while
-locked. The media list and scene stop actions remain available.
+settings panel, selection chrome, guides and media controls while locked.
+The media list, remote cursor and scene stop actions remain available.
 
 Regression coverage lives in `tst_RemoteSceneLifecycle`,
 `tst_VideoPlaybackBackend`, `tst_RemoteSceneControllerLifecycle` and
-`tst_MediaOverlay`. The server scene protocol tests cover signed end offsets and
-reject malformed delays before remote preparation.
+`tst_MediaOverlay`. `tst_ClientConnectionFlow` exercises local test survival through
+actual remote-session cleanup and lease-expiry events. The server scene protocol
+tests cover signed end offsets and reject malformed delays before remote
+preparation.
