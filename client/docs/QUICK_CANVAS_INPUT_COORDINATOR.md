@@ -107,6 +107,32 @@ derives editing from its injected session. The remote renderer is passive.
 - Media IDs resolve through lifetime-guarded references. A queued request for
   a deleted item is ignored; never dereference a cached `QGraphicsItem*` first.
 
+## Camera and viewport
+
+`CanvasDocument` owns a camera center in scene coordinates and the scene-space
+side length `D` of the square inscribed in the viewport. `QuickCanvasController`
+receives the actual CanvasRoot size (logical pixels), independently of its
+rendering window. It publishes the existing scale/pan projection:
+
+```text
+scale = min(viewportWidth, viewportHeight) / D
+pan = viewportCenter - cameraCenter * scale
+```
+
+Resize only republishes that projection; it never changes the logical camera,
+clamps its scale, fits content again, or schedules camera autosave. Manual pan
+and cursor/pinch-anchored zoom update the document in one operation. Manual zoom
+uses `1000 / D` with limits `[0.2, 10]`; fitting can exceed these limits, and
+subsequent gestures can return gradually into the range. Screen labels, handles,
+and snap thresholds continue to use logical screen pixels.
+
+The local project viewport stores `cameraVersion: 2`, `centerX`, `centerY`, and
+`squareSceneSize`, alongside the legacy matrix snapshot. A legacy matrix is
+converted at the first positive viewport size. Restore precedes topology
+publication so initial fitting cannot overwrite it. An untouched project saved
+before its first fit has no viewport record. Camera changes use the existing
+workspace autosave debounce; camera data never enters remote scene state.
+
 ## Regression verification
 
 From `client`, configure with `BUILD_TESTING=ON`, then:

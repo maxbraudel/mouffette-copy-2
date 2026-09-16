@@ -120,6 +120,296 @@ private slots:
         QQuickStyle::setStyle(QStringLiteral("Basic"));
     }
 
+    void cameraResizePreservesSquareComposition()
+    {
+        CanvasDocument document;
+        QuickCanvasController controller(&document);
+        controller.setViewportSize(1200, 800);
+        QCOMPARE(controller.viewScale(), 0.8);
+        QCOMPARE(controller.panX(), 600.0);
+        QCOMPARE(controller.panY(), 400.0);
+        document.setCameraView({320, -85}, 1200);
+        controller.panBy(73, -29);
+        controller.zoomAt(930, 240, 1.6);
+        const QPointF center = document.cameraCenter();
+        const qreal span = document.cameraSquareSceneSize();
+        QSignalSpy cameraChanges(&document, &CanvasDocument::cameraChanged);
+        QSignalSpy contentChanges(&document, &CanvasDocument::documentChanged);
+        const QList<QSizeF> sizes{{600,400}, {1600,800}, {800,1600}, {800,800},
+                                  {1,2}, {1200,800}};
+        const QList<QPointF> points{{320,-85}, {120,65}, {-180,-585}, {910,650}};
+        for (int cycle = 0; cycle < 100; ++cycle) {
+            for (const QSizeF size : sizes) {
+                controller.setViewportSize(size.width(), size.height());
+                const qreal side = qMin(size.width(), size.height());
+                for (const QPointF point : points) {
+                    const QPointF displayed = point * controller.viewScale()
+                        + QPointF(controller.panX(), controller.panY());
+                    const QPointF relative = (displayed
+                        - QPointF(size.width()/2, size.height()/2)) / side;
+                    QVERIFY(QLineF(relative, (point - center) / span).length() < 1e-10);
+                }
+                QCOMPARE(document.cameraCenter(), center);
+                QCOMPARE(document.cameraSquareSceneSize(), span);
+            }
+        }
+        QCOMPARE(cameraChanges.count(), 0);
+        QCOMPARE(contentChanges.count(), 0);
+        const qreal previousScale = controller.viewScale();
+        const QPointF previousPan(controller.panX(), controller.panY());
+        const qreal nan = std::numeric_limits<qreal>::quiet_NaN();
+        const qreal infinity = std::numeric_limits<qreal>::infinity();
+        for (const QSizeF size : {QSizeF(0,0), QSizeF(-1,800), QSizeF(800,0),
+                                  QSizeF(nan,800), QSizeF(800,infinity)})
+            controller.setViewportSize(size.width(), size.height());
+        QCOMPARE(controller.viewScale(), previousScale);
+        QCOMPARE(QPointF(controller.panX(), controller.panY()), previousPan);
+        QCOMPARE(cameraChanges.count(), 0);
+    }
+
+    void cameraZoomAnchorsAndLimitsAreRelative()
+    {
+        CanvasDocument document;
+        QuickCanvasController controller(&document);
+        controller.setViewportSize(1200, 800);
+        document.setCameraView({340, -90}, 1000);
+        const QPointF cursor(920, 230);
+        auto sceneUnderCursor = [&] {
+            return (cursor - QPointF(controller.panX(), controller.panY()))
+                / controller.viewScale();
+        };
+        const QPointF anchor = sceneUnderCursor();
+        QSignalSpy changes(&document, &CanvasDocument::cameraChanged);
+        controller.zoomAt(cursor.x(), cursor.y(), 1.25);
+        QCOMPARE(changes.count(), 1);
+        QVERIFY(QLineF(sceneUnderCursor(), anchor).length() < 1e-9);
+        QCOMPARE(document.cameraSquareSceneSize(), 800.0);
+        controller.zoomAt(cursor.x(), cursor.y(), 1e10);
+        QCOMPARE(document.cameraSquareSceneSize(), 100.0);
+        QVERIFY(QLineF(sceneUnderCursor(), anchor).length() < 1e-9);
+        controller.setViewportSize(600, 400);
+        QCOMPARE(controller.viewScale(), 4.0); // Same maximum normalized zoom.
+        controller.zoomAt(300, 200, 2);
+        QCOMPARE(document.cameraSquareSceneSize(), 100.0);
+        controller.zoomAt(300, 200, 1e-10);
+        QCOMPARE(document.cameraSquareSceneSize(), 5000.0);
+        QCOMPARE(controller.viewScale(), 0.08); // Below the old absolute clamp.
+        controller.zoomAt(300, 200, .5);
+        QCOMPARE(document.cameraSquareSceneSize(), 5000.0);
+
+        // Fitting far beyond either manual bound must not make the next wheel
+        // tick jump straight to that bound.
+        document.setCameraView({}, 20000);
+        controller.zoomAt(300, 200, .5);
+        QCOMPARE(document.cameraSquareSceneSize(), 20000.0);
+        controller.zoomAt(300, 200, 2);
+        QCOMPARE(document.cameraSquareSceneSize(), 10000.0);
+        document.setCameraView({}, 25);
+        controller.zoomAt(300, 200, 2);
+        QCOMPARE(document.cameraSquareSceneSize(), 25.0);
+        controller.zoomAt(300, 200, .5);
+        QCOMPARE(document.cameraSquareSceneSize(), 50.0);
+    }
+
+    void cameraFitWaitsForCanvasAndPreservesChosenViews()
+    {
+        CanvasDocument document;
+        QuickCanvasController controller(&document);
+        QQuickWindow unrelatedWindow;
+        unrelatedWindow.resize(1600, 1000);
+        controller.registerWindow(&unrelatedWindow);
+        document.setScreens({ScreenInfo(0, 1920, 1080, 0, 0, true)});
+        controller.ensureInitialFit(53);
+        QVERIFY(!document.hasCamera());
+        controller.setViewportSize(800, 600);
+        const qreal expectedScale = qMin(694.0 / 1920, 494.0 / 1080);
+        QCOMPARE(controller.viewScale(), expectedScale);
+        QCOMPARE(document.cameraCenter(), QPointF(960, 540));
+        QCOMPARE(controller.panX(), 400.0 - 960 * expectedScale);
+        QCOMPARE(controller.panY(), 300.0 - 540 * expectedScale);
+        controller.panBy(140, -45);
+        const QPointF center = document.cameraCenter();
+        const qreal span = document.cameraSquareSceneSize();
+        document.setScreens({ScreenInfo(1, 3840, 2160, -3840, 0, true)});
+        controller.ensureInitialFit();
+        controller.registerWindow(&unrelatedWindow);
+        QCOMPARE(document.cameraCenter(), center);
+        QCOMPARE(document.cameraSquareSceneSize(), span);
+        controller.recenterView(25);
+        QCOMPARE(document.cameraCenter(), QPointF(1920, 1080));
+        QVERIFY(qAbs(controller.viewScale() - qMin(750.0/3840, 550.0/2160)) < 1e-12);
+
+        // User navigation before screens arrive also owns the view.
+        CanvasDocument waiting;
+        QuickCanvasController waitingController(&waiting);
+        waitingController.setViewportSize(800, 600);
+        waitingController.panBy(15, 30);
+        const QPointF chosenCenter = waiting.cameraCenter();
+        waiting.setScreens({ScreenInfo(0, 1920, 1080, 0, 0, true)});
+        QCOMPARE(waiting.cameraCenter(), chosenCenter);
+        QCOMPARE(waiting.cameraSquareSceneSize(), 1000.0);
+        waitingController.resetView();
+        QCOMPARE(waiting.cameraCenter(), QPointF());
+        QCOMPARE(waitingController.panX(), 400.0);
+        QCOMPARE(waitingController.panY(), 300.0);
+    }
+
+    void cameraProjectRoundTripAndLegacyMigration()
+    {
+        CanvasDocument source;
+        QuickCanvasController sourceController(&source);
+        sourceController.setViewportSize(1200, 800);
+        source.setCameraView({320, -85}, 1600);
+        QJsonObject saved = source.serializeProjectState();
+        saved.insert("screens", QJsonArray{ScreenInfo(0, 1920, 1080, 0, 0, true).toJson()});
+        const QJsonObject viewport = saved.value("viewport").toObject();
+        QCOMPARE(viewport.value("cameraVersion").toInt(), 2);
+        QCOMPARE(viewport.value("m11").toDouble(), .5);
+        QVERIFY(!source.serializeSceneState().contains("viewport"));
+
+        // Exercise restoration both before and after attaching a viewport.
+        for (bool alreadyMounted : {false, true}) {
+            CanvasDocument restored;
+            QuickCanvasController controller(&restored);
+            if (alreadyMounted) controller.setViewportSize(600, 900);
+            QVERIFY(restored.restoreProjectState(saved, {}));
+            controller.setViewportSize(600, 900);
+            controller.ensureInitialFit();
+            QCOMPARE(restored.cameraCenter(), source.cameraCenter());
+            QCOMPARE(restored.cameraSquareSceneSize(), 1600.0);
+            QCOMPARE(controller.viewScale(), .375);
+            QCOMPARE(controller.panX(), 300.0 - 320 * .375);
+            QCOMPARE(controller.panY(), 450.0 + 85 * .375);
+        }
+        QJsonObject legacyViewport{{"m11", 1.7}, {"dx", 32}, {"dy", -14}};
+        saved.insert("viewport", legacyViewport);
+        CanvasDocument legacy;
+        QuickCanvasController legacyController(&legacy);
+        QVERIFY(legacy.restoreProjectState(saved, {}));
+        QVERIFY(legacy.hasCamera());
+        QVERIFY(!legacy.hasNormalizedCamera());
+        legacyController.setViewportSize(800, 600);
+        QVERIFY(legacy.hasNormalizedCamera());
+        QCOMPARE(legacyController.viewScale(), 1.7);
+        QVERIFY(qAbs(legacyController.panX() - 32) < 1e-10);
+        QVERIFY(qAbs(legacyController.panY() + 14) < 1e-10);
+        QCOMPARE(legacy.cameraCenter(), QPointF((400.0-32)/1.7, (300.0+14)/1.7));
+        const QPointF legacyCenter = legacy.cameraCenter();
+        legacyController.setViewportSize(400, 300);
+        QCOMPARE(legacyController.viewScale(), .85);
+        QCOMPARE(legacy.cameraCenter(), legacyCenter);
+        QCOMPARE(legacy.serializeProjectState().value("viewport").toObject()
+                 .value("cameraVersion").toInt(), 2);
+
+        // Saving an unmounted, untouched project must not suppress its first fit.
+        CanvasDocument untouched, reopened;
+        QVERIFY(reopened.restoreProjectState(untouched.serializeProjectState(), {}));
+        QVERIFY(!reopened.hasCamera());
+    }
+
+    void cameraQmlGesturesResizeAndWorkspaceSwitch()
+    {
+        Fixture fixture;
+        QVERIFY(fixture.initialize());
+        auto* root = fixture.view.rootObject();
+        fixture.document.setCameraView({}, 1000);
+        QList<CanvasMedia*> labels;
+        for (const QPointF position : {QPointF(-280,-180), QPointF(0,0), QPointF(280,180)}) {
+            auto* media = fixture.document.addText(position,
+                QStringLiteral("(%1, %2)").arg(position.x()).arg(position.y()));
+            media->setTextColorOverrideEnabled(true);
+            media->setTextColor(position.isNull() ? QColor("#67e8f9") : QColor("#ffffff"));
+            labels.append(media);
+        }
+        fixture.view.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&fixture.view));
+#ifdef Q_OS_MACOS
+        MacWindowManager::activateApplicationWindow(&fixture.view);
+#else
+        fixture.view.requestActivate();
+#endif
+        QVERIFY(QTest::qWaitForWindowActive(&fixture.view));
+        QTRY_COMPARE(root->size(), QSizeF(fixture.view.size()));
+
+        const QPointF cursor(root->width() * .72, root->height() * .34);
+        const QPointF before = (cursor - QPointF(fixture.controller.panX(), fixture.controller.panY()))
+            / fixture.controller.viewScale();
+        const qreal oldSpan = fixture.document.cameraSquareSceneSize();
+        QWheelEvent zoom(cursor, fixture.view.mapToGlobal(cursor.toPoint()), {}, {0,120},
+                         Qt::NoButton, Qt::NoModifier, Qt::NoScrollPhase, false);
+        QCoreApplication::sendEvent(&fixture.view, &zoom);
+        QVERIFY(fixture.document.cameraSquareSceneSize() < oldSpan);
+        const QPointF after = (cursor - QPointF(fixture.controller.panX(), fixture.controller.panY()))
+            / fixture.controller.viewScale();
+        QVERIFY(QLineF(before, after).length() < 1e-8);
+        const QPointF beforeScroll(fixture.controller.panX(), fixture.controller.panY());
+        QWheelEvent scroll(cursor, fixture.view.mapToGlobal(cursor.toPoint()), {30,-20}, {},
+                           Qt::NoButton, Qt::NoModifier, Qt::ScrollBegin, false);
+        QCoreApplication::sendEvent(&fixture.view, &scroll);
+        const QPointF scrollDelta = QPointF(fixture.controller.panX(), fixture.controller.panY()) - beforeScroll;
+        QVERIFY2(QLineF(scrollDelta, QPointF(30,-20)).length() < 1e-8,
+                 qPrintable(QString("Scroll delta: %1, %2").arg(scrollDelta.x()).arg(scrollDelta.y())));
+        QWheelEvent endScroll(cursor, fixture.view.mapToGlobal(cursor.toPoint()), {}, {},
+                              Qt::NoButton, Qt::NoModifier, Qt::ScrollEnd, false);
+        QCoreApplication::sendEvent(&fixture.view, &endScroll);
+
+        // Each geometry changes different native window edges; a pure move is
+        // included so window position cannot leak into canvas coordinates.
+        const QRect original = fixture.view.geometry();
+        const QList<QRect> geometries{
+            original, original.adjusted(0,0,-140,0), original.adjusted(140,0,0,0),
+            original.adjusted(0,100,0,0), original.adjusted(0,0,0,-100),
+            original.adjusted(120,80,0,0), original.adjusted(0,0,-220,-180),
+            original.translated(15,15), original};
+        const QPointF cameraCenter = fixture.document.cameraCenter();
+        const qreal span = fixture.document.cameraSquareSceneSize();
+        QSignalSpy cameraChanges(&fixture.document, &CanvasDocument::cameraChanged);
+        connect(&fixture.document, &CanvasDocument::cameraChanged, root, [&] {
+            qInfo() << "Camera changed during resize:" << fixture.document.cameraCenter()
+                    << "viewport" << root->size() << "gesture" << root->property("interactionMode");
+        });
+        int index = 0;
+        for (const QRect geometry : geometries) {
+            fixture.view.setGeometry(geometry);
+            QTRY_COMPARE(root->size(), QSizeF(fixture.view.size()));
+            const qreal side = qMin(root->width(), root->height());
+            QTRY_VERIFY(qAbs(root->property("viewScale").toReal() - side / span) < 1e-10);
+            QCOMPARE(fixture.document.cameraCenter(), cameraCenter);
+            QCOMPARE(fixture.document.cameraSquareSceneSize(), span);
+            for (auto* media : labels) {
+                auto* delegate = findQuickItemWithProperty(root, "currentMediaId", media->mediaId());
+                QVERIFY(delegate);
+                const QPointF relative = (delegate->mapToItem(root, QPointF())
+                    - QPointF(root->width()/2, root->height()/2)) / side;
+                QVERIFY(QLineF(relative, (media->position() - cameraCenter) / span).length() < 1e-8);
+            }
+            const QString captureDirectory = qEnvironmentVariable("MOUFFETTE_TEST_CAMERA_CAPTURE_DIR");
+            if (!captureDirectory.isEmpty()) {
+                QTest::qWait(60);
+                const QImage capture = fixture.view.grabWindow();
+                QVERIFY(!capture.isNull());
+                QVERIFY(capture.save(captureDirectory + QString("/canvas-%1.png").arg(index)));
+            }
+            ++index;
+        }
+        QCOMPARE(cameraChanges.count(), 0);
+
+        // The same root can be rebound to a different workspace and back.
+        CanvasDocument otherDocument;
+        QuickCanvasController otherController(&otherDocument);
+        otherController.initialize();
+        otherDocument.setCameraView({700,-200}, 2200);
+        root->setProperty("sessionViewModel", QVariantMap{
+            {QStringLiteral("canvasController"), QVariant::fromValue<QObject*>(&otherController)}});
+        QCOMPARE(root->property("viewScale").toReal(),
+                 qMin(root->width(), root->height()) / 2200);
+        root->setProperty("sessionViewModel", QVariantMap{
+            {QStringLiteral("canvasController"), QVariant::fromValue<QObject*>(&fixture.controller)}});
+        QCOMPARE(fixture.document.cameraCenter(), cameraCenter);
+        QCOMPARE(fixture.document.cameraSquareSceneSize(), span);
+        QCOMPARE(root->property("viewScale").toReal(), qMin(root->width(), root->height()) / span);
+    }
+
     void clipboardPreservesAuthoringState_data()
     {
         QTest::addColumn<QString>("type");
@@ -750,7 +1040,8 @@ private slots:
         QTest::mouseMove(&view, start + QPoint(50,30), 20);
         QTest::mouseMove(&view, start + QPoint(80,40), 20);
         QTest::mouseRelease(&view, Qt::LeftButton, Qt::NoModifier, start + QPoint(80,40));
-        QCOMPARE(media->position(), original.topLeft() + QPointF(80,40));
+        QVERIFY(QLineF(media->position(), original.topLeft()
+            + QPointF(80,40) / host->controller()->viewScale()).length() < 0.01);
     }
 
     void moveSnapFitsACompleteTargetBoxAndReleasesCleanly()
@@ -1055,12 +1346,18 @@ private slots:
 
     void fullPageDragSurvivesPublicationAndResize_data()
     {
-        realMouseDragMovesProductionMedia_data();
+        QTest::addColumn<QString>("mediaType");
+        QTest::addColumn<bool>("resizeViewport");
+        for (const QString type : {QString("text"), QString("image"), QString("video")}) {
+            QTest::newRow(qPrintable(type)) << type << false;
+            QTest::newRow(qPrintable(type + "-resized-viewport")) << type << true;
+        }
     }
 
     void fullPageDragSurvivesPublicationAndResize()
     {
         QFETCH(QString, mediaType);
+        QFETCH(bool, resizeViewport);
         QString error;
         std::unique_ptr<QuickCanvasHost> host(QuickCanvasHost::create(&error));
         QVERIFY2(host, qPrintable(error));
@@ -1099,6 +1396,15 @@ private slots:
             QVariant::fromValue<QObject*>(host->controller()));
         QVERIFY(root);
         host->controller()->updateCamera(0.75, 250, 100);
+        if (resizeViewport) {
+            const QPointF center = host->document()->cameraCenter();
+            const qreal span = host->document()->cameraSquareSceneSize();
+            page->setSize(page->size() - QSizeF(120, 100));
+            QCOMPARE(host->document()->cameraCenter(), center);
+            QCOMPARE(host->document()->cameraSquareSceneSize(), span);
+        }
+        const qreal cameraScale = host->controller()->viewScale();
+        QCOMPARE(root->property("viewScale").toReal(), cameraScale);
 
         QTemporaryDir directory;
         QVERIFY(directory.isValid());
@@ -1116,7 +1422,9 @@ private slots:
                 QTest::keyClick(&window, character);
             QTRY_COMPARE(host->document()->selectedMedia()->text(),
                          QStringLiteral("New title"));
-            const QPoint background = root->mapToScene({700, 500}).toPoint();
+            // The bottom-right media panel moves with the viewport. Use an
+            // uncovered canvas point at either tested size.
+            const QPoint background = root->mapToScene(QPointF(24, root->height() - 24)).toPoint();
             QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier, background);
             QTRY_VERIFY(!root->property("anyMediaEditing").toBool());
             QCOMPARE(host->document()->media().size(), 1);
@@ -1169,13 +1477,14 @@ private slots:
                 QTest::qWait(150);
                 QCOMPARE(ended.count(), gesture);
                 QVERIFY(delegate->property("localDragging").toBool());
-                QCOMPARE(delegate->position(), originalPosition
-                    + QPointF(delta * step / 3) / 0.75);
+                QVERIFY(QLineF(delegate->position(), originalPosition
+                    + QPointF(delta * step / 3) / cameraScale).length() < 0.01);
             }
             QTest::mouseRelease(&window, Qt::LeftButton, Qt::NoModifier, start + delta);
             QTRY_COMPARE(ended.count(), gesture + 1);
             QCOMPARE(started.count(), gesture + 1);
-            QCOMPARE(media->position(), originalPosition + QPointF(delta) / 0.75);
+            QVERIFY(QLineF(media->position(), originalPosition
+                + QPointF(delta) / cameraScale).length() < 0.01);
             QCOMPARE(root->property("activeMediaDragCount").toInt(), 0);
             QCOMPARE(root->property("interactionMode").toString(), QStringLiteral("idle"));
 

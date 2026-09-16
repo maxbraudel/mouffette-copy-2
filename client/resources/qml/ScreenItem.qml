@@ -10,6 +10,7 @@ Rectangle {
 
     // Label properties — set by the parent Repeater delegate
     property real viewScale: 1.0
+    readonly property real safeViewScale: viewScale > 0.0 ? viewScale : 1.0
     property int  screenIndex: 1
     property int  screenId: -1
     property int  pixelWidth: 0
@@ -57,12 +58,12 @@ Rectangle {
         x: 0
         y: 0
         z: 1
-        width: Math.max(0, root.screenWidth * Math.max(0.001, root.viewScale))
-        height: Math.max(0, root.screenHeight * Math.max(0.001, root.viewScale))
+        width: Math.max(0, root.screenWidth * root.safeViewScale)
+        height: Math.max(0, root.screenHeight * root.safeViewScale)
 
         transform: Scale {
-            xScale: 1.0 / Math.max(0.001, root.viewScale)
-            yScale: 1.0 / Math.max(0.001, root.viewScale)
+            xScale: 1.0 / root.safeViewScale
+            yScale: 1.0 / root.safeViewScale
             origin.x: 0
             origin.y: 0
         }
@@ -115,8 +116,8 @@ Rectangle {
         clip: false
 
         transform: Scale {
-            xScale: 1.0 / Math.max(0.001, root.viewScale)
-            yScale: 1.0 / Math.max(0.001, root.viewScale)
+            xScale: 1.0 / root.safeViewScale
+            yScale: 1.0 / root.safeViewScale
             // Scale from the anchor point (x:0, y:0 of this item)
             origin.x: 0
             origin.y: 0

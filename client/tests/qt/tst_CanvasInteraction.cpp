@@ -68,6 +68,10 @@ public:
         connect(root, SIGNAL(textCreateRequested(double,double)), this, SLOT(createText(double,double)));
         window.show();
         if (!QTest::qWaitForWindowExposed(&window)) return false;
+        // Exposure can precede native activation. Starting gestures during
+        // that transition loses keyboard focus or cancels the new pointer grab.
+        window.requestActivate();
+        if (!QTest::qWaitForWindowActive(&window)) return false;
         // macOS may clamp the requested size to the available logical screen
         // (notably with QT_SCALE_FACTOR=2). Render and click in that real size.
         root->setSize(window.size());

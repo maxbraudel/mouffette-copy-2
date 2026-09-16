@@ -97,7 +97,11 @@ private slots:
             {QStringLiteral("viewport"), QJsonObject{
                  {QStringLiteral("scale"), 1.75},
                  {QStringLiteral("panX"), 42.0},
-                 {QStringLiteral("panY"), -18.0}}},
+                 {QStringLiteral("panY"), -18.0},
+                 {QStringLiteral("cameraVersion"), 2},
+                 {QStringLiteral("centerX"), 320.0},
+                 {QStringLiteral("centerY"), -85.0},
+                 {QStringLiteral("squareSceneSize"), 1600.0}}},
             {QStringLiteral("settings"), QJsonObject{
                  {QStringLiteral("snapEnabled"), true}}},
             {QStringLiteral("media"), QJsonArray{video}}
@@ -157,6 +161,8 @@ private slots:
         QCOMPARE(project->canvasState.value(QStringLiteral("viewport"))
                      .toObject().value(QStringLiteral("scale")).toDouble(),
                  1.75);
+        QCOMPARE(project->canvasStateForRestore().value(QStringLiteral("viewport")),
+                 canvas.value(QStringLiteral("viewport")));
         QVERIFY(project->canvasState.value(QStringLiteral("settings"))
                     .toObject().value(QStringLiteral("snapEnabled")).toBool());
 

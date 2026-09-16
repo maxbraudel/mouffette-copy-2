@@ -748,7 +748,7 @@ QPointF QuickCanvasController::snappedPosition(CanvasMedia* media,
                                                QVariantList* guides) const
 {
     if (!media || !m_document) return proposed;
-    const qreal viewScale = std::max<qreal>(0.0001, currentViewScale());
+    const qreal viewScale = currentViewScale();
     const qreal edgeThreshold = kSnapDistancePx / viewScale;
     const qreal cornerThreshold = kCornerSnapDistancePx / viewScale;
     const QSizeF size(media->sceneRect().size());
@@ -1106,7 +1106,7 @@ void QuickCanvasController::appendAlignedResizeGuides(
         }
     }
 
-    const qreal viewScale = std::max<qreal>(0.0001, currentViewScale());
+    const qreal viewScale = currentViewScale();
     QRectF bounds = allScreenBounds(m_document).united(rect);
     for (const QRectF& target : m_snapTargetRects) bounds = bounds.united(target);
     bounds = bounds.adjusted(-1000.0 / viewScale, -1000.0 / viewScale,
@@ -1140,7 +1140,7 @@ QRectF QuickCanvasController::snappedResizeRect(
     if ((!axes.movesX() && !axes.movesY()) || original.isEmpty()
         || m_snapTargetRects.isEmpty()) return proposed;
 
-    const qreal viewScale = std::max<qreal>(0.0001, currentViewScale());
+    const qreal viewScale = currentViewScale();
     const qreal edgeThreshold = kSnapDistancePx / viewScale;
     const qreal edgeRelease = edgeThreshold * kSnapReleaseFactor;
     const qreal cornerThreshold = kCornerSnapDistancePx / viewScale;

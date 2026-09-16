@@ -16,6 +16,8 @@ Item {
         x: viewport.panX
         y: viewport.panY
         scale: viewport.viewScale
+        // pan is the controller's projection of a scene-centered camera:
+        // viewportCenter - cameraCenter * scale. TopLeft avoids a second pivot.
         transformOrigin: Item.TopLeft
     }
 }
