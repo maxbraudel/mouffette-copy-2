@@ -69,7 +69,7 @@ Rectangle {
     property var selectionChromeModel: canvasController
                                        ? canvasController.selectionChromeModel : []
     property var snapGuidesModel: []
-    // Live drag tracking — updated every frame during a move drag, purely in QML
+    // Raw pointer tracking; the controller projects the whole selection's final geometry.
     property string liveDragMediaId: ""
     property real liveDragViewOffsetX: 0.0
     property real liveDragViewOffsetY: 0.0

@@ -6,7 +6,7 @@ These are different states, each with one writer, not competing copies of select
 
 | State | Authority | Consumers |
 | --- | --- | --- |
-| Selected media | `QGraphicsScene::selectedItems()` | Controller publishes `selectionChromeModel`; visuals, chrome, overlays and edit session consume it |
+| Selected media | `CanvasDocument::selectedMediaIds()` | Controller publishes `selectionChromeModel`; visuals, chrome, overlays and edit session consume it |
 | Active text editor | Per-canvas `TextEditSession.activeEditor` | Hosted `TextItem.editing`, `anyMediaEditing` and `currentEditingMediaItem` are read-only projections |
 | Pointer gesture | Per-canvas `InputLayer.inputCoordinator` | Native media/resize/pan handlers request ownership and release their own session |
 | Committed content and geometry | C++ media items | Stable `MediaListModel` updates existing QML delegates |
@@ -18,6 +18,28 @@ selection follows the same projection path as pointer selection.
 Live drag/resize geometry is temporary presentation state, not a second committed
 model. Selection-only updates must not cancel pending content publication: it can
 contain a text edit, style change, fit-to-text resize or newly created item.
+
+## Selection transforms and scene locking
+
+A press on an already selected media preserves the selection for dragging.
+Double-click text activation and explicit list selection still replace it unless
+Shift is held. `QuickCanvasController` snapshots the selected media's geometry
+when a transform starts. Movement applies the active media's final displacement
+to every snapshot. Resize applies its width/height factors and relative anchor
+movement to each media's original rectangle. Alt changes base dimensions while
+preserving each media's existing scale. Modifier changes never accumulate drift.
+
+Only the manipulated media resolves snap targets; the other members of the
+transform are excluded from those targets. The controller's `liveTransforms`
+projection supplies content, selection chrome and overlays with the same
+provisional geometry. Release commits the whole selection to `CanvasDocument`.
+Text fit mode changes only when a free resize commits.
+
+`editingEnabled` combines project permission with the document's scene lock.
+Both QML input and C++ commands enforce it. Test-scene startup and remote prepare
+lock synchronously, discard provisional transforms, end native edit ownership,
+and restore the committed visuals. Late release callbacks cannot commit an old
+transaction, including after the scene stops. Camera navigation remains available.
 
 ## Native pointer lifecycle
 

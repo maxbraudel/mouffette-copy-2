@@ -280,6 +280,10 @@ private slots:
         document.select(active->mediaId()); document.select(follower->mediaId(), true);
         reference.select(control->mediaId());
         const QPointF point = targetOrigin + QPointF(uv.x() * 400 + 2, uv.y() * 200 + 2);
+        // Toggle modifiers within the same gesture; every update must still
+        // derive from the original geometry, without accumulating scale drift.
+        controller.handleMediaResizeRequested(active->mediaId(), handle, point.x() + 30, point.y() + 30, !snap, !alt);
+        single.handleMediaResizeRequested(control->mediaId(), handle, point.x() + 30, point.y() + 30, !snap, !alt);
         controller.handleMediaResizeRequested(active->mediaId(), handle, point.x(), point.y(), snap, alt);
         single.handleMediaResizeRequested(control->mediaId(), handle, point.x(), point.y(), snap, alt);
         if (snap) QVERIFY(!controller.snapGuidesModel().isEmpty());
@@ -329,6 +333,38 @@ private slots:
         // A delayed release without a new gesture cannot move anything.
         c.handleMediaMoveEnded(active->mediaId(), 0, 0, false);
         QCOMPARE(active->position(), QPointF(700,400));
+    }
+
+    void groupResizePreviewReachesContentAndOverlays()
+    {
+        Fixture fixture;
+        QVERIFY(fixture.initialize());
+        auto* active = fixture.document.addText({100,100});
+        auto* follower = fixture.document.addText({600,300});
+        for (auto* media : {active, follower}) {
+            media->setFitToTextEnabled(false); media->setBaseSize({200,100});
+        }
+        active->setPosition({100,100}); follower->setPosition({600,300}); follower->setScale(1.5);
+        fixture.document.select(active->mediaId()); fixture.document.select(follower->mediaId(), true);
+        auto* root = fixture.view.rootObject();
+        QQuickItem* visual = nullptr;
+        QQuickItem* overlay = nullptr;
+        QTRY_VERIFY((visual = findQuickItemWithProperty(root, "currentMediaId", follower->mediaId())));
+        QTRY_VERIFY((overlay = findQuickItemWithProperty(root, "mid", follower->mediaId())));
+        fixture.controller.handleMediaResizeRequested(active->mediaId(), "bottom-right", 500, 250, false, true);
+        QTRY_COMPARE(visual->size(), QSizeF(400,150));
+        QCOMPARE(visual->scale(), 1.5);
+        QCOMPARE(visual->position(), QPointF(600,300));
+        QCOMPARE(overlay->property("screenW").toReal(), 600.0);
+        QCOMPARE(overlay->property("screenH").toReal(), 225.0);
+        QCOMPARE(follower->baseSize(), QSize(200,100));
+        fixture.controller.handleMediaResizeRequested(active->mediaId(), "bottom-right", 500, 300, false, false);
+        QTRY_COMPARE(visual->size(), QSizeF(200,100));
+        QCOMPARE(visual->scale(), 3.0);
+        QCOMPARE(overlay->property("screenH").toReal(), 300.0);
+        fixture.controller.handleMediaResizeEnded(active->mediaId());
+        QTRY_COMPARE(visual->scale(), follower->scale());
+        QCOMPARE(overlay->property("screenW").toReal(), follower->sceneRect().width());
     }
 
     void sceneLockDiscardsPendingSelectionEdits()

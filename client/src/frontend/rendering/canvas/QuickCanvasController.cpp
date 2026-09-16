@@ -1519,6 +1519,9 @@ void QuickCanvasController::handleOverlayVolumeChange(const QString& id, qreal v
         settings.volumeOverrideEnabled = true;
         settings.volumeText = QString::number(percent);
         media->setSettings(settings);
+        // The slider restores its authoritative binding on release. Publish
+        // before returning so it cannot briefly restore the previous volume.
+        publishVideoState();
     }
     emit mediaVolumeChangeRequested(id, value);
 }

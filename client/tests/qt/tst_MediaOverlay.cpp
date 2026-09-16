@@ -1405,6 +1405,7 @@ void MediaOverlayTest::videoVolumeAndMuteStayIndependentAndSyncWithSettings()
 
     // Zero volume is independent too: it must not toggle mute or the checkbox.
     host->controller()->handleOverlayVolumeChange(video->mediaId(), 0.0);
+    QCOMPARE(slider->property("progress").toReal(), 0.0);
     QTRY_COMPARE(field->property("draftText").toString(), QStringLiteral("0"));
     QVERIFY(!video->muted());
     QVERIFY(check->property("checked").toBool());
