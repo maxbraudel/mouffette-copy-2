@@ -1790,4 +1790,173 @@ function messages(socket, type) {
     assert.equal(secondBoot.incomingByTarget.size, 0);
 }
 
+function cursorContext(prefix) {
+    const context = serverSessionContext(prefix);
+    context.server.clients.get('target-connection').screens = [{
+        id: 3, x: -3840, y: 200, width: 3840, height: 2160, primary: false,
+    }];
+    context.cursorMessage = (overrides = {}) => ({
+        type: 'remote_session_cursor',
+        protocolVersion: 5,
+        serverBootId: context.server.serverBootId,
+        messageId: crypto.randomUUID(),
+        connectionGeneration: 1,
+        remoteSessionId: context.session.remoteSessionId,
+        generation: context.session.generation,
+        sequence: 1,
+        visible: true,
+        screenId: 3,
+        x: 3839,
+        y: 2159,
+        ...overrides,
+    });
+    return context;
+}
+
+// Cursor telemetry has its own v5 route and is private to an active session.
+// Negative desktop origins do not affect physical, screen-local coordinates.
+{
+    const context = cursorContext('cursor-relay');
+    const observer = addAuthenticatedClient(context.server, 'observer-connection', 'C');
+    context.server.remoteSessions.open(binding('C', 'B'));
+    const protocolLog = [];
+    context.server.protocolLogger = event => protocolLog.push(event);
+    context.server.handleMessage('target-connection', context.cursorMessage());
+    const sample = messages(context.ownerSocket, 'remote_session_cursor').at(-1);
+    assert.ok(sample, 'a target cursor reaches the owner through the full v5 dispatcher');
+    assert.equal(sample.remoteSessionId, context.session.remoteSessionId);
+    assert.equal(sample.generation, context.session.generation);
+    assert.equal(sample.ownerEndpointId, 'A');
+    assert.equal(sample.targetEndpointId, 'B');
+    assert.equal(sample.connectionGeneration, 1);
+    assert.equal(sample.ownerConnectionGeneration, 1);
+    assert.equal(sample.targetConnectionGeneration, 1);
+    assert.equal(sample.phase, 'Active');
+    assert.equal(sample.sequence, 1);
+    assert.equal(sample.visible, true);
+    assert.equal(sample.screenId, 3);
+    assert.equal(sample.x, 3839);
+    assert.equal(sample.y, 2159);
+    assert.equal(messages(observer, 'remote_session_cursor').length, 0,
+        'a different owner of the same target must not receive this session sample');
+    assert.equal(messages(context.targetSocket, 'remote_session_cursor').length, 0);
+    assert.equal(protocolLog.length, 0, 'high-frequency cursor samples do not flood protocol logs');
+
+    context.server.handleMessage('target-connection', context.cursorMessage({
+        sequence: 2, visible: false, screenId: -1, x: 0, y: 0,
+    }));
+    assert.equal(messages(context.ownerSocket, 'remote_session_cursor').at(-1).visible, false);
+    context.server.handleMessage('target-connection', context.cursorMessage({ type: 'cursor_update' }));
+    assert.equal(messages(context.targetSocket, 'error').at(-1).code, 'removed_message_type',
+        'restoring cursors must not revive the unauthenticated legacy relay');
+}
+
+// Reject foreign senders, stale generations and non-active sessions without
+// accepting a sample or consuming its sequence.
+{
+    const context = cursorContext('cursor-authorization');
+    const observer = addAuthenticatedClient(context.server, 'observer-connection', 'C');
+    context.server.handleMessage('owner-connection', context.cursorMessage());
+    assert.equal(messages(context.ownerSocket, 'error').at(-1).code, 'not_session_target');
+    context.server.handleMessage('observer-connection', context.cursorMessage());
+    assert.equal(messages(observer, 'error').at(-1).code, 'not_a_session_party');
+    context.server.handleMessage('target-connection', context.cursorMessage({ generation: 2 }));
+    assert.equal(messages(context.targetSocket, 'error').at(-1).code,
+        'stale_remote_session_generation');
+    context.server.handleMessage('target-connection', context.cursorMessage({ connectionGeneration: 2 }));
+    assert.equal(messages(context.targetSocket, 'error').at(-1).code,
+        'stale_connection_generation');
+    for (const phase of ['Opening', 'Grace', 'CleanupPending', 'Closed']) {
+        context.session.phase = phase;
+        context.server.handleMessage('target-connection', context.cursorMessage());
+        assert.equal(messages(context.targetSocket, 'error').at(-1).code,
+            'remote_session_not_active');
+    }
+    assert.equal(messages(context.ownerSocket, 'remote_session_cursor').length, 0);
+    assert.equal(context.session.cursorSample, undefined);
+}
+
+// Cursor shape is strict and bounded against the target's registered screens.
+// Invalid samples do not poison a later valid update with the same sequence.
+{
+    const context = cursorContext('cursor-validation');
+    for (const invalid of [
+        { sequence: 0 }, { sequence: 1.5 }, { sequence: Number.MAX_SAFE_INTEGER + 1 },
+        { visible: 1 }, { visible: null }, { screenId: 0 }, { screenId: '3' },
+        { screenId: -1 }, { x: -1 }, { y: -1 }, { x: 3840 }, { y: 2160 },
+        { x: 1.5 }, { y: Infinity }, { x: null }, { x: '1' },
+        { visible: false },
+        { visible: false, screenId: -1, x: 1, y: 0 },
+        { extra: true },
+    ]) {
+        context.server.handleMessage('target-connection', context.cursorMessage(invalid));
+        assert.equal(messages(context.targetSocket, 'error').at(-1).code,
+            'invalid_remote_session_cursor', JSON.stringify(invalid));
+        assert.equal(messages(context.ownerSocket, 'remote_session_cursor').length, 0);
+    }
+    const missing = context.cursorMessage();
+    delete missing.visible;
+    context.server.handleMessage('target-connection', missing);
+    assert.equal(messages(context.targetSocket, 'error').at(-1).code,
+        'invalid_remote_session_cursor');
+    context.server.handleMessage('target-connection', context.cursorMessage({ x: 0, y: 0 }));
+    assert.equal(messages(context.ownerSocket, 'remote_session_cursor').length, 1);
+}
+
+// A resumed session can restart the cursor sequence, but samples from the old
+// session or transport generation must never overwrite its new position.
+{
+    const context = cursorContext('cursor-resume');
+    context.server.handleMessage('target-connection', context.cursorMessage({ sequence: 9 }));
+    context.server.handleMessage('target-connection', context.cursorMessage({ sequence: 9, x: 0 }));
+    context.server.handleMessage('target-connection', context.cursorMessage({ sequence: 8, x: 1 }));
+    assert.equal(messages(context.ownerSocket, 'remote_session_cursor').length, 1);
+    assert.equal(messages(context.targetSocket, 'error').length, 0,
+        'duplicate ephemeral samples are silently ignored');
+    context.server.remoteSessions.markDisconnected('B');
+    context.server.clients.get('target-connection').connectionGeneration = 2;
+    context.server.handleRemoteSessionResume('target-connection', {
+        remoteSessionId: context.session.remoteSessionId,
+        resumeToken: context.session.resumeToken,
+        generation: 1,
+    });
+    assert.equal(context.session.generation, 2);
+    context.server.handleMessage('target-connection', context.cursorMessage({
+        connectionGeneration: 2, sequence: 1, x: 20, y: 30,
+    }));
+    assert.equal(messages(context.ownerSocket, 'remote_session_cursor').length, 2);
+    assert.equal(messages(context.ownerSocket, 'remote_session_cursor').at(-1).x, 20);
+    context.server.handleMessage('target-connection', context.cursorMessage({
+        connectionGeneration: 2, generation: 1, sequence: 10,
+    }));
+    assert.equal(messages(context.ownerSocket, 'remote_session_cursor').length, 2);
+    assert.equal(messages(context.targetSocket, 'error').at(-1).code,
+        'stale_remote_session_generation');
+}
+
+// Cursor traffic never adds to a congested owner's backlog. Fresh repeated
+// samples recover stationary/hidden state once the connection has drained.
+{
+    const context = cursorContext('cursor-backpressure');
+    context.ownerSocket.bufferedAmount = 64 * 1024 + 1;
+    context.server.handleMessage('target-connection', context.cursorMessage());
+    assert.equal(messages(context.ownerSocket, 'remote_session_cursor').length, 0);
+    context.ownerSocket.bufferedAmount = 0;
+    context.server.handleMessage('target-connection', context.cursorMessage());
+    assert.equal(messages(context.ownerSocket, 'remote_session_cursor').length, 0,
+        'a stale queued sample cannot reappear after backpressure');
+    context.server.handleMessage('target-connection', context.cursorMessage({ sequence: 2 }));
+    assert.equal(messages(context.ownerSocket, 'remote_session_cursor').length, 1);
+    context.ownerSocket.bufferedAmount = 64 * 1024 + 1;
+    context.server.handleMessage('target-connection', context.cursorMessage({
+        sequence: 3, visible: false, screenId: -1, x: 0, y: 0,
+    }));
+    context.ownerSocket.bufferedAmount = 64 * 1024;
+    context.server.handleMessage('target-connection', context.cursorMessage({
+        sequence: 4, visible: false, screenId: -1, x: 0, y: 0,
+    }));
+    assert.equal(messages(context.ownerSocket, 'remote_session_cursor').length, 2);
+    assert.equal(messages(context.ownerSocket, 'remote_session_cursor').at(-1).visible, false);
+}
+
 console.log('remote session protocol tests passed');

@@ -11,6 +11,7 @@
 #include <QJsonArray>
 #include <QElapsedTimer>
 #include <QVector>
+#include <QPointF>
 #include <functional>
 #include <memory>
 #include <limits>
@@ -116,6 +117,9 @@ public:
     bool sendRemoteSessionSnapshot(const QString& remoteSessionId,
                                    quint64 generation,
                                    const QJsonObject& targetSnapshot);
+    bool sendRemoteCursor(const QString& remoteSessionId, quint64 generation,
+                          quint64 sequence, bool visible, int screenId,
+                          const QPointF& screenPosition);
     bool resumeRemoteSession(const QString& remoteSessionId);
     void resumeAllRemoteSessions();
     // Withdraws this endpoint from discovery and atomically asks the server
@@ -230,6 +234,8 @@ signals:
     void remoteSessionOpened(const QJsonObject& envelope);
     void remoteSessionOfferReceived(const QJsonObject& envelope);
     void remoteSessionSnapshotReceived(const QJsonObject& envelope);
+    void remoteCursorReceived(const QString& remoteSessionId, int screenId,
+                              const QPointF& screenPosition, bool visible);
     void remoteSessionResumed(const QJsonObject& envelope);
     void remoteSessionLeaseStateChanged(const QJsonObject& envelope);
     void remoteSessionTerminating(const QJsonObject& envelope);
@@ -314,6 +320,11 @@ private:
     QJsonObject m_registeredTargetSnapshot;
     quint64 m_targetSnapshotRevision = 0;
     QHash<QString, quint64> m_targetSnapshotSequenceBySession;
+    struct CursorSequence {
+        quint64 generation = 0;
+        quint64 sequence = 0;
+    };
+    QHash<QString, CursorSequence> m_receivedCursorSequenceBySession;
     QTimer* m_heartbeatTimer;
     QTimer* m_clockSyncBurstTimer;
     QTimer* m_leaseHealthTimer;

@@ -146,6 +146,10 @@ Active Canvas sessions recover automatically when a peer becomes available.
 See [session recovery](docs/remote-session-recovery.md) for the activity policy,
 close barriers, and regression coverage.
 
+The canvas shows the target's live mouse position through the active session.
+See [remote cursor](docs/remote-cursor.md) for coordinate mapping, freshness,
+regression coverage and the required client/server update.
+
 ## Usage
 
 1. **Start the Server**: Make sure the Mouffette server is running on `localhost:8080`

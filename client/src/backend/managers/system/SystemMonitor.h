@@ -3,6 +3,7 @@
 
 #include <QObject>
 #include <QList>
+#include <QPointF>
 #include <QString>
 
 class QTimer;
@@ -56,6 +57,13 @@ public:
      * @return List of ScreenInfo objects describing each display
      */
     QList<ScreenInfo> getLocalScreenInfo() const;
+
+    /**
+     * Sample the desktop cursor in the advertised screen's local coordinates.
+     * Units match ScreenInfo (physical pixels on macOS/Windows, Qt pixels on
+     * other platforms). Returns false when the cursor or screen is unavailable.
+     */
+    bool getLocalCursorPosition(int* screenId, QPointF* screenPosition) const;
     
     /**
      * @brief Get the machine/host name

@@ -322,6 +322,7 @@ class MouffetteServer {
         this.MAX_UPLOAD_TOTAL_BYTES = 64 * 1024 * 1024 * 1024;
         this.MAX_UPLOAD_CHUNK_BASE64_LENGTH = Math.ceil((128 * 1024) / 3) * 4;
         this.MAX_TARGET_BUFFERED_UPLOAD_BYTES = 8 * 1024 * 1024;
+        this.MAX_OWNER_BUFFERED_CURSOR_BYTES = 64 * 1024;
         this.MAX_PENDING_REMOVALS = 4096;
         this.MAX_REMOTE_SCENE_BYTES = 8 * 1024 * 1024;
         this.MAX_REMOTE_SCENE_SYNC_BYTES = 256 * 1024;
@@ -1455,7 +1456,8 @@ class MouffetteServer {
         }
         
         if (message.type !== 'upload_chunk' && message.type !== 'upload_progress'
-            && message.type !== 'prepare_progress' && message.type !== 'state_snapshot') {
+            && message.type !== 'prepare_progress' && message.type !== 'state_snapshot'
+            && message.type !== 'remote_session_cursor') {
             this.logProtocolEvent('protocol_message_received', {
                 connectionId: clientId,
                 endpointId: client.endpointId,
@@ -1557,6 +1559,9 @@ class MouffetteServer {
                 break;
             case 'remote_session_snapshot':
                 this.handleRemoteSessionSnapshot(clientId, message);
+                break;
+            case 'remote_session_cursor':
+                this.handleRemoteSessionCursor(clientId, message);
                 break;
             case 'remote_session_resume':
                 this.handleRemoteSessionResume(clientId, message);
@@ -2090,6 +2095,55 @@ class MouffetteServer {
             ...this.remoteSessionPayload(session, 'remote_session_snapshot'),
             snapshotSequence: message.snapshotSequence,
             snapshot,
+        });
+    }
+
+    handleRemoteSessionCursor(targetId, message) {
+        const validated = this.validateSessionMessage(targetId, message);
+        if (!validated.ok || validated.role !== 'target') {
+            return this.sendRemoteSessionError(targetId,
+                validated.ok ? 'Only the target may publish its cursor' : validated.error,
+                validated.ok ? 'not_session_target' : validated.error, message);
+        }
+        const { client, session } = validated;
+        const fields = ['type', 'protocolVersion', 'serverBootId', 'messageId',
+            'connectionGeneration', 'remoteSessionId', 'generation',
+            'sequence', 'visible', 'screenId', 'x', 'y'];
+        const screen = client.screens.find(candidate => candidate.id === message.screenId);
+        const hidden = message.visible === false && message.screenId === -1
+            && message.x === 0 && message.y === 0;
+        const onScreen = screen && isBoundedInteger(message.x, 0, screen.width - 1)
+            && isBoundedInteger(message.y, 0, screen.height - 1);
+        if (!isPlainObject(message) || !hasOnlyKeys(message, fields)
+            || !Number.isSafeInteger(message.sequence) || message.sequence < 1
+            || typeof message.visible !== 'boolean'
+            || !isBoundedInteger(message.screenId, -1, 1_000_000)
+            || (message.visible ? !onScreen : !hidden)) {
+            return this.sendRemoteSessionError(targetId, 'Invalid remote cursor sample',
+                'invalid_remote_session_cursor', message);
+        }
+        const previous = session.cursorSample;
+        if (previous && previous.generation === session.generation
+            && message.sequence <= previous.sequence) return false;
+        // Cursor positions are ephemeral. Keep only ordering state and drop
+        // superseded/congested samples instead of building up a delayed trail.
+        // The target periodically repeats its current position with a fresh
+        // sequence, including when it is stationary or hidden.
+        session.cursorSample = { generation: session.generation, sequence: message.sequence };
+        const ownerId = this.resolveClientId(session.ownerEndpointId);
+        const owner = ownerId && this.clients.get(ownerId);
+        if (!owner || !owner.ws || owner.connectionGeneration !== session.ownerConnectionGeneration
+            || owner.runtimeId !== session.ownerRuntimeId
+            || Number(owner.ws.bufferedAmount) > this.MAX_OWNER_BUFFERED_CURSOR_BYTES) {
+            return false;
+        }
+        return this.sendToEndpoint(session.ownerEndpointId, {
+            ...this.remoteSessionPayload(session, 'remote_session_cursor'),
+            sequence: message.sequence,
+            visible: message.visible,
+            screenId: message.screenId,
+            x: message.x,
+            y: message.y,
         });
     }
 

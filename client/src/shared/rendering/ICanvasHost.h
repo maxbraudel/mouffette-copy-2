@@ -5,6 +5,7 @@
 #include <QHash>
 #include <QJsonObject>
 #include <QObject>
+#include <QPointF>
 #include <QStringList>
 
 class CanvasDocument;
@@ -45,7 +46,7 @@ public:
     virtual void hideContentPreservingState() = 0;
     virtual void showContentAfterReconnect() = 0;
     virtual void resetTransform() = 0;
-    virtual void updateRemoteCursor(int globalX, int globalY) = 0;
+    virtual void updateRemoteCursor(int screenId, const QPointF& screenPosition) = 0;
     virtual void hideRemoteCursor() = 0;
     virtual void setOverlayActionsEnabled(bool enabled) = 0;
     virtual bool overlayActionsEnabled() const = 0;

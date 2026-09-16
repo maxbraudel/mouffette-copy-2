@@ -77,10 +77,12 @@ public:
     qreal cameraPanY() const { return m_cameraPanY; }
     void resetCamera();
 
-    void setRemoteCursor(bool visible, const QPointF& scenePosition);
+    void updateRemoteCursor(int screenId, const QPointF& screenPosition);
+    void hideRemoteCursor();
     bool remoteCursorVisible() const { return m_remoteCursorVisible; }
     QPointF remoteCursorPosition() const { return m_remoteCursorPosition; }
-    bool mapRemoteCursor(int globalX, int globalY, QPointF* scenePosition) const;
+    bool mapRemoteCursor(int screenId, const QPointF& screenPosition,
+                         QPointF* scenePosition) const;
 
     void setEditsLocked(bool locked);
     bool editsLocked() const { return m_editsLocked; }
@@ -129,6 +131,7 @@ private:
                                   const QHash<QString, QString>& sourcePaths,
                                   QStringList* skippedMediaIds, bool freshIds);
     void rebuildScreenRects();
+    void setRemoteCursor(bool visible, const QPointF& scenePosition);
     qreal nextZ() const;
 
     quint64 m_importGeneration = 0;
@@ -148,6 +151,8 @@ private:
     qreal m_cameraPanY = 0.0;
     bool m_remoteCursorVisible = false;
     QPointF m_remoteCursorPosition;
+    int m_remoteCursorScreenId = -1;
+    QPointF m_remoteCursorScreenPosition;
     bool m_editsLocked = false;
     bool m_contentAvailable = true;
 };

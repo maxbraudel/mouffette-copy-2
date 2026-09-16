@@ -1578,7 +1578,6 @@ void MediaOverlayTest::scenePlaybackUnloadsEditorOverlays()
         QStringLiteral("canvasSceneElementPanel"),
         QStringLiteral("canvasSelectionChrome"),
         QStringLiteral("canvasSnapGuides"),
-        QStringLiteral("canvasRemoteCursor"),
         QStringLiteral("canvasMediaOverlays"),
         QStringLiteral("mediaTopOverlay"),
         QStringLiteral("mediaVideoOverlay"),
@@ -1591,6 +1590,13 @@ void MediaOverlayTest::scenePlaybackUnloadsEditorOverlays()
         QTRY_VERIFY2((item = findVisualItem(page, name)), qPrintable(name));
         previousControls.append(item);
     }
+    // The remote pointer conveys presence, so it survives the editing lock
+    // even though interactive editor controls are destroyed during playback.
+    host->setScreens({ScreenInfo(0, 1920, 1080, 0, 0, true)});
+    host->updateRemoteCursor(0, {200, 150});
+    QPointer<QQuickItem> remoteCursor = findVisualItem(
+        page, QStringLiteral("canvasRemoteCursor"));
+    QVERIFY(remoteCursor && remoteCursor->isVisible());
     auto* panel = findVisualItem(page, QStringLiteral("canvasSceneElementPanel"));
     panel->setProperty("activeTab", 1);
     QPointer<QQuickItem> mediaList = findVisualItem(page, QStringLiteral("mediaListPanel"));
@@ -1614,6 +1620,8 @@ void MediaOverlayTest::scenePlaybackUnloadsEditorOverlays()
         QTRY_VERIFY(item.isNull());
     for (const auto& name : editorNames)
         QVERIFY2(!findVisualItem(page, name), qPrintable(name));
+    QVERIFY(remoteCursor && remoteCursor->isVisible());
+    QCOMPARE(findVisualItem(page, QStringLiteral("canvasRemoteCursor")), remoteCursor.data());
     QVERIFY(mediaList);
     QVERIFY(mediaList->isVisible());
     CanvasMedia* selectionBeforeInput = host->document()->selectedMedia();
@@ -1631,6 +1639,7 @@ void MediaOverlayTest::scenePlaybackUnloadsEditorOverlays()
     host->controller()->selectMedia(media->mediaId());
     for (const auto& name : editorNames)
         QTRY_VERIFY2(findVisualItem(page, name), qPrintable(name));
+    QVERIFY(remoteCursor && remoteCursor->isVisible());
     QCOMPARE(findVisualItem(page, QStringLiteral("canvasSceneElementPanel"))
                  ->property("activeTab").toInt(), 1);
     QCOMPARE(findVisualItem(page, QStringLiteral("mediaListPanel")), mediaList.data());

@@ -154,6 +154,110 @@ private slots:
         QQuickStyle::setStyle(QStringLiteral("Basic"));
     }
 
+    void remoteCursorUsesScreenIdentityAndExactPixels()
+    {
+        CanvasDocument document;
+        // Mixed-DPI screen rectangles can overlap in global physical space.
+        // The declared screen, not a first-match rectangle, owns the sample.
+        document.setScreens({ScreenInfo(0, 3840, 2160, -1920, -200, true),
+                             ScreenInfo(1, 1920, 1080, 0, 0, false)});
+        document.updateRemoteCursor(1, {0, 0});
+        QVERIFY(document.remoteCursorVisible());
+        QCOMPARE(document.remoteCursorPosition(), QPointF(1920, 200));
+        document.updateRemoteCursor(0, {3839, 2159});
+        QCOMPARE(document.remoteCursorPosition(), QPointF(3839, 2159));
+        document.updateRemoteCursor(1, {100.5, 50.25});
+        QCOMPARE(document.remoteCursorPosition(), QPointF(2020.5, 250.25));
+
+        for (const QPointF& invalid : {QPointF(-1, 20), QPointF(1920, 20),
+                                      QPointF(20, 1080),
+                                      QPointF(std::numeric_limits<qreal>::quiet_NaN(), 0),
+                                      QPointF(0, std::numeric_limits<qreal>::infinity())}) {
+            document.updateRemoteCursor(1, {10, 10});
+            QVERIFY(document.remoteCursorVisible());
+            document.updateRemoteCursor(1, invalid);
+            QVERIFY(!document.remoteCursorVisible());
+        }
+        document.updateRemoteCursor(99, {10, 10});
+        QVERIFY(!document.remoteCursorVisible());
+    }
+
+    void remoteCursorReprojectsWithoutRepublishingCanvas()
+    {
+        CanvasDocument document;
+        QuickCanvasController controller(&document);
+        controller.updateRemoteCursor(1, {120, 80});
+        QVERIFY(!controller.remoteCursorVisible());
+        document.setScreens({ScreenInfo(1, 1920, 1080, 0, 0, true)});
+        QVERIFY(controller.remoteCursorVisible());
+        QCOMPARE(controller.remoteCursorX(), 120.0);
+        document.setScreens({ScreenInfo(1, 1920, 1080, 0, 0, true),
+                             ScreenInfo(2, 2560, 1440, -2560, -100, false)});
+        QCOMPARE(controller.remoteCursorX(), 2680.0);
+        QCOMPARE(controller.remoteCursorY(), 180.0);
+
+        QSignalSpy cursor(&controller, &QuickCanvasController::remoteCursorChanged);
+        QSignalSpy canvas(&controller, &QuickCanvasController::presentationChanged);
+        QSignalSpy edits(&document, &CanvasDocument::documentChanged);
+        const QJsonObject saved = document.serializeProjectState();
+        controller.updateRemoteCursor(1, {130, 90});
+        controller.updateRemoteCursor(1, {130, 90});
+        QCOMPARE(cursor.count(), 1);
+        QCOMPARE(canvas.count(), 0);
+        QCOMPARE(edits.count(), 0);
+        QCOMPARE(document.serializeProjectState(), saved);
+
+        document.setScreens({ScreenInfo(2, 2560, 1440, -2560, -100, true)});
+        QVERIFY(!controller.remoteCursorVisible());
+        controller.hideRemoteCursor();
+        document.setScreens({ScreenInfo(1, 1920, 1080, 0, 0, true)});
+        // A closed/expired stream must not resurrect on a topology update.
+        QVERIFY(!controller.remoteCursorVisible());
+    }
+
+    void remoteCursorStaysVisibleWhenLockedAndZoomed()
+    {
+        Fixture fixture;
+        QVERIFY(fixture.initialize());
+        fixture.document.setScreens({ScreenInfo(0, 3840, 2160, 0, 0, true)});
+        fixture.controller.updateRemoteCursor(0, {300, 200});
+        QQuickItem* cursor = findQuickItemWithProperty(
+            fixture.view.rootObject(), "objectName", QStringLiteral("canvasRemoteCursor"));
+        QVERIFY(cursor);
+        QVERIFY(cursor->isVisible());
+        fixture.document.setEditsLocked(true);
+        QVERIFY(!fixture.controller.editingEnabled());
+        QVERIFY(cursor->isVisible());
+        fixture.controller.setProjectEditingEnabled(false);
+        QVERIFY(cursor->isVisible());
+
+        for (const qreal scale : {.1, .5, 2.0}) {
+            fixture.controller.updateCamera(scale, 25, 35);
+            const QPointF center = cursor->mapToItem(fixture.view.rootObject(),
+                QPointF(cursor->width() / 2, cursor->height() / 2));
+            QCOMPARE(center, QPointF(25 + 300 * scale, 35 + 200 * scale));
+            const QRectF indicator = cursor->mapRectToItem(fixture.view.rootObject(),
+                QRectF(0, 0, cursor->width(), cursor->height()));
+            QCOMPARE(indicator.size(), QSizeF(30, 30));
+        }
+
+        fixture.controller.updateCamera(.5, 25, 35);
+        fixture.view.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&fixture.view));
+        const auto cursorPixel = [&]() {
+            const QImage frame = fixture.view.grabWindow();
+            if (frame.isNull()) return QColor();
+            const QPointF center = cursor->mapToScene(
+                QPointF(cursor->width() / 2, cursor->height() / 2));
+            return frame.pixelColor(qRound(center.x() * frame.width() / fixture.view.width()),
+                                    qRound(center.y() * frame.height() / fixture.view.height()));
+        };
+        QTRY_COMPARE(cursorPixel(), QColor(Qt::white));
+        fixture.controller.hideRemoteCursor();
+        QVERIFY(!cursor->isVisible());
+        QTRY_VERIFY(cursorPixel() != QColor(Qt::white));
+    }
+
     void frameSourcePublishesOnlyChangedContentAndAvailability()
     {
         RemoteVideoFrameSource source;

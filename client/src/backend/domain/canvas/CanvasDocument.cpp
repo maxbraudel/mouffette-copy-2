@@ -395,6 +395,8 @@ void CanvasDocument::setScreens(const QList<ScreenInfo>& screens)
 {
     m_screens = screens;
     rebuildScreenRects();
+    if (m_remoteCursorScreenId >= 0)
+        updateRemoteCursor(m_remoteCursorScreenId, m_remoteCursorScreenPosition);
     emit screensChanged();
     emit documentChanged();
 }
@@ -467,27 +469,36 @@ void CanvasDocument::setRemoteCursor(bool visible,
     emit remoteCursorChanged();
 }
 
-bool CanvasDocument::mapRemoteCursor(int globalX, int globalY,
+void CanvasDocument::updateRemoteCursor(int screenId, const QPointF& screenPosition)
+{
+    // Retain the sample if it precedes the screen snapshot. Screen changes
+    // reproject it; cursor state never enters the saved project or autosave.
+    m_remoteCursorScreenId = screenId;
+    m_remoteCursorScreenPosition = screenPosition;
+    QPointF mapped;
+    const bool visible = mapRemoteCursor(screenId, screenPosition, &mapped);
+    setRemoteCursor(visible, visible ? mapped : m_remoteCursorPosition);
+}
+
+void CanvasDocument::hideRemoteCursor()
+{
+    m_remoteCursorScreenId = -1;
+    setRemoteCursor(false, m_remoteCursorPosition);
+}
+
+bool CanvasDocument::mapRemoteCursor(int screenId, const QPointF& screenPosition,
                                      QPointF* scenePosition) const
 {
-    for (const ScreenInfo& screen : m_screens) {
-        const QRect remote(screen.x, screen.y, screen.width, screen.height);
-        if (!remote.adjusted(-1, -1, 1, 1).contains(globalX, globalY)) continue;
-        const QRectF local = m_screenRects.value(screen.id);
-        if (local.isEmpty()) return false;
-        const qreal rx = screen.width > 1
-            ? qBound(0.0, (globalX - screen.x) / qreal(screen.width - 1), 1.0)
-            : 0.0;
-        const qreal ry = screen.height > 1
-            ? qBound(0.0, (globalY - screen.y) / qreal(screen.height - 1), 1.0)
-            : 0.0;
-        if (scenePosition) {
-            *scenePosition = {local.x() + rx * local.width(),
-                              local.y() + ry * local.height()};
-        }
-        return true;
-    }
-    return false;
+    const QRectF screen = m_screenRects.value(screenId);
+    if (screen.isEmpty() || !std::isfinite(screenPosition.x())
+        || !std::isfinite(screenPosition.y())
+        || screenPosition.x() < 0 || screenPosition.y() < 0
+        || screenPosition.x() >= screen.width()
+        || screenPosition.y() >= screen.height()) return false;
+    // Screen-local pixels avoid ambiguous global rectangles with mixed DPI
+    // displays, and preserve exact positions at adjoining screen edges.
+    if (scenePosition) *scenePosition = screen.topLeft() + screenPosition;
+    return true;
 }
 
 void CanvasDocument::setEditsLocked(bool locked)

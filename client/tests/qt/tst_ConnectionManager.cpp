@@ -757,6 +757,7 @@ void ConnectionManagerTest::protocolUploadWireSchemaAndActiveGate() {
     QVector<QJsonObject> uploadCommands;
     QVector<QJsonObject> endpointSnapshots;
     QVector<QJsonObject> teardownAcknowledgements;
+    QVector<QJsonObject> cursorCommands;
     QWebSocket* peer = nullptr;
 
     WebSocketClient client(identityDirectory.path(), false);
@@ -842,6 +843,8 @@ void ConnectionManagerTest::protocolUploadWireSchemaAndActiveGate() {
                 uploadCommands.append(message);
             } else if (type == QLatin1String("remote_session_teardown_ack")) {
                 teardownAcknowledgements.append(message);
+            } else if (type == QLatin1String("remote_session_cursor")) {
+                cursorCommands.append(message);
             }
         });
     });
@@ -849,6 +852,7 @@ void ConnectionManagerTest::protocolUploadWireSchemaAndActiveGate() {
     QSignalSpy connectedSpy(&client, &WebSocketClient::connected);
     QSignalSpy sessionSpy(&client, &WebSocketClient::remoteSessionOpened);
     QSignalSpy uploadEnvelopeSpy(&client, &WebSocketClient::uploadMessageReceived);
+    QSignalSpy cursorSpy(&client, &WebSocketClient::remoteCursorReceived);
     client.connectToServer(QStringLiteral("ws://127.0.0.1:%1").arg(server.serverPort()));
     QTRY_COMPARE_WITH_TIMEOUT(connectedSpy.count(), 1, 2000);
     client.registerClient(QStringLiteral("test-device"), QStringLiteral("test-platform"),
@@ -879,6 +883,54 @@ void ConnectionManagerTest::protocolUploadWireSchemaAndActiveGate() {
     });
     QTRY_COMPARE_WITH_TIMEOUT(sessionSpy.count(), 1, 1000);
     QVERIFY(client.remoteSessionCoordinator()->forPeer(targetEndpointId).active);
+    // The cursor rides the same authenticated session without an obsolete
+    // watch_screens subscription. Reject stale, malformed and reverse traffic.
+    QJsonObject cursor{
+        {QStringLiteral("type"), QStringLiteral("remote_session_cursor")},
+        {QStringLiteral("remoteSessionId"), remoteSessionId},
+        {QStringLiteral("generation"), 1},
+        {QStringLiteral("ownerConnectionGeneration"), 1},
+        {QStringLiteral("targetConnectionGeneration"), 1},
+        {QStringLiteral("connectionGeneration"), 1},
+        {QStringLiteral("ownerEndpointId"), client.endpointId()},
+        {QStringLiteral("targetEndpointId"), targetEndpointId},
+        {QStringLiteral("sequence"), 1},
+        {QStringLiteral("visible"), true},
+        {QStringLiteral("screenId"), 2},
+        {QStringLiteral("x"), 120},
+        {QStringLiteral("y"), 240}
+    };
+    for (const auto& mutation : QList<QPair<QString, QJsonValue>>{
+             {QStringLiteral("generation"), 1.5},
+             {QStringLiteral("sequence"), 1.5},
+             {QStringLiteral("sequence"), 0},
+             {QStringLiteral("connectionGeneration"), 2},
+             {QStringLiteral("targetConnectionGeneration"), 2},
+             {QStringLiteral("ownerEndpointId"), targetEndpointId},
+             {QStringLiteral("screenId"), -1},
+             {QStringLiteral("x"), -1},
+             {QStringLiteral("x"), 120.5},
+             {QStringLiteral("visible"), QStringLiteral("true")}}) {
+        QJsonObject malformed = cursor;
+        malformed.insert(mutation.first, mutation.second);
+        sendServerMessage(malformed);
+    }
+    sendServerMessage(cursor);
+    QTRY_COMPARE_WITH_TIMEOUT(cursorSpy.count(), 1, 1000);
+    QCOMPARE(cursorSpy.last().at(0).toString(), remoteSessionId);
+    QCOMPARE(cursorSpy.last().at(1).toInt(), 2);
+    QCOMPARE(cursorSpy.last().at(2).toPointF(), QPointF(120, 240));
+    QVERIFY(cursorSpy.last().at(3).toBool());
+    sendServerMessage(cursor); // duplicate
+    cursor.insert(QStringLiteral("sequence"), 2);
+    cursor.insert(QStringLiteral("visible"), false);
+    cursor.insert(QStringLiteral("screenId"), -1);
+    cursor.insert(QStringLiteral("x"), 0);
+    cursor.insert(QStringLiteral("y"), 0);
+    sendServerMessage(cursor);
+    QTRY_COMPARE_WITH_TIMEOUT(cursorSpy.count(), 2, 1000);
+    QVERIFY(!cursorSpy.last().at(3).toBool());
+    QVERIFY(!client.sendRemoteCursor(remoteSessionId, 1, 1, true, 0, {10, 20}));
     QVERIFY(client.beginUploadSession(false));
     QVERIFY(client.beginUploadSession(false));
     client.endUploadSession();
@@ -966,6 +1018,8 @@ void ConnectionManagerTest::protocolUploadWireSchemaAndActiveGate() {
         !client.remoteSessionCoordinator()->forPeer(targetEndpointId).active, 1000);
     QVERIFY(!client.sendUploadStart(remoteSessionId, 1,
                                     QStringLiteral("upload_blocked_in_grace"), manifest));
+    cursor.insert(QStringLiteral("sequence"), 3);
+    sendServerMessage(cursor);
 
     // The reverse direction is a distinct binding even though the peer is the
     // same device. B may control A while A's outgoing session to B is in Grace.
@@ -986,6 +1040,22 @@ void ConnectionManagerTest::protocolUploadWireSchemaAndActiveGate() {
                  ->outgoingForPeer(targetEndpointId).active);
     QVERIFY(client.remoteSessionCoordinator()
                 ->incomingForPeer(targetEndpointId).active);
+    QCOMPARE(cursorSpy.count(), 2); // inactive outgoing session was ignored
+    QVERIFY(client.sendRemoteCursor(incomingSessionId, 1, 1, true, 2, {12.9, 24.1}));
+    QVERIFY(client.sendRemoteCursor(incomingSessionId, 1, 2, false, 2, {12.9, 24.1}));
+    QVERIFY(!client.sendRemoteCursor(incomingSessionId, 2, 3, true, 2, {12, 24}));
+    QVERIFY(!client.sendRemoteCursor(incomingSessionId, 1, 0, true, 2, {12, 24}));
+    QVERIFY(!client.sendRemoteCursor(incomingSessionId, 1, 3, true, 2, {-1, 24}));
+    QTRY_COMPARE_WITH_TIMEOUT(cursorCommands.size(), 2, 1000);
+    QCOMPARE(cursorCommands.first().value(QStringLiteral("screenId")).toInt(), 2);
+    QCOMPARE(cursorCommands.first().value(QStringLiteral("x")).toInt(), 12);
+    QCOMPARE(cursorCommands.first().value(QStringLiteral("y")).toInt(), 24);
+    QCOMPARE(cursorCommands.first().value(QStringLiteral("remoteSessionId")).toString(), incomingSessionId);
+    QCOMPARE(cursorCommands.first().value(QStringLiteral("protocolVersion")).toInt(), 5);
+    QCOMPARE(cursorCommands.first().value(QStringLiteral("connectionGeneration")).toInt(), 1);
+    QCOMPARE(cursorCommands.last().value(QStringLiteral("screenId")).toInt(), -1);
+    QCOMPARE(cursorCommands.last().value(QStringLiteral("x")).toInt(), 0);
+    QCOMPARE(cursorCommands.last().value(QStringLiteral("y")).toInt(), 0);
     QVERIFY(!client.acknowledgeRemoteSessionTeardown(
         incomingSessionId, QStringLiteral("teardown_reverse"), true, true, true, 0));
 
@@ -1003,6 +1073,7 @@ void ConnectionManagerTest::protocolUploadWireSchemaAndActiveGate() {
     QTRY_COMPARE_WITH_TIMEOUT(
         client.remoteSessionCoordinator()->incomingForPeer(targetEndpointId).phase,
         QStringLiteral("CleanupPending"), 1000);
+    QVERIFY(!client.sendRemoteCursor(incomingSessionId, 1, 3, true, 2, {12, 24}));
     QVERIFY(!client.acknowledgeRemoteSessionTeardown(
         incomingSessionId, QStringLiteral("teardown_wrong"), true, true, true, 0));
     QVERIFY(client.acknowledgeRemoteSessionTeardown(

@@ -316,6 +316,10 @@ WebSocketClient::WebSocketClient(const QString& identityFallbackDirectory,
         AppConfig::instance().leaseHealthCheckIntervalMs());
     m_leaseHealthTimer->setSingleShot(false);
     connect(m_leaseHealthTimer, &QTimer::timeout, this, &WebSocketClient::checkLeaseHealth);
+    connect(remoteSessionCoordinator(), &RemoteSessionCoordinator::sessionRemoved,
+            this, [this](const QString& sessionId) {
+        m_receivedCursorSequenceBySession.remove(sessionId);
+    });
 
     if (!m_identityStore->initialize(&m_identityInitializationError)) {
         qCritical().noquote() << "Device identity initialization failed:"
@@ -1018,6 +1022,36 @@ bool WebSocketClient::sendRemoteSessionSnapshot(
         {QStringLiteral("generation"), static_cast<double>(generation)},
         {QStringLiteral("snapshotSequence"), static_cast<double>(sequence)},
         {QStringLiteral("snapshot"), snapshot}
+    });
+}
+
+bool WebSocketClient::sendRemoteCursor(const QString& remoteSessionId,
+                                      quint64 generation, quint64 sequence,
+                                      bool visible, int screenId,
+                                      const QPointF& screenPosition)
+{
+    if (!isConnected() || !m_sceneRuns || !m_webSocket || m_endpointDraining
+        || sequence == 0 || sequence > 9007199254740991ULL
+        || m_webSocket->bytesToWrite() > 64 * 1024) return false;
+    const auto binding = m_sceneRuns->sessionById(remoteSessionId);
+    if (!binding.active || binding.generation != generation
+        || binding.targetEndpointId != m_endpointId
+        || binding.targetConnectionGeneration != m_connectionGeneration) return false;
+    if (visible && (screenId < 0 || screenId > 1000000
+        || !std::isfinite(screenPosition.x()) || !std::isfinite(screenPosition.y())
+        || screenPosition.x() < 0 || screenPosition.x() >= 100000
+        || screenPosition.y() < 0 || screenPosition.y() >= 100000)) return false;
+    // Cursor samples are disposable: do not grow a transport backlog while an
+    // upload or a slow connection is draining. The next tick sends fresh state.
+    return sendControlMessage(QJsonObject{
+        {QStringLiteral("type"), QStringLiteral("remote_session_cursor")},
+        {QStringLiteral("remoteSessionId"), remoteSessionId},
+        {QStringLiteral("generation"), static_cast<double>(generation)},
+        {QStringLiteral("sequence"), static_cast<double>(sequence)},
+        {QStringLiteral("visible"), visible},
+        {QStringLiteral("screenId"), visible ? screenId : -1},
+        {QStringLiteral("x"), visible ? static_cast<int>(std::floor(screenPosition.x())) : 0},
+        {QStringLiteral("y"), visible ? static_cast<int>(std::floor(screenPosition.y())) : 0}
     });
 }
 
@@ -1741,7 +1775,8 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
     }
     noteServerContact();
     // Suppress noisy logs for high-frequency message types
-    if (type != "upload_progress" && type != "upload_chunk") {
+    if (type != "upload_progress" && type != "upload_chunk"
+        && type != "remote_session_cursor") {
         qDebug() << "Received message type:" << type;
     }
     
@@ -2013,6 +2048,40 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
             || binding.ownerEndpointId != message.value(QStringLiteral("ownerEndpointId")).toString()) return;
         emit mediaResidencyReceived(message);
     }
+    else if (type == "remote_session_cursor") {
+        const QString sessionId = message.value(QStringLiteral("remoteSessionId")).toString();
+        const auto binding = m_sceneRuns->sessionById(sessionId);
+        quint64 generation = 0, sequence = 0, ownerConnection = 0, targetConnection = 0;
+        quint64 recipientConnection = 0;
+        const auto visibleValue = message.value(QStringLiteral("visible"));
+        const qint64 screenId = boundedInteger(message.value(QStringLiteral("screenId")), -1, 1000000);
+        const qint64 x = boundedInteger(message.value(QStringLiteral("x")), 0, 99999);
+        const qint64 y = boundedInteger(message.value(QStringLiteral("y")), 0, 99999);
+        if (!binding.active || binding.ownerEndpointId != m_endpointId
+            || binding.ownerConnectionGeneration != m_connectionGeneration
+            || !readPositiveSafeJsonInteger(message.value(QStringLiteral("connectionGeneration")), &recipientConnection)
+            || recipientConnection != m_connectionGeneration
+            || !readPositiveSafeJsonInteger(message.value(QStringLiteral("generation")), &generation)
+            || generation != binding.generation
+            || !readPositiveSafeJsonInteger(message.value(QStringLiteral("sequence")), &sequence)
+            || !readPositiveSafeJsonInteger(message.value(QStringLiteral("ownerConnectionGeneration")), &ownerConnection)
+            || ownerConnection != binding.ownerConnectionGeneration
+            || !readPositiveSafeJsonInteger(message.value(QStringLiteral("targetConnectionGeneration")), &targetConnection)
+            || targetConnection != binding.targetConnectionGeneration
+            || message.value(QStringLiteral("ownerEndpointId")).toString() != binding.ownerEndpointId
+            || message.value(QStringLiteral("targetEndpointId")).toString() != binding.targetEndpointId
+            || !visibleValue.isBool() || x < 0 || y < 0
+            || (visibleValue.toBool() && screenId < 0)
+            || (!visibleValue.toBool()
+                && (!message.value(QStringLiteral("screenId")).isDouble()
+                    || message.value(QStringLiteral("screenId")).toDouble() != -1
+                    || x != 0 || y != 0))) return;
+        CursorSequence& previous = m_receivedCursorSequenceBySession[sessionId];
+        if (previous.generation == generation && sequence <= previous.sequence) return;
+        previous = {generation, sequence};
+        emit remoteCursorReceived(sessionId, static_cast<int>(screenId),
+                                  QPointF(x, y), visibleValue.toBool());
+    }
     else if (type == "remote_session_snapshot") {
         RemoteSessionCoordinator* sessions = remoteSessionCoordinator();
         if (!sessions || !sessions->acceptSnapshot(message, m_connectionGeneration)) {
@@ -2088,6 +2157,8 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
         }
         emit remoteSessionClosed(message);
         m_targetSnapshotSequenceBySession.remove(
+            message.value(QStringLiteral("remoteSessionId")).toString());
+        m_receivedCursorSequenceBySession.remove(
             message.value(QStringLiteral("remoteSessionId")).toString());
         emit messageReceived(message);
     }

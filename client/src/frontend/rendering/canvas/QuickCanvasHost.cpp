@@ -605,9 +605,9 @@ void QuickCanvasHost::resetTransform()
     if (m_controller) m_controller->resetView();
 }
 
-void QuickCanvasHost::updateRemoteCursor(int x, int y)
+void QuickCanvasHost::updateRemoteCursor(int screenId, const QPointF& screenPosition)
 {
-    if (m_controller) m_controller->updateRemoteCursor(x, y);
+    if (m_controller) m_controller->updateRemoteCursor(screenId, screenPosition);
 }
 
 void QuickCanvasHost::hideRemoteCursor()

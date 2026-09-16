@@ -39,9 +39,9 @@ class QuickCanvasController final : public QObject
     Q_PROPERTY(qreal viewScale READ viewScale NOTIFY presentationChanged)
     Q_PROPERTY(qreal panX READ panX NOTIFY presentationChanged)
     Q_PROPERTY(qreal panY READ panY NOTIFY presentationChanged)
-    Q_PROPERTY(bool remoteCursorVisible READ remoteCursorVisible NOTIFY presentationChanged)
-    Q_PROPERTY(qreal remoteCursorX READ remoteCursorX NOTIFY presentationChanged)
-    Q_PROPERTY(qreal remoteCursorY READ remoteCursorY NOTIFY presentationChanged)
+    Q_PROPERTY(bool remoteCursorVisible READ remoteCursorVisible NOTIFY remoteCursorChanged)
+    Q_PROPERTY(qreal remoteCursorX READ remoteCursorX NOTIFY remoteCursorChanged)
+    Q_PROPERTY(qreal remoteCursorY READ remoteCursorY NOTIFY remoteCursorChanged)
     Q_PROPERTY(QString liveSnapDragMediaId READ liveSnapDragMediaId NOTIFY presentationChanged)
     Q_PROPERTY(qreal liveSnapDragX READ liveSnapDragX NOTIFY presentationChanged)
     Q_PROPERTY(qreal liveSnapDragY READ liveSnapDragY NOTIFY presentationChanged)
@@ -108,7 +108,7 @@ public:
     void selectMedia(const QString& mediaId, bool additive = false);
 
     void setShellActive(bool active);
-    void updateRemoteCursor(int globalX, int globalY);
+    void updateRemoteCursor(int screenId, const QPointF& screenPosition);
     void hideRemoteCursor();
     Q_INVOKABLE void resetView();
     Q_INVOKABLE void recenterView(int marginPx = 53);
@@ -136,6 +136,7 @@ signals:
     void editingEnabledChanged();
     void pendingEditsCanceled();
     void presentationChanged();
+    void remoteCursorChanged();
     void liveTransformsChanged();
     void mediaSnapshotChanged();
     void selectionChromeModelChanged();

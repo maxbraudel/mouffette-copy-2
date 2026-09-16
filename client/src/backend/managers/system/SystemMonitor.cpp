@@ -1,13 +1,14 @@
 #include "backend/managers/system/SystemMonitor.h"
+#include "backend/managers/system/ScreenCoordinateMapping.h"
 #include "backend/config/AppConfig.h"
 #include "backend/domain/models/ClientInfo.h"
 #include <QTimer>
 #include <QProcess>
 #include <QGuiApplication>
+#include <QCursor>
 #include <QScreen>
 #include <QHostInfo>
 #include <algorithm>
-#include <cmath>
 
 #ifdef Q_OS_WIN
 #include <windows.h>
@@ -255,13 +256,10 @@ QList<ScreenInfo> SystemMonitor::getLocalScreenInfo() const {
     QList<QScreen*> screenList = QGuiApplication::screens();
     for (int i = 0; i < screenList.size(); ++i) {
         QScreen* screen = screenList[i];
-    QRect geometry = screen->geometry();
+        QRect geometry = screen->geometry();
 #ifdef Q_OS_MACOS
-    const qreal dpr = std::max<qreal>(1.0, screen->devicePixelRatio());
-    geometry.setX(static_cast<int>(std::lround(static_cast<qreal>(geometry.x()) * dpr)));
-    geometry.setY(static_cast<int>(std::lround(static_cast<qreal>(geometry.y()) * dpr)));
-    geometry.setWidth(static_cast<int>(std::lround(static_cast<qreal>(geometry.width()) * dpr)));
-    geometry.setHeight(static_cast<int>(std::lround(static_cast<qreal>(geometry.height()) * dpr)));
+        const qreal dpr = std::max<qreal>(1.0, screen->devicePixelRatio());
+        geometry = ScreenCoordinateMapping::scaledScreenGeometry(geometry, dpr);
 #endif
         bool isPrimary = (screen == QGuiApplication::primaryScreen());
         screens.append(ScreenInfo(i, geometry.width(), geometry.height(), 
@@ -270,6 +268,54 @@ QList<ScreenInfo> SystemMonitor::getLocalScreenInfo() const {
 #endif
     
     return screens;
+}
+
+bool SystemMonitor::getLocalCursorPosition(int* screenId,
+                                          QPointF* screenPosition) const
+{
+    if (!screenId || !screenPosition) return false;
+    // Screen ids follow enumeration order. Wait until the debounced topology
+    // snapshot is published before using ids from a newly changed desktop.
+    if (m_screenChangeTimer && m_screenChangeTimer->isActive()) return false;
+
+#ifdef Q_OS_WIN
+    // Qt cursor coordinates are logical. Query physical coordinates to match
+    // the monitor rectangles advertised by getLocalScreenInfo().
+    POINT physicalPosition{};
+    if (!GetPhysicalCursorPos(&physicalPosition)) return false;
+
+    MonitorEnumContext ctx;
+    EnumDisplayMonitors(nullptr, nullptr, MouffetteEnumMonProc,
+                        reinterpret_cast<LPARAM>(&ctx));
+    for (size_t i = 0; i < ctx.count; ++i) {
+        const RECT& rectangle = ctx.monitors[i].rc;
+        if (physicalPosition.x < rectangle.left || physicalPosition.x >= rectangle.right
+            || physicalPosition.y < rectangle.top || physicalPosition.y >= rectangle.bottom) {
+            continue;
+        }
+        *screenId = static_cast<int>(i);
+        *screenPosition = QPointF(physicalPosition.x - rectangle.left,
+                                 physicalPosition.y - rectangle.top);
+        return true;
+    }
+    if (ctx.count != 0) return false;
+    // Mirror getLocalScreenInfo()'s Qt fallback when native enumeration fails.
+#endif
+
+    const QPoint position = QCursor::pos();
+    QScreen* screen = QGuiApplication::screenAt(position);
+    if (!screen) return false;
+    const int id = QGuiApplication::screens().indexOf(screen);
+    if (id < 0) return false;
+#ifdef Q_OS_MACOS
+    const qreal scale = std::max<qreal>(1.0, screen->devicePixelRatio());
+#else
+    const qreal scale = 1.0;
+#endif
+    *screenId = id;
+    *screenPosition = ScreenCoordinateMapping::screenLocalPosition(
+        position, screen->geometry(), scale);
+    return true;
 }
 
 QString SystemMonitor::getMachineName() const {

@@ -1065,24 +1065,20 @@ Rectangle {
 
             }
 
-            Loader {
+            RemoteCursor {
                 parent: viewport
-                x: root.panX
-                y: root.panY
-                scale: root.viewScale
-                transformOrigin: Item.TopLeft
-                active: root.editingEnabled
-                z: 2
-                sourceComponent: RemoteCursor {
-                    objectName: "canvasRemoteCursor"
-                    cursorVisible: root.remoteCursorVisible
-                    cursorX: root.remoteCursorX
-                    cursorY: root.remoteCursorY
-                    diameter: root.remoteCursorDiameter
-                    fillColor: root.remoteCursorFill
-                    borderColor: root.remoteCursorBorder
-                    borderWidth: root.remoteCursorBorderWidth
-                }
+                objectName: "canvasRemoteCursor"
+                // Cursor presence is independent of editing/scene playback.
+                // Only its position follows the camera; size stays legible
+                // when fitting a large or multi-monitor desktop in the view.
+                z: 5
+                cursorVisible: root.remoteCursorVisible
+                cursorX: root.panX + root.remoteCursorX * root.viewScale
+                cursorY: root.panY + root.remoteCursorY * root.viewScale
+                diameter: root.remoteCursorDiameter
+                fillColor: root.remoteCursorFill
+                borderColor: root.remoteCursorBorder
+                borderWidth: root.remoteCursorBorderWidth
             }
 
         Loader {

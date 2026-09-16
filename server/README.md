@@ -60,6 +60,13 @@ Session messages are `remote_session_open`, `remote_session_resume`,
 `remote_session_opened`, `remote_session_resumed`, `remote_session_lease_state`,
 `remote_session_terminating`, and `remote_session_closed`.
 
+Active targets also publish `remote_session_cursor` with a session generation,
+increasing sequence and screen-local coordinates. The server validates the
+target and advertised screen bounds, and forwards only to that session's owner.
+Samples are transient and dropped when the owner's socket is congested. Deploy
+this server update before or together with the updated clients to restore the
+canvas mouse indicator; see [remote cursor](../client/docs/remote-cursor.md).
+
 An authenticated replacement transport from the same endpoint and runtime may
 close the exact live session generation without first resuming it. This advances
 only terminal-state delivery to the current connection generation; it never

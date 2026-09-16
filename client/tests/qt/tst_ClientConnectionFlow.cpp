@@ -233,6 +233,7 @@ public:
     QList<QJsonObject> closeCommands;
     QList<QJsonObject> resumeCommands;
     QList<QJsonObject> teardownAcknowledgements;
+    QList<QJsonObject> cursorSamples;
 
 private:
     void acceptConnection()
@@ -277,6 +278,8 @@ private:
             } else if (type
                        == QLatin1String("remote_session_teardown_ack")) {
                 teardownAcknowledgements.append(message);
+            } else if (type == QLatin1String("remote_session_cursor")) {
+                cursorSamples.append(message);
             }
         });
 
@@ -333,6 +336,114 @@ class ClientConnectionFlowTest final : public QObject
     Q_OBJECT
 
 private slots:
+    void remoteCursorStreamsWithoutSceneAndRecoversAfterStaleOrResumedSession()
+    {
+        QTemporaryDir root;
+        QVERIFY(root.isValid());
+        RuntimeProfileContext context;
+        context.ordinal = 2;
+        context.instanceId = QStringLiteral("remote-cursor-regression");
+        context.profileId = context.instanceId;
+        context.rootPath = root.path();
+        context.persistent = false;
+        RuntimeProfile::configure(context);
+        ApplicationRuntime runtime(context);
+        runtime.getWorkspaceManager()->stopAutomaticTimersForTesting();
+        runtime.getProjectManager()->stopAutomaticTimersForTesting();
+        auto* websocket = runtime.getWebSocketClient();
+        RemoteSessionTestServer server(websocket->endpointId());
+        QVERIFY(server.listen());
+        auto* connections = runtime.findChild<ConnectionManager*>();
+        QVERIFY(connections);
+        connections->connectToServer(server.url());
+        QTRY_VERIFY_WITH_TIMEOUT(websocket->isConnected(), 2000);
+        const QString target(43, QLatin1Char('C'));
+        const QString sessionId = QStringLiteral("cursor-outgoing");
+        QVERIFY(server.sendClientList(onlineClient(target, QStringLiteral("Cursor target"))));
+        QTRY_COMPARE_WITH_TIMEOUT(runtime.displayClients().size(), 1, 1000);
+        runtime.activateClient(target);
+        QTRY_COMPARE_WITH_TIMEOUT(server.openCommands.size(), 1, 1000);
+        QVERIFY(server.sendOpened(sessionId,
+            server.openCommands.last().value(QStringLiteral("requestId")).toString(),
+            target, ScreenInfo(7, 1920, 1080, -1920, 0, true), 50));
+        QTRY_VERIFY_WITH_TIMEOUT(runtime.getActiveCanvas(), 1000);
+        CanvasDocument* document = runtime.getActiveCanvas()->document();
+        QVERIFY(document);
+        QVERIFY(!document->remoteCursorVisible());
+        QJsonObject sample{
+            {QStringLiteral("type"), QStringLiteral("remote_session_cursor")},
+            {QStringLiteral("remoteSessionId"), sessionId},
+            {QStringLiteral("generation"), 1},
+            {QStringLiteral("ownerConnectionGeneration"), 1},
+            {QStringLiteral("targetConnectionGeneration"), 1},
+            {QStringLiteral("connectionGeneration"), 1},
+            {QStringLiteral("ownerEndpointId"), websocket->endpointId()},
+            {QStringLiteral("targetEndpointId"), target},
+            {QStringLiteral("sequence"), 1},
+            {QStringLiteral("visible"), true},
+            {QStringLiteral("screenId"), 7},
+            {QStringLiteral("x"), 120},
+            {QStringLiteral("y"), 240}
+        };
+        QVERIFY(server.send(sample));
+        QTRY_VERIFY_WITH_TIMEOUT(document->remoteCursorVisible(), 1000);
+        QPointF expected;
+        QVERIFY(document->mapRemoteCursor(7, {120, 240}, &expected));
+        QCOMPARE(document->remoteCursorPosition(), expected);
+        // A live websocket heartbeat cannot keep a stale pointer visible.
+        QTRY_VERIFY_WITH_TIMEOUT(!document->remoteCursorVisible(), 4000);
+        QVERIFY(websocket->isConnected());
+        QVERIFY(server.cursorSamples.isEmpty()); // no incoming session to sample for
+        sample.insert(QStringLiteral("sequence"), 2);
+        QVERIFY(server.send(sample));
+        QTRY_VERIFY_WITH_TIMEOUT(document->remoteCursorVisible(), 1000);
+        QVERIFY(server.sendResumed(sessionId, target, 1, 1, QStringLiteral("Grace")));
+        QTRY_VERIFY_WITH_TIMEOUT(!document->remoteCursorVisible(), 1000);
+        QVERIFY(server.sendResumed(sessionId, target, 2, 2, QStringLiteral("Active")));
+        QTRY_VERIFY_WITH_TIMEOUT(websocket->remoteSessionCoordinator()->byId(sessionId).active, 1000);
+        sample.insert(QStringLiteral("generation"), 2);
+        sample.insert(QStringLiteral("targetConnectionGeneration"), 2);
+        sample.insert(QStringLiteral("sequence"), 1); // fresh generation restarts ordering
+        QVERIFY(server.send(sample));
+        QTRY_VERIFY_WITH_TIMEOUT(document->remoteCursorVisible(), 1000);
+
+        // The reverse session starts local sampling even without media or an
+        // active SceneRun. Stationary cursors still refresh at least every 1s.
+        const QString incomingId = QStringLiteral("cursor-incoming");
+        QVERIFY(server.sendIncomingOpened(incomingId, QStringLiteral("cursor-offer"), target));
+        QTRY_VERIFY_WITH_TIMEOUT(server.cursorSamples.size() >= 2, 1600);
+        QCOMPARE(server.cursorSamples.first().value(QStringLiteral("remoteSessionId")).toString(), incomingId);
+        QCOMPARE(server.cursorSamples.first().value(QStringLiteral("sequence")).toInt(), 1);
+        QVERIFY(server.cursorSamples.last().value(QStringLiteral("sequence")).toInteger()
+                > server.cursorSamples.first().value(QStringLiteral("sequence")).toInteger());
+        QVERIFY(server.send(QJsonObject{
+            {QStringLiteral("type"), QStringLiteral("remote_session_lease_state")},
+            {QStringLiteral("remoteSessionId"), incomingId},
+            {QStringLiteral("generation"), 1},
+            {QStringLiteral("ownerConnectionGeneration"), 1},
+            {QStringLiteral("targetConnectionGeneration"), 1},
+            {QStringLiteral("ownerEndpointId"), target},
+            {QStringLiteral("targetEndpointId"), websocket->endpointId()},
+            {QStringLiteral("phase"), QStringLiteral("Grace")}
+        }));
+        QTRY_VERIFY_WITH_TIMEOUT(!websocket->remoteSessionCoordinator()->byId(incomingId).active, 1000);
+        const qsizetype stoppedCount = server.cursorSamples.size();
+        QTest::qWait(100);
+        QCOMPARE(server.cursorSamples.size(), stoppedCount);
+        sample.insert(QStringLiteral("sequence"), 2);
+        QVERIFY(server.send(sample));
+        QTRY_VERIFY_WITH_TIMEOUT(document->remoteCursorVisible(), 1000);
+        connections->disconnect();
+        QTRY_VERIFY_WITH_TIMEOUT(!document->remoteCursorVisible(), 1000);
+        auto* workspace = runtime.findWorkspace(target);
+        runtime.handleApplicationAboutToQuit();
+        runtime.getNavigationManager()->setActiveCanvas(nullptr);
+        runtime.setActiveCanvas(nullptr);
+        QVERIFY(workspace && workspace->canvas);
+        delete workspace->canvas;
+        workspace->canvas = nullptr;
+    }
+
     void selectedClientSnapshotSurvivesSynchronousModelRebuild()
     {
         ClientListModel model;

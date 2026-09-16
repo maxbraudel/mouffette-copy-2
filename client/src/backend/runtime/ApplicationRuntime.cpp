@@ -413,6 +413,47 @@ ApplicationRuntime::ApplicationRuntime(const RuntimeProfileContext& runtimeProfi
     connect(m_webSocketClient, &WebSocketClient::clientListReceived,
             this, &ApplicationRuntime::onClientListReceived);
 
+    m_cursorClock.start();
+    m_cursorPublishTimer = new QTimer(this);
+    m_cursorPublishTimer->setTimerType(Qt::PreciseTimer);
+    m_cursorPublishTimer->setInterval(16);
+    connect(m_cursorPublishTimer, &QTimer::timeout,
+            this, &ApplicationRuntime::publishLocalCursor);
+    m_cursorExpiryTimer = new QTimer(this);
+    m_cursorExpiryTimer->setInterval(500);
+    connect(m_cursorExpiryTimer, &QTimer::timeout,
+            this, &ApplicationRuntime::expireStaleRemoteCursors);
+    if (auto* sessions = m_webSocketClient->remoteSessionCoordinator()) {
+        connect(sessions, &RemoteSessionCoordinator::sessionChanged, this,
+                [this](const QString& sessionId, quint64, const QString&) {
+            if (m_publishedCursors.contains(sessionId)) {
+                m_publishedCursors[sessionId].lastSentAtMs = -1;
+            }
+            refreshRemoteCursorStreaming();
+        });
+        connect(sessions, &RemoteSessionCoordinator::sessionRemoved, this,
+                [this](const QString& sessionId) {
+            m_publishedCursors.remove(sessionId);
+            refreshRemoteCursorStreaming();
+        });
+    }
+    connect(m_webSocketClient, &WebSocketClient::connected,
+            this, &ApplicationRuntime::refreshRemoteCursorStreaming);
+    connect(m_webSocketClient, &WebSocketClient::disconnected,
+            this, &ApplicationRuntime::refreshRemoteCursorStreaming);
+    connect(m_webSocketClient, &WebSocketClient::remoteCursorReceived, this,
+            [this](const QString& sessionId, int screenId,
+                   const QPointF& position, bool visible) {
+        const auto binding = m_webSocketClient->remoteSessionCoordinator()->byId(sessionId);
+        if (!isCommandReadyBinding(m_webSocketClient, binding)
+            || binding.ownerEndpointId != m_webSocketClient->endpointId()) return;
+        auto* workspace = m_workspaceManager->findWorkspace(binding.targetEndpointId);
+        if (!workspace || !workspace->canvas) return;
+        m_receivedCursorAtByEndpoint[binding.targetEndpointId] = m_cursorClock.elapsed();
+        if (visible) workspace->canvas->updateRemoteCursor(screenId, position);
+        else workspace->canvas->hideRemoteCursor();
+    });
+
     // SceneActivityModel is the sole source for the Ongoing Scenes UI. A run
     // is inserted only after the protocol v4 coordinator reaches Live and is
     // removed as soon as it leaves Live.
@@ -3885,7 +3926,80 @@ void ApplicationRuntime::onDisconnected() {
     }
 }
 
-// Screen watching and cursor streaming are intentionally absent from protocol v4.
+void ApplicationRuntime::refreshRemoteCursorStreaming()
+{
+    const auto* sessions = m_webSocketClient
+        ? m_webSocketClient->remoteSessionCoordinator() : nullptr;
+    bool publish = false, receive = false;
+    if (sessions && m_webSocketClient->isConnected()) {
+        for (const auto& binding : sessions->all()) {
+            if (!isCommandReadyBinding(m_webSocketClient, binding)) continue;
+            publish |= binding.targetEndpointId == m_webSocketClient->endpointId();
+            receive |= binding.ownerEndpointId == m_webSocketClient->endpointId();
+        }
+    }
+    if (publish) m_cursorPublishTimer->start();
+    else m_cursorPublishTimer->stop();
+    if (receive) m_cursorExpiryTimer->start();
+    else m_cursorExpiryTimer->stop();
+    for (auto* workspace : m_workspaceManager->allWorkspaces()) {
+        if (!workspace || !workspace->canvas) continue;
+        const auto binding = sessions
+            ? sessions->outgoingForPeer(workspace->targetEndpointId)
+            : RemoteSessionCoordinator::Binding();
+        if (!isCommandReadyBinding(m_webSocketClient, binding)) {
+            workspace->canvas->hideRemoteCursor();
+            m_receivedCursorAtByEndpoint.remove(workspace->targetEndpointId);
+        }
+    }
+}
+
+void ApplicationRuntime::publishLocalCursor()
+{
+    if (!m_webSocketClient->isConnected()) {
+        refreshRemoteCursorStreaming();
+        return;
+    }
+    int screenId = -1;
+    QPointF position;
+    const bool visible = m_systemMonitor->getLocalCursorPosition(&screenId, &position);
+    if (visible) position = QPointF(std::floor(position.x()), std::floor(position.y()));
+    const qint64 now = m_cursorClock.elapsed();
+    for (const auto& binding : m_webSocketClient->remoteSessionCoordinator()->all()) {
+        if (!isCommandReadyBinding(m_webSocketClient, binding)
+            || binding.targetEndpointId != m_webSocketClient->endpointId()) continue;
+        auto& state = m_publishedCursors[binding.remoteSessionId];
+        if (state.generation != binding.generation) {
+            state = PublishedCursor{};
+            state.generation = binding.generation;
+        }
+        // Still pointers send a low-rate freshness pulse, so a dropped sample
+        // or a hidden stale marker recovers without requiring mouse movement.
+        if (state.lastSentAtMs >= 0 && now - state.lastSentAtMs < 1000
+            && state.visible == visible && state.screenId == screenId
+            && state.position == position) continue;
+        if (m_webSocketClient->sendRemoteCursor(binding.remoteSessionId,
+                binding.generation, state.sequence + 1, visible, screenId, position)) {
+            ++state.sequence;
+            state.visible = visible;
+            state.screenId = screenId;
+            state.position = position;
+            state.lastSentAtMs = now;
+        }
+    }
+}
+
+void ApplicationRuntime::expireStaleRemoteCursors()
+{
+    const qint64 now = m_cursorClock.elapsed();
+    for (auto it = m_receivedCursorAtByEndpoint.begin();
+         it != m_receivedCursorAtByEndpoint.end();) {
+        if (now - it.value() < 3000) { ++it; continue; }
+        if (auto* workspace = m_workspaceManager->findWorkspace(it.key());
+            workspace && workspace->canvas) workspace->canvas->hideRemoteCursor();
+        it = m_receivedCursorAtByEndpoint.erase(it);
+    }
+}
 
 void ApplicationRuntime::onConnectionError(const QString& error) {
     if (m_cleanShutdownPrepared) return;

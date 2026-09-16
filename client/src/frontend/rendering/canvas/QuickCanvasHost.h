@@ -43,7 +43,7 @@ public:
     void hideContentPreservingState() override;
     void showContentAfterReconnect() override;
     void resetTransform() override;
-    void updateRemoteCursor(int globalX, int globalY) override;
+    void updateRemoteCursor(int screenId, const QPointF& screenPosition) override;
     void hideRemoteCursor() override;
     void setOverlayActionsEnabled(bool enabled) override;
     bool overlayActionsEnabled() const override { return m_actionsEnabled; }

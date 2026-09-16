@@ -688,6 +688,14 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME ConnectionManager COMMAND tst_ConnectionManager)
 
+    add_executable(tst_ScreenCoordinateMapping
+        tests/qt/tst_ScreenCoordinateMapping.cpp
+        src/backend/managers/system/ScreenCoordinateMapping.h
+    )
+    target_include_directories(tst_ScreenCoordinateMapping PRIVATE src)
+    target_link_libraries(tst_ScreenCoordinateMapping PRIVATE Qt6::Core Qt6::Test)
+    add_test(NAME ScreenCoordinateMapping COMMAND tst_ScreenCoordinateMapping)
+
     add_executable(tst_AppConfig
         tests/qt/tst_AppConfig.cpp
         src/backend/config/AppConfig.cpp

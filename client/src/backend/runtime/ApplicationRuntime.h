@@ -7,6 +7,8 @@
 #include <QSet>
 #include <QString>
 #include <QTimer>
+#include <QElapsedTimer>
+#include <QPointF>
 
 #include "backend/domain/models/ClientInfo.h"
 #include "backend/domain/workspace/WorkspaceManager.h"
@@ -193,6 +195,9 @@ private slots:
     void onTrayIconActivated(int reason);
 
 private:
+    void refreshRemoteCursorStreaming();
+    void publishLocalCursor();
+    void expireStaleRemoteCursors();
     void showScreenView(const ClientInfo& client);
     void showClientListView();
     void switchToWorkspace(const QString& targetEndpointId);
@@ -269,6 +274,19 @@ private:
     ProjectManager* m_projectManager = nullptr;
     SceneActivityModel* m_sceneActivityModel = nullptr;
     SystemMonitor* m_systemMonitor = nullptr;
+    QTimer* m_cursorPublishTimer = nullptr;
+    QTimer* m_cursorExpiryTimer = nullptr;
+    QElapsedTimer m_cursorClock;
+    struct PublishedCursor {
+        quint64 generation = 0;
+        quint64 sequence = 0;
+        bool visible = false;
+        int screenId = -1;
+        QPointF position;
+        qint64 lastSentAtMs = -1;
+    };
+    QHash<QString, PublishedCursor> m_publishedCursors;
+    QHash<QString, qint64> m_receivedCursorAtByEndpoint;
     SystemTrayManager* m_systemTrayManager = nullptr;
     WebSocketClient* m_webSocketClient = nullptr;
     ConnectionManager* m_connectionManager = nullptr;

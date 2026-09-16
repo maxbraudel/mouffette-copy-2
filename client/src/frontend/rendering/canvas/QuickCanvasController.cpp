@@ -401,10 +401,13 @@ void QuickCanvasController::publishScreens()
 void QuickCanvasController::publishRemoteCursor()
 {
     if (!m_document) return;
+    if (m_remoteCursorVisible == m_document->remoteCursorVisible()
+        && m_remoteCursorX == m_document->remoteCursorPosition().x()
+        && m_remoteCursorY == m_document->remoteCursorPosition().y()) return;
     m_remoteCursorVisible = m_document->remoteCursorVisible();
     m_remoteCursorX = m_document->remoteCursorPosition().x();
     m_remoteCursorY = m_document->remoteCursorPosition().y();
-    emit presentationChanged();
+    emit remoteCursorChanged();
 }
 
 void QuickCanvasController::publishVideoState()
@@ -450,18 +453,14 @@ void QuickCanvasController::setShellActive(bool active)
     emit presentationChanged();
 }
 
-void QuickCanvasController::updateRemoteCursor(int globalX, int globalY)
+void QuickCanvasController::updateRemoteCursor(int screenId, const QPointF& screenPosition)
 {
-    if (!m_document) return;
-    QPointF mapped;
-    if (m_document->mapRemoteCursor(globalX, globalY, &mapped)) {
-        m_document->setRemoteCursor(true, mapped);
-    }
+    if (m_document) m_document->updateRemoteCursor(screenId, screenPosition);
 }
 
 void QuickCanvasController::hideRemoteCursor()
 {
-    if (m_document) m_document->setRemoteCursor(false, m_document->remoteCursorPosition());
+    if (m_document) m_document->hideRemoteCursor();
 }
 
 void QuickCanvasController::resetView()
