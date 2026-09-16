@@ -1599,6 +1599,7 @@ private slots:
         QVERIFY(QTest::qWaitForWindowActive(&view));
         QQuickItem* item = nullptr;
         QTRY_VERIFY((item = findQuickItemWithProperty(root, "currentMediaId", media->mediaId())));
+        const QPointF originalViewPosition = item->position();
         const QPoint start = item->mapToScene({100,50}).toPoint();
         if (duringDrag) {
             QTest::mousePress(&view, Qt::LeftButton, Qt::NoModifier, start);
@@ -1617,7 +1618,7 @@ private slots:
         QTest::mouseMove(&view, start + QPoint(100,60), 20);
         QTest::mouseRelease(&view, Qt::LeftButton, Qt::NoModifier, start + QPoint(100,60));
         QCOMPARE(media->sceneRect(), original);
-        QCOMPARE(item->position(), original.topLeft());
+        QCOMPARE(item->position(), originalViewPosition);
         QVERIFY(!root->property("mediaMoveHandlerActive").toBool());
         // Resize handles and text activation are locked too.
         const QPoint corner = item->mapToScene({200,100}).toPoint();
@@ -2631,6 +2632,8 @@ private slots:
         QTest::newRow("enlarged-top") << false << false << qreal(0.75) << qreal(0.15) << qreal(4);
         QTest::newRow("enlarged-middle") << true << false << qreal(0.75) << qreal(0.5) << qreal(4);
         QTest::newRow("enlarged-bottom-zoomed-resized") << true << true << qreal(1.6) << qreal(0.85) << qreal(4);
+        QTest::newRow("scene-beyond-viewport-bounds") << false << false << qreal(0.25) << qreal(-1) << qreal(1);
+        QTest::newRow("scene-beyond-viewport-bounds-enlarged") << true << true << qreal(0.25) << qreal(0.85) << qreal(4);
     }
 
     void fullPageTextCreationAndDoubleClick()
@@ -2644,6 +2647,7 @@ private slots:
         std::unique_ptr<QuickCanvasHost> host(QuickCanvasHost::create(&error));
         QVERIFY2(host, qPrintable(error));
         host->setProjectEditingEnabled(true);
+        host->document()->setScreens({ScreenInfo(0, 2880, 1800, 0, 0, true)});
         ClientWorkspaceViewModel session(QStringLiteral("text-session"), host.get(),
             [] {}, nullptr, [] { return false; }, [] { return true; },
             [] { return true; });
@@ -2684,6 +2688,10 @@ private slots:
         session.setActiveTool(QStringLiteral("text"));
         const QPoint createPoint = root->mapToScene(
             {root->width() * 0.45, root->height() * 0.45}).toPoint();
+        QSignalSpy initialFrames(&window, &QQuickWindow::frameSwapped);
+        window.update();
+        QTRY_VERIFY(!initialFrames.isEmpty());
+        QTest::mouseMove(&window, createPoint);
         QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier, createPoint);
         QTRY_COMPARE(host->document()->media().size(), 1);
         QTRY_VERIFY(root->property("anyMediaEditing").toBool());
@@ -2749,9 +2757,51 @@ private slots:
         QCOMPARE(editor->cursorPosition(), expectedPosition);
         QCOMPARE(editor->selectedText(), QString());
         QCOMPARE(media->text(), original);
+
+        // Once editing, native clicks and drags must reach the text document,
+        // including after fit-to-text publication, media resize and camera zoom.
+        const QPointF mediaPosition = media->position();
+        const qreal mediaScale = media->scale();
+        const QPointF cameraPan(host->controller()->panX(), host->controller()->panY());
+        const auto characterPoint = [&](int position) {
+            const QRectF rect = editor->positionToRectangle(position);
+            return editor->mapToScene({rect.x(), rect.center().y()}).toPoint();
+        };
+        for (int position : {2, 16}) {
+            const QPoint point = characterPoint(position);
+            QVERIFY(QRect(QPoint(), window.size()).contains(point));
+            QTest::mouseMove(&window, point,
+                QGuiApplication::styleHints()->mouseDoubleClickInterval() + 20);
+            QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier, point);
+            QTRY_COMPARE(editor->cursorPosition(), position);
+            QCOMPARE(editor->selectedText(), QString());
+            QVERIFY(root->property("anyMediaEditing").toBool());
+            QVERIFY(editor->hasActiveFocus());
+        }
+        for (bool reverse : {false, true}) {
+            const QPoint start = characterPoint(reverse ? 18 : 3);
+            const QPoint end = characterPoint(reverse ? 3 : 18);
+            QTest::mouseMove(&window, start,
+                QGuiApplication::styleHints()->mouseDoubleClickInterval() + 20);
+            QTest::mousePress(&window, Qt::LeftButton, Qt::NoModifier, start);
+            for (int step = 1; step <= 6; ++step) {
+                QTest::mouseMove(&window, start + (end - start) * step / 6, 20);
+                QCoreApplication::processEvents();
+            }
+            QTest::mouseRelease(&window, Qt::LeftButton, Qt::NoModifier, end);
+            QTRY_COMPARE(editor->selectionStart(), 3);
+            QCOMPARE(editor->selectionEnd(), 18);
+            QCOMPARE(editor->selectedText(), original.mid(3, 15));
+            QVERIFY(root->property("anyMediaEditing").toBool());
+            QVERIFY(editor->hasActiveFocus());
+            QCOMPARE(media->position(), mediaPosition);
+            QCOMPARE(media->scale(), mediaScale);
+            QCOMPARE(QPointF(host->controller()->panX(), host->controller()->panY()), cameraPan);
+            QCOMPARE(media->text(), original);
+        }
         QTest::keyClick(&window, Qt::Key_X);
         QString expected = original;
-        expected.insert(expectedPosition, QLatin1Char('x'));
+        expected.replace(3, 15, QLatin1Char('x'));
         QTRY_COMPARE(media->text(), expected);
         QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier, background);
         QTRY_VERIFY(!root->property("anyMediaEditing").toBool());
@@ -2910,7 +2960,9 @@ private slots:
                 QTest::qWait(150);
                 QCOMPARE(ended.count(), gesture);
                 QVERIFY(delegate->property("localDragging").toBool());
-                QVERIFY(QLineF(delegate->position(), originalPosition
+                const QPointF liveScenePosition(delegate->property("effectiveLocalX").toReal(),
+                                                delegate->property("effectiveLocalY").toReal());
+                QVERIFY(QLineF(liveScenePosition, originalPosition
                     + QPointF(delta * step / 3) / cameraScale).length() < 0.01);
             }
             QTest::mouseRelease(&window, Qt::LeftButton, Qt::NoModifier, start + delta);

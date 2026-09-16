@@ -12,9 +12,11 @@
 #include <QPointer>
 #include <QRectF>
 #include <QRegularExpression>
+#include <QScopeGuard>
 #include <QSignalSpy>
 #include <QStyleHints>
 #include <QTest>
+#include <QtGui/private/qpointingdevice_p.h>
 #include <QtQuick/private/qquicktextedit_p.h>
 
 // A deterministic host for the real canvas. Only backend storage/publication
@@ -134,7 +136,15 @@ public:
         QVariantList chrome;
         for (const QVariant& value : media) {
             const auto entry = value.toMap();
-            if (selected.contains(entry.value("mediaId").toString())) chrome.append(entry);
+            if (!selected.contains(entry.value("mediaId").toString())) continue;
+            // Match QuickCanvasController::publishSelection: chrome and
+            // floating controls consume scene rectangles, not base sizes.
+            const qreal scale = entry.value("scale", 1.0).toReal();
+            chrome.append(QVariantMap {
+                {"mediaId", entry.value("mediaId")},
+                {"x", entry.value("x")}, {"y", entry.value("y")},
+                {"width", entry.value("width").toReal() * scale},
+                {"height", entry.value("height").toReal() * scale}});
         }
         root->setProperty("selectionChromeModel", chrome);
     }
@@ -447,6 +457,207 @@ private slots:
         scene.doubleClick({240, 230});
         QVERIFY(visual->property("editing").toBool());
         QCOMPARE(editor->text(), original + "x");
+    }
+
+    void editingMousePlacesCaretAndSelectsText_data()
+    {
+        QTest::addColumn<qreal>("mediaScale");
+        QTest::addColumn<qreal>("viewScale");
+        QTest::addColumn<QPointF>("pan");
+        QTest::addColumn<bool>("reclassifyAsTouchpad");
+        QTest::addColumn<QPointF>("mediaPosition");
+        QTest::newRow("identity")
+            << qreal(1.0) << qreal(1.0) << QPointF() << false << QPointF(100, 150);
+        QTest::newRow("enlarged-zoom-out-panned")
+            << qreal(2.0) << qreal(0.75) << QPointF(35.0, -20.0) << false << QPointF(100, 150);
+        QTest::newRow("enlarged-zoom-in-panned")
+            << qreal(1.6) << qreal(1.4) << QPointF(-25.0, 15.0) << false << QPointF(100, 150);
+        QTest::newRow("mouse-reclassified-as-trackpad-after-scroll")
+            << qreal(1.0) << qreal(1.0) << QPointF() << true << QPointF(100, 150);
+        QTest::newRow("enlarged-zoomed-reclassified-trackpad")
+            << qreal(1.6) << qreal(1.4) << QPointF(-25.0, 15.0) << true << QPointF(100, 150);
+        QTest::newRow("zoomed-out-media-beyond-content-root-bounds")
+            << qreal(3.0) << qreal(0.3) << QPointF(-200.0, -20.0) << false << QPointF(1500, 900);
+        QTest::newRow("zoomed-out-negative-world-position")
+            << qreal(3.0) << qreal(0.3) << QPointF(700.0, 520.0) << false << QPointF(-1500, -900);
+        QTest::newRow("text-crosses-content-root-bottom-edge")
+            << qreal(3.0) << qreal(0.3) << QPointF(220.0, 70.0) << false << QPointF(100, 600);
+    }
+
+    void editingMousePlacesCaretAndSelectsText()
+    {
+        QFETCH(qreal, mediaScale);
+        QFETCH(qreal, viewScale);
+        QFETCH(QPointF, pan);
+        QFETCH(bool, reclassifyAsTouchpad);
+        QFETCH(QPointF, mediaPosition);
+        const auto* device = QPointingDevice::primaryPointingDevice();
+        auto* deviceState = QPointingDevicePrivate::get(const_cast<QPointingDevice*>(device));
+        const auto originalDeviceType = deviceState->deviceType;
+        const auto restoreDevice = qScopeGuard([&] { deviceState->deviceType = originalDeviceType; });
+        deviceState->deviceType = QInputDevice::DeviceType::Mouse;
+        CanvasFixture scene;
+        QVERIFY2(scene.initialize(), qPrintable(scene.error));
+        scene.root->setProperty("screensModel", QVariantList {QVariantMap {
+            {"x", 0}, {"y", 0}, {"width", 2880}, {"height", 1800},
+            {"primary", true}, {"screenId", 1}, {"pixelWidth", 2880}, {"pixelHeight", 1800}}});
+        scene.root->setProperty("viewScale", viewScale);
+        scene.root->setProperty("panX", pan.x());
+        scene.root->setProperty("panY", pan.y());
+        QSignalSpy emptyFrames(&scene.window, &QQuickWindow::frameSwapped);
+        scene.window.update();
+        QTRY_VERIFY_WITH_TIMEOUT(!emptyFrames.isEmpty(), 2000);
+        // Real authoring starts with a framed screen and pointer interaction
+        // before media are added. Exercise cached ancestor clipping in that
+        // order, rather than invalidating every transform after insertion.
+        QTest::mouseMove(&scene.window, {250, 250});
+        scene.click({250, 250});
+        scene.add("text", "text", mediaPosition.x(), mediaPosition.y());
+        const QString original = QStringLiteral("ALPHA BRAVO\nCHARLIE DELTA\nECHO FOXTROT");
+        scene.change("text", {{"textContent", original},
+                              {"width", 320}, {"height", 170}, {"scale", mediaScale},
+                              {"textFontPixelSize", 22},
+                              {"textHorizontalAlignment", "left"},
+                              {"textVerticalAlignment", "top"},
+                              {"fitToTextEnabled", false}});
+        QCoreApplication::processEvents();
+        QSignalSpy frames(&scene.window, &QQuickWindow::frameSwapped);
+        scene.window.update();
+        QTRY_VERIFY_WITH_TIMEOUT(!frames.isEmpty(), 2000);
+        auto* visual = scene.visual("text");
+        QVERIFY(visual);
+        auto* editor = visual->findChild<QQuickTextEdit*>();
+        QVERIFY(editor);
+        const auto characterPoint = [editor](int position) {
+            const QRectF caret = editor->positionToRectangle(position);
+            return editor->mapToScene(QPointF(caret.x(), caret.center().y())).toPoint();
+        };
+        scene.doubleClick(characterPoint(3));
+        QTRY_VERIFY(visual->property("editing").toBool());
+        QVERIFY(editor->hasActiveFocus());
+
+        if (reclassifyAsTouchpad) {
+            // QCocoa reclassifies this same primary device after its first
+            // precise wheel event (trackpads and Magic Mouse alike).
+            deviceState->deviceType = QInputDevice::DeviceType::TouchPad;
+            const QPoint point = characterPoint(3);
+            QWheelEvent wheel(point, scene.window.mapToGlobal(point), {0, 12}, {},
+                              Qt::NoButton, Qt::NoModifier, Qt::ScrollUpdate,
+                              false, Qt::MouseEventNotSynthesized, device);
+            QCoreApplication::sendEvent(&scene.window, &wheel);
+            QCoreApplication::processEvents();
+        }
+
+        QSignalSpy moved(scene.root, SIGNAL(mediaMoveStarted(QString,double,double,bool)));
+        QSignalSpy resized(scene.root, SIGNAL(mediaResizeRequested(QString,QString,double,double,bool,bool)));
+        const QVariantMap geometryBefore = scene.entry("text");
+
+        // Creation selects all text. A click at that selection's existing
+        // cursor endpoint must still collapse it, even though the cursor's
+        // numerical position does not change.
+        editor->selectAll();
+        QCOMPARE(editor->selectedText(), original);
+        const QPoint selectionEnd = characterPoint(editor->length());
+        QTest::mouseMove(&scene.window, selectionEnd,
+            QGuiApplication::styleHints()->mouseDoubleClickInterval() + 20);
+        scene.click(selectionEnd);
+        QCOMPARE(editor->cursorPosition(), editor->length());
+        QCOMPARE(editor->selectedText(), QString());
+
+        // These clicks occur after editing has begun. They must reach the
+        // existing TextEdit rather than the canvas selection/movement layer.
+        for (int position : {6, 17, 31}) {
+            const QPoint point = characterPoint(position);
+            QVERIFY(QRect(QPoint(), scene.window.size()).contains(point));
+            QTest::mouseMove(&scene.window, point,
+                QGuiApplication::styleHints()->mouseDoubleClickInterval() + 20);
+            scene.click(point);
+            QCOMPARE(editor->cursorPosition(), position);
+            QCOMPARE(editor->selectedText(), QString());
+            QVERIFY(visual->property("editing").toBool());
+            QVERIFY(editor->hasActiveFocus());
+        }
+
+        // Both directions cross a newline. Check the exact selection rather
+        // than just its presence, including which endpoint owns the caret.
+        const QPair<int, int> selections[] {{3, 20}, {31, 15}};
+        for (const auto& selection : selections) {
+            const QPoint start = characterPoint(selection.first);
+            const QPoint end = characterPoint(selection.second);
+            QTest::mouseMove(&scene.window, start,
+                QGuiApplication::styleHints()->mouseDoubleClickInterval() + 20);
+            scene.drag(start, end);
+            const int first = qMin(selection.first, selection.second);
+            const int last = qMax(selection.first, selection.second);
+            QCOMPARE(editor->selectionStart(), first);
+            QCOMPARE(editor->selectionEnd(), last);
+            QCOMPARE(editor->selectedText(), original.mid(first, last - first));
+            QCOMPARE(editor->cursorPosition(), selection.second);
+            QVERIFY(visual->property("editing").toBool());
+            QVERIFY(editor->hasActiveFocus());
+        }
+
+        QTest::keyClick(&scene.window, Qt::Key_X);
+        QString replaced = original;
+        replaced.replace(15, 31 - 15, QStringLiteral("x"));
+        QTRY_COMPARE(editor->text(), replaced);
+        QCOMPARE(scene.entry("text").value("textContent").toString(), replaced);
+        QCOMPARE(editor->cursorPosition(), 16);
+        QCOMPARE(editor->selectedText(), QString());
+
+        // Native text selection keeps its grab when the pointer leaves the
+        // media. It must not turn into a canvas move or end the edit session.
+        const QPoint outside = visual->mapToScene(
+            QPointF(visual->width() + 8, visual->height() + 8)).toPoint();
+        QVERIFY(QRect(QPoint(), scene.window.size()).contains(outside));
+        QVERIFY(!visual->boundingRect().contains(visual->mapFromScene(outside)));
+        const QPoint start = characterPoint(6);
+        QTest::mouseMove(&scene.window, start,
+            QGuiApplication::styleHints()->mouseDoubleClickInterval() + 20);
+        scene.drag(start, outside);
+        QCOMPARE(editor->selectionStart(), 6);
+        QCOMPARE(editor->selectionEnd(), replaced.size());
+        QCOMPARE(editor->selectedText(), replaced.mid(6));
+        QVERIFY(visual->property("editing").toBool());
+        QVERIFY(editor->hasActiveFocus());
+        QCOMPARE(scene.commitCount, 0);
+        QCOMPARE(moved.size(), 0);
+        QCOMPARE(resized.size(), 0);
+        for (const QString& property : {QStringLiteral("x"), QStringLiteral("y"),
+                                      QStringLiteral("width"), QStringLiteral("height"),
+                                      QStringLiteral("scale")})
+            QCOMPARE(scene.entry("text").value(property), geometryBefore.value(property));
+    }
+
+    void editingShiftClickAndDoubleClickSelectText()
+    {
+        CanvasFixture scene;
+        QVERIFY2(scene.initialize(), qPrintable(scene.error));
+        scene.add("text", "text", 100, 150);
+        auto* visual = scene.visual("text");
+        QVERIFY(visual);
+        auto* editor = visual->findChild<QQuickTextEdit*>();
+        QVERIFY(editor);
+        const auto characterPoint = [editor](int position) {
+            const QRectF caret = editor->positionToRectangle(position);
+            return editor->mapToScene(QPointF(caret.x(), caret.center().y())).toPoint();
+        };
+        scene.doubleClick(characterPoint(2));
+        QTRY_VERIFY(visual->property("editing").toBool());
+        scene.click(characterPoint(1));
+        scene.click(characterPoint(4), Qt::ShiftModifier);
+        QCOMPARE(editor->selectionStart(), 1);
+        QCOMPARE(editor->selectionEnd(), 4);
+        QCOMPARE(editor->selectedText(), QStringLiteral("anv"));
+        QCOMPARE(editor->cursorPosition(), 4);
+
+        scene.doubleClick(characterPoint(9));
+        QCOMPARE(editor->selectedText(), QStringLiteral("text"));
+        QCOMPARE(editor->selectionStart(), 7);
+        QCOMPARE(editor->selectionEnd(), 11);
+        QVERIFY(visual->property("editing").toBool());
+        QVERIFY(editor->hasActiveFocus());
+        QCOMPARE(scene.commitCount, 0);
     }
 
     void doubleClickPlacesCaretNearestPointer_data()

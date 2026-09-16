@@ -110,7 +110,9 @@ BaseMediaItem {
         enabled:            root.editing   // false in display mode → no event capture
         activeFocusOnTab:   false          // focus managed imperatively
         cursorVisible:      root.editing
-        selectByMouse:      false          // custom MouseArea handles selection
+        // Let TextEdit own cursor placement, selection and the mouse grab.
+        // The canvas yields its media gestures to the active editor.
+        selectByMouse:      true
         topPadding: {
             var extra = Math.max(0, height - contentHeight)
             if (root.verticalAlignment === "top")    return 0
@@ -171,36 +173,6 @@ BaseMediaItem {
         // The default restore mode would restore the pre-binding empty value
         // on entry and could publish that empty document as a live user edit.
         restoreMode: Binding.RestoreNone
-    }
-
-    // Cursor placement and drag-select.
-    // selectByMouse:false on textDisplayNode avoids Qt6 coordinate-mapping
-    // issues in scaled/transformed viewports; this area provides equivalent
-    // behaviour with explicit positionAt() calls.
-    MouseArea {
-        id: textEditMouseArea
-        anchors.fill: textDisplayNode
-        visible:         root.editing
-        z:               2   // above textDisplayNode (z:1)
-        acceptedButtons: Qt.LeftButton
-        property int pressCharPos: 0
-
-        onPressed: function(mouse) {
-            textDisplayNode.forceActiveFocus()
-            // textEditMouseArea and textDisplayNode share the same coordinate
-            // space (same parent, same anchors), so no mapToItem is needed.
-            var pos = textDisplayNode.positionAt(mouse.x, mouse.y)
-            pressCharPos = pos
-            textDisplayNode.cursorPosition = pos
-            mouse.accepted = true
-        }
-
-        onPositionChanged: function(mouse) {
-            if (pressed) {
-                var pos = textDisplayNode.positionAt(mouse.x, mouse.y)
-                textDisplayNode.select(pressCharPos, pos)
-            }
-        }
     }
 
     Rectangle {

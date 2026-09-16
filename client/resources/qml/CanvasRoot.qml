@@ -854,7 +854,12 @@ Rectangle {
 
             MediaLayer {
                 id: mediaLayer
+                // Interactive ancestors cover the viewport, not a viewport-sized
+                // rectangle in scene coordinates. Qt can otherwise prune visible
+                // children from pointer delivery after zoom/pan (effective clipping).
+                parent: viewport
                 anchors.fill: parent
+                z: 1
 
                 // Each media item is a native QML Item with its own local x/y/scale.
                 // The viewport-level globalMediaDrag owns movement so image,
@@ -981,11 +986,13 @@ Rectangle {
                                               : (media ? Math.max(1, media.width) : 1)
                     height: liveTransform ? liveTransform.height : usesLiveAltResize ? Math.max(1, root.liveAltResizeHeight)
                                               : (media ? Math.max(1, media.height) : 1)
-                    x: liveTransform ? liveTransform.x : usesLiveAltResize ? root.liveAltResizeX
+                    readonly property real sceneX: liveTransform ? liveTransform.x : usesLiveAltResize ? root.liveAltResizeX
                                          : (usesLiveResize ? root.liveResizeX : effectiveLocalX)
-                    y: liveTransform ? liveTransform.y : usesLiveAltResize ? root.liveAltResizeY
+                    readonly property real sceneY: liveTransform ? liveTransform.y : usesLiveAltResize ? root.liveAltResizeY
                                          : (usesLiveResize ? root.liveResizeY : effectiveLocalY)
-                    scale: effectiveScale
+                    x: root.panX + sceneX * root.viewScale
+                    y: root.panY + sceneY * root.viewScale
+                    scale: effectiveScale * root.viewScale
                     transformOrigin: Item.TopLeft
                     z: media ? media.z : 0
                     visible: !!media && media.contentVisible
@@ -1030,8 +1037,13 @@ Rectangle {
             }
 
             Loader {
+                parent: viewport
+                x: root.panX
+                y: root.panY
+                scale: root.viewScale
+                transformOrigin: Item.TopLeft
                 active: root.editingEnabled
-                z: 11500
+                z: 2
                 sourceComponent: RemoteCursor {
                     objectName: "canvasRemoteCursor"
                     cursorVisible: root.remoteCursorVisible
@@ -1048,6 +1060,7 @@ Rectangle {
             id: selectionLayerLoader
             parent: viewport
             anchors.fill: parent
+            z: 3
             active: root.editingEnabled
             sourceComponent: SelectionLayer {
                 id: selectionLayer
@@ -1109,6 +1122,7 @@ Rectangle {
             id: inputLayer
             parent: viewport
             anchors.fill: parent
+            z: 4
             interactionController: root
             textToolActive: root.textToolActive
             selectionHandlePriorityActive: !!selectionChrome && selectionChrome.interacting
