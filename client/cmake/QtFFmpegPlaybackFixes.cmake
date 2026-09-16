@@ -14,10 +14,24 @@ function(mouffette_patch_ffmpeg relative old_text new_text)
     file(WRITE "${_file}" "${_text}")
 endfunction()
 
-# MP4 indexes use DTS. A keyframe selected by DTS can have a PTS later than the
+# Migrate previously patched build trees before matching the complete patch.
+# Otherwise its original av_seek_frame line would receive a second nested patch.
+set(_previous_seek_restore "err = av_seek_frame(m_context, index, dts == AV_NOPTS_VALUE ? cursor : dts, AVSEEK_FLAG_BACKWARD);")
+file(READ "${_ffmpeg}/playbackengine/qffmpegdemuxer.cpp" _demuxer_seek_source)
+string(FIND "${_demuxer_seek_source}" "${_previous_seek_restore}" _previous_seek_restore_offset)
+if(NOT _previous_seek_restore_offset EQUAL -1)
+    string(REPLACE "${_previous_seek_restore}"
+        "err = av_seek_frame(m_context, index, cursor, AVSEEK_FLAG_BACKWARD);"
+        _demuxer_seek_source "${_demuxer_seek_source}")
+    file(WRITE "${_ffmpeg}/playbackengine/qffmpegdemuxer.cpp" "${_demuxer_seek_source}")
+endif()
+
+# MP4 indexes use DTS. A selected keyframe can have a PTS later than the
 # desired image when B frames reorder timestamps. Walk back to a decodable GOP
 # whose keyframe PTS is at or before the target; keep the presentation clock at
 # the requested position. Only a few compressed packets are inspected.
+# Restore the exact seek cursor used to inspect the accepted packet. MOV seeks
+# interpret timestamps as PTS; restoring a packet's DTS can jump back another GOP.
 mouffette_patch_ffmpeg(playbackengine/qffmpegdemuxer.cpp
     "auto err = av_seek_frame(m_context, -1, seekPos.get(), AVSEEK_FLAG_BACKWARD);"
     [=[auto err = av_seek_frame(m_context, -1, seekPos.get(), AVSEEK_FLAG_BACKWARD);
@@ -42,7 +56,7 @@ mouffette_patch_ffmpeg(playbackengine/qffmpegdemuxer.cpp
                 const int64_t dts = packet->dts;
                 const int64_t pts = packet->pts;
                 if (pts == AV_NOPTS_VALUE || pts <= target || dts == AV_NOPTS_VALUE || dts >= cursor) {
-                    err = av_seek_frame(m_context, index, dts == AV_NOPTS_VALUE ? cursor : dts, AVSEEK_FLAG_BACKWARD);
+                    err = av_seek_frame(m_context, index, cursor, AVSEEK_FLAG_BACKWARD);
                     break;
                 }
                 cursor = dts - 1;

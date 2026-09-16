@@ -2,6 +2,7 @@
 #include "backend/media/ResidentVideoPlayer.h"
 
 #include <QAudioOutput>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QSignalSpy>
 #include <QTemporaryDir>
@@ -246,13 +247,60 @@ private slots:
         QVERIFY(probe.estimatedBytes < 20 * 1024 * 1024);
         qInfo() << "1080p retained bytes:" << retained << "preparation budget:" << peakBudget;
         // Exact original bitstream, shared between independent occurrences.
+        QVideoSink sink;
         ResidentVideoPlayer one, two;
+        one.setVideoSink(&sink);
+        QElapsedTimer preparationTime;
+        preparationTime.start();
         one.setAsset(asset); two.setAsset(asset);
         QCOMPARE(one.asset()->compressedVideo.constData(), two.asset()->compressedVideo.constData());
         QCOMPARE(one.asset()->compressedVideo.constData(), asset->compressedVideo.constData());
-        one.play();
-        QTRY_VERIFY2_WITH_TIMEOUT(one.position() > 100, qPrintable(one.errorString()), 5000);
-        one.pause();
+        QTRY_VERIFY2_WITH_TIMEOUT(one.preparedAt(0), qPrintable(one.errorString()), 5000);
+        QTRY_VERIFY2_WITH_TIMEOUT(two.preparedAt(0), qPrintable(two.errorString()), 5000);
+        qInfo() << "1080p automatic preparation ms:" << preparationTime.elapsed();
+        QCOMPARE(one.playbackState(), QMediaPlayer::StoppedState);
+        QCOMPARE(two.playbackState(), QMediaPlayer::StoppedState);
+
+        // The sample has a keyframe at 23.466 s. A 24.567 s seek should
+        // decode from there, not restart the preceding GOP at 15.133 s.
+        // Observe the delivered frame interval: position() changes optimistically
+        // before decoding and cannot demonstrate that a seek has completed.
+        constexpr qint64 targetMs = 24567;
+        constexpr qint64 targetUs = targetMs * 1000;
+        for (const bool playing : {false, true}) {
+            one.pause();
+            one.setPosition(0);
+            QTRY_VERIFY2_WITH_TIMEOUT(one.preparedAt(0), qPrintable(one.errorString()), 5000);
+            if (playing) {
+                one.play();
+                QTRY_VERIFY2_WITH_TIMEOUT(one.position() > 100, qPrintable(one.errorString()), 5000);
+            }
+            qint64 deliveredAfterMs = -1;
+            qint64 deliveredStartUs = -1;
+            qint64 deliveredEndUs = -1;
+            QElapsedTimer seekTime;
+            QObject seekObserver;
+            connect(&sink, &QVideoSink::videoFrameChanged, &seekObserver,
+                    [&](const QVideoFrame& frame) {
+                if (deliveredAfterMs >= 0 || !frame.isValid() || frame.startTime() < 0
+                    || frame.startTime() > targetUs || frame.endTime() <= targetUs) return;
+                deliveredAfterMs = seekTime.elapsed();
+                deliveredStartUs = frame.startTime();
+                deliveredEndUs = frame.endTime();
+            });
+            seekTime.start();
+            one.setPosition(targetMs);
+            QTRY_VERIFY2_WITH_TIMEOUT(deliveredAfterMs >= 0, qPrintable(one.errorString()), 5000);
+            qInfo() << "1080p" << (playing ? "playing" : "paused")
+                    << "seek ms:" << deliveredAfterMs
+                    << "delivered frame us:" << deliveredStartUs << deliveredEndUs;
+            QVERIFY2(deliveredAfterMs < 500,
+                     qPrintable(QStringLiteral("%1 seek delivered the requested frame after %2 ms")
+                         .arg(playing ? QStringLiteral("Playing") : QStringLiteral("Paused"))
+                         .arg(deliveredAfterMs)));
+            QCOMPARE(one.isPlaying(), playing);
+            one.pause();
+        }
     }
 
     void presentationCachesDoNotAccumulateOnResidentFrames() {
@@ -349,6 +397,10 @@ private slots:
         first.setAsset(asset);
         second.setAsset(asset);
         QVERIFY(sink.videoFrame().isValid());
+        QTRY_VERIFY_WITH_TIMEOUT(first.preparedAt(0), 3000);
+        QTRY_VERIFY_WITH_TIMEOUT(second.preparedAt(0), 3000);
+        QCOMPARE(first.playbackState(), QMediaPlayer::StoppedState);
+        QCOMPARE(second.playbackState(), QMediaPlayer::StoppedState);
         first.setPosition(200);
         QCOMPARE(first.position(), qint64(200));
         QCOMPARE(second.position(), qint64(0));
@@ -363,6 +415,9 @@ private slots:
         QCOMPARE(first.position(), retained);
         first.setAsset(asset);
         QCOMPARE(first.position(), retained);
+        QTRY_VERIFY_WITH_TIMEOUT(first.preparedAt(retained), 3000);
+        QVERIFY(!first.isPlaying());
+        QCOMPARE(first.position(), retained);
         first.setPosition(first.duration() - 30);
         first.play();
         QTRY_COMPARE_WITH_TIMEOUT(first.mediaStatus(), QMediaPlayer::EndOfMedia, 2000);
@@ -375,6 +430,47 @@ private slots:
         QTRY_COMPARE_WITH_TIMEOUT(first.mediaStatus(), QMediaPlayer::EndOfMedia, 1000);
         first.stop();
         QCOMPARE(first.position(), qint64(0));
+        first.setPosition(200);
+        QTRY_VERIFY_WITH_TIMEOUT(first.preparedAt(200), 3000);
+        QCOMPARE(sink.videoFrame().startTime(), qint64(200000));
+        QCOMPARE(first.playbackState(), QMediaPlayer::StoppedState);
+    }
+
+    void automaticPreparationDefersWhenPlaybackBudgetIsUnavailable() {
+        QTemporaryDir directory;
+        const QString path = directory.filePath("budget.mp4");
+        QVERIFY(writeVideo(path));
+        const auto asset = MediaDecoder::decode(path);
+        QVERIFY(asset);
+        bool admitted = false;
+        int attempts = 0;
+        int releases = 0;
+        asset->reservePlayback = [&] { ++attempts; return admitted; };
+        asset->releasePlayback = [&] { ++releases; };
+        QVideoSink sink;
+        ResidentVideoPlayer player;
+        player.setVideoSink(&sink);
+        QSignalSpy errors(&player, &ResidentVideoPlayer::errorOccurred);
+        player.setAsset(asset);
+        QCOMPARE(attempts, 1);
+        QCOMPARE(releases, 0);
+        QCOMPARE(errors.size(), 0);
+        QCOMPARE(player.error(), QMediaPlayer::NoError);
+        QCOMPARE(player.mediaStatus(), QMediaPlayer::LoadedMedia);
+        QCOMPARE(player.playbackState(), QMediaPlayer::StoppedState);
+        QVERIFY(sink.videoFrame().isValid());
+        QVERIFY(!player.preparedAt(0));
+
+        // An explicit request can retry the same resident asset once capacity
+        // becomes available; refusal must not poison its cached poster/state.
+        admitted = true;
+        player.play();
+        QTRY_VERIFY2_WITH_TIMEOUT(player.position() > 50, qPrintable(player.errorString()), 3000);
+        QCOMPARE(attempts, 2);
+        QCOMPARE(errors.size(), 0);
+        QCOMPARE(player.error(), QMediaPlayer::NoError);
+        player.clearAsset();
+        QCOMPARE(releases, 1);
     }
 
     void variableFrameRateUsesPresentationTimestamps() {

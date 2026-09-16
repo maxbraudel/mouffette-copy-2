@@ -72,7 +72,7 @@ signals:
     void frameReady(qint64 timestampMs); // decoded frame, never the cached poster
 
 private:
-    bool ensurePlayer();
+    bool ensurePlayer(bool reportFailure = true);
     void releasePlayer();
     void presentPoster();
     void setState(QMediaPlayer::PlaybackState state);

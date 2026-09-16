@@ -91,7 +91,13 @@ void ResidentVideoPlayer::setAsset(std::shared_ptr<const ResidentMediaAsset> ass
     presentPoster();
     setStatus(QMediaPlayer::LoadedMedia);
     emit positionChanged(position());
+    // Prime the bounded decoder queues while the asset becomes resident, even
+    // at zero. The cached poster alone must not defer source/codec setup until
+    // the first Play or seek. At zero, budget refusal leaves the poster usable;
+    // an explicit playback request can retry admission later. A retained cursor
+    // still requires its decoded frame and the normal preparation/error path.
     if (m_positionMs > 0) prepare(m_positionMs);
+    else ensurePlayer(false);
 }
 
 void ResidentVideoPlayer::clearAsset() {
@@ -104,11 +110,12 @@ void ResidentVideoPlayer::clearAsset() {
     emit seekableChanged(false);
 }
 
-bool ResidentVideoPlayer::ensurePlayer() {
+bool ResidentVideoPlayer::ensurePlayer(bool reportFailure) {
     if (m_player) return true;
     if (!m_asset) return false;
     if (m_asset->reservePlayback && !m_asset->reservePlayback()) {
-        fail(QMediaPlayer::ResourceError, QStringLiteral("Insufficient available RAM for the video playback buffers"));
+        if (reportFailure)
+            fail(QMediaPlayer::ResourceError, QStringLiteral("Insufficient available RAM for the video playback buffers"));
         return false;
     }
     m_error = QMediaPlayer::NoError;
@@ -137,7 +144,9 @@ bool ResidentVideoPlayer::ensurePlayer() {
         emit positionChanged(value);
     });
     connect(m_player.get(), &QMediaPlayer::playbackStateChanged, this, [this](auto state) {
-        if (!m_loading) setState(state);
+        // A stopped occurrence may own a primed, paused native decoder.
+        if (!m_loading) setState(state == QMediaPlayer::PausedState
+                && m_requestedState == QMediaPlayer::StoppedState ? m_requestedState : state);
     });
     connect(m_player.get(), &QMediaPlayer::errorOccurred, this, &ResidentVideoPlayer::fail);
     connect(m_player.get(), &QMediaPlayer::mediaStatusChanged, this, [this](auto status) {
@@ -154,12 +163,14 @@ bool ResidentVideoPlayer::ensurePlayer() {
                 native->setActiveAudioTrack(m_asset->audioTrack);
                 native->setActiveSubtitleTrack(-1);
                 m_loading = false;
+                // Select the cursor before pause/play creates decoder threads,
+                // so a restored cursor does not first decode from zero and then
+                // immediately flush that work for a second seek.
+                native->setPosition(target);
                 if (m_requestedState == QMediaPlayer::PlayingState) {
-                    native->setPosition(target);
                     native->play();
                 } else {
                     native->pause();
-                    native->setPosition(target);
                 }
                 // AVFoundation stays LoadedMedia when primed while paused;
                 // it need not emit BufferedMedia. Publish completion so later
@@ -272,7 +283,13 @@ void ResidentVideoPlayer::setPosition(qint64 value) {
     const bool changed = value != m_positionMs;
     m_positionMs = value;
     if (m_asset && (m_player || value > 0)) {
-        if (ensurePlayer() && !m_loading && changed) m_player->setPosition(value);
+        if (ensurePlayer() && !m_loading && changed) {
+            m_player->setPosition(value);
+            // Qt does not produce a new frame for a stopped native player.
+            // Keep paused scrubbing functional after Stop/EndOfMedia as well.
+            if (m_player->playbackState() == QMediaPlayer::StoppedState)
+                m_player->pause();
+        }
     }
     if (changed) emit positionChanged(m_positionMs);
     if (!m_player) presentPoster();
