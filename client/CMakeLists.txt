@@ -772,6 +772,17 @@ if(BUILD_TESTING)
     target_link_libraries(tst_SystemLifecycleMonitor PRIVATE Qt6::Core Qt6::Test)
     add_test(NAME SystemLifecycleMonitor COMMAND tst_SystemLifecycleMonitor)
 
+    add_executable(tst_MediaFrameItem
+        tests/qt/tst_MediaFrameItem.cpp
+        src/frontend/rendering/remote/RemoteVideoFrameItem.cpp
+        src/frontend/rendering/remote/RemoteVideoFrameItem.h
+        src/shared/rendering/MediaFrameSource.cpp
+        src/shared/rendering/MediaFrameSource.h
+    )
+    target_include_directories(tst_MediaFrameItem PRIVATE src)
+    target_link_libraries(tst_MediaFrameItem PRIVATE Qt6::Quick Qt6::GuiPrivate Qt6::Test)
+    add_test(NAME MediaFrameItem COMMAND tst_MediaFrameItem)
+
     add_executable(tst_TextOutlineItem
         tests/qt/tst_TextOutlineItem.cpp
         src/frontend/rendering/canvas/TextOutlineItem.cpp

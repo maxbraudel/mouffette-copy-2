@@ -123,7 +123,10 @@ void MediaListModel::updateFromList(const QVariantList& newList)
     // ── Pass 2: insert / move / update to match newRows order ────────────
     for (int newIdx = 0; newIdx < static_cast<int>(newRows.size()); ++newIdx) {
         const Row& nr = newRows[newIdx];
-        int curIdx = rowForKey(nr.rowKey);
+        // Geometry/runtime publications normally preserve row order. Check
+        // that position before scanning, so refreshing N stable rows is O(N).
+        const int curIdx = newIdx < m_rows.size() && m_rows[newIdx].rowKey == nr.rowKey
+            ? newIdx : rowForKey(nr.rowKey);
 
         if (curIdx == -1) {
             // ── Brand-new item: insert at newIdx ─────────────────────────

@@ -38,6 +38,7 @@
 #include "frontend/rendering/canvas/QuickCanvasController.h"
 #include "frontend/rendering/canvas/QuickCanvasHost.h"
 #include "frontend/rendering/remote/RemoteVideoFrameItem.h"
+#include "shared/rendering/MediaFrameSource.h"
 #include "frontend/qml/ClientWorkspaceViewModel.h"
 #include "frontend/qml/MediaSettingsViewModel.h"
 #ifdef Q_OS_MACOS
@@ -147,6 +148,99 @@ private slots:
     {
         // The complete page must use the same controls as production main().
         QQuickStyle::setStyle(QStringLiteral("Basic"));
+    }
+
+    void frameSourcePublishesOnlyChangedContentAndAvailability()
+    {
+        RemoteVideoFrameSource source;
+        QSignalSpy frames(&source, &RemoteVideoFrameSource::frameChanged);
+        QSignalSpy availability(&source, &RemoteVideoFrameSource::hasFrameChanged);
+        source.clear();
+        source.setFrame({});
+        QCOMPARE(frames.count(), 0);
+        QCOMPARE(availability.count(), 0);
+
+        QImage image(32, 16, QImage::Format_RGBA8888);
+        image.fill(Qt::cyan);
+        source.setFrame(image);
+        QVERIFY(source.hasFrame());
+        QCOMPARE(frames.count(), 1);
+        QCOMPARE(availability.count(), 1);
+
+        const QImage shared = image;
+        source.setFrame(image);
+        source.setFrame(shared);
+        QCOMPARE(source.frame().cacheKey(), image.cacheKey());
+        QCOMPARE(frames.count(), 1);
+        QCOMPARE(availability.count(), 1);
+
+        // A content edit detaches the shared image and must still reach renderers.
+        image.setPixelColor(0, 0, Qt::magenta);
+        source.setFrame(image);
+        QCOMPARE(source.frame().pixelColor(0, 0), QColor(Qt::magenta));
+        QCOMPARE(frames.count(), 2);
+        QCOMPARE(availability.count(), 1);
+
+        source.setFrame({});
+        QVERIFY(!source.hasFrame());
+        QCOMPARE(frames.count(), 3);
+        QCOMPARE(availability.count(), 2);
+        source.clear();
+        QCOMPARE(frames.count(), 3);
+        QCOMPARE(availability.count(), 2);
+    }
+
+    void imageGeometryAndDuplicateImportsPreserveResidentFrame()
+    {
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        const QString originalPath = directory.filePath(QStringLiteral("image.png"));
+        const QString duplicatePath = directory.filePath(QStringLiteral("copy.png"));
+        QImage image(128, 64, QImage::Format_RGBA8888);
+        image.fill(Qt::cyan);
+        QVERIFY(image.save(originalPath));
+        QVERIFY(QFile::copy(originalPath, duplicatePath));
+
+        CanvasMedia media(CanvasMedia::Type::Image, image.size());
+        media.setSourcePath(originalPath);
+        QTRY_VERIFY_WITH_TIMEOUT(media.residencyReady(), 10000);
+        auto& residency = MediaResidencyManager::instance();
+        const auto asset = residency.asset(media.residencyOwnerId());
+        QVERIFY(asset);
+        auto* source = qobject_cast<RemoteVideoFrameSource*>(
+            media.toModelMap().value(QStringLiteral("residentFrameSource")).value<QObject*>());
+        QVERIFY(source);
+        const qint64 cacheKey = source->frame().cacheKey();
+        const quint64 residentBytes = asset->residentBytes;
+        QSignalSpy frames(source, &RemoteVideoFrameSource::frameChanged);
+        QSignalSpy availability(source, &RemoteVideoFrameSource::hasFrameChanged);
+        QSignalSpy residencyChanges(&media, &CanvasMedia::residencyChanged);
+
+        for (qreal scale : {10000.0, 0.01, 20.0, 1.0}) {
+            media.setScale(scale);
+            media.setBaseSize({200000, 100000});
+            media.setPosition({-150000, -75000});
+            media.setBaseSize(image.size());
+        }
+        QCoreApplication::processEvents();
+        QCOMPARE(residencyChanges.count(), 0);
+        QCOMPARE(residency.asset(media.residencyOwnerId()), asset);
+        QCOMPARE(source->frame().size(), image.size());
+        QCOMPARE(source->frame().cacheKey(), cacheKey);
+        QCOMPARE(asset->residentBytes, residentBytes);
+        QCOMPARE(frames.count(), 0);
+        QCOMPARE(availability.count(), 0);
+
+        // Content deduplication republishes the shared asset to existing owners.
+        // Its identical pixels must not invalidate their renderer textures.
+        CanvasMedia duplicate(CanvasMedia::Type::Image, image.size());
+        duplicate.setSourcePath(duplicatePath);
+        QTRY_VERIFY_WITH_TIMEOUT(duplicate.residencyReady(), 10000);
+        QCOMPARE(residency.asset(duplicate.residencyOwnerId()), asset);
+        QVERIFY(residencyChanges.count() > 0);
+        QCOMPARE(source->frame().cacheKey(), cacheKey);
+        QCOMPARE(frames.count(), 0);
+        QCOMPARE(availability.count(), 0);
     }
 
     void pendingMetadataImportDoesNotWaitForBulkWorkers_data()

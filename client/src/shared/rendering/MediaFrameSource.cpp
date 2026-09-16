@@ -9,8 +9,13 @@ void RemoteVideoFrameSource::setFrame(const QImage& frame) {
         clear();
         return;
     }
+    // Residency updates can republish the same immutable image when another
+    // owner joins its asset. Keep those updates from invalidating GPU textures.
+    if (m_frame.cacheKey() == frame.cacheKey()) return;
+    const bool wasEmpty = m_frame.isNull();
     m_frame = frame;
     emit frameChanged();
+    if (wasEmpty) emit hasFrameChanged();
 }
 
 void RemoteVideoFrameSource::clear() {
@@ -19,5 +24,5 @@ void RemoteVideoFrameSource::clear() {
     }
     m_frame = QImage();
     emit frameChanged();
+    emit hasFrameChanged();
 }
-

@@ -987,30 +987,10 @@ Rectangle {
                         id: mediaContentLoader
                         media: mediaDelegate.media
                         selected: mediaDelegate.isSelected
-                        readonly property real liveWidth: mediaDelegate.width
-                        readonly property real liveHeight: mediaDelegate.height
                         anchors.fill: parent
                         freeResizePreview: !!mediaDelegate.liveTransform && !!mediaDelegate.liveTransform.altResize
                         textEditable: root.editingEnabled
                         editingSession: textEditSession
-                    }
-
-                    Binding {
-                        target: mediaContentLoader.visualItem
-                        property: "mediaWidth"
-                        value: mediaContentLoader.liveWidth
-                        when: mediaContentLoader.visualItem !== null
-                              && (mediaDelegate.usesLiveAltResize
-                                  || (!!mediaDelegate.liveTransform && !!mediaDelegate.liveTransform.altResize))
-                    }
-
-                    Binding {
-                        target: mediaContentLoader.visualItem
-                        property: "mediaHeight"
-                        value: mediaContentLoader.liveHeight
-                        when: mediaContentLoader.visualItem !== null
-                              && (mediaDelegate.usesLiveAltResize
-                                  || (!!mediaDelegate.liveTransform && !!mediaDelegate.liveTransform.altResize))
                     }
 
                     // Connections lives inside mediaDelegate so both `mediaDelegate` and

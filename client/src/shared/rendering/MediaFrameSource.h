@@ -6,7 +6,7 @@
 // Shared immutable CPU frame projection; independent from Qt Quick.
 class RemoteVideoFrameSource final : public QObject {
     Q_OBJECT
-    Q_PROPERTY(bool hasFrame READ hasFrame NOTIFY frameChanged)
+    Q_PROPERTY(bool hasFrame READ hasFrame NOTIFY hasFrameChanged)
 
 public:
     explicit RemoteVideoFrameSource(QObject* parent = nullptr);
@@ -19,8 +19,8 @@ public:
 
 signals:
     void frameChanged();
+    void hasFrameChanged();
 
 private:
     QImage m_frame;
 };
-

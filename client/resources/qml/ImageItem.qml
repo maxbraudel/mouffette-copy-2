@@ -18,8 +18,8 @@ BaseMediaItem {
         Loader {
             id: imageLoader
             anchors.fill: parent
-            // A hidden painted item still allocates its backing surface during
-            // scene-graph synchronization. Create it only for a resident frame.
+            // Create the source-sized texture only once a resident frame can
+            // be presented, after the initial loading skeleton.
             active: root.residencyReady && !!root.residentFrameSource
                     && root.residentFrameSource.hasFrame === true
                     && surface.renderingAllowed

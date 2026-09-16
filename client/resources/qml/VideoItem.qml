@@ -130,7 +130,7 @@ BaseMediaItem {
             anchors.fill: parent
             z: 1
             // Local video uses VideoOutput only. Passive remote spans create a
-            // painted surface once their shared source holds a resident frame.
+            // source-sized texture once their shared source holds a frame.
             active: root.remoteFrameMode && root.residencyReady
                     && root.remoteFrameSource.hasFrame === true
                     && mediaSurface.renderingAllowed
