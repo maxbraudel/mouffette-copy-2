@@ -104,6 +104,7 @@ QtObject {
                     AppButton {
                         visible: root.controller.applicationPage !== 1 || window.width >= 1100
                         text: root.controller.connectionEnabled ? "Disable" : "Enable"
+                        textVariants: ["Disable", "Enable"]
                         onClicked: root.controller.toggleConnection()
                     }
                     AppButton {

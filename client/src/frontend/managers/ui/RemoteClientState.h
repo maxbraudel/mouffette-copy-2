@@ -80,8 +80,8 @@ struct RemoteClientState {
     QString statusText() const {
         switch (connectionStatus) {
             case Disconnected: return "DISCONNECTED";
-            case Connecting: return "CONNECTING...";
-            case Reconnecting: return "RECONNECTING...";
+            case Connecting: return "CONNECTING";
+            case Reconnecting: return "RECONNECTING";
             case Connected: return "CONNECTED";
             case Error: return "ERROR";
         }

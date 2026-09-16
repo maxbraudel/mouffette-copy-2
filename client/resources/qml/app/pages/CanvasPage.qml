@@ -33,19 +33,6 @@ AppPanel {
         running: visible
     }
 
-    Text {
-        anchors.centerIn: parent
-        width: Math.min(parent.width - 48, 640)
-        visible: root.session && !root.session.loading && !root.session.hasScreens
-        text: "No screens available"
-        color: Theme.mutedText
-        font.pixelSize: Math.max(28, Theme.titleFontSize * 1.5)
-        font.bold: true
-        horizontalAlignment: Text.AlignHCenter
-        wrapMode: Text.WordWrap
-        z: 99999
-    }
-
     // Scene playback owns the canvas. Unload editor controls completely so
     // they cannot render, retain focus, or remain exposed to accessibility.
     Loader {

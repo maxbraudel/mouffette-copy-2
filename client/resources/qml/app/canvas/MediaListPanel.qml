@@ -3,6 +3,7 @@ import QtQuick.Controls
 import QtQuick.Effects
 import Mouffette.App
 import Mouffette.Canvas
+import "../components"
 
 Rectangle {
     id: root
@@ -104,7 +105,7 @@ Rectangle {
                         readonly property string detailsText: dimensions
                             + (textMedia ? "" : "  ·  " + root.humanSize(modelData.sourceSizeBytes))
                         implicitWidth: Math.max(nameMetrics.advanceWidth, detailsMetrics.advanceWidth,
-                                                textMedia ? 0 : statusMetrics.advanceWidth) + 40
+                                                textMedia ? 0 : statusMetrics.maximumWidth) + 40
                         width: mediaColumn.width
                         height: details.implicitHeight + 16 + (index > 0 ? 1 : 0)
                         padding: 0
@@ -133,7 +134,12 @@ Rectangle {
                         }
                         TextMetrics { id: nameMetrics; text: row.displayName; font: nameLabel.font }
                         TextMetrics { id: detailsMetrics; text: row.detailsText; font: detailLabel.font }
-                        TextMetrics { id: statusMetrics; text: row.statusText; font: statusLabel.font }
+                        StateTextMetrics {
+                            id: statusMetrics
+                            text: row.statusText
+                            textVariants: ["Not uploaded", "Uploaded", "Uploaded and Cached"]
+                            font: statusLabel.font
+                        }
                         contentItem: Column {
                             id: details
                             spacing: 3
@@ -244,6 +250,8 @@ Rectangle {
                 objectName: "remoteSceneAction"
                 width: actions.width
                 text: root.session ? root.session.remoteSceneActionText : "Launch Remote Scene"
+                textVariants: ["Launch Remote Scene", "Launching Remote Scene...",
+                               "Stop Remote Scene", "Stopping Remote Scene..."]
                 tone: root.session ? root.session.remoteSceneActionTone : OverlayActionButton.Normal
                 busy: tone === OverlayActionButton.Uploading && !root.session.actionPending
                 enabled: root.session && root.session.remoteSceneActionEnabled
@@ -256,6 +264,7 @@ Rectangle {
                 objectName: "testSceneAction"
                 width: actions.width
                 text: root.session ? root.session.testSceneActionText : "Launch Test Scene"
+                textVariants: ["Launch Test Scene", "Stop Test Scene"]
                 tone: root.session ? root.session.testSceneActionTone : OverlayActionButton.Normal
                 enabled: root.session && root.session.testSceneActionEnabled
                 unavailableReason: root.session ? root.session.testSceneUnavailableReason : ""
@@ -267,6 +276,14 @@ Rectangle {
                 objectName: "uploadAction"
                 width: actions.width
                 text: root.session ? root.session.uploadActionText : "Upload"
+                textVariants: ["Upload", "Unload", "Preparing…", "Uploading…",
+                               "Finalizing…", "Cancelling…", "Removing…"]
+                // At most one uploaded file per media occurrence. Reserve all
+                // counter digits before upload starts, in its progress font.
+                monospaceTextVariants: {
+                    var digits = "9".repeat(String(Math.max(1, root.mediaCount)).length)
+                    return ["Uploading (" + digits + "/" + digits + ") 100%"]
+                }
                 tone: root.session ? root.session.uploadActionTone : OverlayActionButton.Normal
                 busy: tone === OverlayActionButton.Uploading && !root.session.actionPending
                 monospace: busy && enabled

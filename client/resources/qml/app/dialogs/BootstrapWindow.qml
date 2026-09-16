@@ -52,6 +52,7 @@ Window {
             }
             AppButton {
                 text: root.controller.bootstrapPrimaryText
+                textVariants: ["Retry", "Continue"]
                 primary: true
                 onClicked: root.controller.acceptBootstrapDecision()
             }

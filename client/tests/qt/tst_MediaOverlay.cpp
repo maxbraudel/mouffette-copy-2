@@ -52,6 +52,9 @@ private slots:
     void segmentedStatusFillReachesBothEdges();
     void availableStatusUsesNeutralGreyPalette();
     void segmentedStatusKeepsSingleTopBorder();
+    void stateLabelsReserveWidthBeforeTransitions();
+    void mediaPanelWidthSurvivesActionAndUploadTransitions();
+    void emptyScreenHintStaysBehindMediaAndCenteredInViewport();
     void mediaPanelVisibilityAnchorInteractionAndScroll();
     void mediaCountTracksRealCanvasInsertions();
     void typedCapabilitiesGuardDirectCppInvocations();
@@ -574,6 +577,165 @@ void MediaOverlayTest::segmentedStatusKeepsSingleTopBorder()
         image, window.size(),
         QPointF(origin.x() + border->width() / 2.0, origin.y() - 2.0));
     QVERIFY(top != justOutside);
+}
+
+void MediaOverlayTest::stateLabelsReserveWidthBeforeTransitions()
+{
+    QQmlEngine engine;
+    QQuickWindow window;
+    std::unique_ptr<QQuickItem> card(createStatusCard(engine, window, true));
+    QVERIFY(card);
+    const qreal width = card->implicitWidth();
+    for (const auto& status : {"AVAILABLE", "CONNECTED", "DISCONNECTED", "CONNECTING",
+                               "RECONNECTING", "DISCONNECTING", "UNREACHABLE", "DEGRADED"}) {
+        card->setProperty("statusText", status);
+        for (const auto& volume : {"0%", "9%", "50%", "100%"}) {
+            card->setProperty("auxiliaryText", volume);
+            QCOMPARE(card->implicitWidth(), width);
+        }
+    }
+
+    QQmlComponent component(&engine);
+    component.setData(R"QML(
+import QtQuick
+import Mouffette.App
+Item {
+    AppButton {
+        objectName: "button"
+        text: "Enable"
+        textVariants: ["Enable", "Disable"]
+    }
+    StateTextMetrics {
+        objectName: "metrics"
+        text: "i"
+        textVariants: ["i", "WWW"]
+        font.pixelSize: 12
+    }
+}
+)QML", QUrl());
+    std::unique_ptr<QObject> harness(component.create());
+    QVERIFY2(harness, qPrintable(component.errorString()));
+    auto* button = harness->findChild<QQuickItem*>("button");
+    auto* metrics = harness->findChild<QObject*>("metrics");
+    QVERIFY(button && metrics);
+    const qreal buttonWidth = button->implicitWidth();
+    button->setProperty("text", "Disable");
+    QCOMPARE(button->implicitWidth(), buttonWidth);
+    const qreal measured = metrics->property("maximumWidth").toReal();
+    metrics->setProperty("text", "WWW");
+    QCOMPARE(metrics->property("maximumWidth").toReal(), measured);
+    QFont font = metrics->property("font").value<QFont>();
+    font.setPixelSize(24);
+    metrics->setProperty("font", font);
+    QVERIFY(metrics->property("maximumWidth").toReal() > measured * 1.9);
+}
+
+void MediaOverlayTest::mediaPanelWidthSurvivesActionAndUploadTransitions()
+{
+    QQmlEngine engine;
+    QQuickWindow window;
+    window.resize(1200, 800);
+    MediaListModel model;
+    QString error;
+    std::unique_ptr<QQuickItem> harness(createMediaPanelHarness(engine, window, &model, &error));
+    QVERIFY2(harness, qPrintable(error));
+    harness->setSize(window.size());
+    auto* panel = harness->findChild<QQuickItem*>("mediaListPanel");
+    auto* session = harness->property("session").value<QObject*>();
+    QVERIFY(panel && session);
+    QVariantMap row{{"rowKey", "image"}, {"mediaId", "image"}, {"displayName", "Image"}, {"mediaType", "image"},
+                    {"width", 160}, {"height", 90}, {"sourceSizeBytes", 10},
+                    {"uploadState", "not_uploaded"}, {"uploadProgress", 0}};
+    model.updateFromList({row});
+    harness->setProperty("testMediaCount", 10);
+    QCoreApplication::processEvents();
+    const qreal initialWidth = panel->implicitWidth();
+    const qreal initialLeft = panel->x();
+    auto* remote = findVisualItem(panel, "remoteSceneAction");
+    auto* upload = findVisualItem(panel, "uploadAction");
+    QVERIFY(remote && upload);
+    const qreal remoteWidth = remote->implicitWidth();
+    const qreal uploadWidth = upload->implicitWidth();
+    for (const auto& label : {"Launch Remote Scene", "Launching Remote Scene...",
+                              "Stop Remote Scene", "Stopping Remote Scene..."}) {
+        session->setProperty("remoteSceneActionText", label);
+        QCOMPARE(remote->implicitWidth(), remoteWidth);
+        QCOMPARE(panel->implicitWidth(), initialWidth);
+        QCOMPARE(panel->x(), initialLeft);
+    }
+    for (const auto& state : {"not_uploaded", "uploading", "uploaded"}) {
+        row["uploadState"] = state;
+        row["remoteCached"] = true;
+        model.updateFromList({row});
+        QCoreApplication::processEvents();
+        QCOMPARE(panel->implicitWidth(), initialWidth);
+    }
+    for (const auto& label : {"Preparing…", "Uploading…", "Uploading (0/10) 0%",
+                              "Uploading (10/10) 100%", "Finalizing…", "Cancelling…",
+                              "Removing…", "Unload", "Upload"}) {
+        const bool progress = QString::fromUtf8(label).startsWith("Uploading (");
+        session->setProperty("uploadActionText", QString::fromUtf8(label));
+        session->setProperty("uploadActionTone", progress ? 1 : 0);
+        QCOMPARE(upload->implicitWidth(), uploadWidth);
+        QCOMPARE(panel->implicitWidth(), initialWidth);
+        QCOMPARE(panel->x(), initialLeft);
+    }
+}
+
+void MediaOverlayTest::emptyScreenHintStaysBehindMediaAndCenteredInViewport()
+{
+    QString error;
+    std::unique_ptr<QuickCanvasHost> host(QuickCanvasHost::create(&error));
+    QVERIFY2(host, qPrintable(error));
+    host->setProjectEditingEnabled(true);
+    ClientWorkspaceViewModel session("empty-screen", host.get(), [] {}, nullptr,
+                                    [] { return false; }, [] { return true; }, [] { return true; });
+    session.setLoading(false);
+    QQmlEngine engine;
+    QQuickWindow window;
+    window.resize(1000, 700);
+    QQmlComponent component(&engine, QUrl(QStringLiteral(
+        "qrc:/qt/qml/Mouffette/App/resources/qml/app/pages/CanvasPage.qml")));
+    std::unique_ptr<QObject> pageObject(component.createWithInitialProperties({
+        {"controller", QVariantMap{{"activeWorkspace", QVariant::fromValue(&session)}, {"remoteBusy", false}}}
+    }));
+    auto* page = qobject_cast<QQuickItem*>(pageObject.get());
+    QVERIFY2(page, qPrintable(component.errorString()));
+    page->setParentItem(window.contentItem());
+    page->setSize(window.size());
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    page->setSize(window.size());
+    host->controller()->updateCamera(1.0, 0.0, 0.0);
+    auto* hint = findVisualItem(page, "emptyScreenHint");
+    QVERIFY(hint && hint->isVisible());
+    const QPointF center = hint->mapToScene({hint->width() / 2, hint->height() / 2});
+    // Qt's centered anchors align text to logical pixels (up to half a pixel
+    // per axis when the text's implicit height is odd).
+    QVERIFY(QLineF(center, QPointF(page->width() / 2, page->height() / 2)).length() <= 1.0);
+
+    QTemporaryDir directory;
+    const QString path = directory.filePath("foreground.png");
+    QImage source(640, 120, QImage::Format_ARGB32_Premultiplied);
+    source.fill(Qt::cyan);
+    QVERIFY(source.save(path));
+    auto* media = host->document()->addPreparedFile(path, source.size(), false, center - QPointF(320, 60));
+    QVERIFY(media);
+    media->setZ(-100000);
+    host->document()->clearSelection();
+    QTRY_VERIFY(media->residencyReady());
+    QTRY_VERIFY(imagePixel(window.grabWindow(), window.size(), center) == QColor(Qt::cyan));
+    const QImage frame = window.grabWindow();
+    QVERIFY(!frame.isNull());
+    for (int y = -15; y <= 15; ++y)
+        for (int x = -220; x <= 220; ++x)
+            QCOMPARE(imagePixel(frame, window.size(), center + QPointF(x, y)), QColor(Qt::cyan));
+
+    host->controller()->panBy(70, -30);
+    host->controller()->zoomAt(120, 160, 1.4);
+    QCOMPARE(hint->mapToScene({hint->width() / 2, hint->height() / 2}), center);
+    session.setLoading(true);
+    QVERIFY(!hint->isVisible());
 }
 
 void MediaOverlayTest::mediaPanelVisibilityAnchorInteractionAndScroll()

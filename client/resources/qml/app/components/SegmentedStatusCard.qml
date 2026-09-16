@@ -16,7 +16,7 @@ Item {
     property string auxiliaryText: ""
     property bool auxiliaryVisible: auxiliaryText.length > 0
     property bool busy: false
-    property int statusWidth: 120
+    readonly property real statusWidth: statusMetrics.maximumWidth + Theme.segmentPadding * 2
     readonly property bool availableStatus: statusText.trim().toUpperCase() === "AVAILABLE"
 
     readonly property color statusForeground: availableStatus
@@ -32,11 +32,18 @@ Item {
                                                : statusKind === SegmentedStatusCard.Warning
                                                  ? Theme.warningBackground : Theme.errorBackground
 
-    TextMetrics {
+    ConnectionStatusMetrics {
+        id: statusMetrics
+        text: root.statusText
+        uppercase: true
+        font: statusLabel.font
+    }
+
+    StateTextMetrics {
         id: auxiliaryMetrics
         text: root.auxiliaryText
-        font.pixelSize: Theme.titleFontSize
-        font.bold: true
+        textVariants: Array.from({length: 101}, function(_, value) { return value + "%" })
+        font: auxiliaryLabel.font
     }
 
     implicitWidth: segments.implicitWidth
@@ -87,6 +94,7 @@ Item {
             bottomRightRadius: root.auxiliaryVisible ? 0 : Theme.controlRadius
 
             Text {
+                id: statusLabel
                 anchors.fill: parent
                 anchors.leftMargin: Theme.segmentPadding
                 anchors.rightMargin: Theme.segmentPadding
@@ -111,7 +119,7 @@ Item {
             id: auxiliarySegment
             visible: root.auxiliaryVisible
             height: root.height
-            width: visible ? Math.max(40, auxiliaryMetrics.advanceWidth + Theme.segmentPadding * 2) : 0
+            width: visible ? Math.max(40, auxiliaryMetrics.maximumWidth + Theme.segmentPadding * 2) : 0
             color: "transparent"
             topRightRadius: Theme.controlRadius
             bottomRightRadius: Theme.controlRadius

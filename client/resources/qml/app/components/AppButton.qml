@@ -8,8 +8,9 @@ AbstractButton {
     property bool primary: false
     property bool destructive: false
     property string unavailableReason: ""
+    property alias textVariants: textMetrics.textVariants
 
-    implicitWidth: Math.max(Theme.controlMinWidth, label.implicitWidth + 24)
+    implicitWidth: Math.max(Theme.controlMinWidth, textMetrics.maximumWidth + 24)
     implicitHeight: Theme.controlHeight
     hoverEnabled: true
     focusPolicy: Qt.TabFocus
@@ -18,6 +19,12 @@ AbstractButton {
     Accessible.role: Accessible.Button
     Accessible.name: text
     Accessible.description: control.enabled ? "" : unavailableReason
+
+    StateTextMetrics {
+        id: textMetrics
+        text: control.text
+        font: label.font
+    }
 
     contentItem: Text {
         id: label

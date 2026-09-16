@@ -1507,9 +1507,9 @@ void ApplicationRuntime::showScreenView(const ClientInfo& client) {
     m_remoteVolumePercent = active && hasProject
         ? currentWorkspace->lastClientInfo.getVolumePercent() : -1;
     if (active) setRemoteConnectionStatus(QStringLiteral("CONNECTED"), false);
-    else if (grace) setRemoteConnectionStatus(QStringLiteral("RECONNECTING..."), false);
+    else if (grace) setRemoteConnectionStatus(QStringLiteral("RECONNECTING"), false);
     else if (closePending && selectedClient.isOnline()) {
-        setRemoteConnectionStatus(QStringLiteral("CONNECTING..."), false);
+        setRemoteConnectionStatus(QStringLiteral("CONNECTING"), false);
     }
     else setRemoteConnectionStatus(currentWorkspace->lastClientInfo.isOnline()
         ? QStringLiteral("AVAILABLE") : QStringLiteral("DISCONNECTED"), false);
@@ -1869,7 +1869,7 @@ void ApplicationRuntime::ensureRemoteSessionForClient(const ClientInfo& client) 
             m_remoteVolumePercent = -1;
             setRemoteConnectionStatus(
                 status == QLatin1String("Connecting")
-                    ? QStringLiteral("CONNECTING...") : status.toUpper(),
+                    ? QStringLiteral("CONNECTING") : status.toUpper(),
                 false);
             if (m_uploadManager) m_uploadManager->setTargetClientId(QString());
         }
@@ -1989,7 +1989,7 @@ void ApplicationRuntime::ensureRemoteSessionForClient(const ClientInfo& client) 
     }
     if (m_activeWorkspaceEndpointId == targetEndpointId) {
         m_remoteClientConnected = false;
-        setRemoteConnectionStatus(QStringLiteral("CONNECTING..."), false);
+        setRemoteConnectionStatus(QStringLiteral("CONNECTING"), false);
         if (m_activeCanvas) m_activeCanvas->setOverlayActionsEnabled(false);
         if (m_uploadManager) m_uploadManager->setTargetClientId(QString());
     }
@@ -2102,7 +2102,7 @@ void ApplicationRuntime::handleRemoteSessionReady(const QJsonObject& envelope,
                 m_remoteClientConnected = false;
                 m_remoteVolumePercent = -1;
                 setRemoteConnectionStatus(
-                    reopenDesired ? QStringLiteral("CONNECTING...")
+                    reopenDesired ? QStringLiteral("CONNECTING")
                                   : QStringLiteral("AVAILABLE"),
                     false);
             }
@@ -2253,7 +2253,7 @@ void ApplicationRuntime::handleRemoteSessionReady(const QJsonObject& envelope,
         m_remoteClientConnected = commandActive;
         setRemoteConnectionStatus(
             commandActive ? QStringLiteral("CONNECTED")
-                          : QStringLiteral("RECONNECTING..."),
+                          : QStringLiteral("RECONNECTING"),
             false);
         updateWorkspaceCapabilities(peerEndpointId);
         if (session->canvas && !m_canvasRevealedForCurrentClient) {
@@ -2368,7 +2368,7 @@ void ApplicationRuntime::handleRemoteSessionLeaseState(const QJsonObject& envelo
             m_remoteClientConnected = false;
             m_remoteVolumePercent = -1;
             setRemoteConnectionStatus(
-                reopenDesired ? QStringLiteral("CONNECTING...")
+                reopenDesired ? QStringLiteral("CONNECTING")
                               : status.toUpper(),
                 false);
         }
@@ -2437,7 +2437,7 @@ void ApplicationRuntime::handleRemoteSessionTerminating(const QJsonObject& envel
             updateRemoteClientAvailability(
                 targetEndpointId, QStringLiteral("Connecting"));
             if (m_activeWorkspaceEndpointId == targetEndpointId) {
-                setRemoteConnectionStatus(QStringLiteral("CONNECTING..."), false);
+                setRemoteConnectionStatus(QStringLiteral("CONNECTING"), false);
             }
         }
         return;
@@ -2865,7 +2865,7 @@ void ApplicationRuntime::clearRemoteSessionRuntimeState(
         m_remoteVolumePercent = -1;
         setRemoteConnectionStatus(
             status == QLatin1String("Connecting")
-                ? QStringLiteral("CONNECTING...") : status.toUpper(),
+                ? QStringLiteral("CONNECTING") : status.toUpper(),
             false);
     }
     // This final projection also updates the list when the Project already
@@ -3920,9 +3920,9 @@ void ApplicationRuntime::onClientListReceived(const QList<ClientInfo>& clients) 
         ? workspace->lastClientInfo.getVolumePercent() : -1;
     setRemoteConnectionStatus(
         status == QLatin1String("Connecting")
-            ? QStringLiteral("CONNECTING...")
+            ? QStringLiteral("CONNECTING")
             : (status == QLatin1String("Reconnecting")
-                ? QStringLiteral("RECONNECTING...") : status.toUpper()),
+                ? QStringLiteral("RECONNECTING") : status.toUpper()),
         false);
     updateWorkspaceCapabilities(targetEndpointId);
 }

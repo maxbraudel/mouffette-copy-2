@@ -1362,6 +1362,46 @@ QRectF QuickCanvasController::snappedResizeRect(
     return result;
 }
 
+void QuickCanvasController::scaleSelectionBy(qreal factor)
+{
+    if (!editingEnabled() || !std::isfinite(factor) || factor <= 0.0
+        || qFuzzyCompare(factor, 1.0) || !m_dragMediaId.isEmpty()
+        || !m_resizeMediaId.isEmpty()) return;
+    CanvasMedia* active = selectedMediaItem();
+    if (!active) return;
+
+    captureTransformSelection(active);
+    // Keep every selected item's proportions and center, just as uniform
+    // handle resizing does. A shared lower bound preserves relative scales.
+    qreal minimumFactor = 0.0;
+    for (const auto& start : std::as_const(m_transformStarts)) {
+        if (start.rect.isEmpty()) {
+            clearLiveResize();
+            return;
+        }
+        minimumFactor = std::max({minimumFactor, 1.0 / start.rect.width(),
+                                  1.0 / start.rect.height(), 0.000101 / start.scale});
+    }
+    factor = std::max(factor, std::min<qreal>(1.0, minimumFactor));
+    for (const auto& start : std::as_const(m_transformStarts)) {
+        if (!std::isfinite(start.scale * factor)
+            || !std::isfinite(start.rect.width() * factor)
+            || !std::isfinite(start.rect.height() * factor)) {
+            clearLiveResize();
+            return;
+        }
+    }
+    m_resizeOriginalRect = active->sceneRect();
+    const QSizeF size = m_resizeOriginalRect.size() * factor;
+    m_pendingResizeRect = QRectF(m_resizeOriginalRect.center()
+                                    - QPointF(size.width() / 2.0, size.height() / 2.0), size);
+    m_pendingResizeAlt = false;
+    previewResize();
+    commitTransforms(true, false);
+    clearLiveResize();
+    publishMedia();
+}
+
 void QuickCanvasController::handleMediaResizeRequested(
     const QString& mediaId, const QString& handleId, qreal x, qreal y,
     bool snap, bool altPressed)

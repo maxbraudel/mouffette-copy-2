@@ -114,13 +114,20 @@ AppPanel {
 
                     Rectangle {
                         id: badge
-                        width: Math.max(54, badgeLabel.implicitWidth + 18)
+                        width: Math.max(54, badgeMetrics.maximumWidth + 18)
                         height: 22
                         radius: height / 2
                         color: row.availableBadge ? Theme.buttonBackground
                                : row.badgeKindValue === 0 ? Theme.connectedBackground
                                : row.badgeKindValue === 1 ? Theme.warningBackground
                                                          : Theme.errorBackground
+
+                        ConnectionStatusMetrics {
+                            id: badgeMetrics
+                            text: row.badgeValue
+                            font: badgeLabel.font
+                            sceneStatus: root.sceneMode
+                        }
 
                         Text {
                             id: badgeLabel

@@ -606,7 +606,7 @@ private slots:
         QVERIFY(!runtime.isRemoteClientConnected());
         QVERIFY(runtime.findWorkspace(targetEndpointId));
         QVERIFY(!runtime.findWorkspace(targetEndpointId)->canvas);
-        QCOMPARE(runtime.remoteStatusText(), QStringLiteral("CONNECTING..."));
+        QCOMPARE(runtime.remoteStatusText(), QStringLiteral("CONNECTING"));
 
         QVERIFY(server.sendClosed(malformedSessionId, targetEndpointId));
         QTRY_COMPARE_WITH_TIMEOUT(server.openCommands.size(), 2, 1'000);
@@ -1167,7 +1167,7 @@ private slots:
         ++nowMs;
         runtime.setPointerInsideControlWindow(true);
         QCOMPARE(server.openCommands.size(), 1);
-        QCOMPARE(runtime.remoteStatusText(), QStringLiteral("CONNECTING..."));
+        QCOMPARE(runtime.remoteStatusText(), QStringLiteral("CONNECTING"));
         QVERIFY(!runtime.isRemoteClientConnected());
         QVERIFY(!runtime.isRemoteOverlayActionsEnabled());
 
@@ -1427,7 +1427,7 @@ private slots:
             {QStringLiteral("targetEndpointId"), targetEndpointId}
         }));
         QTRY_COMPARE_WITH_TIMEOUT(runtime.remoteStatusText(),
-                                  QStringLiteral("CONNECTING..."), 1'000);
+                                  QStringLiteral("CONNECTING"), 1'000);
         QCOMPARE(server.openCommands.size(), 3);
         QVERIFY(runtime.getNavigationManager()->isOnScreenView());
         QVERIFY(runtime.getNavigationManager()->isLoading());
@@ -1529,7 +1529,7 @@ private slots:
         QVERIFY(runtime.getActiveCanvas());
         QVERIFY(!runtime.isRemoteClientConnected());
         QVERIFY(!runtime.isRemoteOverlayActionsEnabled());
-        QCOMPARE(runtime.remoteStatusText(), QStringLiteral("RECONNECTING..."));
+        QCOMPARE(runtime.remoteStatusText(), QStringLiteral("RECONNECTING"));
         QCOMPARE(runtime.remoteVolumePercent(), -1);
         QCOMPARE(server.openCommands.size(), 1);
         QCOMPARE(runtime.getWorkspaceManager()->remoteSessionState(
@@ -1553,7 +1553,7 @@ private slots:
                  WorkspaceManager::RemoteSessionState::Grace);
         QVERIFY(!runtime.isRemoteClientConnected());
         QVERIFY(!runtime.isRemoteOverlayActionsEnabled());
-        QCOMPARE(runtime.remoteStatusText(), QStringLiteral("RECONNECTING..."));
+        QCOMPARE(runtime.remoteStatusText(), QStringLiteral("RECONNECTING"));
         QCOMPARE(runtime.remoteVolumePercent(), -1);
         QCOMPARE(server.openCommands.size(), 1);
 
@@ -1717,7 +1717,7 @@ private slots:
         // replacement, but OPEN2 must wait for the old boot's terminal result.
         runtime.activateClient(targetEndpointId);
         QCOMPARE(server.openCommands.size(), 1);
-        QCOMPARE(runtime.remoteStatusText(), QStringLiteral("CONNECTING..."));
+        QCOMPARE(runtime.remoteStatusText(), QStringLiteral("CONNECTING"));
 
         QSignalSpy disconnectedSpy(runtime.getWebSocketClient(),
                                    &WebSocketClient::disconnected);
@@ -1740,7 +1740,7 @@ private slots:
         QCOMPARE(server.openCommands.constLast()
                      .value(QStringLiteral("targetEndpointId")).toString(),
                  targetEndpointId);
-        QCOMPARE(runtime.remoteStatusText(), QStringLiteral("CONNECTING..."));
+        QCOMPARE(runtime.remoteStatusText(), QStringLiteral("CONNECTING"));
 
         ApplicationRuntime::ClientWorkspace* workspace =
             runtime.findWorkspace(targetEndpointId);
@@ -1915,7 +1915,7 @@ private slots:
         // replacement intent, but must not emit OPEN until CLOSE converges.
         runtime.activateClient(targetEndpointId);
         QCOMPARE(server.openCommands.size(), 1);
-        QCOMPARE(runtime.remoteStatusText(), QStringLiteral("CONNECTING..."));
+        QCOMPARE(runtime.remoteStatusText(), QStringLiteral("CONNECTING"));
 
         // Stop authenticated contact. The lease-expiry signal is followed by
         // SceneRunCoordinator::clearSessions(), then ConnectionManager creates
@@ -2036,7 +2036,7 @@ private slots:
              firstOpen.value(QStringLiteral("requestId"))}
         }));
         QTRY_COMPARE_WITH_TIMEOUT(runtime.remoteStatusText(),
-                                  QStringLiteral("CONNECTING..."), 1'000);
+                                  QStringLiteral("CONNECTING"), 1'000);
         QVERIFY(runtime.getNavigationManager()->isOnScreenView());
         QVERIFY(runtime.getNavigationManager()->isLoading());
         QVERIFY(!runtime.activeProjectExists());
@@ -2174,7 +2174,7 @@ private slots:
         QVERIFY(runtime.getNavigationManager()->isOnScreenView());
         QVERIFY(runtime.getNavigationManager()->isLoading());
         QCOMPARE(runtime.getNavigationManager()->currentClientId(), targetC);
-        QCOMPARE(runtime.remoteStatusText(), QStringLiteral("CONNECTING..."));
+        QCOMPARE(runtime.remoteStatusText(), QStringLiteral("CONNECTING"));
 
         QVERIFY(server.sendOpened(
             QStringLiteral("correlated-session-c"),
@@ -2245,7 +2245,7 @@ private slots:
             outgoingOpen.value(QStringLiteral("requestId")).toString();
         QVERIFY(!outgoingRequestId.isEmpty());
         QVERIFY(runtime.getNavigationManager()->isLoading());
-        QCOMPARE(runtime.remoteStatusText(), QStringLiteral("CONNECTING..."));
+        QCOMPARE(runtime.remoteStatusText(), QStringLiteral("CONNECTING"));
 
         // The peer independently owns the reverse-direction session. Its
         // Ready envelope must only populate incomingForPeer(), never consume
@@ -2271,7 +2271,7 @@ private slots:
         QVERIFY(runtime.getNavigationManager()->isLoading());
         QCOMPARE(runtime.getNavigationManager()->currentClientId(),
                  peerEndpointId);
-        QCOMPARE(runtime.remoteStatusText(), QStringLiteral("CONNECTING..."));
+        QCOMPARE(runtime.remoteStatusText(), QStringLiteral("CONNECTING"));
 
         const QString outgoingSessionId =
             QStringLiteral("bidirectional-outgoing-session");

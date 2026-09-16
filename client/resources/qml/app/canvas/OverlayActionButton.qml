@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import Mouffette.App
+import "../components"
 
 AbstractButton {
     id: control
@@ -12,6 +13,8 @@ AbstractButton {
     property bool monospace: false
     property real bottomRadius: 0
     property string unavailableReason: ""
+    property alias textVariants: textMetrics.textVariants
+    property alias monospaceTextVariants: monospaceMetrics.textVariants
     readonly property bool dimmed: !enabled && !busy
     readonly property color foregroundColor: dimmed ? Theme.overlayDisabledText
         : tone === OverlayActionButton.Uploading ? Theme.brandBlue
@@ -34,7 +37,7 @@ AbstractButton {
              : hovered ? Theme.overlayHover : "transparent"
     }
 
-    implicitWidth: label.implicitWidth + 40
+    implicitWidth: Math.max(textMetrics.maximumWidth, monospaceMetrics.maximumWidth) + leftPadding + rightPadding
     implicitHeight: Theme.overlayButtonHeight
     padding: 0
     leftPadding: 20
@@ -43,16 +46,26 @@ AbstractButton {
     Accessible.role: Accessible.Button
     Accessible.name: text
     Accessible.description: control.enabled ? "" : unavailableReason
+    StateTextMetrics {
+        id: textMetrics
+        text: control.monospace ? "" : control.text
+        font.family: control.font.family
+        font.pixelSize: 14
+        font.bold: true
+    }
+    StateTextMetrics {
+        id: monospaceMetrics
+        text: control.monospace ? control.text : ""
+        font.family: Qt.platform.os === "osx" ? "Menlo" : "Courier New"
+        font.pixelSize: 14
+        font.bold: true
+    }
     contentItem: Text {
         id: label
         text: control.text
         textFormat: Text.PlainText
         color: control.foregroundColor
-        font.family: control.monospace
-                     ? (Qt.platform.os === "osx" ? "Menlo" : "Courier New")
-                     : control.font.family
-        font.pixelSize: 14
-        font.bold: true
+        font: control.monospace ? monospaceMetrics.font : textMetrics.font
         horizontalAlignment: Text.AlignHCenter
         verticalAlignment: Text.AlignVCenter
         elide: Text.ElideRight

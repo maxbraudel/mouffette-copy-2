@@ -827,6 +827,22 @@ Rectangle {
         return committed
     }
 
+    // Viewport-space background: stays centered during navigation, while the
+    // scene and all its media render above it regardless of their own z values.
+    Text {
+        objectName: "emptyScreenHint"
+        anchors.centerIn: parent
+        width: Math.min(parent.width - 48, 640)
+        visible: !!root.sessionViewModel && root.sessionViewModel.loading === false
+                 && root.screenCount === 0
+        text: "No screens available"
+        color: AppStyle.Theme.mutedText
+        font.pixelSize: Math.max(28, AppStyle.Theme.titleFontSize * 1.5)
+        font.bold: true
+        horizontalAlignment: Text.AlignHCenter
+        wrapMode: Text.WordWrap
+    }
+
     CanvasViewport {
         id: viewport
         anchors.fill: parent
@@ -1570,6 +1586,25 @@ Rectangle {
                 preventStealing: false
 
                 onWheel: function(event) {
+                    if ((event.modifiers & Qt.AltModifier) !== 0) {
+                        // Alt/Option scroll belongs to the selection, including
+                        // over empty canvas. Never pan/zoom the camera here.
+                        if (!pinchZoom.active && root.interactionMode === "idle"
+                                && !inputLayer.inputCoordinator.primaryGestureActive
+                                && root.editingEnabled && root.canvasController) {
+                            var delta = root.wheelDeltaY(event)
+                            if (event.inverted) delta = -delta
+                            if (delta !== 0.0) {
+                                var factor = root.isTrackpadWheel(event)
+                                    ? Math.exp(delta * root.trackpadZoomSensitivity)
+                                    : Math.pow(root.wheelZoomBase, delta * root.wheelZoomSensitivity)
+                                root.canvasController.scaleSelectionBy(factor)
+                            }
+                        }
+                        event.accepted = true
+                        return
+                    }
+
                     if (pinchZoom.active || !root.canProcessCameraWheel()) {
                         event.accepted = true
                         return

@@ -35,6 +35,14 @@ projection supplies content, selection chrome and overlays with the same
 provisional geometry. Release commits the whole selection to `CanvasDocument`.
 Text fit mode changes only when a free resize commits.
 
+Alt/Option + vertical wheel/trackpad scroll scales selected media uniformly
+around each item's own center. Physical scroll up enlarges and down reduces,
+independently of natural scrolling. QML routes this before camera navigation;
+horizontal packets and an empty or locked selection never move the camera.
+The controller reuses selection transform snapshots and uniform resize commits,
+preserving base dimensions, fit-to-text and relative scales. Active pointer,
+text-edit and pinch gestures retain input ownership.
+
 Images and videos keep this same selectable, movable and resizable shell while
 their content is loading or waiting for memory. Uniform and Alt resize, including
 group transforms, operate on geometry independently of media residency. Loading

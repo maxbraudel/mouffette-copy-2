@@ -737,6 +737,132 @@ private slots:
         }
     }
 
+    void altScrollScalesSelectionAroundItsCenter_data()
+    {
+        QTest::addColumn<QString>("mediaType");
+        QTest::addColumn<bool>("trackpad");
+        QTest::addColumn<bool>("naturalScrolling");
+        QTest::addColumn<bool>("overMedia");
+        for (const QString type : {QStringLiteral("text"), QStringLiteral("image"), QStringLiteral("video")})
+            for (int device = 0; device < 3; ++device)
+                for (bool over : {false, true})
+                    QTest::newRow(qPrintable(type + QString("-%1-%2").arg(device).arg(over)))
+                        << type << (device > 0) << (device == 2) << over;
+    }
+
+    void altScrollScalesSelectionAroundItsCenter()
+    {
+        QFETCH(QString, mediaType);
+        QFETCH(bool, trackpad);
+        QFETCH(bool, naturalScrolling);
+        QFETCH(bool, overMedia);
+        QPointingDevice device("test scroll device", 0xCB01,
+            trackpad ? QInputDevice::DeviceType::TouchPad : QInputDevice::DeviceType::Mouse,
+            trackpad ? QPointingDevice::PointerType::Finger : QPointingDevice::PointerType::Generic,
+            QInputDevice::Capability::Position | QInputDevice::Capability::Scroll
+                | QInputDevice::Capability::PixelScroll, 2, 3);
+        Fixture fixture;
+        QVERIFY(fixture.initialize());
+        QTemporaryDir directory;
+        const bool video = mediaType == "video";
+        const QString path = video ? QString::fromUtf8(TEST_VIDEO_FILE) : directory.filePath("image.png");
+        QImage image(160, 90, QImage::Format_ARGB32_Premultiplied);
+        image.fill(Qt::cyan);
+        if (!video) QVERIFY(image.save(path));
+        CanvasMedia* media = mediaType == "text"
+            ? fixture.document.addText({250, 220}, "Scale me")
+            : fixture.document.addPreparedFile(path, image.size(), video, {250, 220});
+        QVERIFY(media);
+        media->setFitToTextEnabled(false);
+        media->setBaseSize({160, 90});
+        media->setScale(1.5);
+        fixture.document.select(media->mediaId(), false);
+        fixture.view.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&fixture.view));
+        QCoreApplication::processEvents();
+        const QRectF original = media->sceneRect();
+        const QSize baseSize = media->baseSize();
+        const qreal scale = media->scale();
+        const auto camera = fixture.document.cameraCenter();
+        const auto span = fixture.document.cameraSquareSceneSize();
+        const QPointF cursor = overMedia
+            ? original.center() * fixture.controller.viewScale()
+                + QPointF(fixture.controller.panX(), fixture.controller.panY())
+            : QPointF(fixture.view.width() - 35, fixture.view.height() - 35);
+        auto scroll = [&](int direction, Qt::ScrollPhase phase) {
+            const int sign = direction * (naturalScrolling ? -1 : 1);
+            QWheelEvent event(cursor, fixture.view.mapToGlobal(cursor.toPoint()),
+                trackpad ? QPoint(0, sign * 24) : QPoint(), QPoint(0, sign * 120),
+                Qt::NoButton, Qt::AltModifier, trackpad ? phase : Qt::NoScrollPhase,
+                naturalScrolling, Qt::MouseEventNotSynthesized, &device);
+            QCoreApplication::sendEvent(&fixture.view, &event);
+        };
+        scroll(1, Qt::ScrollBegin);
+        QVERIFY(media->scale() > scale);
+        QVERIFY(QLineF(media->sceneRect().center(), original.center()).length() < 1e-8);
+        QCOMPARE(media->baseSize(), baseSize);
+        QVERIFY(!media->fitToTextEnabled());
+        scroll(-1, Qt::ScrollUpdate);
+        QVERIFY(qAbs(media->scale() - scale) < 1e-8);
+        QVERIFY(QLineF(media->position(), original.topLeft()).length() < 1e-8);
+        scroll(0, Qt::ScrollEnd);
+
+        if (trackpad) {
+            QWheelEvent horizontal(cursor, fixture.view.mapToGlobal(cursor.toPoint()), {30, 0}, {120, 120},
+                Qt::NoButton, Qt::AltModifier, Qt::ScrollBegin, naturalScrolling,
+                Qt::MouseEventNotSynthesized, &device);
+            QCoreApplication::sendEvent(&fixture.view, &horizontal);
+            scroll(0, Qt::ScrollEnd);
+            QVERIFY(qAbs(media->scale() - scale) < 1e-8);
+        }
+        fixture.document.clearSelection();
+        scroll(1, Qt::ScrollBegin);
+        scroll(0, Qt::ScrollEnd);
+        QVERIFY(qAbs(media->scale() - scale) < 1e-8);
+        fixture.document.select(media->mediaId(), false);
+        fixture.document.setEditsLocked(true);
+        scroll(1, Qt::ScrollBegin);
+        scroll(0, Qt::ScrollEnd);
+        QVERIFY(qAbs(media->scale() - scale) < 1e-8);
+        QCOMPARE(fixture.document.cameraCenter(), camera);
+        QCOMPARE(fixture.document.cameraSquareSceneSize(), span);
+    }
+
+    void centeredSelectionScalingPreservesGroupGeometryAndRejectsInvalidInput()
+    {
+        Fixture fixture;
+        QVERIFY(fixture.initialize());
+        auto* first = fixture.document.addText({10, 20}, "First");
+        auto* second = fixture.document.addText({400, 300}, "Second");
+        first->setBaseSize({200, 100});
+        second->setBaseSize({150, 80});
+        second->setScale(2.0);
+        fixture.document.select(first->mediaId(), false);
+        fixture.document.select(second->mediaId(), true);
+        const QRectF firstRect = first->sceneRect(), secondRect = second->sceneRect();
+        fixture.controller.scaleSelectionBy(1.25);
+        QCOMPARE(first->scale(), 1.25);
+        QCOMPARE(second->scale(), 2.5);
+        QCOMPARE(first->sceneRect().center(), firstRect.center());
+        QCOMPARE(second->sceneRect().center(), secondRect.center());
+        QVERIFY(first->fitToTextEnabled() && second->fitToTextEnabled());
+        for (qreal invalid : {0.0, -1.0, std::numeric_limits<qreal>::infinity(),
+                              std::numeric_limits<qreal>::quiet_NaN()})
+            fixture.controller.scaleSelectionBy(invalid);
+        QCOMPARE(first->scale(), 1.25);
+        fixture.controller.setProjectEditingEnabled(false);
+        fixture.controller.scaleSelectionBy(2.0);
+        QCOMPARE(first->scale(), 1.25);
+        fixture.controller.setProjectEditingEnabled(true);
+        fixture.controller.scaleSelectionBy(1e-9);
+        QVERIFY(first->sceneRect().height() >= 1.0);
+        QVERIFY(second->sceneRect().height() >= 1.0);
+        const qreal minimum = first->scale();
+        fixture.controller.scaleSelectionBy(0.5);
+        QCOMPARE(first->scale(), minimum);
+        QVERIFY(QLineF(first->sceneRect().center(), firstRect.center()).length() < 1e-8);
+    }
+
     void trackpadControlScrollZoomsAtCursor_data()
     {
         QTest::addColumn<int>("direction");

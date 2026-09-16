@@ -481,6 +481,8 @@ qt_add_qml_module(MouffetteClient
         resources/qml/app/components/AppPanel.qml
         resources/qml/app/components/AppSpinner.qml
         resources/qml/app/components/AppTextField.qml
+        resources/qml/app/components/StateTextMetrics.qml
+        resources/qml/app/components/ConnectionStatusMetrics.qml
         resources/qml/app/components/SegmentedStatusCard.qml
         resources/qml/app/components/ToastStack.qml
         resources/qml/app/pages/ClientListPanel.qml

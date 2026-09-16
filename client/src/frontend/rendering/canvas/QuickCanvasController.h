@@ -128,6 +128,7 @@ public:
     Q_INVOKABLE void updateCamera(qreal scale, qreal panX, qreal panY);
     Q_INVOKABLE void panBy(qreal dx, qreal dy);
     Q_INVOKABLE void zoomAt(qreal x, qreal y, qreal factor);
+    Q_INVOKABLE void scaleSelectionBy(qreal factor);
 
 signals:
     void editingEnabledChanged();
