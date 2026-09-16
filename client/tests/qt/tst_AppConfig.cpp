@@ -58,7 +58,7 @@ void AppConfigTest::loadsEmbeddedDefaults() {
     QVERIFY2(config.load(options, &error), qPrintable(error));
     QCOMPARE(config.serverUrl(), QStringLiteral("ws://localhost:8080"));
     QCOMPARE(config.remoteSessionHiddenTimeoutMs(), qint64(30000));
-    QCOMPARE(config.projectHiddenRetentionMs(), qint64(300000));
+    QCOMPARE(config.projectHiddenRetentionMs(), qint64(60000));
     QCOMPARE(config.incomingSessionOrphanTimeoutMs(), qint64(3000));
     QCOMPARE(config.uploadActionMinIntervalMs(), 300);
     QCOMPARE(config.uploadCancelGuardMs(), 1000);

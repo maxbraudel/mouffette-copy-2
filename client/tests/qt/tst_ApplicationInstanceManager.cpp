@@ -8,6 +8,8 @@
 #include <QLockFile>
 #include <QProcess>
 #include <QSignalSpy>
+#include <QScopeGuard>
+#include <QDateTime>
 #include <QSettings>
 #include <QTemporaryDir>
 #include <QTextStream>
@@ -22,6 +24,7 @@ class ApplicationInstanceManagerTest final : public QObject {
 private slots:
     void allocatesAndReusesUnboundedSlots();
     void allocatesConcurrentSlotsAtomically();
+    void preservesLiveWorkerAndRecoversCrashedSlot();
     void singleInstanceLaunchRequestsActivation();
     void cleansOnlyAbandonedTemporaryProfiles();
     void redirectsSecondaryWritableState();
@@ -99,7 +102,10 @@ void ApplicationInstanceManagerTest::allocatesConcurrentSlotsAtomically()
     QVERIFY2(errors.isEmpty(), qPrintable(errors.join(QStringLiteral("; "))));
     std::sort(ordinals.begin(), ordinals.end());
     const std::vector<int> expected{2, 3, 4, 5, 6, 7};
-    QVERIFY(ordinals == expected);
+    QStringList observed;
+    for (const int ordinal : ordinals) observed.append(QString::number(ordinal));
+    QVERIFY2(ordinals == expected, qPrintable(QStringLiteral("Allocated slots: %1")
+        .arg(observed.join(QStringLiteral(", ")))));
 
     for (const auto& worker : workers) worker->closeWriteChannel();
     for (const auto& worker : workers) {
@@ -107,6 +113,72 @@ void ApplicationInstanceManagerTest::allocatesConcurrentSlotsAtomically()
         QCOMPARE(worker->exitStatus(), QProcess::NormalExit);
         QCOMPARE(worker->exitCode(), 0);
     }
+}
+
+void ApplicationInstanceManagerTest::preservesLiveWorkerAndRecoversCrashedSlot()
+{
+    QTemporaryDir root;
+    QVERIFY(root.isValid());
+    ApplicationInstanceManager primary(QStringLiteral("concurrent"), true, root.path());
+    QString error;
+    QCOMPARE(primary.start(&error), ApplicationInstanceManager::StartResult::Started);
+    QProcess worker;
+    worker.setProgram(QCoreApplication::applicationFilePath());
+    worker.setArguments({QStringLiteral("--instance-worker"), root.path()});
+    worker.start();
+    QVERIFY2(worker.waitForStarted(5000), qPrintable(worker.errorString()));
+    const auto releaseWorker = qScopeGuard([&worker] {
+        if (worker.state() == QProcess::NotRunning) return;
+        worker.closeWriteChannel();
+        if (!worker.waitForFinished(5000)) {
+            worker.kill();
+            worker.waitForFinished(5000);
+        }
+    });
+    QCOMPARE(worker.write("go\n"), qint64(3));
+    QVERIFY(worker.waitForBytesWritten(1000));
+    QVERIFY(worker.waitForReadyRead(5000));
+    QCOMPARE(worker.readLine().trimmed(), QByteArrayLiteral("2"));
+    const qint64 workerPid = worker.processId();
+    const QString slotPath = QDir(root.path()).filePath(QStringLiteral("slot-2.lock"));
+    QLockFile slot(slotPath);
+    qint64 ownerPid = 0;
+    QString ownerHost;
+    QString ownerApplication;
+    QVERIFY(slot.getLockInfo(&ownerPid, &ownerHost, &ownerApplication));
+    QCOMPARE(ownerPid, workerPid);
+#ifndef Q_OS_WIN
+    // Windows denies write access to a live QLockFile. On Unix also exercise
+    // contention after the ordinary stale-time threshold has elapsed.
+    QFile ageSlot(slotPath);
+    QVERIFY(ageSlot.open(QIODevice::ReadWrite));
+    QVERIFY(ageSlot.setFileTime(QDateTime::currentDateTime().addSecs(-60),
+                               QFileDevice::FileModificationTime));
+    ageSlot.close();
+#endif
+    const QDir profiles(QDir(root.path()).filePath(QStringLiteral("profiles")));
+    const auto oldProfiles = profiles.entryList({QStringLiteral("instance-2-*")}, QDir::Dirs);
+    QCOMPARE(oldProfiles.size(), 1);
+    const QString workerProfile = profiles.filePath(oldProfiles.first());
+    {
+        ApplicationInstanceManager contender(QStringLiteral("concurrent"), true, root.path());
+        QCOMPARE(contender.start(&error), ApplicationInstanceManager::StartResult::Started);
+        QCOMPARE(contender.profile().ordinal, 3);
+        QVERIFY(slot.getLockInfo(&ownerPid, &ownerHost, &ownerApplication));
+        QCOMPARE(ownerPid, workerPid);
+        QVERIFY(QDir(workerProfile).exists());
+    }
+    // Kill only the child spawned above: its slot/profile locks remain on disk.
+    worker.kill();
+    QVERIFY(worker.waitForFinished(5000));
+    QCOMPARE(worker.exitStatus(), QProcess::CrashExit);
+    QVERIFY(QFileInfo::exists(slotPath));
+    ApplicationInstanceManager recovered(QStringLiteral("concurrent"), true, root.path());
+    QCOMPARE(recovered.start(&error), ApplicationInstanceManager::StartResult::Started);
+    QCOMPARE(recovered.profile().ordinal, 2);
+    QVERIFY(!QDir(workerProfile).exists());
+    QVERIFY(slot.getLockInfo(&ownerPid, &ownerHost, &ownerApplication));
+    QCOMPARE(ownerPid, QCoreApplication::applicationPid());
 }
 
 void ApplicationInstanceManagerTest::singleInstanceLaunchRequestsActivation()

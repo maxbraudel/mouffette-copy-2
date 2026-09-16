@@ -55,6 +55,7 @@ private slots:
             const auto modified = QFileInfo(first).lastModified();
             QVERIFY(file.open(QIODevice::WriteOnly | QIODevice::Truncate));
             QCOMPARE(file.write("BBBB", 4), qint64(4));
+            QVERIFY(file.flush());
             QVERIFY(file.setFileTime(modified.addSecs(5), QFileDevice::FileModificationTime));
             file.close();
         } else {

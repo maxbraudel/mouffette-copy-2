@@ -78,6 +78,11 @@ QuickCanvasHost::QuickCanvasHost(CanvasDocument* document,
     m_controller->setParent(this);
     connect(m_controller, &QuickCanvasController::textToolActiveChanged,
             this, &QuickCanvasHost::toolChanged);
+    connect(m_document, &CanvasDocument::pendingImportsChanged, this, [this]() {
+        if (m_sceneLaunching && m_document->hasPendingImports())
+            failScene(QStringLiteral("Scene preparation was invalidated by a media import still being analyzed"), true);
+        publishActionState();
+    });
     connect(m_document, &CanvasDocument::mediaSourceInvalidated, this,
             [this](const QString&, const QString&) { stopScenesForSourceInvalidation(); });
     connect(m_document, &CanvasDocument::mediaAdded,
@@ -483,6 +488,8 @@ QStringList QuickCanvasHost::residencyOwners() const
 
 QString QuickCanvasHost::mediaReadinessReason(bool remote) const
 {
+    if (m_document->hasPendingImports())
+        return QStringLiteral("Wait until every imported media has been analyzed and fully decoded in memory");
     const auto& manager = MediaResidencyManager::instance();
     for (const auto* media : m_document->media()) {
         if (!media || media->isText()) continue;
@@ -568,8 +575,9 @@ QJsonArray QuickCanvasHost::localPreparationChecklist(
 {
     QHash<QString, QString> mediaIdsByItemId;
     QJsonArray checklist = SceneRunCoordinator::createLocalChecklist(scene, &mediaIdsByItemId);
-    bool allReady = true;
-    QString firstError;
+    bool allReady = !m_document->hasPendingImports();
+    QString firstError = allReady ? QString()
+        : QStringLiteral("Media imports are still being analyzed");
     for (qsizetype i = 0; i < checklist.size(); ++i) {
         QJsonObject entry = checklist.at(i).toObject();
         const QString itemId = entry.value(QStringLiteral("itemId")).toString();
@@ -646,6 +654,11 @@ void QuickCanvasHost::tryArmRemoteScene()
         return;
     }
 
+    const QString readinessError = mediaReadinessReason(true);
+    if (!readinessError.isEmpty()) {
+        failScene(readinessError, true);
+        return;
+    }
     const qint64 allowed = m_webSocket->serverPolicy()
         .value(QStringLiteral("sceneMaxClockSkewMs")).toInteger(-1);
     const qint64 uncertainty = m_webSocket->sceneClockUncertaintyMs();

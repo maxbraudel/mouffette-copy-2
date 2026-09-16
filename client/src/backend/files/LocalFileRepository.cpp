@@ -93,6 +93,12 @@ QString LocalFileRepository::getFilePathForId(const QString& fileId) const {
     return {};
 }
 
+QStringList LocalFileRepository::recordedFilePaths(const QString& fileId) const {
+    auto paths = m_pathToFileId.keys(fileId);
+    std::sort(paths.begin(), paths.end());
+    return paths;
+}
+
 bool LocalFileRepository::hasFileId(const QString& fileId) const {
     return m_fileIdToPath.contains(fileId);
 }

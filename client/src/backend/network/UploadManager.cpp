@@ -484,9 +484,9 @@ void UploadManager::cleanupOrphanedIncomingCache() {
 
     QSet<QString> trackedPaths;
     for (const QString& fileId : m_fileManager->getAllFileIds()) {
-        const QString path = m_fileManager->getFilePathForId(fileId);
-        if (!path.isEmpty() && pathIsInsideDirectory(path, rootPath)) {
-            trackedPaths.insert(QDir::cleanPath(QFileInfo(path).absoluteFilePath()));
+        for (const QString& path : m_fileManager->getRecordedFilePathsForId(fileId)) {
+            if (!path.isEmpty() && pathIsInsideDirectory(path, rootPath))
+                trackedPaths.insert(QDir::cleanPath(QFileInfo(path).absoluteFilePath()));
         }
     }
     const auto hasTrackedPathUnder = [&trackedPaths](const QString& directory) {
@@ -3667,11 +3667,12 @@ bool UploadManager::removeResidualIncomingStaging(const QString& senderId,
         return false;
     }
     for (const QString& fileId : m_fileManager->getAllFileIds()) {
-        const QString mappedPath = m_fileManager->getFilePathForId(fileId);
-        if (!mappedPath.isEmpty()
-            && pathIsInsideDirectory(mappedPath, stagingCanonical)) {
-            qWarning() << "UploadManager: refusing to remove mapped residual staging";
-            return false;
+        for (const QString& mappedPath : m_fileManager->getRecordedFilePathsForId(fileId)) {
+            if (!mappedPath.isEmpty()
+                && pathIsInsideDirectory(mappedPath, stagingCanonical)) {
+                qWarning() << "UploadManager: refusing to remove mapped residual staging";
+                return false;
+            }
         }
     }
     if (!QDir(stagingCanonical).removeRecursively()) return false;

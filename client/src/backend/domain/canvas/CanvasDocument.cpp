@@ -3,17 +3,34 @@
 #include "backend/domain/media/CanvasMedia.h"
 #include "backend/domain/media/MediaSettingsState.h"
 #include "backend/files/FileManager.h"
+#include "backend/media/MediaDecoder.h"
 
+#include <QDateTime>
 #include <QFileInfo>
+#include <QFutureWatcher>
 #include <QJsonArray>
+#include <QUuid>
 #include <QUrl>
+#include <QtConcurrent/QtConcurrentRun>
 
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <utility>
 
 namespace {
 constexpr int kProjectTextSettingsSchemaVersion = 1;
+
+QString sourceSignature(const QString& path)
+{
+    const QFileInfo info(path);
+    if (!info.isFile() || info.isSymLink() || !info.isReadable()) return {};
+    // Metadata only: saving a pending import must not read or hash its content.
+    return QStringLiteral("%1:%2:%3:%4")
+        .arg(info.size()).arg(info.lastModified().toMSecsSinceEpoch())
+        .arg(info.birthTime().toMSecsSinceEpoch())
+        .arg(info.fileTime(QFileDevice::FileMetadataChangeTime).toMSecsSinceEpoch());
+}
 
 QJsonObject spanForIntersection(int screenId, const QRectF& screen,
                                 const QRectF& media)
@@ -43,7 +60,104 @@ CanvasDocument::CanvasDocument(QObject* parent)
 {
 }
 
-CanvasDocument::~CanvasDocument() = default;
+CanvasDocument::~CanvasDocument()
+{
+    cancelPendingImportTasks();
+}
+
+void CanvasDocument::cancelPendingImportTasks()
+{
+    ++m_importGeneration;
+    for (const PendingImport& pending : std::as_const(m_pendingImports))
+        if (pending.cancelled) pending.cancelled->store(true);
+    m_activeImports.clear();
+}
+
+void CanvasDocument::setClientWorkspaceId(const QString& id)
+{
+    if (m_projectId == id) return;
+    cancelPendingImportTasks();
+    m_projectId = id;
+    for (const QString& mediaId : m_pendingImports.keys()) startPendingImport(mediaId);
+}
+
+QString CanvasDocument::queueFileImport(const QString& sourcePath,
+                                       const QPointF& center)
+{
+    if (m_editsLocked || !std::isfinite(center.x()) || !std::isfinite(center.y())) return {};
+    const QFileInfo info(sourcePath);
+    const QString signature = sourceSignature(sourcePath);
+    if (signature.isEmpty()) return {};
+    PendingImport pending;
+    pending.mediaId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    pending.sourcePath = info.canonicalFilePath();
+    pending.sourceSignature = signature;
+    pending.center = center;
+    const QString id = pending.mediaId;
+    m_pendingImports.insert(id, pending);
+    emit pendingImportsChanged();
+    emit documentChanged();
+    startPendingImport(id);
+    return id;
+}
+
+void CanvasDocument::startPendingImport(const QString& mediaId)
+{
+    if (m_editsLocked || !m_pendingImports.contains(mediaId)
+        || m_activeImports.contains(mediaId)) return;
+    auto& stored = m_pendingImports[mediaId];
+    stored.cancelled = std::make_shared<std::atomic_bool>(false);
+    const PendingImport pending = stored;
+    const quint64 generation = m_importGeneration;
+    m_activeImports.insert(mediaId);
+    auto* watcher = new QFutureWatcher<MediaDecoder::Probe>(this);
+    connect(watcher, &QFutureWatcher<MediaDecoder::Probe>::finished, this,
+            [this, watcher, pending, generation] {
+        const auto probe = watcher->result();
+        watcher->deleteLater();
+        if (generation != m_importGeneration || pending.cancelled->load()
+            || !m_pendingImports.contains(pending.mediaId)) return;
+        m_activeImports.remove(pending.mediaId);
+        // A locked document retains the durable intent and retries after unlock.
+        if (m_editsLocked) return;
+        const QString error = sourceSignature(pending.sourcePath) != pending.sourceSignature
+            ? QStringLiteral("The source file changed or disappeared during import.")
+            : probe.error;
+        if (!error.isEmpty() || !probe.accepted()) {
+            m_pendingImports.remove(pending.mediaId);
+            emit pendingImportsChanged();
+            emit documentChanged();
+            emit mediaImportFailed(pending.mediaId, pending.sourcePath,
+                                   error.isEmpty() ? QStringLiteral("Unsupported media.") : error);
+            return;
+        }
+        auto* media = new CanvasMedia(probe.video ? CanvasMedia::Type::Video
+                                                 : CanvasMedia::Type::Image,
+                                      probe.displaySize);
+        media->restoreMediaId(pending.mediaId);
+        media->setSourcePath(pending.sourcePath);
+        media->setPosition(pending.center - QPointF(probe.displaySize.width() / 2.0,
+                                                    probe.displaySize.height() / 2.0));
+        media->setZ(nextZ());
+        if (probe.video) media->initializeVideoRuntime();
+        // Keep the pending gate until adoption so no observer can launch an
+        // incomplete scene between removing the intent and creating its node.
+        adoptMedia(media);
+        select(media->mediaId());
+        m_pendingImports.remove(pending.mediaId);
+        emit pendingImportsChanged();
+        emit documentChanged();
+    });
+    watcher->setFuture(QtConcurrent::run([pending] {
+        MediaDecoder::Probe probe;
+        if (pending.cancelled->load()) return probe;
+        if (sourceSignature(pending.sourcePath) != pending.sourceSignature) {
+            probe.error = QStringLiteral("The source file changed or disappeared before import.");
+            return probe;
+        }
+        return MediaDecoder::probe(pending.sourcePath);
+    }));
+}
 
 CanvasMedia* CanvasDocument::mediaById(const QString& mediaId) const
 {
@@ -124,6 +238,14 @@ CanvasMedia* CanvasDocument::addPreparedFile(
 bool CanvasDocument::removeMedia(const QString& mediaId)
 {
     if (m_editsLocked) return false;
+    if (auto found = m_pendingImports.find(mediaId); found != m_pendingImports.end()) {
+        if (found->cancelled) found->cancelled->store(true);
+        m_pendingImports.erase(found);
+        m_activeImports.remove(mediaId);
+        emit pendingImportsChanged();
+        emit documentChanged();
+        return true;
+    }
     for (qsizetype i = 0; i < m_media.size(); ++i) {
         CanvasMedia* media = m_media.at(i);
         if (!media || media->mediaId() != mediaId) continue;
@@ -145,7 +267,9 @@ bool CanvasDocument::removeMedia(const QString& mediaId)
 
 void CanvasDocument::clear()
 {
-    ++m_importGeneration;
+    cancelPendingImportTasks();
+    const bool hadPendingImports = hasPendingImports();
+    m_pendingImports.clear();
     const QList<CanvasMedia*> previous = m_media;
     m_media.clear();
     for (CanvasMedia* media : previous) {
@@ -158,6 +282,7 @@ void CanvasDocument::clear()
         media->retireResidency();
         media->deleteLater();
     }
+    if (hadPendingImports) emit pendingImportsChanged();
     emit selectionChanged();
     emit documentChanged();
 }
@@ -341,6 +466,8 @@ void CanvasDocument::setEditsLocked(bool locked)
     if (m_editsLocked == locked) return;
     m_editsLocked = locked;
     emit editsLockedChanged();
+    if (!locked)
+        for (const QString& id : m_pendingImports.keys()) startPendingImport(id);
 }
 
 void CanvasDocument::setContentAvailable(bool available)
@@ -509,6 +636,22 @@ QJsonObject CanvasDocument::serializeProjectState() const
         media.replace(index, item);
     }
     root.insert(QStringLiteral("media"), media);
+    if (!m_pendingImports.isEmpty()) {
+        QJsonArray pendingImports;
+        QStringList ids = m_pendingImports.keys();
+        ids.sort();
+        for (const QString& id : ids) {
+            const PendingImport& pending = m_pendingImports[id];
+            pendingImports.append(QJsonObject{
+                {QStringLiteral("mediaId"), pending.mediaId},
+                {QStringLiteral("sourcePath"), pending.sourcePath},
+                {QStringLiteral("sourceSignature"), pending.sourceSignature},
+                {QStringLiteral("centerX"), pending.center.x()},
+                {QStringLiteral("centerY"), pending.center.y()}
+            });
+        }
+        root.insert(QStringLiteral("pendingImports"), pendingImports);
+    }
     QJsonObject viewport{
         {QStringLiteral("m11"), m_cameraScale},
         {QStringLiteral("m12"), 0.0},
@@ -536,7 +679,7 @@ bool CanvasDocument::restoreProjectState(
     const QHash<QString, QString>& sourcePathByMediaId,
     QStringList* skippedMediaIds)
 {
-    if (!m_media.isEmpty()
+    if (!m_media.isEmpty() || hasPendingImports()
         || state.value(QStringLiteral("renderSchemaVersion")).toInt(-1) != 2) {
         return false;
     }
@@ -567,6 +710,33 @@ bool CanvasDocument::restoreProjectState(
 
     insertProjectMedia(state, sourcePathByMediaId, skippedMediaIds, false);
     clearSelection();
+    for (const QJsonValue& value : state.value(QStringLiteral("pendingImports")).toArray()) {
+        const QJsonObject item = value.toObject();
+        PendingImport pending;
+        pending.mediaId = item.value(QStringLiteral("mediaId")).toString();
+        pending.sourcePath = item.value(QStringLiteral("sourcePath")).toString();
+        pending.sourceSignature = item.value(QStringLiteral("sourceSignature")).toString();
+        pending.center = {item.value(QStringLiteral("centerX")).toDouble(invalid),
+                          item.value(QStringLiteral("centerY")).toDouble(invalid)};
+        // A synchronous snapshot during adoption can contain both forms of
+        // the same import. The concrete media is already authoritative.
+        if (mediaById(pending.mediaId) || m_pendingImports.contains(pending.mediaId)) continue;
+        if (pending.mediaId.isEmpty() || !std::isfinite(pending.center.x())
+            || !std::isfinite(pending.center.y()) || pending.sourceSignature.isEmpty()
+            || !QFileInfo(pending.sourcePath).isAbsolute()
+            || sourceSignature(pending.sourcePath) != pending.sourceSignature) {
+            if (skippedMediaIds && !pending.mediaId.isEmpty()
+                && !skippedMediaIds->contains(pending.mediaId))
+                skippedMediaIds->append(pending.mediaId);
+            continue;
+        }
+        m_pendingImports.insert(pending.mediaId, pending);
+    }
+    if (hasPendingImports()) {
+        emit pendingImportsChanged();
+        emit documentChanged();
+        for (const QString& id : m_pendingImports.keys()) startPendingImport(id);
+    }
     return true;
 }
 

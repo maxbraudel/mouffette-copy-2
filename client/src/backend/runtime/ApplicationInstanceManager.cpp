@@ -27,22 +27,10 @@ QString safeKey(const QString& input)
 
 bool acquireRecoveringStaleLock(QLockFile& lock)
 {
-    if (lock.tryLock(0)) {
-        return true;
-    }
-    qint64 ownerPid = 0;
-    QString ownerHost;
-    QString ownerApplication;
-    if (lock.getLockInfo(&ownerPid, &ownerHost, &ownerApplication)
-        && ownerPid == QCoreApplication::applicationPid()) {
-        // Several managers can legitimately contend in one process in tests.
-        // Never classify a lock owned by this live process as stale.
-        return false;
-    }
-    if (lock.error() == QLockFile::LockFailedError && lock.removeStaleLockFile()) {
-        return lock.tryLock(0);
-    }
-    return false;
+    // tryLock owns stale-PID detection, native locking and serialized stale
+    // removal. Forcing removeStaleLockFile after contention can race a live
+    // initializer and bypass Qt's .rmlock/recheck protocol.
+    return lock.tryLock(0);
 }
 }
 
@@ -237,10 +225,21 @@ ApplicationInstanceManager::start(QString* errorMessage)
     if (!prepareCoordinationRoot(errorMessage)) {
         return StartResult::Failed;
     }
+    // Cleanup must not observe another initializer between mkdir(profile)
+    // and publication of its active.lock. Keep that whole transaction under
+    // one short-lived coordination lock, using Qt's normal crash recovery.
+    QLockFile initializationLock(
+        QDir(m_coordinationRoot).filePath(QStringLiteral("initialization.lock")));
+    if (!initializationLock.tryLock(5000)) {
+        if (errorMessage)
+            *errorMessage = QStringLiteral("Cannot coordinate concurrent application startup");
+        return StartResult::Failed;
+    }
     cleanupAbandonedProfiles();
 
     if (!m_allowMultipleInstances) {
         if (!acquireSlot(1)) {
+            initializationLock.unlock();
             if (requestActivation()) {
                 return StartResult::ActivatedExisting;
             }

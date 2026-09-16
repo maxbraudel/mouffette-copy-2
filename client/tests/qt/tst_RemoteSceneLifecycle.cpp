@@ -5,6 +5,8 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QQuickWindow>
+#include <QScopeGuard>
+#include <QElapsedTimer>
 #include <QTemporaryDir>
 #include <QUuid>
 #include <QWebSocketServer>
@@ -34,6 +36,107 @@ private slots:
     {
         MediaResidencyManager::instance().clearMemorySnapshotForTesting();
     }
+    void pendingMetadataImportBlocksReadyCanvasWithoutAutoLaunching()
+    {
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        const QString path = directory.filePath(QStringLiteral("pending.png"));
+        QImage image(32, 24, QImage::Format_RGBA8888);
+        image.fill(Qt::cyan);
+        QVERIFY(image.save(path));
+        std::unique_ptr<QuickCanvasHost> host(QuickCanvasHost::create());
+        QVERIFY(host);
+        host->setProjectEditingEnabled(true);
+        QVERIFY(host->document()->addText(QPointF(30, 40), QStringLiteral("Ready text")));
+        QVERIFY(host->testSceneActionEnabled());
+        const QString mediaId = host->document()->queueFileImport(path, QPointF(100, 120));
+        QVERIFY(!mediaId.isEmpty());
+        QVERIFY(host->document()->hasPendingImports());
+        QCOMPARE(host->document()->media().size(), 1);
+        QVERIFY(!host->testSceneActionEnabled());
+        QVERIFY(host->mediaReadinessReason(false).contains(QStringLiteral("analyzed")));
+        QVERIFY(host->mediaReadinessReason(true).contains(QStringLiteral("analyzed")));
+        host->triggerTestSceneAction();
+        QVERIFY(!host->testSceneLaunched());
+        QTRY_VERIFY_WITH_TIMEOUT(!host->document()->hasPendingImports(), 5000);
+        QVERIFY(host->document()->mediaById(mediaId));
+        QTRY_VERIFY_WITH_TIMEOUT(host->testSceneActionEnabled(), 5000);
+        QVERIFY(!host->testSceneLaunched());
+        host->triggerTestSceneAction();
+        QVERIFY(host->testSceneLaunched());
+        QVERIFY(host->testSceneActionEnabled()); // Stop remains available.
+        host->triggerTestSceneAction();
+        QVERIFY(!host->testSceneLaunched());
+    }
+
+    void localSceneStopsAfterPersistentMemoryPressure()
+    {
+        auto& manager = MediaResidencyManager::instance();
+        const MediaResidencyManager::MemorySnapshot healthy{
+            8ULL << 30, 6ULL << 30, 128ULL << 20, false, 0};
+        manager.setMemorySnapshotForTesting(healthy);
+        const auto restoreMemory = qScopeGuard([&manager, healthy] {
+            manager.setMemorySnapshotForTesting(healthy);
+        });
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        const QString path = directory.filePath(QStringLiteral("pressure.png"));
+        QImage image(48, 40, QImage::Format_RGBA8888);
+        image.fill(QColor(12, 34, 56));
+        QVERIFY(image.save(path));
+        std::unique_ptr<QuickCanvasHost> host(QuickCanvasHost::create());
+        QVERIFY(host);
+        host->setProjectEditingEnabled(true);
+        CanvasMedia* media = host->document()->addPreparedFile(
+            path, image.size(), false, QPointF(70, 80));
+        QVERIFY(media);
+        QTRY_VERIFY_WITH_TIMEOUT(media->residencyReady(), 5000);
+        const QString owner = media->residencyOwnerId();
+        QVERIFY(owner != media->mediaId());
+        const QString digest = manager.sha256(owner);
+        const auto assetRow = [&manager, digest] {
+            for (const auto& row : manager.assets()) {
+                const auto fields = row.toMap();
+                if (fields.value(QStringLiteral("assetId")).toString() == digest) return fields;
+            }
+            return QVariantMap();
+        };
+        std::weak_ptr<const ResidentMediaAsset> originalAllocation = manager.asset(owner);
+        QVERIFY(!originalAllocation.expired());
+        host->triggerTestSceneAction();
+        QVERIFY(host->testSceneLaunched());
+        QVERIFY(host->document()->editsLocked());
+        QVERIFY(assetRow().value(QStringLiteral("protected")).toBool());
+        QSignalSpy pressureStop(&manager, &MediaResidencyManager::sceneStopRequested);
+        QElapsedTimer pressureDuration;
+        pressureDuration.start();
+        manager.setMemorySnapshotForTesting(
+            {8ULL << 30, 1ULL << 30, 128ULL << 20, false, 0});
+        // A protected scene survives the first pressure sample.
+        QVERIFY(host->testSceneLaunched());
+        QVERIFY(host->testSceneActionEnabled()); // Stop is still available.
+        QVERIFY(media->residencyReady());
+        QCOMPARE(pressureStop.size(), 0);
+        QTRY_VERIFY_WITH_TIMEOUT(!host->testSceneLaunched(), 4500);
+        QVERIFY(pressureDuration.elapsed() >= 1900);
+        QCOMPARE(pressureStop.size(), 1);
+        QVERIFY(pressureStop.first().at(0).toString().startsWith(QStringLiteral("canvas-test:")));
+        QTRY_COMPARE_WITH_TIMEOUT(media->residencyState(), QStringLiteral("waiting_for_memory"), 1500);
+        QVERIFY(media->residencyError().contains(QStringLiteral("RAM")));
+        QVERIFY(!host->document()->editsLocked());
+        QVERIFY(!assetRow().value(QStringLiteral("protected")).toBool());
+        QCOMPARE(assetRow().value(QStringLiteral("residentBytes")).toULongLong(), quint64(0));
+        QVERIFY(!manager.asset(owner));
+        QVERIFY(originalAllocation.expired());
+        QVERIFY(!host->testSceneActionEnabled());
+        manager.setMemorySnapshotForTesting(healthy);
+        QTRY_VERIFY_WITH_TIMEOUT(media->residencyReady(), 5000);
+        QVERIFY(host->testSceneActionEnabled());
+        QVERIFY(!host->testSceneLaunched());
+        QVERIFY(!host->document()->editsLocked());
+        QCOMPARE(pressureStop.size(), 1);
+    }
+
     void remoteLaunchPreparesLocalMedia_data()
     {
         QTest::addColumn<bool>("includeImage");

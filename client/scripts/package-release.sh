@@ -136,12 +136,19 @@ copy_qml_root_files() {
 for QML_ROOT in QML QtMultimedia QtQml QtQuick QtQuick/Controls; do
     copy_qml_root_files "$QML_ROOT"
 done
+# Dialogs and Effects are application imports. Copy Dialogs recursively for
+# quickimpl, whose file/folder dialogs also require Qt.labs.folderlistmodel.
+# The bundled macOS controls style declares Fusion as its fallback import.
 for QML_MODULE in \
+    Qt/labs/folderlistmodel \
     QtQml/Models \
     QtQml/WorkerScript \
     QtQuick/Controls/Basic \
+    QtQuick/Controls/Fusion \
     QtQuick/Controls/impl \
     QtQuick/Controls/macOS \
+    QtQuick/Dialogs \
+    QtQuick/Effects \
     QtQuick/Layouts \
     QtQuick/NativeStyle \
     QtQuick/Templates \
@@ -286,6 +293,16 @@ while IFS= read -r BUNDLED_BINARY; do
         esac
     done < <(otool -L "$BUNDLED_BINARY" | tail -n +2 | awk '{ print $1 }')
 done < <(find "$APP" -type f)
+
+# macdeployqt rewrites Qt framework references to loader-relative paths and
+# can remove the executable's build rpaths without installing a replacement.
+# FFmpeg's transitive libraries still use @rpath (for example libwebp ->
+# libsharpyuv), so anchor their lookup in the bundled Frameworks directory.
+if ! otool -l "$APP/Contents/MacOS/Mouffette" \
+    | grep -F 'path @executable_path/../Frameworks (offset' >/dev/null; then
+    install_name_tool -add_rpath '@executable_path/../Frameworks' \
+        "$APP/Contents/MacOS/Mouffette"
+fi
 
 if [[ -n "${MOUFFETTE_MACOS_SIGN_IDENTITY:-}" ]]; then
     echo "Signing with Developer ID: $MOUFFETTE_MACOS_SIGN_IDENTITY"

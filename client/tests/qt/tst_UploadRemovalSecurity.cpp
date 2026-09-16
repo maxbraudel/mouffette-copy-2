@@ -61,6 +61,7 @@ private slots:
     void terminalCleanupWaitsForBackgroundValidationReaders();
     void leaseExpiryBulkTeardownIncludesValidatedScopes();
     void terminalSignalsWaitForRendererBarrierBeforeQuarantine();
+    void startupSweepPurgesOrphansAndRecoversInterruptedRemoval_data();
     void startupSweepPurgesOrphansAndRecoversInterruptedRemoval();
     void receiverAdvertisementFailsClosedWhenCacheCannotInitialize();
     void receiverAdvertisementRetriesUncommittedLogicalQuarantine();
@@ -278,13 +279,12 @@ void UploadRemovalSecurityTest::removeAllFailureKeepsMappings() {
     const QString canvasId = QStringLiteral("canvas_failure");
     QString path = createReceivedFile(senderId, fileId);
     QVERIFY(!path.isEmpty());
-    QVERIFY(QFile::remove(path));
-    QVERIFY(QDir().mkpath(path)); // QFile::remove() must fail for this directory.
-    path = QFileInfo(path).canonicalFilePath();
-
     FileManager files;
     files.registerReceivedFilePath(fileId, path);
     files.associateFileWithProject(fileId, canvasId);
+    QVERIFY(QFile::remove(path));
+    QVERIFY(QDir().mkpath(path)); // The registered source becomes invalid.
+    path = QFileInfo(path).canonicalFilePath();
     UploadManager uploads(&files);
 
     QJsonObject message;
@@ -294,7 +294,8 @@ void UploadRemovalSecurityTest::removeAllFailureKeepsMappings() {
     message["removalId"] = QStringLiteral("33333333-3333-4333-8333-333333333333");
     uploads.handleIncomingMessage(message);
 
-    QCOMPARE(files.getFilePathForId(fileId), path);
+    QVERIFY(files.getFilePathForId(fileId).isEmpty());
+    QVERIFY(files.getRecordedFilePathsForId(fileId).contains(path));
     QVERIFY(files.getProjectIdsForFile(fileId).contains(canvasId));
     QVERIFY(QFileInfo(path).isDir());
 }
@@ -308,15 +309,14 @@ void UploadRemovalSecurityTest::scopedRemovalFailureRollsBackTheWholeBatch() {
     QString badPath = createReceivedFile(senderId, badFileId);
     QVERIFY(!goodPath.isEmpty());
     QVERIFY(!badPath.isEmpty());
-    QVERIFY(QFile::remove(badPath));
-    QVERIFY(QDir().mkpath(badPath));
-    badPath = QFileInfo(badPath).canonicalFilePath();
-
     FileManager files;
     files.registerReceivedFilePath(goodFileId, goodPath);
     files.registerReceivedFilePath(badFileId, badPath);
     files.associateFileWithProject(goodFileId, canvasId);
     files.associateFileWithProject(badFileId, canvasId);
+    QVERIFY(QFile::remove(badPath));
+    QVERIFY(QDir().mkpath(badPath));
+    badPath = QFileInfo(badPath).canonicalFilePath();
     UploadManager uploads(&files);
 
     QJsonObject message;
@@ -329,7 +329,8 @@ void UploadRemovalSecurityTest::scopedRemovalFailureRollsBackTheWholeBatch() {
     QVERIFY2(QFileInfo::exists(goodPath),
              "a failed batch must not delete files validated earlier in the batch");
     QCOMPARE(files.getFilePathForId(goodFileId), goodPath);
-    QCOMPARE(files.getFilePathForId(badFileId), badPath);
+    QVERIFY(files.getFilePathForId(badFileId).isEmpty());
+    QVERIFY(files.getRecordedFilePathsForId(badFileId).contains(badPath));
     QVERIFY(files.getProjectIdsForFile(goodFileId).contains(canvasId));
     QVERIFY(files.getProjectIdsForFile(badFileId).contains(canvasId));
 }
@@ -1258,7 +1259,14 @@ void UploadRemovalSecurityTest::terminalSignalsWaitForRendererBarrierBeforeQuara
     QVERIFY(!QFileInfo::exists(restartScope.second));
 }
 
+void UploadRemovalSecurityTest::startupSweepPurgesOrphansAndRecoversInterruptedRemoval_data() {
+    QTest::addColumn<bool>("validDuplicateOutsideCache");
+    QTest::newRow("missing-preferred-cache-location") << false;
+    QTest::newRow("valid-preferred-source-outside-cache") << true;
+}
+
 void UploadRemovalSecurityTest::startupSweepPurgesOrphansAndRecoversInterruptedRemoval() {
+    QFETCH(bool, validDuplicateOutsideCache);
     const QString orphanDirectory = QDir(uploadRoot()).filePath(
         QStringLiteral("orphan_sender/11111111-2222-4333-8444-555566667777"));
     QVERIFY(QDir().mkpath(orphanDirectory));
@@ -1271,7 +1279,8 @@ void UploadRemovalSecurityTest::startupSweepPurgesOrphansAndRecoversInterruptedR
     const QString trackedDirectory = QDir(uploadRoot()).filePath(
         senderName + QStringLiteral("/22222222-3333-4444-8555-666677778888"));
     QVERIFY(QDir().mkpath(trackedDirectory));
-    const QString trackedFileId(64, QLatin1Char('9'));
+    const QString trackedFileId = QString::fromLatin1(QCryptographicHash::hash(
+        QByteArrayLiteral("tracked"), QCryptographicHash::Sha256).toHex());
     const QString trackedPath = QDir(trackedDirectory).filePath(trackedFileId
                                                                + QStringLiteral(".png"));
     QFile trackedFile(trackedPath);
@@ -1280,6 +1289,13 @@ void UploadRemovalSecurityTest::startupSweepPurgesOrphansAndRecoversInterruptedR
     trackedFile.close();
 
     FileManager files;
+    QTemporaryDir duplicateDirectory;
+    QVERIFY(duplicateDirectory.isValid());
+    const QString duplicatePath = duplicateDirectory.filePath(QStringLiteral("local-copy.png"));
+    if (validDuplicateOutsideCache) {
+        QVERIFY(QFile::copy(trackedPath, duplicatePath));
+        files.registerVerifiedLocalFile(trackedFileId, duplicatePath);
+    }
     files.registerReceivedFilePath(trackedFileId, QFileInfo(trackedPath).canonicalFilePath());
     const QString quarantineName = QStringLiteral(
         ".mouffette-removing-33333333-4444-4555-8666-777788889999-%1")
@@ -1287,6 +1303,11 @@ void UploadRemovalSecurityTest::startupSweepPurgesOrphansAndRecoversInterruptedR
     QDir root(uploadRoot());
     QVERIFY(root.rename(senderName, quarantineName));
     QVERIFY(!QFileInfo::exists(trackedPath));
+    QVERIFY(files.getRecordedFilePathsForId(trackedFileId).contains(trackedPath));
+    if (validDuplicateOutsideCache)
+        QCOMPARE(files.getFilePathForId(trackedFileId), QFileInfo(duplicatePath).canonicalFilePath());
+    else
+        QVERIFY(files.getFilePathForId(trackedFileId).isEmpty());
 
     UploadManager uploads(&files);
     Q_UNUSED(uploads);
@@ -1296,6 +1317,8 @@ void UploadRemovalSecurityTest::startupSweepPurgesOrphansAndRecoversInterruptedR
     QVERIFY2(QFileInfo::exists(trackedPath),
              "a mapped cache directory quarantined before a crash must be restored");
     QVERIFY(!root.exists(quarantineName));
+    QCOMPARE(files.getFilePathForId(trackedFileId), validDuplicateOutsideCache
+        ? QFileInfo(duplicatePath).canonicalFilePath() : trackedPath);
 }
 
 void UploadRemovalSecurityTest::duplicateUploadClickIsIgnoredBeforeExplicitCancellation() {

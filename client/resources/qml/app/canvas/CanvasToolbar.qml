@@ -19,15 +19,16 @@ Row {
     }
     CanvasControls.OverlayButton {
         objectName: "canvasMemoryButton"
-        accessibleName: "RAM usage"
-        implicitWidth: 48
+        accessibleName: "Usage RAM"
+        implicitWidth: 88
         enabled: true
         isToggle: true
         toggled: memoryPopup.opened
         onClicked: memoryPopup.open()
         Text {
+            objectName: "canvasMemoryLabel"
             anchors.centerIn: parent
-            text: "RAM"
+            text: "Usage RAM"
             color: "#e6ffffff"
             font.pixelSize: 11
             font.bold: true

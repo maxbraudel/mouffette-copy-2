@@ -4,6 +4,10 @@ Every image/video occurrence has an asynchronous residency lease. The process-wi
 `MediaResidencyManager` owns immutable assets shared by SHA-256. Text does not
 need a file lease. RAM state is transient; project references retain the source
 and an optional `pendingImport` flag until the asynchronous identity is known.
+Accepted drops also receive an immediate media ID and an optional canvas
+`pendingImports` record before metadata inspection. This preserves their source
+identity and drop center across restart; changed or missing sources are rejected
+on resume. A canvas with pending metadata imports cannot start a scene.
 
 Drop only performs asynchronous metadata discovery before inserting the exact-size
 skeleton. Hashing, validation and complete decoding run outside the GUI thread.

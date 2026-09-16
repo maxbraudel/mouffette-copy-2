@@ -763,6 +763,12 @@ void MediaOverlayTest::mediaActionPalette()
     QSignalSpy clicked(button.get(), SIGNAL(clicked()));
     window.show();
     QVERIFY(QTest::qWaitForWindowExposed(&window));
+#ifdef Q_OS_MACOS
+    MacWindowManager::activateApplicationWindow(&window);
+#else
+    window.requestActivate();
+#endif
+    QVERIFY(QTest::qWaitForWindowActive(&window));
     QTest::mouseMove(&window, {5, 5});
     QCOMPARE(button->property("foregroundColor").value<QColor>(), foreground);
     auto verifyFill = [&](const QColor& fill) {
@@ -771,6 +777,7 @@ void MediaOverlayTest::mediaActionPalette()
     };
     QTRY_VERIFY(verifyFill(idle));
     QTest::mouseMove(&window, {100, 40});
+    if (enabled) QTRY_VERIFY(button->property("hovered").toBool());
     QTRY_VERIFY(verifyFill(hover));
     QTest::mousePress(&window, Qt::LeftButton, Qt::NoModifier, {100, 40});
     QTRY_VERIFY(verifyFill(pressed));
@@ -1060,6 +1067,9 @@ void MediaOverlayTest::canvasToolbarUsesOverlaySwitchAndSegmentedTools()
     auto* text = findVisualItem(harness.get(), QStringLiteral("canvasTextToolButton"));
     QVERIFY(settings);
     QVERIFY(memory && memory->isEnabled());
+    auto* memoryLabel = findVisualItem(memory, QStringLiteral("canvasMemoryLabel"));
+    QVERIFY(memoryLabel);
+    QCOMPARE(memoryLabel->property("text").toString(), QStringLiteral("Usage RAM"));
     QCOMPARE(memory->x(), settings->x() + settings->width() + 8);
     QVERIFY(selection);
     QVERIFY(text);
@@ -1085,6 +1095,12 @@ void MediaOverlayTest::canvasToolbarUsesOverlaySwitchAndSegmentedTools()
 
     window.show();
     QVERIFY(QTest::qWaitForWindowExposed(&window));
+#ifdef Q_OS_MACOS
+    MacWindowManager::activateApplicationWindow(&window);
+#else
+    window.requestActivate();
+#endif
+    QVERIFY(QTest::qWaitForWindowActive(&window));
     const QPoint textCenter = text->mapToScene(
         QPointF(text->width() / 2.0, text->height() / 2.0)).toPoint();
     QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier, textCenter);
@@ -1127,6 +1143,8 @@ void MediaOverlayTest::mediaSettingsPanelRestoresTabsAndBindings()
     std::unique_ptr<QQuickItem> harness(
         createMediaSettingsHarness(engine, window, &session, &error));
     QVERIFY2(harness, qPrintable(error));
+    connect(&window, &QWindow::widthChanged, harness.get(), [&window, item = harness.get()] { item->setSize(window.size()); });
+    connect(&window, &QWindow::heightChanged, harness.get(), [&window, item = harness.get()] { item->setSize(window.size()); });
 
     auto* panel = findVisualItem(
         harness.get(), QStringLiteral("realMediaSettingsPanel"));
@@ -1146,6 +1164,12 @@ void MediaOverlayTest::mediaSettingsPanelRestoresTabsAndBindings()
 
     window.show();
     QVERIFY(QTest::qWaitForWindowExposed(&window));
+#ifdef Q_OS_MACOS
+    MacWindowManager::activateApplicationWindow(&window);
+#else
+    window.requestActivate();
+#endif
+    QVERIFY(QTest::qWaitForWindowActive(&window));
     harness->setSize(window.size());
     session.setSettingsVisible(true);
     QCoreApplication::processEvents();
@@ -1259,10 +1283,18 @@ void MediaOverlayTest::mediaSettingsPanelRestoresTabsAndBindings()
 
     window.resize(640, 800);
     harness->setSize(window.size());
-    QTRY_VERIFY(!contentFlick->property("overflowing").toBool());
-    QVERIFY(qAbs(contentFlick->property("contentHeight").toReal()
-                 - contentFlick->height()) <= 0.5);
-    QVERIFY(!scrollBar->isVisible());
+    QTest::qWait(50); // Cocoa constrains the native window on scaled displays.
+    const bool contentFits = panel->property("desiredHeight").toReal()
+        <= panel->property("maximumHeight").toReal();
+    QTRY_COMPARE(contentFlick->property("overflowing").toBool(), !contentFits);
+    if (contentFits) {
+        QVERIFY(qAbs(contentFlick->property("contentHeight").toReal()
+                     - contentFlick->height()) <= 0.5);
+        QVERIFY(!scrollBar->isVisible());
+    } else {
+        QVERIFY(contentFlick->property("contentHeight").toReal() > contentFlick->height());
+        QVERIFY(scrollBar->isVisible());
+    }
 
     auto* textSection = findVisualItem(
         harness.get(), QStringLiteral("textSettingsSection"));
@@ -1284,7 +1316,7 @@ void MediaOverlayTest::mediaSettingsPanelRestoresTabsAndBindings()
     QVERIFY(opacityField);
     QVERIFY(textBorderWidthCheck);
     QVERIFY(textBorderWidthField);
-    QTRY_COMPARE(scrollBar->opacity(), 0.0);
+    if (contentFits) QTRY_COMPARE(scrollBar->opacity(), 0.0);
     QVERIFY(!opacityField->property("cursorVisible").isValid());
     QCOMPARE(opacityCheck->property("checkedColor").value<QColor>(),
              QColor(QStringLiteral("#4a90e2")));
@@ -1391,6 +1423,7 @@ void MediaOverlayTest::videoVolumeAndMuteStayIndependentAndSyncWithSettings()
     window.requestActivate();
 #endif
     QVERIFY(QTest::qWaitForWindowActive(&window));
+    host->controller()->updateCamera(1.0, 0.0, 0.0);
     CanvasMedia* video = host->document()->addPreparedFile(
         videoPath, QSize(160, 90), true, QPointF(window.width() / 2, 30));
     QVERIFY(video);
@@ -1405,7 +1438,22 @@ void MediaOverlayTest::videoVolumeAndMuteStayIndependentAndSyncWithSettings()
     auto* check = findVisualItem(page, QStringLiteral("volumeCheck"));
     auto* field = findVisualItem(page, QStringLiteral("volumeField"));
     QVERIFY(mute && check && field);
+    auto* settingsFlick = findVisualItem(page, QStringLiteral("settingsContentFlick"));
+    QVERIFY(settingsFlick);
+    const auto revealSettingsControl = [&](QQuickItem* item) {
+        bool inSettings = false;
+        for (QQuickItem* parent = item->parentItem(); parent; parent = parent->parentItem())
+            if (parent == settingsFlick) { inSettings = true; break; }
+        if (!inSettings) return;
+        const qreal center = item->mapToItem(settingsFlick, {0, item->height() / 2}).y();
+        if (center >= item->height() / 2 && center <= settingsFlick->height() - item->height() / 2) return;
+        const qreal maximum = qMax<qreal>(0, settingsFlick->property("contentHeight").toReal() - settingsFlick->height());
+        settingsFlick->setProperty("contentY", qBound<qreal>(0,
+            settingsFlick->property("contentY").toReal() + center - settingsFlick->height() / 2, maximum));
+        QCoreApplication::processEvents();
+    };
     const auto click = [&](QQuickItem* item) {
+        revealSettingsControl(item);
         QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier,
                          item->mapToScene({item->width() / 2, item->height() / 2}).toPoint());
     };
@@ -1415,6 +1463,7 @@ void MediaOverlayTest::videoVolumeAndMuteStayIndependentAndSyncWithSettings()
     QTRY_VERIFY(field->isVisible());
     QTRY_VERIFY(panel->isEnabled());
     QTest::qWait(50); // Polish the newly selected settings tab before hit testing.
+    revealSettingsControl(field);
     const QString artifactDir = qEnvironmentVariable("MOUFFETTE_OVERLAY_ARTIFACT_DIR");
     const auto capture = [&](const QString& name) {
         if (artifactDir.isEmpty()) return;

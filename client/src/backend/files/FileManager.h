@@ -2,6 +2,7 @@
 #define FILEMANAGER_H
 
 #include <QString>
+#include <QStringList>
 #include <QHash>
 #include <QList>
 #include <QFileInfo>
@@ -49,6 +50,8 @@ public:
     
     // Get file path for a file ID
     QString getFilePathForId(const QString& fileId) const;
+    // Recorded locations for cache transactions only; may be absent or invalid.
+    QStringList getRecordedFilePathsForId(const QString& fileId) const;
     
     // Get all unique file IDs (for upload)
     QList<QString> getAllFileIds() const;

@@ -15,9 +15,6 @@
 #include <QJsonDocument>
 #include <QMimeData>
 #include <QFileInfo>
-#include <QFutureWatcher>
-#include <QtConcurrent/QtConcurrentRun>
-#include "backend/media/MediaDecoder.h"
 #include <QMetaObject>
 #include <QQuickWindow>
 #include <QTimer>
@@ -214,6 +211,11 @@ QuickCanvasController::QuickCanvasController(CanvasDocument* document,
     });
     connect(document, &CanvasDocument::mediaSourceInvalidated, this,
             [](const QString&, const QString& reason) { TOAST_WARNING(reason); });
+    connect(document, &CanvasDocument::mediaImportFailed, this,
+            [](const QString&, const QString& path, const QString& reason) {
+        TOAST_WARNING(QStringLiteral("Import refused: %1 — %2")
+                          .arg(QFileInfo(path).fileName(), reason));
+    });
     connect(document, &CanvasDocument::selectionChanged,
             this, [this]() {
         const QString id = m_document && m_document->selectedMedia()
@@ -1738,26 +1740,7 @@ bool QuickCanvasController::commitLocalFileDrop(qreal viewX, qreal viewY)
         || !m_document || editsLocked()) return false;
     const QString path = std::exchange(m_dropPath, {});
     const QPointF center = mapViewPointToScene({viewX, viewY});
-    const QPointer<CanvasDocument> document = m_document;
-    const quint64 generation = document->importGeneration();
-    auto* watcher = new QFutureWatcher<MediaDecoder::Probe>(this);
-    connect(watcher, &QFutureWatcher<MediaDecoder::Probe>::finished, this,
-            [this, watcher, document, generation, path, center]() {
-        const auto probe = watcher->result();
-        watcher->deleteLater();
-        if (!document || document != m_document || !m_projectEditingEnabled
-            || document->editsLocked() || document->importGeneration() != generation) return;
-        if (!probe.accepted()) {
-            TOAST_WARNING(QStringLiteral("Import refused: %1 — %2")
-                              .arg(QFileInfo(path).fileName(), probe.error));
-            return;
-        }
-        const QPointF topLeft = center - QPointF(probe.displaySize.width() / 2.0,
-                                                 probe.displaySize.height() / 2.0);
-        document->addPreparedFile(path, probe.displaySize, probe.video, topLeft);
-    });
-    watcher->setFuture(QtConcurrent::run([path] { return MediaDecoder::probe(path); }));
-    return true;
+    return !m_document->queueFileImport(path, center).isEmpty();
 }
 
 void QuickCanvasController::cancelLocalFileDrag()

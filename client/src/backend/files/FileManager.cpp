@@ -86,6 +86,11 @@ QString FileManager::getFilePathForId(const QString& fileId) const
     return m_repository->getFilePathForId(fileId);
 }
 
+QStringList FileManager::getRecordedFilePathsForId(const QString& fileId) const
+{
+    return m_repository->recordedFilePaths(fileId);
+}
+
 QList<QString> FileManager::getAllFileIds() const
 {
     return m_repository->getAllFileIds();

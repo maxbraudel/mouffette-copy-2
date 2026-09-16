@@ -8,6 +8,7 @@
 #include "backend/runtime/RuntimeProfile.h"
 #include "frontend/ui/notifications/ToastNotificationSystem.h"
 #include <QFile>
+#include <QFutureWatcher>
 #include <QImage>
 #include <QQmlComponent>
 #include <QQmlEngine>
@@ -22,6 +23,7 @@
 
 #include "backend/domain/canvas/CanvasDocument.h"
 #include "backend/domain/media/CanvasMedia.h"
+#include "backend/domain/project/ProjectModel.h"
 #include "frontend/rendering/canvas/MediaListModel.h"
 #include "frontend/rendering/canvas/QuickCanvasController.h"
 #include "frontend/rendering/canvas/QuickCanvasHost.h"
@@ -134,6 +136,115 @@ private slots:
     {
         // The complete page must use the same controls as production main().
         QQuickStyle::setStyle(QStringLiteral("Basic"));
+    }
+
+    void pendingMetadataImportSurvivesProjectRoundTrip()
+    {
+        QTemporaryDir directory;
+        const QString path = directory.filePath(QStringLiteral("pending.png"));
+        QImage image(96, 54, QImage::Format_ARGB32);
+        image.fill(Qt::cyan);
+        QVERIFY(image.save(path));
+        const QPointF center(431.25, -62.5);
+        auto original = std::make_unique<CanvasDocument>();
+        const QString id = original->queueFileImport(path, center);
+        QVERIFY(!id.isEmpty());
+        QVERIFY(original->hasPendingImports());
+        QVERIFY(original->media().isEmpty());
+        ProjectRecord saved;
+        saved.canvasState = original->serializeProjectState();
+        const auto pending = saved.toJson().value(QStringLiteral("canvasState"))
+            .toObject().value(QStringLiteral("pendingImports")).toArray();
+        QCOMPARE(pending.size(), 1);
+        QCOMPARE(pending.first().toObject().value(QStringLiteral("mediaId")).toString(), id);
+        QVERIFY(!pending.first().toObject().value(QStringLiteral("sourceSignature")).toString().isEmpty());
+        QVERIFY(!original->serializeSceneState().contains(QStringLiteral("pendingImports")));
+        original.reset(); // Closing the document cannot publish its old callback.
+
+        CanvasDocument restored;
+        QStringList skipped;
+        QVERIFY(restored.restoreProjectState(saved.canvasStateForRestore(), {}, &skipped));
+        QVERIFY(skipped.isEmpty());
+        QVERIFY(restored.hasPendingImports());
+        QTRY_VERIFY_WITH_TIMEOUT(!restored.hasPendingImports(), 5000);
+        QCOMPARE(restored.media().size(), 1);
+        CanvasMedia* media = restored.mediaById(id);
+        QVERIFY(media);
+        QCOMPARE(media->baseSize(), QSize(96, 54));
+        QCOMPARE(media->sceneRect().center(), center);
+        QVERIFY(media->selected());
+        QVERIFY(!restored.serializeProjectState().contains(QStringLiteral("pendingImports")));
+        QTRY_VERIFY_WITH_TIMEOUT(media->residencyReady(), 5000);
+    }
+
+    void clearingPendingMetadataImportDiscardsCompletion()
+    {
+        QTemporaryDir directory;
+        const QString path = directory.filePath(QStringLiteral("cancel.png"));
+        QImage image(80, 50, QImage::Format_ARGB32);
+        image.fill(Qt::green);
+        QVERIFY(image.save(path));
+        CanvasDocument document;
+        QSignalSpy added(&document, &CanvasDocument::mediaAdded);
+        const QString id = document.queueFileImport(path, {50, 50});
+        QVERIFY(!id.isEmpty());
+        QVERIFY(document.hasPendingImports());
+        document.clear();
+        QVERIFY(!document.hasPendingImports());
+        QTRY_VERIFY_WITH_TIMEOUT(document.findChildren<QFutureWatcherBase*>().isEmpty(), 5000);
+        QCOMPARE(added.count(), 0);
+        QVERIFY(document.media().isEmpty());
+        QVERIFY(!document.serializeProjectState().contains(QStringLiteral("pendingImports")));
+
+        const QString retry = document.queueFileImport(path, {70, 90});
+        QVERIFY(!retry.isEmpty());
+        QVERIFY(retry != id);
+        QTRY_VERIFY_WITH_TIMEOUT(document.mediaById(retry), 5000);
+        QCOMPARE(document.media().size(), 1);
+        QCOMPARE(document.mediaById(retry)->sceneRect().center(), QPointF(70, 90));
+    }
+
+    void pendingMetadataRestoreRejectsChangedSource()
+    {
+        QTemporaryDir directory;
+        const QString path = directory.filePath(QStringLiteral("changed.png"));
+        QImage original(80, 50, QImage::Format_ARGB32);
+        original.fill(Qt::red);
+        QVERIFY(original.save(path));
+        CanvasDocument document;
+        const QString id = document.queueFileImport(path, {0, 0});
+        const QJsonObject saved = document.serializeProjectState();
+        document.clear();
+        QVERIFY(QFile::remove(path));
+        QImage replacement(17, 9, QImage::Format_ARGB32);
+        replacement.fill(Qt::blue);
+        QVERIFY(replacement.save(path));
+        CanvasDocument restored;
+        QStringList skipped;
+        QVERIFY(restored.restoreProjectState(saved, {}, &skipped));
+        QCOMPARE(skipped, QStringList{id});
+        QVERIFY(!restored.hasPendingImports());
+        QVERIFY(restored.media().isEmpty());
+    }
+
+    void pendingMetadataImportDefersWhileDocumentLocked()
+    {
+        QTemporaryDir directory;
+        const QString path = directory.filePath(QStringLiteral("locked.png"));
+        QImage image(40, 30, QImage::Format_ARGB32);
+        image.fill(Qt::yellow);
+        QVERIFY(image.save(path));
+        CanvasDocument document;
+        const QString id = document.queueFileImport(path, {23, 42});
+        QVERIFY(!id.isEmpty());
+        document.setEditsLocked(true);
+        QTRY_VERIFY_WITH_TIMEOUT(document.findChildren<QFutureWatcherBase*>().isEmpty(), 5000);
+        QVERIFY(document.hasPendingImports());
+        QVERIFY(document.media().isEmpty());
+        document.setEditsLocked(false);
+        QTRY_VERIFY_WITH_TIMEOUT(document.mediaById(id), 5000);
+        QVERIFY(!document.hasPendingImports());
+        QCOMPARE(document.mediaById(id)->sceneRect().center(), QPointF(23, 42));
     }
 
     void cameraResizePreservesSquareComposition()

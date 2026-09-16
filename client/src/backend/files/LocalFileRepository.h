@@ -2,6 +2,7 @@
 #define LOCALFILEREPOSITORY_H
 
 #include <QString>
+#include <QStringList>
 #include <QHash>
 #include <QFileInfo>
 #include <QCryptographicHash>
@@ -28,6 +29,9 @@ public:
     
     // Get file path for a fileId
     QString getFilePathForId(const QString& fileId) const;
+    // Transaction/recovery inventory, including absent or modified locations.
+    // These paths are not eligible sources until getFilePathForId verifies them.
+    QStringList recordedFilePaths(const QString& fileId) const;
     
     // Check if fileId exists in repository
     bool hasFileId(const QString& fileId) const;

@@ -1112,6 +1112,13 @@ void ApplicationRuntime::restoreProjectCanvas(ClientWorkspace& session) {
             }
         }
         durableState.insert(QStringLiteral("media"), finalMedia);
+        QJsonArray finalPendingImports;
+        for (const QJsonValue& value : durableState.value(QStringLiteral("pendingImports")).toArray()) {
+            if (!invalidMediaIds.contains(value.toObject().value(QStringLiteral("mediaId")).toString()))
+                finalPendingImports.append(value);
+        }
+        if (finalPendingImports.isEmpty()) durableState.remove(QStringLiteral("pendingImports"));
+        else durableState.insert(QStringLiteral("pendingImports"), finalPendingImports);
         m_projectManager->updateCanvasState(
             session.targetEndpointId, durableState, validReferences,
             stored->savedScreens);

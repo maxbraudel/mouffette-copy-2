@@ -8,6 +8,10 @@
 #include <QPointF>
 #include <QRectF>
 #include <QStringList>
+#include <QSet>
+
+#include <atomic>
+#include <memory>
 
 class CanvasMedia;
 class FileManager;
@@ -25,7 +29,7 @@ public:
 
     void setFileManager(FileManager* manager) { m_fileManager = manager; }
     FileManager* fileManager() const { return m_fileManager; }
-    void setClientWorkspaceId(const QString& id) { if (m_projectId != id) ++m_importGeneration; m_projectId = id; }
+    void setClientWorkspaceId(const QString& id);
     quint64 importGeneration() const { return m_importGeneration; }
     QString projectId() const { return m_projectId; }
 
@@ -37,6 +41,10 @@ public:
                                  const QSize& nativeSize,
                                  bool video,
                                  const QPointF& position);
+    // Persist the accepted drop before metadata work starts. Its identity is
+    // retained when the selected, exact-size CanvasMedia is created.
+    QString queueFileImport(const QString& sourcePath, const QPointF& center);
+    bool hasPendingImports() const { return !m_pendingImports.isEmpty(); }
     bool removeMedia(const QString& mediaId);
     void clear();
     void moveForward(const QString& mediaId);
@@ -93,6 +101,9 @@ signals:
     void mediaRemoved(const QString& mediaId);
     void mediaChanged(const QString& mediaId);
     void mediaSourceInvalidated(const QString& mediaId, const QString& reason);
+    void mediaImportFailed(const QString& mediaId, const QString& path,
+                           const QString& reason);
+    void pendingImportsChanged();
     void selectionChanged();
     void screensChanged();
     void cameraChanged();
@@ -102,6 +113,15 @@ signals:
     void documentChanged();
 
 private:
+    struct PendingImport {
+        QString mediaId;
+        QString sourcePath;
+        QString sourceSignature;
+        QPointF center;
+        std::shared_ptr<std::atomic_bool> cancelled;
+    };
+    void startPendingImport(const QString& mediaId);
+    void cancelPendingImportTasks();
     void adoptMedia(CanvasMedia* media);
     QStringList insertProjectMedia(const QJsonObject& state,
                                   const QHash<QString, QString>& sourcePaths,
@@ -110,6 +130,8 @@ private:
     qreal nextZ() const;
 
     quint64 m_importGeneration = 0;
+    QHash<QString, PendingImport> m_pendingImports;
+    QSet<QString> m_activeImports;
     QList<CanvasMedia*> m_media;
     QList<ScreenInfo> m_screens;
     QHash<int, QRectF> m_screenRects;
