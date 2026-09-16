@@ -304,6 +304,8 @@ Rectangle {
     }
 
     function abandonPointerInteractions(reason) {
+        if (canvasController)
+            canvasController.finishSelectionScaleGesture()
         if (!inputLayer || !inputLayer.inputCoordinator)
             return
 
@@ -414,6 +416,8 @@ Rectangle {
     }
 
     Keys.onReleased: function(event) {
+        if (event.key === Qt.Key_Alt && root.canvasController)
+            root.canvasController.finishSelectionScaleGesture()
         if (event.key === Qt.Key_Shift) {
             // Clear guides only when no active snapped interaction is alive.
             // During fast Shift-release + mouse-release races, clearing unconditionally
@@ -1024,6 +1028,8 @@ Rectangle {
                         selected: mediaDelegate.isSelected
                         anchors.fill: parent
                         freeResizePreview: !!mediaDelegate.liveTransform && !!mediaDelegate.liveTransform.altResize
+                        uniformScalePreview: !!mediaDelegate.liveTransform
+                            && mediaDelegate.liveTransform.altResize === false
                         textEditable: root.editingEnabled
                         editingSession: textEditSession
                     }
@@ -1589,6 +1595,8 @@ Rectangle {
                     if ((event.modifiers & Qt.AltModifier) !== 0) {
                         // Alt/Option scroll belongs to the selection, including
                         // over empty canvas. Never pan/zoom the camera here.
+                        if (event.phase === Qt.ScrollBegin && root.canvasController)
+                            root.canvasController.finishSelectionScaleGesture()
                         if (!pinchZoom.active && root.interactionMode === "idle"
                                 && !inputLayer.inputCoordinator.primaryGestureActive
                                 && root.editingEnabled && root.canvasController) {
@@ -1598,13 +1606,20 @@ Rectangle {
                                 var factor = root.isTrackpadWheel(event)
                                     ? Math.exp(delta * root.trackpadZoomSensitivity)
                                     : Math.pow(root.wheelZoomBase, delta * root.wheelZoomSensitivity)
-                                root.canvasController.scaleSelectionBy(factor)
+                                root.canvasController.updateSelectionScaleGesture(
+                                    factor, event.phase !== Qt.NoScrollPhase)
                             }
                         }
+                        // ScrollEnd normally carries no delta. Commit even if
+                        // the modifier/interaction state changed during input.
+                        if (event.phase === Qt.ScrollEnd && root.canvasController)
+                            root.canvasController.finishSelectionScaleGesture()
                         event.accepted = true
                         return
                     }
 
+                    if (root.canvasController)
+                        root.canvasController.finishSelectionScaleGesture()
                     if (pinchZoom.active || !root.canProcessCameraWheel()) {
                         event.accepted = true
                         return

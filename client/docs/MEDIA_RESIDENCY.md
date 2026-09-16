@@ -73,9 +73,18 @@ pages); speculative pages are already included in the free count. Process RAM an
 controlled media allocations are separate measurements and need not match.
 macOS pressure is sampled from the current system state as well as notifications,
 so a past notification cannot leave admission blocked after pressure has recovered.
-A native warning pauses new allocations even if the estimate remains above the
-reserve; it alone does not discard existing media or stop scenes. Critical pressure
-or an actual reserve deficit cancels preparation and triggers reclamation.
+A native macOS warning is advisory: imports and playback may start when their
+full preparation budgets fit above the configured reserve, including outstanding
+reservations. A warning alone neither blocks the queue indefinitely nor discards
+existing media or stops scenes. The loader still admits only one full validation
+at a time and rechecks headroom during growth. Critical pressure or an actual
+reserve deficit blocks allocations, cancels preparation and triggers reclamation,
+even when both reserve settings are zero. Windows' low-physical-memory notification
+is treated as a hard pressure constraint, not a macOS-style advisory warning.
+Admission, recovery and reclamation share this distinction; recovery samples can
+be healthy while an advisory warning remains. The available estimate is not a
+guarantee of an allocation succeeding; a runtime budget rejection or caught
+`std::bad_alloc` still defers loading through the same recovery path.
 
 Only one full validation job runs at a time. It reserves estimated final storage plus
 codec/conversion scratch, and checks growth before allocation. Playback budgets
@@ -92,9 +101,9 @@ queues; the system monitor remains the authority for actual pressure. Unprotecte
 are evicted largest first; all referring occurrences become skeletons. Scene
 leases protect data from PREPARE until stop/teardown. Persistent pressure first
 requests a coordinated stop before those leases can be reclaimed. Reloading waits
-for two healthy samples at least one second apart, using the same configured
-reserve as first-time admission, and never evicts another ready asset merely to
-retry a waiting asset.
+for two noncritical samples above the reserve at least one second apart, using
+the same configured reserve as first-time admission, and never evicts another
+ready asset merely to retry a waiting asset.
 
 The RAM popup next to Settings shows process/system/available RAM, media bytes,
 additional preparation budgets, estimated and pending playback budgets, system

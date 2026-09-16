@@ -208,6 +208,18 @@ void CanvasMedia::setScale(qreal scale)
     notifyChanged();
 }
 
+void CanvasMedia::setPositionAndScale(const QPointF& position, qreal scale)
+{
+    if (!std::isfinite(position.x()) || !std::isfinite(position.y())
+        || !std::isfinite(scale) || scale <= 0.0001) return;
+    if (m_position == position && qFuzzyCompare(m_scale, scale)) return;
+    // Centered resizing changes both values together. Observers must see one
+    // complete geometry, never an intermediate resize around the old origin.
+    m_position = position;
+    m_scale = scale;
+    notifyChanged();
+}
+
 void CanvasMedia::setZ(qreal z)
 {
     if (!std::isfinite(z) || qFuzzyCompare(m_z, z)) return;

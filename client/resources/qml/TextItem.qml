@@ -19,6 +19,7 @@ BaseMediaItem {
     property bool highlightEnabled: false
     property color highlightColor: "#00000000"
     property bool textEditable: false
+    property bool uniformScalePreview: false
     property QtObject editingSession: null
     // A hosted editor derives its state solely from the canvas session. The
     // local flag supports standalone previews/tests without a canvas host.
@@ -218,6 +219,7 @@ BaseMediaItem {
         anchors.fill: parent
         source: textDisplayNode
         outlinePixels: root.outlineColor.a > 0 ? root.outlinePixels : 0
+        rasterUpdatesDeferred: root.uniformScalePreview
         color: Qt.rgba(root.outlineColor.r, root.outlineColor.g, root.outlineColor.b, 1)
         opacity: root.outlineColor.a > 0 ? 1 : 0
     }

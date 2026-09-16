@@ -9,6 +9,7 @@ Item {
     property bool selected: false
     property bool textEditable: false
     property bool freeResizePreview: false
+    property bool uniformScalePreview: false
     property QtObject editingSession: null
 
     readonly property var visualItem: visualLoader.item
@@ -113,6 +114,7 @@ Item {
             highlightEnabled: !!(root.media && root.media.textHighlightEnabled)
             highlightColor: root.media ? root.media.textHighlightColor : "#00000000"
             textEditable: root.textEditable
+            uniformScalePreview: root.uniformScalePreview
         }
     }
 }

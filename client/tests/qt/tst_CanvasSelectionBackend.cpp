@@ -40,6 +40,7 @@
 #include "frontend/rendering/canvas/MediaListModel.h"
 #include "frontend/rendering/canvas/QuickCanvasController.h"
 #include "frontend/rendering/canvas/QuickCanvasHost.h"
+#include "frontend/rendering/canvas/TextOutlineItem.h"
 #include "frontend/rendering/remote/RemoteVideoFrameItem.h"
 #include "shared/rendering/MediaFrameSource.h"
 #include "frontend/qml/ClientWorkspaceViewModel.h"
@@ -798,14 +799,24 @@ private slots:
             QCoreApplication::sendEvent(&fixture.view, &event);
         };
         scroll(1, Qt::ScrollBegin);
-        QVERIFY(media->scale() > scale);
-        QVERIFY(QLineF(media->sceneRect().center(), original.center()).length() < 1e-8);
+        auto preview = [&] {
+            return fixture.controller.liveTransforms().value(media->mediaId()).toMap();
+        };
+        QTRY_VERIFY(preview().value("scale").toReal() > scale);
+        QCOMPARE(media->scale(), scale);
+        const QVariantMap enlarged = preview();
+        const QRectF enlargedRect(enlarged.value("x").toReal(), enlarged.value("y").toReal(),
+            enlarged.value("width").toReal() * enlarged.value("scale").toReal(),
+            enlarged.value("height").toReal() * enlarged.value("scale").toReal());
+        QVERIFY(QLineF(enlargedRect.center(), original.center()).length() < 1e-8);
         QCOMPARE(media->baseSize(), baseSize);
         QVERIFY(!media->fitToTextEnabled());
         scroll(-1, Qt::ScrollUpdate);
+        QTRY_VERIFY(qAbs(preview().value("scale").toReal() - scale) < 1e-8);
+        scroll(0, Qt::ScrollEnd);
+        QTRY_VERIFY(fixture.controller.liveTransforms().isEmpty());
         QVERIFY(qAbs(media->scale() - scale) < 1e-8);
         QVERIFY(QLineF(media->position(), original.topLeft()).length() < 1e-8);
-        scroll(0, Qt::ScrollEnd);
 
         if (trackpad) {
             QWheelEvent horizontal(cursor, fixture.view.mapToGlobal(cursor.toPoint()), {30, 0}, {120, 120},
@@ -826,6 +837,168 @@ private slots:
         QVERIFY(qAbs(media->scale() - scale) < 1e-8);
         QCOMPARE(fixture.document.cameraCenter(), camera);
         QCOMPARE(fixture.document.cameraSquareSceneSize(), span);
+    }
+
+    void selectionScaleGestureCoalescesFramesWithoutPublishingDocument()
+    {
+        Fixture fixture;
+        QVERIFY(fixture.initialize());
+        auto* first = fixture.document.addText({10, 20}, "First");
+        auto* second = fixture.document.addText({400, 300}, "Second");
+        first->setOutlineWidthOverrideEnabled(true);
+        first->setOutlineWidthPercent(3.0);
+        first->setBaseSize({200, 100});
+        second->setBaseSize({150, 80});
+        second->setScale(2.0);
+        fixture.document.select(first->mediaId(), false);
+        fixture.document.select(second->mediaId(), true);
+        fixture.view.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&fixture.view));
+        QCoreApplication::processEvents();
+        // Loader-created visuals follow QQuickItem parenting; their QObject
+        // ownership can stay with a QML component instead of the canvas root.
+        QList<TextOutlineItem*> outlines;
+        auto collectOutlines = [&](auto&& collect, QQuickItem* item) -> void {
+            if (auto* outline = qobject_cast<TextOutlineItem*>(item))
+                outlines.append(outline);
+            for (auto* child : item->childItems()) collect(collect, child);
+        };
+        collectOutlines(collectOutlines, fixture.view.rootObject());
+        QCOMPARE(outlines.size(), 2);
+        for (auto* outline : outlines) QVERIFY(!outline->rasterUpdatesDeferred());
+        const QRectF firstRect = first->sceneRect(), secondRect = second->sceneRect();
+        QSignalSpy documentChanges(&fixture.document, &CanvasDocument::documentChanged);
+        QSignalSpy snapshots(&fixture.controller, &QuickCanvasController::mediaSnapshotChanged);
+        QSignalSpy selection(&fixture.controller, &QuickCanvasController::selectionChromeModelChanged);
+        QSignalSpy modelChanges(fixture.controller.mediaListModel(), &QAbstractItemModel::dataChanged);
+        QSignalSpy previews(&fixture.controller, &QuickCanvasController::liveTransformsChanged);
+        QSignalSpy presentation(&fixture.controller, &QuickCanvasController::presentationChanged);
+        for (int i = 0; i < 100; ++i)
+            fixture.controller.updateSelectionScaleGesture(1.001, true);
+        QCOMPARE(previews.count(), 0);
+        QCOMPARE(documentChanges.count(), 0);
+        QCOMPARE(snapshots.count(), 0);
+        QCOMPARE(selection.count(), 0);
+        QCOMPARE(modelChanges.count(), 0);
+        QTRY_COMPARE(previews.count(), 1);
+        for (auto* outline : outlines) QVERIFY(outline->rasterUpdatesDeferred());
+        QCOMPARE(presentation.count(), 0);
+        const QVariantMap preview = fixture.controller.liveTransforms().value(first->mediaId()).toMap();
+        QVERIFY(qAbs(preview.value("scale").toReal() - std::pow(1.001, 100)) < 1e-10);
+        QCOMPARE(first->sceneRect(), firstRect);
+        QCOMPARE(second->sceneRect(), secondRect);
+
+        bool completeGeometryOnly = true;
+        const auto geometryConnection = connect(&fixture.document, &CanvasDocument::mediaChanged, this, [&](const QString&) {
+            completeGeometryOnly &= QLineF(first->sceneRect().center(), firstRect.center()).length() < 1e-8;
+            completeGeometryOnly &= QLineF(second->sceneRect().center(), secondRect.center()).length() < 1e-8;
+        });
+        for (int i = 0; i < 100; ++i)
+            fixture.controller.updateSelectionScaleGesture(1.001, true);
+        QCOMPARE(previews.count(), 1);
+        QCOMPARE(documentChanges.count(), 0);
+        // End can arrive before the next frame. It must include every packet.
+        fixture.controller.finishSelectionScaleGesture();
+        QVERIFY(qAbs(first->scale() - std::pow(1.001, 200)) < 1e-10);
+        QVERIFY(qAbs(second->scale() - 2.0 * first->scale()) < 1e-10);
+        QVERIFY(completeGeometryOnly);
+        QCOMPARE(documentChanges.count(), 2);
+        QCOMPARE(snapshots.count(), 2);
+        QCOMPARE(selection.count(), 2);
+        QCOMPARE(modelChanges.count(), 2);
+        QCOMPARE(previews.count(), 3); // final preview, then clear
+        QVERIFY(fixture.controller.liveTransforms().isEmpty());
+        for (auto* outline : outlines) QVERIFY(!outline->rasterUpdatesDeferred());
+        fixture.controller.finishSelectionScaleGesture();
+        QCOMPARE(documentChanges.count(), 2);
+        disconnect(geometryConnection);
+    }
+
+    void altScrollCommitsOnNativeEndOrModifierRelease_data()
+    {
+        QTest::addColumn<bool>("releaseAlt");
+        QTest::newRow("end-without-alt") << false;
+        QTest::newRow("alt-key-release") << true;
+    }
+
+    void altScrollCommitsOnNativeEndOrModifierRelease()
+    {
+        QFETCH(bool, releaseAlt);
+        Fixture fixture;
+        QVERIFY(fixture.initialize());
+        auto* media = fixture.document.addText({250, 220}, "Scale me");
+        fixture.document.select(media->mediaId(), false);
+        fixture.view.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&fixture.view));
+        fixture.view.rootObject()->forceActiveFocus();
+        const QPointF cursor(950, 650);
+        const auto camera = fixture.document.cameraCenter();
+        const auto span = fixture.document.cameraSquareSceneSize();
+        QWheelEvent begin(cursor, fixture.view.mapToGlobal(cursor.toPoint()), {0, 24}, {},
+            Qt::NoButton, Qt::AltModifier, Qt::ScrollBegin, false);
+        QCoreApplication::sendEvent(&fixture.view, &begin);
+        QCOMPARE(media->scale(), 1.0);
+        if (releaseAlt) {
+            QTest::keyRelease(&fixture.view, Qt::Key_Alt);
+        } else {
+            QWheelEvent end(cursor, fixture.view.mapToGlobal(cursor.toPoint()), {}, {},
+                Qt::NoButton, Qt::NoModifier, Qt::ScrollEnd, false);
+            QCoreApplication::sendEvent(&fixture.view, &end);
+        }
+        QVERIFY(qAbs(media->scale() - std::exp(24 * 0.003)) < 1e-10);
+        QVERIFY(fixture.controller.liveTransforms().isEmpty());
+        QCOMPARE(fixture.document.cameraCenter(), camera);
+        QCOMPARE(fixture.document.cameraSquareSceneSize(), span);
+    }
+
+    void selectionScaleGestureLifecycleAndMouseWheelFallback()
+    {
+        CanvasDocument document;
+        QuickCanvasController controller(&document);
+        QVERIFY(controller.initialize());
+        controller.setProjectEditingEnabled(true);
+        auto* first = document.addText({10, 20}, "First");
+        auto* second = document.addText({400, 300}, "Second");
+        document.select(first->mediaId(), false);
+        // A finite delta can still overflow geometry. It must not capture a
+        // dormant transaction that later uses outdated starting values.
+        controller.updateSelectionScaleGesture(std::numeric_limits<qreal>::max(), true);
+        first->setScale(1.5);
+        controller.updateSelectionScaleGesture(2.0, true);
+        controller.finishSelectionScaleGesture();
+        QCOMPARE(first->scale(), 3.0);
+        first->setScale(1.0);
+        const QRectF original = first->sceneRect();
+        controller.updateSelectionScaleGesture(2.0, false);
+        QCOMPARE(first->sceneRect(), original);
+        QTRY_COMPARE(first->scale(), 2.0);
+        QVERIFY(controller.liveTransforms().isEmpty());
+        QVERIFY(QLineF(first->sceneRect().center(), original.center()).length() < 1e-8);
+
+        controller.updateSelectionScaleGesture(1.5, true);
+        controller.handleMediaSelectRequested(second->mediaId(), false);
+        QCOMPARE(first->scale(), 3.0);
+        QCOMPARE(second->scale(), 1.0);
+        QVERIFY(controller.liveTransforms().isEmpty());
+
+        controller.updateSelectionScaleGesture(2.0, true);
+        QTRY_VERIFY(!controller.liveTransforms().isEmpty());
+        document.setEditsLocked(true);
+        QVERIFY(controller.liveTransforms().isEmpty());
+        controller.finishSelectionScaleGesture();
+        QCOMPARE(second->scale(), 1.0);
+        document.setEditsLocked(false);
+        controller.updateSelectionScaleGesture(2.0, true);
+        controller.setProjectEditingEnabled(false);
+        controller.finishSelectionScaleGesture();
+        QCOMPARE(second->scale(), 1.0);
+        controller.setProjectEditingEnabled(true);
+
+        controller.updateSelectionScaleGesture(2.0, true);
+        document.removeMedia(second->mediaId());
+        controller.finishSelectionScaleGesture();
+        QVERIFY(controller.liveTransforms().isEmpty());
+        QCOMPARE(first->scale(), 3.0);
     }
 
     void centeredSelectionScalingPreservesGroupGeometryAndRejectsInvalidInput()

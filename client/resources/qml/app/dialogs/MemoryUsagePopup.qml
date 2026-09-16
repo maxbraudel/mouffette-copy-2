@@ -84,7 +84,7 @@ Popup {
             visible: root.usage.pressure === "warning" || root.usage.pressure === "critical"
             text: root.usage.pressure === "critical"
                   ? "Critical memory pressure: loading is paused and media may be released."
-                  : "System memory warning: new loading is paused until pressure recovers."
+                  : "System memory warning: loading continues when its full preparation budget fits."
             color: root.usage.pressure === "critical" ? Theme.errorText : Theme.warningText
             font.pixelSize: 12
             wrapMode: Text.Wrap

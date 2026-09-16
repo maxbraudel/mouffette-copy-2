@@ -27,7 +27,7 @@ class QuickCanvasController final : public QObject
     Q_OBJECT
     Q_PROPERTY(QObject* mediaModel READ mediaModel CONSTANT)
     Q_PROPERTY(bool editingEnabled READ editingEnabled NOTIFY editingEnabledChanged)
-    Q_PROPERTY(QVariantMap liveTransforms READ liveTransforms NOTIFY presentationChanged)
+    Q_PROPERTY(QVariantMap liveTransforms READ liveTransforms NOTIFY liveTransformsChanged)
     Q_PROPERTY(QVariantList mediaSnapshot READ mediaSnapshot NOTIFY mediaSnapshotChanged)
     Q_PROPERTY(QVariantList selectionChromeModel READ selectionChromeModel NOTIFY selectionChromeModelChanged)
     Q_PROPERTY(QVariantList screensModel READ screensModel NOTIFY presentationChanged)
@@ -129,11 +129,14 @@ public:
     Q_INVOKABLE void panBy(qreal dx, qreal dy);
     Q_INVOKABLE void zoomAt(qreal x, qreal y, qreal factor);
     Q_INVOKABLE void scaleSelectionBy(qreal factor);
+    Q_INVOKABLE void updateSelectionScaleGesture(qreal factor, bool phased);
+    Q_INVOKABLE void finishSelectionScaleGesture();
 
 signals:
     void editingEnabledChanged();
     void pendingEditsCanceled();
     void presentationChanged();
+    void liveTransformsChanged();
     void mediaSnapshotChanged();
     void selectionChromeModelChanged();
     void textToolActiveChanged();
@@ -225,6 +228,7 @@ private:
     void previewMove(const QPointF& position);
     void previewResize();
     void commitTransforms(bool resize, bool alt);
+    void flushSelectionScalePreview();
 
     struct TransformStart {
         QPointer<CanvasMedia> media;
@@ -234,6 +238,12 @@ private:
     };
     QHash<QString, TransformStart> m_transformStarts;
     QVariantMap m_liveTransforms;
+    bool m_scaleGestureActive = false;
+    bool m_scalePreviewPending = false;
+    qreal m_scaleGestureFactor = 1.0;
+    qreal m_scaleMinimumFactor = 1.0;
+    QTimer* m_scaleGestureEndTimer = nullptr;
+    QMetaObject::Connection m_scaleFrameConnection;
 
     QPointer<CanvasDocument> m_document;
     QPointer<QQuickWindow> m_renderWindow;

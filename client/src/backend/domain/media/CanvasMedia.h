@@ -58,6 +58,7 @@ public:
     void setPosition(const QPointF& position);
     qreal scale() const { return m_scale; }
     void setScale(qreal scale);
+    void setPositionAndScale(const QPointF& position, qreal scale);
     qreal z() const { return m_z; }
     void setZ(qreal z);
     QRectF sceneRect() const;

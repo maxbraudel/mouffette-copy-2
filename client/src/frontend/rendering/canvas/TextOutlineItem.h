@@ -14,6 +14,7 @@ class TextOutlineItem : public QQuickItem
     Q_PROPERTY(QQuickItem* source READ source WRITE setSource NOTIFY sourceChanged)
     Q_PROPERTY(qreal outlinePixels READ outlinePixels WRITE setOutlinePixels NOTIFY outlinePixelsChanged)
     Q_PROPERTY(QColor color READ color WRITE setColor NOTIFY colorChanged)
+    Q_PROPERTY(bool rasterUpdatesDeferred READ rasterUpdatesDeferred WRITE setRasterUpdatesDeferred NOTIFY rasterUpdatesDeferredChanged)
     Q_PROPERTY(QRectF renderedRect READ renderedRect NOTIFY viewportChanged)
     Q_PROPERTY(QSize renderedPixelSize READ renderedPixelSize NOTIFY viewportChanged)
 
@@ -27,6 +28,8 @@ public:
     void setOutlinePixels(qreal width);
     QColor color() const;
     void setColor(const QColor& color);
+    bool rasterUpdatesDeferred() const;
+    void setRasterUpdatesDeferred(bool deferred);
     QRectF renderedRect() const;
     QSize renderedPixelSize() const;
 
@@ -53,6 +56,7 @@ signals:
     void sourceChanged();
     void outlinePixelsChanged();
     void colorChanged();
+    void rasterUpdatesDeferredChanged();
     void viewportChanged();
 
 protected:

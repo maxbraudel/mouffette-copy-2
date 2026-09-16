@@ -19,7 +19,7 @@ Ownership is established at gesture start and remains stable until gesture end/c
 
 ## Selection Contract
 
-- `QGraphicsScene` is the only selection authority; QML consumes its projection.
+- `CanvasDocument` is the only selection authority; QML consumes its projection.
 - Media selection is triggered on primary press.
 - Drag start does not re-select when the same gesture already started on that media.
 - Selection changes are published through selection chrome model updates.
@@ -45,6 +45,17 @@ Ownership is established at gesture start and remains stable until gesture end/c
 - Switching target or external deselection finishes the old editor.
 - Committing text does not select it. Deletion cannot clear a newer editor.
 - Entering editing preserves the existing document, highlight and outline.
+
+## Alt/Option Scroll Contract
+
+- Vertical scroll scales every selected item's geometry around its own center.
+- Input packets accumulate into one provisional transaction; `liveTransforms`
+  publishes at most once per rendered frame without changing document/model rows.
+- Releasing Alt or `ScrollEnd`, including a zero-delta end, commits the final
+  geometry. Phase-less mouse wheels commit after 160 ms without input.
+- Selection changes, another transform, copy and window suspension finish the
+  transaction. Revoked editing or removal of a participating media cancels it.
+- Each selected media commits position and scale atomically once per gesture.
 
 ## Mode Contract (InputCoordinator)
 

@@ -39,9 +39,26 @@ Alt/Option + vertical wheel/trackpad scroll scales selected media uniformly
 around each item's own center. Physical scroll up enlarges and down reduces,
 independently of natural scrolling. QML routes this before camera navigation;
 horizontal packets and an empty or locked selection never move the camera.
-The controller reuses selection transform snapshots and uniform resize commits,
-preserving base dimensions, fit-to-text and relative scales. Active pointer,
-text-edit and pinch gestures retain input ownership.
+The controller captures selection transform snapshots once per gesture and
+accumulates every input delta, preserving base dimensions, fit-to-text and
+relative scales. `QQuickWindow::afterAnimating` publishes only the latest
+`liveTransforms` preview before each frame, through a dedicated notification.
+No document changes, full media projections or selection-model replacements
+occur during input. Releasing Alt or `ScrollEnd` commits position and scale atomically once per
+media, even when its delta is zero or Alt was released first. Phase-less mouse
+wheels finish after 160 ms of inactivity; phased input has a 1500 ms recovery
+timeout for a missing end event. Selection changes, another transform, copying
+and window/app suspension finish the pending transaction; removal or editing
+revocation cancels it. Active pointer, text-edit and pinch gestures retain input
+ownership.
+
+Uniform previews also defer text-outline raster-density changes. The renderer
+keeps the existing glyph masks while their scene-graph transform changes, then
+refines the masks in the next polish after the gesture settles. Text edits and
+viewport culling remain active; camera-only zoom and free resize keep their normal
+quality policy. This avoids synchronous glyph rasterization and texture uploads
+at resolution-bucket crossings during a scale gesture. The motion benchmark
+measures gesture frames and the final quality refresh separately.
 
 Images and videos keep this same selectable, movable and resizable shell while
 their content is loading or waiting for memory. Uniform and Alt resize, including

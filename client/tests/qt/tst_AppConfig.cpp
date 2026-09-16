@@ -60,7 +60,10 @@ void AppConfigTest::loadsEmbeddedDefaults() {
     QVERIFY2(config.load(options, &error), qPrintable(error));
     QCOMPARE(config.serverUrl(), QStringLiteral("ws://localhost:8080"));
     QCOMPARE(config.mediaRamReservePercent(), 0);
-    QCOMPARE(config.mediaRamReserveMinMiB(), 548);
+    // The checked-in client/.env explicitly overrides the compiled reserve.
+    QCOMPARE(config.mediaRamReserveMinMiB(), 0);
+    QVERIFY(config.provenance(AppConfig::Key::MediaRamReserveMinMiB)
+                .startsWith(QStringLiteral("embedded-env:")));
     QCOMPARE(config.remoteSessionHiddenTimeoutMs(), qint64(30000));
     QCOMPARE(config.projectHiddenRetentionMs(), qint64(60000));
     QCOMPARE(config.incomingSessionOrphanTimeoutMs(), qint64(3000));
@@ -78,7 +81,7 @@ void AppConfigTest::loadsEmbeddedDefaults() {
     QCOMPARE(config.uiScrollbarHideDelayMs(), 500);
     QCOMPARE(config.uiInputWatchdogIntervalMs(), 120);
     QCOMPARE(config.uiSnapFreezeCleanupDelayMs(), 300);
-    QCOMPARE(config.canvasTextInitialHeightPercent(), 8);
+    QCOMPARE(config.canvasTextInitialHeightPercent(), 10);
     QCOMPARE(config.clientCountdownRefreshIntervalMs(), 1000);
     QCOMPARE(config.toastDefaultDurationMs(), 4000);
     QCOMPARE(config.toastInfoDurationMs(), 2000);
@@ -165,6 +168,8 @@ void AppConfigTest::compiledDefaultDisablesMultipleInstances() {
     QVERIFY(!config.allowMultipleInstances());
     QCOMPARE(config.mediaRamReservePercent(), 0);
     QCOMPARE(config.mediaRamReserveMinMiB(), 548);
+    QCOMPARE(config.provenance(AppConfig::Key::MediaRamReserveMinMiB),
+             QStringLiteral("compiled-default"));
     QCOMPARE(config.provenance(AppConfig::Key::AllowMultipleInstances),
              QStringLiteral("compiled-default"));
 }

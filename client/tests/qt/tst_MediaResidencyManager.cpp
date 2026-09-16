@@ -356,7 +356,104 @@ private slots:
         manager.sampleNow();
         QVERIFY(!manager.ready("protected"));
     }
-    void pressureWarningPreservesResidentMediaWhileNewImportsWait() {
+    void warningAdmitsImageWithScreenshotMemoryBudget_data() {
+        QTest::addColumn<int>("reserveMiB");
+        QTest::newRow("zero-reserve") << 0;
+        QTest::newRow("default-reserve") << 548;
+    }
+    void warningAdmitsImageWithScreenshotMemoryBudget() {
+        QFETCH(int, reserveMiB);
+        QTemporaryDir dir;
+        MediaResidencyManager manager;
+        manager.setMemorySnapshotForTesting({16 * GiB, 3960 * MiB, 197 * MiB, true, 1, true});
+        manager.setSafetyReserve(0, reserveMiB);
+        // A small compressed JPEG still needs 46.5 MiB of pixels and about
+        // 233 MiB including preparation. Both fit easily in the reported RAM.
+        const auto path = image(dir, "screenshot.jpg", 3492, qRgb(31, 42, 53));
+        QVERIFY(!path.isEmpty());
+        QVERIFY(QFileInfo(path).size() < MiB);
+        manager.acquire("image", path);
+        QTRY_VERIFY_WITH_TIMEOUT(manager.ready("image"), 5000);
+        QVERIFY(manager.asset("image")->residentBytes > 46 * MiB);
+        QVERIFY(manager.asset("image")->residentBytes < 47 * MiB);
+        QCOMPARE(manager.summary().value("pressure").toString(), QStringLiteral("warning"));
+        QCOMPARE(manager.summary().value("reserveBytes").toULongLong(), quint64(reserveMiB) * MiB);
+        QVERIFY(manager.errorString("image").isEmpty());
+    }
+    void warningStillEnforcesBudgetAndRecoversWithoutNormalPressure_data() {
+        QTest::addColumn<int>("reserveMiB");
+        QTest::newRow("zero-reserve") << 0;
+        QTest::newRow("default-reserve") << 548;
+    }
+    void warningStillEnforcesBudgetAndRecoversWithoutNormalPressure() {
+        QFETCH(int, reserveMiB);
+        QTemporaryDir dir;
+        MediaResidencyManager manager;
+        const quint64 reserve = quint64(reserveMiB) * MiB;
+        auto warning = memory(reserve + 32 * MiB);
+        warning.pressure = 1;
+        manager.setMemorySnapshotForTesting(warning);
+        manager.setSafetyReserve(0, reserveMiB);
+        manager.acquire("image", image(dir, "image.png", 128, qRgb(4, 5, 6)));
+        QTRY_COMPARE_WITH_TIMEOUT(manager.state("image"), QStringLiteral("waiting_for_memory"), 5000);
+        QVERIFY(manager.errorString("image").contains("preparation needs"));
+        QCOMPARE(manager.summary().value("loadableBytes").toULongLong(), 32 * MiB);
+        const quint64 preparation = manager.assets().first().toMap().value("preparationBudgetBytes").toULongLong();
+        QVERIFY(preparation > 32 * MiB);
+        warning.availableBytes = reserve + preparation;
+        manager.setMemorySnapshotForTesting(warning);
+        for (int i = 0; i < 10; ++i) manager.retry("image");
+        QVERIFY(!manager.ready("image")); // retries cannot bypass recovery hysteresis
+        QTRY_VERIFY_WITH_TIMEOUT(manager.ready("image"), 5000);
+        QCOMPARE(manager.summary().value("pressure").toString(), QStringLiteral("warning"));
+    }
+    void warningPlaybackAdmissionStillAccountsForPendingPlayers() {
+        MediaResidencyManager manager;
+        auto warning = memory();
+        warning.pressure = 1;
+        manager.setMemorySnapshotForTesting(warning);
+        manager.setSafetyReserve(0, 548);
+        manager.acquire("video", QString::fromUtf8(TEST_VIDEO_FILE));
+        QTRY_VERIFY_WITH_TIMEOUT(manager.ready("video"), 10000);
+        const auto asset = manager.asset("video");
+        const quint64 budget = asset->playbackBudgetBytes;
+        QVERIFY(budget > 0);
+        warning.availableBytes = 548 * MiB + 2 * budget;
+        manager.setMemorySnapshotForTesting(warning);
+        QVERIFY(!manager.pinOwners({"video", "video", "video"}, "too-many"));
+        QVERIFY(manager.pinOwners({"video", "video"}, "pair"));
+        QVERIFY(asset->reservePlayback());
+        QVERIFY(asset->reservePlayback());
+        QVERIFY(!asset->reservePlayback());
+        QCOMPARE(manager.summary().value("pendingPlaybackBudgetBytes").toULongLong(), 2 * budget);
+        QCOMPARE(manager.summary().value("loadableBytes").toULongLong(), quint64(0));
+        manager.unpinGroup("pair");
+        asset->releasePlayback(false);
+        asset->releasePlayback(false);
+        QVERIFY(asset->reservePlayback());
+        asset->releasePlayback(false);
+    }
+    void criticalPressureStillBlocksZeroReserveAndRecoversToWarning() {
+        QTemporaryDir dir;
+        MediaResidencyManager manager;
+        auto snapshot = memory();
+        snapshot.pressure = 2;
+        manager.setMemorySnapshotForTesting(snapshot);
+        manager.setSafetyReserve(0, 0);
+        QCOMPARE(manager.summary().value("loadableBytes").toULongLong(), quint64(0));
+        manager.acquire("image", image(dir, "image.png", 128, qRgb(4, 5, 6)));
+        QTRY_COMPARE_WITH_TIMEOUT(manager.state("image"), QStringLiteral("waiting_for_memory"), 5000);
+        QVERIFY(manager.errorString("image").contains("critical"));
+        QVERIFY(!manager.ready("image"));
+        snapshot.pressure = 1;
+        manager.setMemorySnapshotForTesting(snapshot);
+        QCOMPARE(manager.summary().value("loadableBytes").toULongLong(), snapshot.availableBytes);
+        for (int i = 0; i < 10; ++i) manager.retry("image");
+        QVERIFY(!manager.ready("image"));
+        QTRY_VERIFY_WITH_TIMEOUT(manager.ready("image"), 5000);
+        QCOMPARE(manager.summary().value("pressure").toString(), QStringLiteral("warning"));
+    }
+    void pressureWarningPreservesResidentMediaAndAdmitsNewImports() {
         QTemporaryDir dir;
         MediaResidencyManager manager;
         manager.setMemorySnapshotForTesting(memory());
@@ -373,7 +470,7 @@ private slots:
         manager.setMemorySnapshotForTesting(warning);
         const auto pendingPath = image(dir, "pending.png", 64, qRgb(6, 7, 8));
         manager.acquire("pending", pendingPath);
-        QTRY_VERIFY_WITH_TIMEOUT(!manager.hasBackgroundWorkForPath(pendingPath), 5000);
+        QTRY_VERIFY_WITH_TIMEOUT(manager.ready("pending"), 5000);
         // A persistent warning with ample available RAM must not trigger the
         // two-second controlled stop or evict already prepared media.
         QTest::qWait(2200);
@@ -383,12 +480,8 @@ private slots:
         QVERIFY(manager.ready("protected"));
         QCOMPARE(manager.asset("resident"), resident);
         QCOMPARE(manager.asset("protected"), protectedAsset);
-        QVERIFY(!manager.ready("pending"));
-
-        manager.setMemorySnapshotForTesting(memory());
-        QTRY_VERIFY_WITH_TIMEOUT(manager.ready("pending"), 5000);
-        QCOMPARE(manager.asset("resident"), resident);
-        QCOMPARE(manager.asset("protected"), protectedAsset);
+        QVERIFY(manager.ready("pending"));
+        QCOMPARE(manager.summary().value("pressure").toString(), QStringLiteral("warning"));
         manager.unpinGroup("scene");
     }
     void criticalPressureEvictsAndRequestsControlledStop() {

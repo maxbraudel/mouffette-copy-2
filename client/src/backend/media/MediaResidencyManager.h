@@ -27,7 +27,7 @@ public:
         quint64 availableBytes = 0;
         quint64 processBytes = 0;
         bool availableEstimated = false;
-        int pressure = 0; // 0 normal, 1 warning, 2 critical
+        int pressure = 0; // 0 normal, 1 advisory warning, 2 critical/OS low-memory
         bool pressureKnown = false; // otherwise native notifications are the fallback
     };
     static MediaResidencyManager& instance();
@@ -86,6 +86,8 @@ private:
     quint64 playbackBudgetBytes() const;
     quint64 pendingPlaybackBudgetBytes() const;
     quint64 reservedBudgetBytes() const;
+    int pressureLevel() const;
+    bool allocationsBlocked() const;
     quint64 loadableBytes() const;
     QString waitingReason(quint64 required) const;
     bool admitsBudget(quint64 additional, bool includeReservations = true);

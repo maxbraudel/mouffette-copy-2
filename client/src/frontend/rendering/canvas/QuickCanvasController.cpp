@@ -184,6 +184,7 @@ void appendGuide(QVariantList* guides, const QRectF& bounds,
 QuickCanvasController::QuickCanvasController(CanvasDocument* document,
                                              QObject* parent)
     : QObject(parent)
+    , m_scaleGestureEndTimer(new QTimer(this))
     , m_document(document)
     , m_mediaListModel(new MediaListModel(this))
     , m_videoStateTimer(new QTimer(this))
@@ -218,6 +219,7 @@ QuickCanvasController::QuickCanvasController(CanvasDocument* document,
     });
     connect(document, &CanvasDocument::selectionChanged,
             this, [this]() {
+        finishSelectionScaleGesture();
         const QString id = m_document && m_document->selectedMedia()
             ? m_document->selectedMedia()->mediaId() : QString();
         if (id != m_lastSelectedId) {
@@ -247,6 +249,9 @@ QuickCanvasController::QuickCanvasController(CanvasDocument* document,
         AppConfig::instance().videoStatePublishIntervalMs());
     connect(m_videoStateTimer, &QTimer::timeout,
             this, &QuickCanvasController::publishVideoState);
+    m_scaleGestureEndTimer->setSingleShot(true);
+    connect(m_scaleGestureEndTimer, &QTimer::timeout,
+            this, &QuickCanvasController::finishSelectionScaleGesture);
 }
 
 QuickCanvasController::~QuickCanvasController() = default;
@@ -262,7 +267,17 @@ bool QuickCanvasController::initialize(QString* errorMessage)
 
 void QuickCanvasController::registerWindow(QQuickWindow* window)
 {
+    if (m_renderWindow == window) return;
+    finishSelectionScaleGesture();
+    disconnect(m_scaleFrameConnection);
     m_renderWindow = window;
+    if (window) {
+        // afterAnimating runs on the GUI thread once per rendered frame, before
+        // scene-graph synchronization. Consume every input delta but publish
+        // only the newest preview for that frame.
+        m_scaleFrameConnection = connect(window, &QQuickWindow::afterAnimating,
+            this, &QuickCanvasController::flushSelectionScalePreview);
+    }
 }
 
 QQuickWindow* QuickCanvasController::renderWindow() const
@@ -618,17 +633,20 @@ QPointF QuickCanvasController::mapViewPointToScene(const QPointF& point) const
 void QuickCanvasController::handleMediaSelectRequested(const QString& mediaId,
                                                         bool additive)
 {
+    finishSelectionScaleGesture();
     if (m_document && !m_document->editsLocked()) m_document->select(mediaId, additive);
 }
 
 void QuickCanvasController::handleClearSelectionRequested()
 {
+    finishSelectionScaleGesture();
     if (m_document && !m_document->editsLocked()) m_document->clearSelection();
 }
 
 void QuickCanvasController::handleMediaMoveStarted(const QString& mediaId,
                                                     qreal, qreal, bool)
 {
+    finishSelectionScaleGesture();
     if (!editingEnabled()) return;
     CanvasMedia* media = m_document->mediaById(mediaId);
     if (!media) return;
@@ -880,6 +898,7 @@ void QuickCanvasController::handleMediaMoveEnded(const QString& mediaId,
     m_liveSnapDragMediaId.clear();
     m_transformStarts.clear();
     m_liveTransforms.clear();
+    emit liveTransformsChanged();
     clearSnapTargets();
     publishSnapGuides({});
     publishMedia();
@@ -912,6 +931,7 @@ void QuickCanvasController::previewMove(const QPointF& position)
             {QStringLiteral("scale"), start.scale}});
     }
     m_liveTransforms = transforms;
+    emit liveTransformsChanged();
 }
 
 void QuickCanvasController::previewResize()
@@ -941,6 +961,7 @@ void QuickCanvasController::previewResize()
             {QStringLiteral("altResize"), m_pendingResizeAlt}});
     }
     m_liveTransforms = transforms;
+    emit liveTransformsChanged();
 }
 
 void QuickCanvasController::commitTransforms(bool resize, bool alt)
@@ -959,10 +980,14 @@ void QuickCanvasController::commitTransforms(bool resize, bool alt)
                 media->setBaseSize(QSize(geometry.value(QStringLiteral("width")).toInt(),
                                          geometry.value(QStringLiteral("height")).toInt()));
             }
-            media->setScale(geometry.value(QStringLiteral("scale")).toReal());
+            media->setPositionAndScale(
+                {geometry.value(QStringLiteral("x")).toReal(),
+                 geometry.value(QStringLiteral("y")).toReal()},
+                geometry.value(QStringLiteral("scale")).toReal());
+        } else {
+            media->setPosition({geometry.value(QStringLiteral("x")).toReal(),
+                               geometry.value(QStringLiteral("y")).toReal()});
         }
-        media->setPosition({geometry.value(QStringLiteral("x")).toReal(),
-                            geometry.value(QStringLiteral("y")).toReal()});
     }
 }
 
@@ -1364,48 +1389,91 @@ QRectF QuickCanvasController::snappedResizeRect(
 
 void QuickCanvasController::scaleSelectionBy(qreal factor)
 {
+    finishSelectionScaleGesture();
+    updateSelectionScaleGesture(factor, false);
+    finishSelectionScaleGesture();
+}
+
+void QuickCanvasController::updateSelectionScaleGesture(qreal factor, bool phased)
+{
     if (!editingEnabled() || !std::isfinite(factor) || factor <= 0.0
         || qFuzzyCompare(factor, 1.0) || !m_dragMediaId.isEmpty()
         || !m_resizeMediaId.isEmpty()) return;
     CanvasMedia* active = selectedMediaItem();
     if (!active) return;
 
-    captureTransformSelection(active);
-    // Keep every selected item's proportions and center, just as uniform
-    // handle resizing does. A shared lower bound preserves relative scales.
-    qreal minimumFactor = 0.0;
-    for (const auto& start : std::as_const(m_transformStarts)) {
-        if (start.rect.isEmpty()) {
-            clearLiveResize();
-            return;
+    const bool startingGesture = !m_scaleGestureActive;
+    if (!m_scaleGestureActive) {
+        captureTransformSelection(active);
+        // Keep each item's center/proportions and a shared lower bound. Capture
+        // once per gesture, independent of the number of native wheel packets.
+        m_scaleMinimumFactor = 0.0;
+        for (const auto& start : std::as_const(m_transformStarts)) {
+            if (start.rect.isEmpty()) {
+                clearLiveResize();
+                return;
+            }
+            m_scaleMinimumFactor = std::max({m_scaleMinimumFactor,
+                1.0 / start.rect.width(), 1.0 / start.rect.height(),
+                0.000101 / start.scale});
         }
-        minimumFactor = std::max({minimumFactor, 1.0 / start.rect.width(),
-                                  1.0 / start.rect.height(), 0.000101 / start.scale});
+        m_scaleMinimumFactor = std::min<qreal>(1.0, m_scaleMinimumFactor);
+        m_scaleGestureFactor = 1.0;
+        m_resizeOriginalRect = active->sceneRect();
+        m_scaleGestureActive = true;
     }
-    factor = std::max(factor, std::min<qreal>(1.0, minimumFactor));
+    factor = std::max(m_scaleGestureFactor * factor, m_scaleMinimumFactor);
     for (const auto& start : std::as_const(m_transformStarts)) {
         if (!std::isfinite(start.scale * factor)
             || !std::isfinite(start.rect.width() * factor)
             || !std::isfinite(start.rect.height() * factor)) {
-            clearLiveResize();
+            if (startingGesture) clearLiveResize();
             return;
         }
     }
-    m_resizeOriginalRect = active->sceneRect();
+    m_scaleGestureFactor = factor;
     const QSizeF size = m_resizeOriginalRect.size() * factor;
     m_pendingResizeRect = QRectF(m_resizeOriginalRect.center()
                                     - QPointF(size.width() / 2.0, size.height() / 2.0), size);
     m_pendingResizeAlt = false;
+
+    // Mouse wheels have no end event. Native phased gestures normally finish
+    // at ScrollEnd; the longer timeout only recovers a lost native end event.
+    m_scaleGestureEndTimer->start(phased ? 1500 : 160);
+    if (m_scalePreviewPending) return;
+    m_scalePreviewPending = true;
+    if (m_renderWindow) {
+        m_renderWindow->update();
+    } else {
+        QMetaObject::invokeMethod(this,
+            &QuickCanvasController::flushSelectionScalePreview, Qt::QueuedConnection);
+    }
+}
+
+void QuickCanvasController::flushSelectionScalePreview()
+{
+    if (!m_scaleGestureActive || !m_scalePreviewPending) return;
+    m_scalePreviewPending = false;
     previewResize();
+}
+
+void QuickCanvasController::finishSelectionScaleGesture()
+{
+    if (!m_scaleGestureActive) return;
+    m_scaleGestureEndTimer->stop();
+    flushSelectionScalePreview();
+    // Clear ownership before notifying document observers: a synchronous
+    // selection change or edit revocation may otherwise reenter this commit.
+    m_scaleGestureActive = false;
     commitTransforms(true, false);
     clearLiveResize();
-    publishMedia();
 }
 
 void QuickCanvasController::handleMediaResizeRequested(
     const QString& mediaId, const QString& handleId, qreal x, qreal y,
     bool snap, bool altPressed)
 {
+    finishSelectionScaleGesture();
     if (!editingEnabled()) return;
     CanvasMedia* media = m_document ? m_document->mediaById(mediaId) : nullptr;
     // Geometry edits do not depend on decoded content. Loading media shares
@@ -1474,8 +1542,13 @@ void QuickCanvasController::handleMediaResizeEnded(const QString& mediaId)
 
 void QuickCanvasController::clearLiveResize()
 {
+    m_scaleGestureEndTimer->stop();
+    m_scaleGestureActive = false;
+    m_scalePreviewPending = false;
+    m_scaleGestureFactor = 1.0;
     m_transformStarts.clear();
     m_liveTransforms.clear();
+    emit liveTransformsChanged();
     m_liveResizeActive = false;
     m_liveResizeMediaId.clear();
     m_liveResizeRect = {};
@@ -1547,6 +1620,7 @@ void QuickCanvasController::handleOverlayBringBackward(const QString& id)
 
 void QuickCanvasController::copySelectedMedia()
 {
+    finishSelectionScaleGesture();
     if (!editingEnabled() || !m_document) return;
     const QStringList selected = m_document->selectedMediaIds();
     if (selected.isEmpty()) return;

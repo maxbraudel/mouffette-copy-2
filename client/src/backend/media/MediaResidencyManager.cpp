@@ -130,7 +130,9 @@ void MediaResidencyManager::setupPressureNotifications() {
     m_pressureNotifier = notifier;
     connect(notifier, &QWinEventNotifier::activated, this, [this, notifier]() {
         notifier->setEnabled(false); // level-triggered, rearmed after recovery
-        m_nativePressure.store(1);
+        // Windows' low-physical-memory event is a hard allocation constraint,
+        // unlike macOS' advisory pressure warning.
+        m_nativePressure.store(2);
         sampleNow();
     });
 #endif
@@ -245,7 +247,17 @@ quint64 MediaResidencyManager::pendingPlaybackBudgetBytes() const {
     }
     return bytes;
 }
+int MediaResidencyManager::pressureLevel() const {
+    return std::max(m_memory.pressure, m_nativePressure.load());
+}
+bool MediaResidencyManager::allocationsBlocked() const {
+    // A warning describes system-wide reclaim/compression activity, not an
+    // allocation failure. Admit fully budgeted work while headroom exists;
+    // critical pressure and the configured byte reserve remain hard limits.
+    return pressureLevel() >= 2 || m_memory.availableBytes < reserveBytes();
+}
 quint64 MediaResidencyManager::loadableBytes() const {
+    if (allocationsBlocked()) return 0;
     const quint64 available = m_memory.availableBytes;
     const quint64 reserve = reserveBytes();
     if (available <= reserve) return 0;
@@ -253,10 +265,8 @@ quint64 MediaResidencyManager::loadableBytes() const {
     return remaining - std::min(remaining, reservedBudgetBytes());
 }
 QString MediaResidencyManager::waitingReason(quint64 required) const {
-    const int pressure = std::max(m_memory.pressure, m_nativePressure.load());
-    if (pressure) {
-        return QStringLiteral("Waiting for system memory pressure to return to normal (%1; %2 MiB available)")
-            .arg(pressure >= 2 ? QStringLiteral("critical") : QStringLiteral("warning"))
+    if (pressureLevel() >= 2) {
+        return QStringLiteral("Waiting for critical system memory pressure to recover (%1 MiB available)")
             .arg(m_memory.availableBytes / MiB);
     }
     if (required <= loadableBytes())
@@ -270,10 +280,20 @@ void MediaResidencyManager::refreshSystemMemory() {
     if (m_testMemory) return;
     m_memory = readSystemMemory();
     if (m_memory.pressureKnown) m_nativePressure.store(m_memory.pressure);
+#ifdef Q_OS_WIN
+    if (m_pressureSource) {
+        BOOL low = FALSE;
+        if (QueryMemoryResourceNotification(m_pressureSource, &low)) {
+            m_nativePressure.store(low ? 2 : 0);
+            if (!low && m_pressureNotifier)
+                static_cast<QWinEventNotifier*>(m_pressureNotifier.data())->setEnabled(true);
+        }
+    }
+#endif
 }
 bool MediaResidencyManager::admitsBudget(quint64 additional, bool includeReservations) {
     refreshSystemMemory();
-    if (m_memory.pressure || m_nativePressure.load()) return false;
+    if (allocationsBlocked()) return false;
     const quint64 pending = includeReservations ? reservedBudgetBytes() : 0;
     return m_memory.availableBytes >= reserveBytes()
         && pending <= m_memory.availableBytes - reserveBytes()
@@ -502,7 +522,7 @@ void MediaResidencyManager::schedule() {
             continue;
         }
         const quint64 usable = loadableBytes();
-        if (m_memory.pressure || m_nativePressure.load()
+        if (allocationsBlocked()
             || (e->requiresHealthySamples && m_healthySamples < 2) || e->estimated > usable
             || e->scratch > usable - std::min(usable, e->estimated)) {
             const auto reason = waitingReason(e->estimated + e->scratch);
@@ -675,19 +695,9 @@ void MediaResidencyManager::startDecode(const EntryPtr& e, quint64 allowance) {
 }
 void MediaResidencyManager::sampleNow() {
     refreshSystemMemory();
-#ifdef Q_OS_WIN
-    if (m_pressureSource && !m_testMemory) {
-        BOOL low = FALSE;
-        QueryMemoryResourceNotification(m_pressureSource, &low);
-        m_nativePressure.store(low ? 1 : 0);
-        if (!low && m_pressureNotifier) static_cast<QWinEventNotifier*>(m_pressureNotifier.data())->setEnabled(true);
-    }
-#endif
-    const int pressureLevel = std::max(m_memory.pressure, m_nativePressure.load());
-    const bool belowReserve = m_memory.availableBytes < reserveBytes();
-    const bool pressure = pressureLevel > 0 || belowReserve;
+    const int pressure = pressureLevel();
     const qint64 sampleTime = m_clock.elapsed();
-    if (!pressure) {
+    if (!allocationsBlocked()) {
         if (sampleTime - m_lastHealthySampleMs >= 1000) {
             m_healthySamples = std::min(2, m_healthySamples + 1);
             m_lastHealthySampleMs = sampleTime;
@@ -696,9 +706,9 @@ void MediaResidencyManager::sampleNow() {
         m_healthySamples = 0;
         m_lastHealthySampleMs = sampleTime;
     }
-    // Warning changes future allocations; only an actual reserve deficit or
-    // critical pressure should tear down already prepared media and scenes.
-    if (belowReserve || pressureLevel >= 2) {
+    // Use the same hard constraints for admission, recovery and reclamation.
+    // Advisory warnings may persist with ample budget for bounded loading.
+    if (allocationsBlocked()) {
         for (const auto& e : m_entries) if (e->state == QLatin1String("decoding")) e->cancelled->store(true);
         auto candidates = m_entries;
         std::sort(candidates.begin(), candidates.end(), [](const EntryPtr& a, const EntryPtr& b) {
@@ -713,7 +723,7 @@ void MediaResidencyManager::sampleNow() {
             if (!e->data || protectedEntry(e)) continue;
             planned += e->data->residentBytes;
             evict(e);
-            if (pressureLevel < 2 && planned >= deficit) break;
+            if (pressure < 2 && planned >= deficit) break;
         }
         const qint64 now = m_clock.elapsed();
         if (m_pressureSinceMs < 0) m_pressureSinceMs = now;
@@ -769,7 +779,7 @@ QVariantMap MediaResidencyManager::summary() const {
     for (const auto& e : m_entries) reserved += e->reserved - std::min(e->reserved, e->allocated.load());
     const quint64 available = std::min(m_memory.availableBytes, m_memory.totalBytes);
     const quint64 process = std::min(m_memory.processBytes, m_memory.totalBytes - available);
-    const int pressure = std::max(m_memory.pressure, m_nativePressure.load());
+    const int pressure = pressureLevel();
     return {{QStringLiteral("totalBytes"), QVariant::fromValue(m_memory.totalBytes)},
         {QStringLiteral("availableBytes"), QVariant::fromValue(available)},
         {QStringLiteral("processBytes"), QVariant::fromValue(process)},

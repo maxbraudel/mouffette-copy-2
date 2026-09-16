@@ -32,8 +32,19 @@ initial text size against the camera square at multiple percentages/zooms, and
 persisted scale without resizing old media. It does not initialize application
 networking or runtime storage.
 
+Its Alt/Option-scroll cases cover image/video/text, cursor over media or empty
+canvas, mouse/trackpad, natural scrolling and selection locks. A publication
+regression sends two 100-packet bursts: no document/media/selection model change
+during input, one preview per rendered frame, and exactly one atomic geometry
+change per selected media at commit. It also covers a final packet before the
+next frame, zero-delta end without Alt, Alt key release, phase-less wheel timeout,
+selection change, editing revocation and removal during a gesture.
+
 `TextItemQml` / `TextItemQmlScaled`, `TextOutlineItem` and `TextOutlineMotion`
-protect the prior highlight, border and movement optimizations.
+protect the highlight, border and movement optimizations. Continuous uniform
+scaling at DPR 1/2 checks that text layout stays unchanged, existing outline masks
+are reused throughout the gesture, and the settled raster quality is refreshed
+once afterward. Gesture and settled-refresh timings are reported separately.
 
 JS baselines remain supplemental checks. Performance checks below are manual
 workload checks, not claims made by the interaction suite.

@@ -92,6 +92,7 @@ struct TextOutlineItem::Private {
     QSize renderedPixelSize;
     bool layoutDirty = true;
     bool viewportDirty = true;
+    bool rasterUpdatesDeferred = false;
     qreal rasterScale = 1;
     // GUI-thread-only font objects. Only immutable, font-free masks cross
     // into updatePaintNode while the GUI thread is blocked by Qt's sync phase.
@@ -189,6 +190,7 @@ TextOutlineItem::~TextOutlineItem() = default;
 QQuickItem* TextOutlineItem::source() const { return d->source; }
 qreal TextOutlineItem::outlinePixels() const { return d->width; }
 QColor TextOutlineItem::color() const { return d->color; }
+bool TextOutlineItem::rasterUpdatesDeferred() const { return d->rasterUpdatesDeferred; }
 QRectF TextOutlineItem::renderedRect() const { return d->renderedRect; }
 QSize TextOutlineItem::renderedPixelSize() const { return d->renderedPixelSize; }
 TextOutlineItem::Statistics TextOutlineItem::statistics() const { return d->stats; }
@@ -292,6 +294,20 @@ void TextOutlineItem::setColor(const QColor& color)
     emit colorChanged();
 }
 
+void TextOutlineItem::setRasterUpdatesDeferred(bool deferred)
+{
+    if (d->rasterUpdatesDeferred == deferred)
+        return;
+    d->rasterUpdatesDeferred = deferred;
+    // Uniform resizing is a scene-graph transform. Keep its existing masks
+    // throughout the gesture, then refine to the settled density on the next
+    // polish even if no further transform notification arrives. Document edits
+    // and newly visible content still use the normal layout/culling path.
+    if (!deferred)
+        scheduleViewport();
+    emit rasterUpdatesDeferredChanged();
+}
+
 void TextOutlineItem::geometryChange(const QRectF& now, const QRectF& before)
 {
     QQuickItem::geometryChange(now, before);
@@ -373,8 +389,9 @@ void TextOutlineItem::updatePolish()
     // Hysteresis also prevents tiny floating-point translation errors at exact
     // zoom powers from repeatedly invalidating every glyph in the cache.
     const qreal wantedScale = qMax(qreal(0.0625), density);
-    if (wantedScale > d->rasterScale * (1 + 1e-5)
-        || wantedScale < d->rasterScale * 0.5) {
+    if (!d->rasterUpdatesDeferred
+        && (wantedScale > d->rasterScale * (1 + 1e-5)
+            || wantedScale < d->rasterScale * 0.5)) {
         d->rasterScale = std::exp2(std::ceil(std::log2(wantedScale) * 2 - 1e-5) / 2);
         d->clearCache();
         contentChanged = true;
