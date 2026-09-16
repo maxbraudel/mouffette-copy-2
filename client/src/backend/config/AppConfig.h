@@ -246,7 +246,7 @@ private:
     int m_sceneVideoSyncTransitMaxMs = 2000;
     int m_sceneAuthoritativeSeekGuardMs = 250;
     int m_sceneRepeatTriggerGuardMs = 500;
-    int m_uiContentFadeDurationMs = 80;
+    int m_uiContentFadeDurationMs = 200;
     int m_uiSpinnerRotationDurationMs = 900;
     int m_uiScrollbarHideDelayMs = 500;
     int m_uiInputWatchdogIntervalMs = 120;

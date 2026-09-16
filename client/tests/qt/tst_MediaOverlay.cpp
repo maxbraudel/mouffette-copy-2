@@ -60,7 +60,7 @@ private slots:
     void mediaActionPalette();
     void mediaRowsAndProgress();
     void uploadActionLocksBeforeDispatchAndRecovers();
-    void canvasToolbarUsesOverlaySwitchAndSegmentedTools();
+    void toolbarToolsAndGlobalMemoryUsage();
     void mediaSettingsPanelRestoresTabsAndBindings();
     void videoVolumeAndMuteStayIndependentAndSyncWithSettings();
     void toastUsesBottomLeftDoubleBackground();
@@ -1068,7 +1068,7 @@ void MediaOverlayTest::mainWindowPointerActivity()
     QCOMPARE(hoverChanges.count(), 2);
 }
 
-void MediaOverlayTest::canvasToolbarUsesOverlaySwitchAndSegmentedTools()
+void MediaOverlayTest::toolbarToolsAndGlobalMemoryUsage()
 {
     QTemporaryDir directory;
     const QString mediaPath = directory.filePath(QStringLiteral("memory-example.png"));
@@ -1086,15 +1086,9 @@ void MediaOverlayTest::canvasToolbarUsesOverlaySwitchAndSegmentedTools()
         createCanvasToolbarHarness(engine, window, &error));
     QVERIFY2(harness, qPrintable(error));
     auto* settings = findVisualItem(harness.get(), QStringLiteral("canvasSettingsButton"));
-    auto* memory = findVisualItem(harness.get(), QStringLiteral("canvasMemoryButton"));
     auto* selection = findVisualItem(harness.get(), QStringLiteral("canvasSelectionToolButton"));
     auto* text = findVisualItem(harness.get(), QStringLiteral("canvasTextToolButton"));
     QVERIFY(settings);
-    QVERIFY(memory && memory->isEnabled());
-    auto* memoryLabel = findVisualItem(memory, QStringLiteral("canvasMemoryLabel"));
-    QVERIFY(memoryLabel);
-    QCOMPARE(memoryLabel->property("text").toString(), QStringLiteral("Usage RAM"));
-    QCOMPARE(memory->x(), settings->x() + settings->width() + 8);
     QVERIFY(selection);
     QVERIFY(text);
 
@@ -1110,7 +1104,6 @@ void MediaOverlayTest::canvasToolbarUsesOverlaySwitchAndSegmentedTools()
     harness->setProperty("fakeSessionHasProject", false);
     QTRY_VERIFY(!text->isVisible());
     QTRY_VERIFY(!selection->isVisible());
-    QVERIFY(memory->isVisible() && memory->isEnabled());
     QVERIFY(selection->property("toggled").toBool());
 
     harness->setProperty("fakeSessionHasProject", true);
@@ -1130,26 +1123,72 @@ void MediaOverlayTest::canvasToolbarUsesOverlaySwitchAndSegmentedTools()
     QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier, textCenter);
     QTRY_VERIFY(text->property("toggled").toBool());
     QVERIFY(!selection->property("toggled").toBool());
+    window.hide();
+
+    // RAM belongs to the application shell and must work without a client or
+    // project open. Keep the popup coverage on the shipped Main.qml.
+    RuntimeProfileContext profile;
+    profile.ordinal = 2;
+    profile.instanceId = QStringLiteral("global-memory-test");
+    profile.profileId = profile.instanceId;
+    profile.rootPath = directory.path();
+    profile.persistent = false;
+    ApplicationController controller(profile, {});
+    QQmlComponent component(&engine, QUrl(QStringLiteral(
+        "qrc:/qt/qml/Mouffette/App/resources/qml/app/Main.qml")));
+    std::unique_ptr<QObject> root(component.createWithInitialProperties({
+        {QStringLiteral("controller"), QVariant::fromValue(&controller)}
+    }));
+    QVERIFY2(root, qPrintable(component.errorString()));
+    auto* bootstrap = qobject_cast<QWindow*>(root->property("bootstrap").value<QObject*>());
+    QVERIFY(bootstrap);
+    bootstrap->hide();
+    auto* appWindow = qobject_cast<QQuickWindow*>(root->property("window").value<QObject*>());
+    QVERIFY(appWindow);
+    auto* memory = findVisualItem(appWindow->contentItem(), QStringLiteral("memoryUsageButton"));
+    QVERIFY(memory && memory->isEnabled());
+    QCOMPARE(memory->property("text").toString(), QStringLiteral("Usage RAM"));
+    appWindow->resize(900, 650);
+    appWindow->showNormal();
+    QVERIFY(QTest::qWaitForWindowExposed(appWindow));
+#ifdef Q_OS_MACOS
+    MacWindowManager::activateApplicationWindow(appWindow);
+#else
+    appWindow->requestActivate();
+#endif
+    QVERIFY(QTest::qWaitForWindowActive(appWindow));
+    const qreal toolbarY = memory->mapToScene({0, 0}).y();
     const QPoint memoryCenter = memory->mapToScene({memory->width() / 2, memory->height() / 2}).toPoint();
-    QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier, memoryCenter);
-    QTRY_VERIFY(memory->property("toggled").toBool());
-    auto* bar = findVisualItem(window.contentItem(), QStringLiteral("memoryDistributionBar"));
+    QTest::mouseClick(appWindow, Qt::LeftButton, Qt::NoModifier, memoryCenter);
+    QTRY_VERIFY(memory->property("checked").toBool());
+    auto* bar = findVisualItem(appWindow->contentItem(), QStringLiteral("memoryDistributionBar"));
     QVERIFY(bar && bar->isVisible() && bar->width() > 400);
-    auto* assets = findVisualItem(window.contentItem(), QStringLiteral("memoryAssetList"));
+    auto* assets = findVisualItem(appWindow->contentItem(), QStringLiteral("memoryAssetList"));
     QVERIFY(assets && assets->property("count").toInt() >= 1);
     const QString artifactDir = qEnvironmentVariable("MOUFFETTE_OVERLAY_ARTIFACT_DIR");
     if (!artifactDir.isEmpty()) {
         QVERIFY(QDir().mkpath(artifactDir));
-        QSignalSpy frames(&window, &QQuickWindow::frameSwapped);
-        window.update();
+        QSignalSpy frames(appWindow, &QQuickWindow::frameSwapped);
+        appWindow->update();
         QTRY_VERIFY(frames.size() > 0);
         const QString scale = qEnvironmentVariable("QT_SCALE_FACTOR");
         const QString name = scale.isEmpty() ? "memory-usage-popup.png"
             : "memory-usage-popup-scale-" + scale + ".png";
-        QVERIFY(window.grabWindow().save(QDir(artifactDir).filePath(name)));
+        QVERIFY(appWindow->grabWindow().save(QDir(artifactDir).filePath(name)));
     }
-    QTest::keyClick(&window, Qt::Key_Escape);
-    QTRY_VERIFY(!memory->property("toggled").toBool());
+    QTest::keyClick(appWindow, Qt::Key_Escape);
+    QTRY_VERIFY(!memory->property("checked").toBool());
+
+    appWindow->resize(480, 650);
+    QTRY_VERIFY(memory->mapToScene({memory->width(), 0}).x() <= appWindow->width());
+    QVERIFY(memory->isVisible() && memory->width() >= memory->implicitWidth());
+    QTest::mouseClick(appWindow, Qt::LeftButton, Qt::NoModifier,
+                     memory->mapToScene({memory->width() / 2, memory->height() / 2}).toPoint());
+    QTRY_VERIFY(memory->property("checked").toBool());
+    QTest::keyClick(appWindow, Qt::Key_Escape);
+    QTRY_VERIFY(!memory->property("checked").toBool());
+    appWindow->resize(900, 650);
+    QTRY_COMPARE(memory->mapToScene({0, 0}).y(), toolbarY);
 }
 
 void MediaOverlayTest::mediaSettingsPanelRestoresTabsAndBindings()

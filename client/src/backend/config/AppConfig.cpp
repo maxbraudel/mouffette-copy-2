@@ -67,7 +67,7 @@ constexpr std::array<SettingSpec, 61> kSpecs{{
     {Key::SceneVideoSyncTransitMaxMs, "MOUFFETTE_SCENE_VIDEO_SYNC_TRANSIT_MAX_MS", "scene-video-sync-transit-max-ms", nullptr, "2000", false},
     {Key::SceneAuthoritativeSeekGuardMs, "MOUFFETTE_SCENE_AUTHORITATIVE_SEEK_GUARD_MS", "scene-authoritative-seek-guard-ms", nullptr, "250", false},
     {Key::SceneRepeatTriggerGuardMs, "MOUFFETTE_SCENE_REPEAT_TRIGGER_GUARD_MS", "scene-repeat-trigger-guard-ms", nullptr, "500", false},
-    {Key::UiContentFadeDurationMs, "MOUFFETTE_UI_CONTENT_FADE_DURATION_MS", "ui-content-fade-duration-ms", nullptr, "80", false},
+    {Key::UiContentFadeDurationMs, "MOUFFETTE_UI_CONTENT_FADE_DURATION_MS", "ui-content-fade-duration-ms", nullptr, "200", false},
     {Key::UiSpinnerRotationDurationMs, "MOUFFETTE_UI_SPINNER_ROTATION_DURATION_MS", "ui-spinner-rotation-duration-ms", nullptr, "900", false},
     {Key::UiScrollbarHideDelayMs, "MOUFFETTE_UI_SCROLLBAR_HIDE_DELAY_MS", "ui-scrollbar-hide-delay-ms", nullptr, "500", false},
     {Key::UiInputWatchdogIntervalMs, "MOUFFETTE_UI_INPUT_WATCHDOG_INTERVAL_MS", "ui-input-watchdog-interval-ms", nullptr, "120", false},
@@ -409,7 +409,7 @@ void AppConfig::resetToCompiledDefaults() {
     m_sceneVideoSyncTransitMaxMs = 2000;
     m_sceneAuthoritativeSeekGuardMs = 250;
     m_sceneRepeatTriggerGuardMs = 500;
-    m_uiContentFadeDurationMs = 80;
+    m_uiContentFadeDurationMs = 200;
     m_uiSpinnerRotationDurationMs = 900;
     m_uiScrollbarHideDelayMs = 500;
     m_uiInputWatchdogIntervalMs = 120;

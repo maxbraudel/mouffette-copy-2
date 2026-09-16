@@ -1,7 +1,7 @@
 import QtQuick
 // Top overlay panel attached above a selected media item.
-//   Row 1: media name pill (full width, adaptive with ellipsis)
-//   Row 2: show/hide | bring-forward | bring-backward | delete
+//   Row 1: show/hide | bring-forward | bring-backward | delete
+//   Row 2: media name pill (full width, adaptive with ellipsis)
 // Container width is driven by the buttons row.
 Item {
     id: root
@@ -32,13 +32,13 @@ Item {
     implicitHeight: (displayName.length > 0 ? namePillHeight : 0)
                     + (actionsAvailable ? itemSpacing + btnSize : 0)
 
-    // Row 1: media name in a styled pill.
+    // Row 2: media name in a styled pill, closest to the media.
     // Stretches to the full container width (= buttons row width).
     MediaNamePill {
         id: namePill
         visible: root.displayName.length > 0
         x: 0
-        y: 0
+        y: root.actionsAvailable ? root.btnSize + root.itemSpacing : 0
         width: root.width
         height: root.namePillHeight
         displayName: root.displayName
@@ -52,13 +52,13 @@ Item {
 
     }
 
-    // Row 2: action buttons — defines the container width
+    // Row 1: action buttons — defines the container width
     Row {
         id: btnRow
         visible: root.actionsAvailable
         enabled: root.actionsAvailable
         x: 0
-        y: (root.displayName.length > 0 ? root.namePillHeight + root.itemSpacing : 0)
+        y: 0
         spacing: root.itemSpacing
 
         OverlayButton {

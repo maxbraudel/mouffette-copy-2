@@ -70,7 +70,7 @@ void AppConfigTest::loadsEmbeddedDefaults() {
     QCOMPARE(config.sceneVideoSyncTransitMaxMs(), 2000);
     QCOMPARE(config.sceneAuthoritativeSeekGuardMs(), 250);
     QCOMPARE(config.sceneRepeatTriggerGuardMs(), 500);
-    QCOMPARE(config.uiContentFadeDurationMs(), 80);
+    QCOMPARE(config.uiContentFadeDurationMs(), 200);
     QCOMPARE(config.uiSpinnerRotationDurationMs(), 900);
     QCOMPARE(config.uiScrollbarHideDelayMs(), 500);
     QCOMPARE(config.uiInputWatchdogIntervalMs(), 120);

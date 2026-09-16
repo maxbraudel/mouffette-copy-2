@@ -49,63 +49,87 @@ QtObject {
             anchors.leftMargin: Theme.windowMargin
             spacing: Theme.innerGap
 
-            RowLayout {
+            GridLayout {
                 id: topBar
                 Layout.fillWidth: true
-                Layout.preferredHeight: Theme.titleHeight
-                spacing: 8
+                columns: window.width >= (root.controller.applicationPage === 1 ? 1100 : 800) ? 2 : 1
+                columnSpacing: 8
+                rowSpacing: 8
 
-                Text {
-                    text: root.controller.pageTitle
-                    color: Theme.text
-                    font.pixelSize: Theme.titleFontSize
-                    font.bold: true
-                    Layout.preferredHeight: Theme.titleHeight
-                    verticalAlignment: Text.AlignVCenter
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 8
+
+                    Text {
+                        text: root.controller.pageTitle
+                        color: Theme.text
+                        font.pixelSize: Theme.titleFontSize
+                        font.bold: true
+                        Layout.preferredHeight: Theme.titleHeight
+                        verticalAlignment: Text.AlignVCenter
+                    }
+                    AppButton {
+                        visible: root.controller.applicationPage !== 0
+                        text: "← Go Back"
+                        onClicked: root.controller.goBack()
+                    }
+                    SegmentedStatusCard {
+                        visible: root.controller.applicationPage === 1 && window.width >= 600
+                        primaryText: root.controller.remoteDisplayName
+                        statusText: root.controller.remoteStatusText
+                        statusKind: root.controller.remoteConnectionState
+                        auxiliaryText: root.controller.remoteVolumeText
+                        auxiliaryVisible: root.controller.remoteVolumeVisible
+                        busy: root.controller.remoteBusy
+                    }
+                    Item { Layout.fillWidth: true }
                 }
-                AppButton {
-                    visible: root.controller.applicationPage !== 0
-                    text: "← Go Back"
-                    onClicked: root.controller.goBack()
-                }
-                SegmentedStatusCard {
-                    visible: root.controller.applicationPage === 1 && window.width >= 600
-                    primaryText: root.controller.remoteDisplayName
-                    statusText: root.controller.remoteStatusText
-                    statusKind: root.controller.remoteConnectionState
-                    auxiliaryText: root.controller.remoteVolumeText
-                    auxiliaryVisible: root.controller.remoteVolumeVisible
-                    busy: root.controller.remoteBusy
-                }
-                Item { Layout.fillWidth: true }
-                SegmentedStatusCard {
-                    visible: root.controller.applicationPage !== 1 || window.width >= 1100
-                    primaryText: "You"
-                    statusText: root.controller.localStatusText
-                    statusKind: root.controller.localConnectionState
-                }
-                AppButton {
-                    visible: root.controller.applicationPage !== 1 || window.width >= 1100
-                    text: root.controller.connectionEnabled ? "Disable" : "Enable"
-                    onClicked: root.controller.toggleConnection()
-                }
-                AppButton {
-                    visible: root.controller.applicationPage !== 1 || window.width >= 1100
-                    text: "History"
-                    onClicked: root.controller.showHistory()
-                }
-                AppButton {
-                    visible: root.controller.applicationPage !== 1 || window.width >= 1100
-                    text: "Settings"
-                    onClicked: settings.open()
-                }
-                AppButton {
-                    visible: root.controller.applicationPage === 1 && root.controller.hasProject
-                    text: "Delete project..."
-                    enabled: root.controller.canDeleteProject
-                    destructive: true
-                    unavailableReason: "No project exists for this client"
-                    onClicked: root.controller.requestDeleteProject()
+
+                Flow {
+                    Layout.fillWidth: topBar.columns === 1
+                    Layout.preferredWidth: children.reduce(function(total, child) {
+                        return total + (child.visible ? child.implicitWidth + spacing : 0)
+                    }, -spacing)
+                    spacing: 8
+
+                    SegmentedStatusCard {
+                        visible: root.controller.applicationPage !== 1 || window.width >= 1100
+                        primaryText: "You"
+                        statusText: root.controller.localStatusText
+                        statusKind: root.controller.localConnectionState
+                    }
+                    AppButton {
+                        visible: root.controller.applicationPage !== 1 || window.width >= 1100
+                        text: root.controller.connectionEnabled ? "Disable" : "Enable"
+                        onClicked: root.controller.toggleConnection()
+                    }
+                    AppButton {
+                        visible: root.controller.applicationPage !== 1 || window.width >= 1100
+                        text: "History"
+                        onClicked: root.controller.showHistory()
+                    }
+                    Row {
+                        spacing: 8
+                        AppButton {
+                            visible: root.controller.applicationPage !== 1 || window.width >= 1100
+                            text: "Settings"
+                            onClicked: settings.open()
+                        }
+                        AppButton {
+                            objectName: "memoryUsageButton"
+                            text: "Usage RAM"
+                            checked: memoryPopup.opened
+                            onClicked: memoryPopup.open()
+                        }
+                    }
+                    AppButton {
+                        visible: root.controller.applicationPage === 1 && root.controller.hasProject
+                        text: "Delete project..."
+                        enabled: root.controller.canDeleteProject
+                        destructive: true
+                        unavailableReason: "No project exists for this client"
+                        onClicked: root.controller.requestDeleteProject()
+                    }
                 }
             }
 
@@ -135,6 +159,7 @@ QtObject {
             id: settings
             controller: root.controller
         }
+        MemoryUsagePopup { id: memoryPopup }
         AppDialog {
             id: confirmation
             parent: Overlay.overlay

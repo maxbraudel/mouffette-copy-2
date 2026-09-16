@@ -17,8 +17,10 @@
 #include <QQuickStyle>
 #include <QQuickView>
 #include <QTemporaryDir>
+#include <QTimer>
 #include <QtTest>
 #include <limits>
+#include <array>
 #include <cmath>
 #include <QtQuick/private/qquickpinchhandler_p.h>
 
@@ -1672,12 +1674,67 @@ private slots:
         fixture.controller.handleMediaMoveEnded(media->mediaId(), 130, 120, false);
         QCOMPARE(media->position(), QPointF(130, 120));
         const QRectF editedRect = media->sceneRect();
+        const QImage loadingFrame = fixture.view.grabWindow();
+        QVERIFY(!loadingFrame.isNull());
+        QImage fadingFrame;
+        bool capturePending = false;
+        QObject revealObserver;
+        const QPointer<QQuickItem> surface = skeleton->parentItem();
+        // Inspect rendered pixels, not only the animated QML property: a
+        // texture that appears after its fade has elapsed must fail this check.
+        connect(&fixture.view, &QQuickWindow::afterAnimating, &revealObserver, [&] {
+            if (!surface || !fadingFrame.isNull() || capturePending) return;
+            const qreal progress = surface->property("revealProgress").toReal();
+            if (progress < 0.2 || progress > 0.7) return;
+            capturePending = true;
+            // grabWindow performs its own synchronization, outside the
+            // afterAnimating callback of the current frame.
+            QTimer::singleShot(0, &revealObserver, [&] {
+                capturePending = false;
+                if (!surface) return;
+                const qreal current = surface->property("revealProgress").toReal();
+                if (current >= 0.2 && current <= 0.7)
+                    fadingFrame = fixture.view.grabWindow();
+            });
+        });
         // Loading only replaces the skeleton content; user geometry survives.
         memory.setMemorySnapshotForTesting({8ULL << 30, 6ULL << 30, 512ULL << 20, false, 0});
         memory.sampleNow();
         memory.sampleNow();
         QTRY_VERIFY_WITH_TIMEOUT(media->residencyReady(), 5000);
         QTRY_VERIFY(!skeleton->isVisible());
+        QVERIFY2(!fadingFrame.isNull(), "Media must render a visible intermediate fade frame");
+        const QImage readyFrame = fixture.view.grabWindow();
+        QVERIFY(!readyFrame.isNull());
+        const auto channelsAt = [&](const QImage& frame, const QPointF& point) {
+            const QColor color = frame.pixelColor(
+                qBound(0, qRound(point.x() * frame.width() / fixture.view.width()), frame.width() - 1),
+                qBound(0, qRound(point.y() * frame.height() / fixture.view.height()), frame.height() - 1));
+            return std::array<int, 3>{color.red(), color.green(), color.blue()};
+        };
+        int blendedPixels = 0;
+        for (int y = 1; y <= 4; ++y) {
+            for (int x = 1; x <= 4; ++x) {
+                const QPointF point = delegate->mapToScene(
+                    {delegate->width() * x / 5, delegate->height() * y / 5});
+                const auto loading = channelsAt(loadingFrame, point);
+                const auto fading = channelsAt(fadingFrame, point);
+                const auto ready = channelsAt(readyFrame, point);
+                int channel = 0;
+                for (int c = 1; c < 3; ++c)
+                    if (qAbs(ready[c] - loading[c]) > qAbs(ready[channel] - loading[channel])) channel = c;
+                const int difference = ready[channel] - loading[channel];
+                if (qAbs(difference) < 100) continue;
+                const qreal fraction = qreal(fading[channel] - loading[channel]) / difference;
+                if (fraction > 0.15 && fraction < 0.85) ++blendedPixels;
+            }
+        }
+        QVERIFY2(blendedPixels >= 4, "Rendered media must be blended between its skeleton and fully visible content");
+        if (!artifactDir.isEmpty()) {
+            const QString tag = QString::fromLatin1(QTest::currentDataTag());
+            QVERIFY(fadingFrame.save(QDir(artifactDir).filePath(QStringLiteral("media-fading-%1.png").arg(tag))));
+            QVERIFY(readyFrame.save(QDir(artifactDir).filePath(QStringLiteral("media-ready-%1.png").arg(tag))));
+        }
         QCOMPARE(media->sceneRect(), editedRect);
         QCOMPARE(findQuickItemWithProperty(root, "currentMediaId", media->mediaId()), delegate.data());
         fixture.controller.deleteSelectedMedia();
@@ -1751,11 +1808,20 @@ private slots:
         QVERIFY(chrome->isVisible());
         QVERIFY(skeleton->isVisible());
 
+        bool sawPartialOpacity = false;
+        QObject revealObserver;
+        const QPointer<QQuickItem> surface = skeleton->parentItem();
+        connect(&fixture.view, &QQuickWindow::afterAnimating, &revealObserver, [&] {
+            if (!surface) return;
+            const qreal progress = surface->property("revealProgress").toReal();
+            sawPartialOpacity |= progress > 0 && progress < 1;
+        });
         fixture.view.show();
         QVERIFY(QTest::qWaitForWindowExposed(&fixture.view));
         QTRY_VERIFY(top->property("actionsAvailable").toBool());
         QTRY_VERIFY(chrome->isVisible());
         QTRY_VERIFY(!skeleton->isVisible());
+        QVERIFY2(sawPartialOpacity, "Cached media must fade in after the initial skeleton frame");
     }
 
     void testSceneRequiresEveryCanvasMediaResident()

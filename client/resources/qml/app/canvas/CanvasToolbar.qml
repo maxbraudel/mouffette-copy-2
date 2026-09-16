@@ -17,24 +17,6 @@ Row {
         unavailableReason: root.session ? root.session.mediaEditingUnavailableReason : "Canvas is unavailable"
         onClicked: root.session.settingsVisible = !root.session.settingsVisible
     }
-    CanvasControls.OverlayButton {
-        objectName: "canvasMemoryButton"
-        accessibleName: "Usage RAM"
-        implicitWidth: 88
-        enabled: true
-        isToggle: true
-        toggled: memoryPopup.opened
-        onClicked: memoryPopup.open()
-        Text {
-            objectName: "canvasMemoryLabel"
-            anchors.centerIn: parent
-            text: "Usage RAM"
-            color: "#e6ffffff"
-            font.pixelSize: 11
-            font.bold: true
-        }
-    }
-    MemoryUsagePopup { id: memoryPopup }
     Row {
         visible: root.session && root.session.hasProject
         spacing: 0

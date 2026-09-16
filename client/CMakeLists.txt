@@ -486,11 +486,11 @@ qt_add_qml_module(MouffetteClient
         resources/qml/app/pages/CanvasPage.qml
         resources/qml/app/pages/HistoryPage.qml
         resources/qml/app/canvas/CanvasToolbar.qml
-        resources/qml/app/canvas/MemoryUsagePopup.qml
         resources/qml/app/canvas/MediaListPanel.qml
         resources/qml/app/canvas/OverlayActionButton.qml
         resources/qml/app/canvas/SceneElementPanel.qml
         resources/qml/app/dialogs/BootstrapWindow.qml
+        resources/qml/app/dialogs/MemoryUsagePopup.qml
         resources/qml/app/dialogs/SettingsDialog.qml
         resources/qml/BaseMediaItem.qml
         resources/qml/CanvasRoot.qml
