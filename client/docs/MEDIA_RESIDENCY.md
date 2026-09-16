@@ -57,31 +57,49 @@ fixes (UTI, metadata request completion, byte-range bounds) as well as precise s
 
 The application uses ordinary pageable memory, not physical page locking. The OS
 may compress or swap memory. A one-second monitor and native memory-pressure
-notifications enforce a reserve of max(20% physical RAM, 2 GiB) by default.
+notifications enforce a fixed reserve of **548 MiB** by default.
 Configure `MOUFFETTE_MEDIA_RAM_RESERVE_PERCENT` and
 `MOUFFETTE_MEDIA_RAM_RESERVE_MIN_MIB` in `client/.env` (or an external env file
 selected with `--env-file` / `MOUFFETTE_ENV_FILE`). Rebuild after changing the
 embedded `client/.env`; external env files only require an application restart.
-The effective reserve is the larger of the percentage and the minimum, and is
-shown in the RAM popup. The extra reload headroom remains max(512 MiB, 5% RAM). The macOS available
-value is an explicitly labelled estimate (free plus inactive pages). Process RAM
-and controlled media allocations are separate measurements and need not match.
+Leave the optional percentage at `0` to use only the minimum MiB setting. A nonzero
+percentage means a minimum free share of total physical RAM: the effective reserve
+is `max(total RAM × percent / 100, minimum MiB)`, not a cap on media RAM. For example,
+5% and 548 MiB reserve 819.2 MiB on a 16 GiB computer. There is no additional hidden
+byte reserve when retrying a waiting import. The RAM popup shows the effective
+reserve and the remaining budget for new media after outstanding reservations.
+The macOS available value is an explicitly labelled estimate (free plus inactive
+pages); speculative pages are already included in the free count. Process RAM and
+controlled media allocations are separate measurements and need not match.
+macOS pressure is sampled from the current system state as well as notifications,
+so a past notification cannot leave admission blocked after pressure has recovered.
+A native warning pauses new allocations even if the estimate remains above the
+reserve; it alone does not discard existing media or stop scenes. Critical pressure
+or an actual reserve deficit cancels preparation and triggers reclamation.
 
 Only one full validation job runs at a time. It reserves estimated final storage plus
 codec/conversion scratch, and checks growth before allocation. Playback budgets
 are admitted separately per independent player, including atomic scene admission.
 They are conservative estimates of codec, queue and rendering overhead, not a
-measurement of allocated RAM. Qt controls its streaming queues; the system monitor
-remains the authority for actual pressure. Unprotected media
+measurement of allocated RAM. A player's preparation reservation remains pending
+until its first decoded frame proves that its decoder has initialized. Only budgets
+for pending players or pinned scene slots that still need players reduce admission
+headroom. Once prepared, a player's allocations are reflected in the fresh system
+measurement and its estimated budget is not subtracted a second time. The total
+playback estimate (`playbackBudgetBytes`) remains visible separately from the
+outstanding reservation (`pendingPlaybackBudgetBytes`). Qt controls its streaming
+queues; the system monitor remains the authority for actual pressure. Unprotected media
 are evicted largest first; all referring occurrences become skeletons. Scene
 leases protect data from PREPARE until stop/teardown. Persistent pressure first
 requests a coordinated stop before those leases can be reclaimed. Reloading waits
-for two healthy samples and max(512 MiB, 5% RAM) extra headroom, and never evicts
-another ready asset merely to retry a waiting asset.
+for two healthy samples at least one second apart, using the same configured
+reserve as first-time admission, and never evicts another ready asset merely to
+retry a waiting asset.
 
 The RAM popup next to Settings shows process/system/available RAM, media bytes,
-additional preparation budgets, estimated playback budgets, system reserve, and
-per-asset local/remote state. Retained bytes exclude scratch and future allocations;
+additional preparation budgets, estimated and pending playback budgets, system
+reserve, the budget available for new media (`loadableBytes`), native pressure,
+and per-asset local/remote state. Retained bytes exclude scratch and future allocations;
 preparation reservations show only the remainder beyond those retained bytes.
 Opaque platform decoder/GPU memory appears in process/system measurements, not as
 fictional retained media allocations. Errors are reported there

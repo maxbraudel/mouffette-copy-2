@@ -92,6 +92,7 @@ private:
     int m_loops = QMediaPlayer::Once;
     bool m_loading = false;
     bool m_playbackReserved = false;
+    bool m_playbackPrepared = false;
     QMediaPlayer::PlaybackState m_requestedState = QMediaPlayer::StoppedState;
     QMediaPlayer::PlaybackState m_state = QMediaPlayer::StoppedState;
     QMediaPlayer::MediaStatus m_status = QMediaPlayer::NoMedia;

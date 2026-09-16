@@ -256,8 +256,8 @@ private:
     int m_toastWarningDurationMs = 3500;
     int m_toastErrorDurationMs = 5000;
     int m_toastAnimationDurationMs = 300;
-    int m_mediaRamReservePercent = 20;
-    int m_mediaRamReserveMinMiB = 2048;
+    int m_mediaRamReservePercent = 0;
+    int m_mediaRamReserveMinMiB = 548;
     int m_uploadConcurrency = 2;
     bool m_autoUploadImportedMedia = false;
     QString m_qtMediaBackend = QStringLiteral("ffmpeg");

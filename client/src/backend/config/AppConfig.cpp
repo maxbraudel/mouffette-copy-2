@@ -77,8 +77,8 @@ constexpr std::array<SettingSpec, 61> kSpecs{{
     {Key::ToastWarningDurationMs, "MOUFFETTE_TOAST_WARNING_DURATION_MS", "toast-warning-duration-ms", nullptr, "3500", false},
     {Key::ToastErrorDurationMs, "MOUFFETTE_TOAST_ERROR_DURATION_MS", "toast-error-duration-ms", nullptr, "5000", false},
     {Key::ToastAnimationDurationMs, "MOUFFETTE_TOAST_ANIMATION_DURATION_MS", "toast-animation-duration-ms", nullptr, "300", false},
-    {Key::MediaRamReservePercent, "MOUFFETTE_MEDIA_RAM_RESERVE_PERCENT", "media-ram-reserve-percent", nullptr, "20", false},
-    {Key::MediaRamReserveMinMiB, "MOUFFETTE_MEDIA_RAM_RESERVE_MIN_MIB", "media-ram-reserve-min-mib", nullptr, "2048", false},
+    {Key::MediaRamReservePercent, "MOUFFETTE_MEDIA_RAM_RESERVE_PERCENT", "media-ram-reserve-percent", nullptr, "0", false},
+    {Key::MediaRamReserveMinMiB, "MOUFFETTE_MEDIA_RAM_RESERVE_MIN_MIB", "media-ram-reserve-min-mib", nullptr, "548", false},
     {Key::UploadConcurrency, "MOUFFETTE_UPLOAD_CONCURRENCY", "upload-concurrency", nullptr, "2", false},
     {Key::AutoUploadImportedMedia, "MOUFFETTE_AUTO_UPLOAD_IMPORTED_MEDIA", "auto-upload-imported-media", "autoUploadImportedMedia", "false", true},
     {Key::QtMediaBackend, "QT_MEDIA_BACKEND", "media-backend", nullptr, "ffmpeg", false},
@@ -419,8 +419,8 @@ void AppConfig::resetToCompiledDefaults() {
     m_toastWarningDurationMs = 3500;
     m_toastErrorDurationMs = 5000;
     m_toastAnimationDurationMs = 300;
-    m_mediaRamReservePercent = 20;
-    m_mediaRamReserveMinMiB = 2048;
+    m_mediaRamReservePercent = 0;
+    m_mediaRamReserveMinMiB = 548;
     m_uploadConcurrency = 2;
     m_autoUploadImportedMedia = false;
     m_qtMediaBackend = QStringLiteral("ffmpeg");

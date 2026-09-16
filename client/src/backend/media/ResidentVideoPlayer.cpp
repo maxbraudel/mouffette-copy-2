@@ -6,6 +6,7 @@
 #include <QVariant>
 #include <QVideoSink>
 #include <algorithm>
+#include <utility>
 
 namespace {
 class PresentationFrameBuffer final : public QAbstractVideoBuffer {
@@ -59,6 +60,10 @@ QVideoFrame ResidentVideoPlayer::presentationFrame(const QVideoFrame& source) {
 }
 
 void ResidentVideoPlayer::releasePlayer() {
+    const bool wasReserved = std::exchange(m_playbackReserved, false);
+    const bool wasPrepared = std::exchange(m_playbackPrepared, false);
+    const auto releaseReservation = wasReserved && m_asset ? m_asset->releasePlayback
+                                                         : std::function<void(bool)>();
     // Join/destroy the decoder before releasing its QIODevice and the budget.
     // An outstanding source load must never read a destroyed buffer.
     if (m_player) disconnect(m_player.get(), nullptr, this, nullptr);
@@ -70,8 +75,7 @@ void ResidentVideoPlayer::releasePlayer() {
     m_positionTimer.stop();
     m_frame = {};
     if (m_videoSink) m_videoSink->setVideoFrame({});
-    if (m_playbackReserved && m_asset && m_asset->releasePlayback) m_asset->releasePlayback();
-    m_playbackReserved = false;
+    if (releaseReservation) releaseReservation(wasPrepared);
 }
 
 void ResidentVideoPlayer::setAsset(std::shared_ptr<const ResidentMediaAsset> asset) {
@@ -113,15 +117,24 @@ void ResidentVideoPlayer::clearAsset() {
 bool ResidentVideoPlayer::ensurePlayer(bool reportFailure) {
     if (m_player) return true;
     if (!m_asset) return false;
-    if (m_asset->reservePlayback && !m_asset->reservePlayback()) {
+    const auto requestedAsset = m_asset;
+    const QPointer<ResidentVideoPlayer> self(this);
+    const bool reserved = !requestedAsset->reservePlayback || requestedAsset->reservePlayback();
+    if (!self || m_asset != requestedAsset) {
+        if (reserved && requestedAsset->releasePlayback) requestedAsset->releasePlayback(false);
+        return false;
+    }
+    if (!reserved) {
         if (reportFailure)
             fail(QMediaPlayer::ResourceError, QStringLiteral("Insufficient available RAM for the video playback buffers"));
         return false;
     }
+    m_playbackReserved = true;
+    m_playbackPrepared = false;
     m_error = QMediaPlayer::NoError;
     m_errorString.clear();
     emit errorChanged();
-    m_playbackReserved = true;
+    if (!self || m_asset != requestedAsset || !m_playbackReserved) return false;
     m_loading = true;
     m_source = std::make_unique<QBuffer>();
     // QByteArray implicit sharing: one immutable MP4 allocation for every cursor.
@@ -132,8 +145,17 @@ bool ResidentVideoPlayer::ensurePlayer(bool reportFailure) {
     m_player->setLoops(m_loops);
     m_player->setAudioOutput(m_audioOutput);
     m_player->setVideoSink(m_decodeSink.get());
-    connect(m_decodeSink.get(), &QVideoSink::videoFrameChanged, this, [this](const QVideoFrame& frame) {
-        if (!m_asset || !frame.isValid()) return;
+    connect(m_decodeSink.get(), &QVideoSink::videoFrameChanged, this,
+            [this, native = QPointer<QMediaPlayer>(m_player.get())](const QVideoFrame& frame) {
+        if (!native || native != m_player.get() || !m_asset || !frame.isValid()) return;
+        if (m_playbackReserved && !m_playbackPrepared) {
+            m_playbackPrepared = true;
+            const QPointer<ResidentVideoPlayer> self(this);
+            const auto prepared = m_asset->playbackPrepared;
+            if (prepared) prepared();
+            // Admission notifications can synchronously retire this player.
+            if (!self || !native || native != m_player.get() || !m_asset) return;
+        }
         m_frame = frame;
         if (m_videoSink) m_videoSink->setVideoFrame(frame);
         emit frameReady(frame.startTime() / 1000);
@@ -148,7 +170,10 @@ bool ResidentVideoPlayer::ensurePlayer(bool reportFailure) {
         if (!m_loading) setState(state == QMediaPlayer::PausedState
                 && m_requestedState == QMediaPlayer::StoppedState ? m_requestedState : state);
     });
-    connect(m_player.get(), &QMediaPlayer::errorOccurred, this, &ResidentVideoPlayer::fail);
+    connect(m_player.get(), &QMediaPlayer::errorOccurred, this,
+            [this, native = QPointer<QMediaPlayer>(m_player.get())](auto error, const QString& message) {
+        if (native && native == m_player.get()) fail(error, message);
+    });
     connect(m_player.get(), &QMediaPlayer::mediaStatusChanged, this, [this](auto status) {
         if (!m_asset) return;
         if (status == QMediaPlayer::LoadedMedia && m_loading) {
@@ -248,6 +273,18 @@ void ResidentVideoPlayer::setStatus(QMediaPlayer::MediaStatus status) {
     emit mediaStatusChanged(status);
 }
 void ResidentVideoPlayer::fail(QMediaPlayer::Error error, const QString& message) {
+    if (m_player) {
+        const QPointer<QMediaPlayer> failedPlayer = m_player.get();
+        // A failed source can never produce the frame that retires its future
+        // reservation. Destroy its native decoder after the current callback,
+        // retaining the error and cached asset for display or an explicit retry.
+        QMetaObject::invokeMethod(this, [this, failedPlayer] {
+            if (!failedPlayer || failedPlayer != m_player.get()) return;
+            const QPointer<ResidentVideoPlayer> self(this);
+            releasePlayer();
+            if (self) presentPoster();
+        }, Qt::QueuedConnection);
+    }
     m_error = error;
     m_errorString = message;
     m_requestedState = QMediaPlayer::StoppedState;

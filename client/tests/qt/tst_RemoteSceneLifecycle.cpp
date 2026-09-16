@@ -113,8 +113,10 @@ private slots:
         QSignalSpy pressureStop(&manager, &MediaResidencyManager::sceneStopRequested);
         QElapsedTimer pressureDuration;
         pressureDuration.start();
+        const quint64 reserve = manager.summary().value(QStringLiteral("reserveBytes")).toULongLong();
+        QVERIFY(reserve > 0);
         manager.setMemorySnapshotForTesting(
-            {8ULL << 30, 1ULL << 30, 128ULL << 20, false, 0});
+            {8ULL << 30, reserve - 1, 128ULL << 20, false, 0});
         // A protected scene survives the first pressure sample.
         QVERIFY(host->testSceneLaunched());
         QVERIFY(host->testSceneActionEnabled()); // Stop is still available.

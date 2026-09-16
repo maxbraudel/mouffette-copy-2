@@ -59,6 +59,7 @@ struct MediaResidencyManager::Entry {
     quint64 reserved = 0;
     quint64 scratch = DecodeScratch;
     int activePlayers = 0;
+    int pendingPlayers = 0;
     std::atomic<quint64> budgeted{0};
     std::atomic<quint64> required{0};
     double progress = 0;
@@ -154,6 +155,15 @@ MediaResidencyManager::MemorySnapshot MediaResidencyManager::readSystemMemory() 
     if (task_info(mach_task_self(), TASK_VM_INFO, reinterpret_cast<task_info_t>(&process), &count) == KERN_SUCCESS)
         result.processBytes = process.resident_size;
     result.availableEstimated = true;
+    // Dispatch events can be coalesced and only report transitions. Reconcile
+    // the latched notification with the current level on every measurement.
+    int pressureFlags = 0;
+    size = sizeof(pressureFlags);
+    if (sysctlbyname("kern.memorystatus_vm_pressure_level", &pressureFlags, &size, nullptr, 0) == 0) {
+        result.pressure = (pressureFlags & DISPATCH_MEMORYPRESSURE_CRITICAL) ? 2
+            : ((pressureFlags & DISPATCH_MEMORYPRESSURE_WARN) ? 1 : 0);
+        result.pressureKnown = true;
+    }
 #elif defined(Q_OS_WIN)
     MEMORYSTATUSEX status{};
     status.dwLength = sizeof(status);
@@ -197,7 +207,6 @@ quint64 MediaResidencyManager::reserveBytes() const
         + (m_memory.totalBytes % 100) * m_reservePercent / 100;
     return std::max(quint64(m_reserveMinMiB) * MiB, percentage);
 }
-quint64 MediaResidencyManager::headroomBytes() const { return std::max(512 * MiB, m_memory.totalBytes / 20); }
 quint64 MediaResidencyManager::residentBytes() const {
     quint64 bytes = 0;
     for (const auto& e : m_entries) bytes += e->data ? e->data->residentBytes : e->allocated.load();
@@ -215,17 +224,60 @@ quint64 MediaResidencyManager::playbackBudgetBytes() const {
     return bytes;
 }
 quint64 MediaResidencyManager::reservedBudgetBytes() const {
-    quint64 bytes = playbackBudgetBytes();
+    quint64 bytes = pendingPlaybackBudgetBytes();
     for (const auto& e : m_entries)
         bytes += e->reserved - std::min(e->reserved, e->allocated.load());
     return bytes;
 }
-bool MediaResidencyManager::admitsBudget(quint64 additional) {
-    if (!m_testMemory) m_memory = readSystemMemory();
-    if (m_memory.pressure || m_nativePressure.load()) return false;
+quint64 MediaResidencyManager::pendingPlaybackBudgetBytes() const {
+    quint64 bytes = 0;
+    for (const auto& e : m_entries) {
+        if (!e->data || !e->data->video) continue;
+        int pinnedPlayers = 0;
+        for (const auto& owners : m_pins)
+            for (const auto& id : owners) if (e->owners.contains(id)) ++pinnedPlayers;
+        // A first decoded frame commits the player's allocations to the OS
+        // measurement. Keep only unopened scene slots and still-priming players
+        // as future commitments; charging prepared players again double-counts
+        // memory already absent from availableBytes.
+        const int pending = e->pendingPlayers + std::max(0, pinnedPlayers - e->activePlayers);
+        bytes += e->data->playbackBudgetBytes * quint64(pending);
+    }
+    return bytes;
+}
+quint64 MediaResidencyManager::loadableBytes() const {
     const quint64 available = m_memory.availableBytes;
-    const quint64 margin = reserveBytes() + reservedBudgetBytes();
-    return available >= margin && additional <= available - margin;
+    const quint64 reserve = reserveBytes();
+    if (available <= reserve) return 0;
+    const quint64 remaining = available - reserve;
+    return remaining - std::min(remaining, reservedBudgetBytes());
+}
+QString MediaResidencyManager::waitingReason(quint64 required) const {
+    const int pressure = std::max(m_memory.pressure, m_nativePressure.load());
+    if (pressure) {
+        return QStringLiteral("Waiting for system memory pressure to return to normal (%1; %2 MiB available)")
+            .arg(pressure >= 2 ? QStringLiteral("critical") : QStringLiteral("warning"))
+            .arg(m_memory.availableBytes / MiB);
+    }
+    if (required <= loadableBytes())
+        return QStringLiteral("Waiting for available RAM to stabilize before reloading");
+    return QStringLiteral("Waiting for RAM: preparation needs %1 MiB; %2 MiB usable (%3 MiB available, %4 MiB system reserve, %5 MiB pending allocations)")
+        .arg((required + MiB - 1) / MiB).arg(loadableBytes() / MiB)
+        .arg(m_memory.availableBytes / MiB).arg((reserveBytes() + MiB - 1) / MiB)
+        .arg((reservedBudgetBytes() + MiB - 1) / MiB);
+}
+void MediaResidencyManager::refreshSystemMemory() {
+    if (m_testMemory) return;
+    m_memory = readSystemMemory();
+    if (m_memory.pressureKnown) m_nativePressure.store(m_memory.pressure);
+}
+bool MediaResidencyManager::admitsBudget(quint64 additional, bool includeReservations) {
+    refreshSystemMemory();
+    if (m_memory.pressure || m_nativePressure.load()) return false;
+    const quint64 pending = includeReservations ? reservedBudgetBytes() : 0;
+    return m_memory.availableBytes >= reserveBytes()
+        && pending <= m_memory.availableBytes - reserveBytes()
+        && additional <= m_memory.availableBytes - reserveBytes() - pending;
 }
 void MediaResidencyManager::acquire(const QString& ownerId, const QString& path, const QString& expected) {
     if (ownerId.isEmpty() || path.isEmpty()) return;
@@ -414,37 +466,55 @@ void MediaResidencyManager::unpinGroup(const QString& group) {
 void MediaResidencyManager::evict(const EntryPtr& e) {
     if (protectedEntry(e)) return;
     e->state = QStringLiteral("waiting_for_memory");
-    e->error = QStringLiteral("Waiting for available RAM");
+    e->error = waitingReason(e->estimated + e->scratch);
     e->progress = 0;
     e->requiresHealthySamples = true;
+    m_healthySamples = 0;
+    m_lastHealthySampleMs = m_clock.elapsed();
     // Consumers synchronously clear their frame/audio references in response.
     // Admission still uses a fresh OS measurement, so delayed scene-graph
     // destruction is never mistaken for immediately available physical RAM.
     publish(e);
     e->data.reset();
     e->allocated.store(0);
+    e->activePlayers = 0;
+    e->pendingPlayers = 0;
     emit changed();
 }
 void MediaResidencyManager::schedule() {
-    if (m_scheduling || m_decoding || m_memory.pressure || m_nativePressure.load()) return;
+    if (m_scheduling || m_decoding) return;
     m_scheduling = true;
     auto candidates = m_entries;
     std::sort(candidates.begin(), candidates.end(), [](const EntryPtr& a, const EntryPtr& b) {
         return a->estimated == b->estimated ? a->hash < b->hash : a->estimated < b->estimated;
     });
-    if (!m_testMemory) m_memory = readSystemMemory();
-    const quint64 available = m_memory.availableBytes;
+    refreshSystemMemory();
     for (const auto& e : candidates) {
-        if (e->state != QLatin1String("queued") && e->state != QLatin1String("waiting_for_memory")) continue;
-        const quint64 margin = reserveBytes() + reservedBudgetBytes()
-            + (e->requiresHealthySamples ? headroomBytes() : 0);
-        const quint64 usable = available > margin ? available - margin : 0;
-        if ((e->requiresHealthySamples && m_healthySamples < 2) || e->estimated > usable
+        if (e->state != QLatin1String("queued") && e->state != QLatin1String("waiting_for_memory")
+            && e->state != QLatin1String("capacity_insufficient")) continue;
+        const quint64 capacity = m_memory.totalBytes - std::min(m_memory.totalBytes, reserveBytes());
+        if (e->estimated > capacity || e->scratch > capacity - std::min(capacity, e->estimated)) {
+            if (e->state != QLatin1String("capacity_insufficient")) {
+                e->state = QStringLiteral("capacity_insufficient");
+                e->error = QStringLiteral("The media and its preparation buffers exceed this computer's RAM capacity and safety reserve");
+                publish(e);
+            }
+            continue;
+        }
+        const quint64 usable = loadableBytes();
+        if (m_memory.pressure || m_nativePressure.load()
+            || (e->requiresHealthySamples && m_healthySamples < 2) || e->estimated > usable
             || e->scratch > usable - std::min(usable, e->estimated)) {
+            const auto reason = waitingReason(e->estimated + e->scratch);
+            const bool changed = e->state != QLatin1String("waiting_for_memory") || e->error != reason;
             if (e->state != QLatin1String("waiting_for_memory")) {
-                e->state = QStringLiteral("waiting_for_memory");
-                e->error = QStringLiteral("Waiting for available RAM");
-                e->requiresHealthySamples = true;
+                m_healthySamples = 0;
+                m_lastHealthySampleMs = m_clock.elapsed();
+            }
+            e->state = QStringLiteral("waiting_for_memory");
+            e->error = reason;
+            e->requiresHealthySamples = true;
+            if (changed) {
                 publish(e);
             }
             continue;
@@ -499,10 +569,12 @@ void MediaResidencyManager::startDecode(const EntryPtr& e, quint64 allowance) {
         if (e->generation != generation || e->owners.isEmpty()) { schedule(); return; }
         if (e->cancelled->load() || result.error == QLatin1String("memory_unavailable")) {
             e->state = QStringLiteral("waiting_for_memory");
-            e->error = QStringLiteral("Waiting for available RAM");
             e->requiresHealthySamples = true; e->progress = 0;
+            m_healthySamples = 0;
+            m_lastHealthySampleMs = m_clock.elapsed();
             const quint64 required = e->required.load();
             if (required > e->scratch) e->estimated = std::max(e->estimated, required - e->scratch);
+            e->error = waitingReason(e->estimated + e->scratch);
             const quint64 maximum = m_memory.totalBytes > reserveBytes() ? m_memory.totalBytes - reserveBytes() : 0;
             if (required > maximum) {
                 e->state = QStringLiteral("capacity_insufficient");
@@ -515,19 +587,46 @@ void MediaResidencyManager::startDecode(const EntryPtr& e, quint64 allowance) {
         } else {
             const std::weak_ptr<Entry> weak = e;
             QPointer<MediaResidencyManager> manager(this);
-            result.asset->reservePlayback = [manager, weak] {
+            result.asset->reservePlayback = [manager, weak, generation] {
                 const auto entry = weak.lock();
-                if (!manager || !entry || !entry->data || entry->state != QLatin1String("ready")) return false;
+                if (!manager || !entry || entry->generation != generation || !entry->data
+                    || entry->state != QLatin1String("ready")) return false;
+                const quint64 pendingBefore = manager->pendingPlaybackBudgetBytes();
                 ++entry->activePlayers;
-                if (!manager->admitsBudget(0)) { --entry->activePlayers; return false; }
+                ++entry->pendingPlayers;
+                const bool consumesPinnedSlot = manager->pendingPlaybackBudgetBytes() == pendingBefore;
+                // Consuming an admitted scene slot adds no new commitment.
+                // Other priming players may already have allocated buffers
+                // without publishing a frame, so charging all of their full
+                // reservations again can reject an already admitted scene.
+                const bool admitted = consumesPinnedSlot
+                    ? manager->admitsBudget(entry->data->playbackBudgetBytes, false)
+                    : manager->admitsBudget(0);
+                if (!admitted) {
+                    --entry->activePlayers; --entry->pendingPlayers; return false;
+                }
                 emit manager->changed();
                 return true;
             };
-            result.asset->releasePlayback = [manager, weak] {
+            result.asset->playbackPrepared = [manager, weak, generation] {
                 const auto entry = weak.lock();
-                if (!entry) return;
+                if (!manager || !entry || entry->generation != generation) return;
+                entry->pendingPlayers = std::max(0, entry->pendingPlayers - 1);
+                // The decoder's real allocations are now visible to the OS.
+                // Refresh before exposing the released future reservation.
+                manager->refreshSystemMemory();
+                emit manager->changed();
+                QTimer::singleShot(0, manager, &MediaResidencyManager::sampleNow);
+            };
+            result.asset->releasePlayback = [manager, weak, generation](bool prepared) {
+                const auto entry = weak.lock();
+                if (!entry || entry->generation != generation) return;
                 entry->activePlayers = std::max(0, entry->activePlayers - 1);
-                if (manager) emit manager->changed();
+                if (!prepared) entry->pendingPlayers = std::max(0, entry->pendingPlayers - 1);
+                if (manager) {
+                    emit manager->changed();
+                    QTimer::singleShot(0, manager, &MediaResidencyManager::sampleNow);
+                }
             };
             e->data = std::move(result.asset);
             e->estimated = e->data->residentBytes;
@@ -555,7 +654,7 @@ void MediaResidencyManager::startDecode(const EntryPtr& e, quint64 allowance) {
             if (!simulatedMemory && (budgetClock.elapsed() - lastBudgetCheck >= 250 || growth >= 64 * MiB)) {
                 const auto system = readSystemMemory();
                 lastBudgetCheck = budgetClock.elapsed();
-                if (system.availableBytes < safetyReserve
+                if (system.pressure >= 2 || system.availableBytes < safetyReserve
                     || growth > system.availableBytes - safetyReserve) return false;
             }
             e->budgeted.store(bytes);
@@ -575,7 +674,7 @@ void MediaResidencyManager::startDecode(const EntryPtr& e, quint64 allowance) {
     }));
 }
 void MediaResidencyManager::sampleNow() {
-    if (!m_testMemory) m_memory = readSystemMemory();
+    refreshSystemMemory();
 #ifdef Q_OS_WIN
     if (m_pressureSource && !m_testMemory) {
         BOOL low = FALSE;
@@ -584,10 +683,11 @@ void MediaResidencyManager::sampleNow() {
         if (!low && m_pressureNotifier) static_cast<QWinEventNotifier*>(m_pressureNotifier.data())->setEnabled(true);
     }
 #endif
-    const bool pressure = m_memory.pressure > 0 || m_nativePressure.load() > 0
-        || m_memory.availableBytes < reserveBytes();
+    const int pressureLevel = std::max(m_memory.pressure, m_nativePressure.load());
+    const bool belowReserve = m_memory.availableBytes < reserveBytes();
+    const bool pressure = pressureLevel > 0 || belowReserve;
     const qint64 sampleTime = m_clock.elapsed();
-    if (!pressure && m_memory.availableBytes >= reserveBytes() + headroomBytes()) {
+    if (!pressure) {
         if (sampleTime - m_lastHealthySampleMs >= 1000) {
             m_healthySamples = std::min(2, m_healthySamples + 1);
             m_lastHealthySampleMs = sampleTime;
@@ -596,7 +696,9 @@ void MediaResidencyManager::sampleNow() {
         m_healthySamples = 0;
         m_lastHealthySampleMs = sampleTime;
     }
-    if (pressure) {
+    // Warning changes future allocations; only an actual reserve deficit or
+    // critical pressure should tear down already prepared media and scenes.
+    if (belowReserve || pressureLevel >= 2) {
         for (const auto& e : m_entries) if (e->state == QLatin1String("decoding")) e->cancelled->store(true);
         auto candidates = m_entries;
         std::sort(candidates.begin(), candidates.end(), [](const EntryPtr& a, const EntryPtr& b) {
@@ -611,7 +713,7 @@ void MediaResidencyManager::sampleNow() {
             if (!e->data || protectedEntry(e)) continue;
             planned += e->data->residentBytes;
             evict(e);
-            if (!m_memory.pressure && !m_nativePressure.load() && planned >= deficit) break;
+            if (pressureLevel < 2 && planned >= deficit) break;
         }
         const qint64 now = m_clock.elapsed();
         if (m_pressureSinceMs < 0) m_pressureSinceMs = now;
@@ -675,6 +777,8 @@ QVariantMap MediaResidencyManager::summary() const {
         {QStringLiteral("mediaBytes"), QVariant::fromValue(residentBytes())},
         {QStringLiteral("reservedBytes"), QVariant::fromValue(reserved)},
         {QStringLiteral("playbackBudgetBytes"), QVariant::fromValue(playbackBudgetBytes())},
+        {QStringLiteral("pendingPlaybackBudgetBytes"), QVariant::fromValue(pendingPlaybackBudgetBytes())},
+        {QStringLiteral("loadableBytes"), QVariant::fromValue(loadableBytes())},
         {QStringLiteral("reserveBytes"), QVariant::fromValue(reserveBytes())},
         {QStringLiteral("availableEstimated"), m_memory.availableEstimated},
         {QStringLiteral("pressure"), pressure >= 2 ? QStringLiteral("critical") : (pressure ? QStringLiteral("warning") : QStringLiteral("normal"))}};

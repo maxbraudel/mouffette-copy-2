@@ -58,6 +58,8 @@ void AppConfigTest::loadsEmbeddedDefaults() {
     QString error;
     QVERIFY2(config.load(options, &error), qPrintable(error));
     QCOMPARE(config.serverUrl(), QStringLiteral("ws://localhost:8080"));
+    QCOMPARE(config.mediaRamReservePercent(), 0);
+    QCOMPARE(config.mediaRamReserveMinMiB(), 548);
     QCOMPARE(config.remoteSessionHiddenTimeoutMs(), qint64(30000));
     QCOMPARE(config.projectHiddenRetentionMs(), qint64(60000));
     QCOMPARE(config.incomingSessionOrphanTimeoutMs(), qint64(3000));
@@ -123,8 +125,8 @@ void AppConfigTest::compiledDefaultDisablesMultipleInstances() {
     QString error;
     QVERIFY2(config.load(options, &error), qPrintable(error));
     QVERIFY(!config.allowMultipleInstances());
-    QCOMPARE(config.mediaRamReservePercent(), 20);
-    QCOMPARE(config.mediaRamReserveMinMiB(), 2048);
+    QCOMPARE(config.mediaRamReservePercent(), 0);
+    QCOMPARE(config.mediaRamReserveMinMiB(), 548);
     QCOMPARE(config.provenance(AppConfig::Key::AllowMultipleInstances),
              QStringLiteral("compiled-default"));
 }

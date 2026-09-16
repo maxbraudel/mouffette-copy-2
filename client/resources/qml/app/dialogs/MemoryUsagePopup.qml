@@ -60,11 +60,31 @@ Popup {
         }
         Text {
             Layout.fillWidth: true
-            text: root.bytes(root.usage.reservedBytes) + " additional preparation budget · "
-                  + root.bytes(root.usage.playbackBudgetBytes) + " playback budget (estimated) · "
+            objectName: "memoryLoadableBudget"
+            text: root.bytes(root.usage.loadableBytes) + " available for new media · "
                   + root.bytes(root.usage.reserveBytes) + " kept available for the system"
+            color: Theme.text
+            font.pixelSize: 12
+            wrapMode: Text.Wrap
+        }
+        Text {
+            Layout.fillWidth: true
+            text: root.bytes(root.usage.reservedBytes) + " pending media preparation · "
+                  + root.bytes(root.usage.pendingPlaybackBudgetBytes) + " pending player preparation\n"
+                  + root.bytes(root.usage.playbackBudgetBytes) + " total playback estimate"
             color: root.secondaryText
             font.pixelSize: 11
+            wrapMode: Text.Wrap
+        }
+        Text {
+            Layout.fillWidth: true
+            objectName: "memoryPressureStatus"
+            visible: root.usage.pressure === "warning" || root.usage.pressure === "critical"
+            text: root.usage.pressure === "critical"
+                  ? "Critical memory pressure: loading is paused and media may be released."
+                  : "System memory warning: new loading is paused until pressure recovers."
+            color: root.usage.pressure === "critical" ? Theme.errorText : Theme.text
+            font.pixelSize: 12
             wrapMode: Text.Wrap
         }
         Rectangle {

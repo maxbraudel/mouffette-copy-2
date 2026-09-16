@@ -28,6 +28,7 @@ public:
         quint64 processBytes = 0;
         bool availableEstimated = false;
         int pressure = 0; // 0 normal, 1 warning, 2 critical
+        bool pressureKnown = false; // otherwise native notifications are the fallback
     };
     static MediaResidencyManager& instance();
     explicit MediaResidencyManager(QObject* parent = nullptr);
@@ -81,11 +82,14 @@ private:
     void evict(const EntryPtr& entry);
     bool protectedEntry(const EntryPtr& entry) const;
     quint64 reserveBytes() const;
-    quint64 headroomBytes() const;
     quint64 residentBytes() const;
     quint64 playbackBudgetBytes() const;
+    quint64 pendingPlaybackBudgetBytes() const;
     quint64 reservedBudgetBytes() const;
-    bool admitsBudget(quint64 additional);
+    quint64 loadableBytes() const;
+    QString waitingReason(quint64 required) const;
+    bool admitsBudget(quint64 additional, bool includeReservations = true);
+    void refreshSystemMemory();
     static MemorySnapshot readSystemMemory();
     void setupPressureNotifications();
     void finishBackgroundWork(const QString& path);
@@ -102,8 +106,8 @@ private:
     QElapsedTimer m_clock;
     qint64 m_lastHealthySampleMs = -1000;
     MemorySnapshot m_memory;
-    int m_reservePercent = 20;
-    int m_reserveMinMiB = 2048;
+    int m_reservePercent = 0;
+    int m_reserveMinMiB = 548;
     bool m_testMemory = false;
     bool m_scheduling = false;
     bool m_decoding = false;

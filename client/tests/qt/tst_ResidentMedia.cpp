@@ -494,7 +494,7 @@ private slots:
         int attempts = 0;
         int releases = 0;
         asset->reservePlayback = [&] { ++attempts; return admitted; };
-        asset->releasePlayback = [&] { ++releases; };
+        asset->releasePlayback = [&](bool) { ++releases; };
         QVideoSink sink;
         ResidentVideoPlayer player;
         player.setVideoSink(&sink);
@@ -519,6 +519,92 @@ private slots:
         QCOMPARE(player.error(), QMediaPlayer::NoError);
         player.clearAsset();
         QCOMPARE(releases, 1);
+    }
+
+    void playbackReservationsFollowNativePreparation() {
+        QTemporaryDir directory;
+        const QString path = directory.filePath("reservations.mp4");
+        QVERIFY(writeVideo(path));
+        const auto asset = MediaDecoder::decode(path);
+        QVERIFY(asset);
+        int reservations = 0;
+        int preparations = 0;
+        QList<bool> releasedPrepared;
+        asset->reservePlayback = [&] { ++reservations; return true; };
+        asset->playbackPrepared = [&] { ++preparations; };
+        asset->releasePlayback = [&](bool prepared) { releasedPrepared.append(prepared); };
+        ResidentVideoPlayer player;
+
+        player.setAsset(asset);
+        QCOMPARE(reservations, 1);
+        // A cached poster does not consume the future native decoder budget.
+        QCOMPARE(preparations, 0);
+        player.clearAsset();
+        QCOMPARE(releasedPrepared.size(), 1);
+        QVERIFY(!releasedPrepared.last());
+
+        player.setAsset(asset);
+        QTRY_VERIFY2_WITH_TIMEOUT(player.preparedAt(0), qPrintable(player.errorString()), 3000);
+        QCOMPARE(reservations, 2);
+        QCOMPARE(preparations, 1);
+        player.prepare(200);
+        QTRY_VERIFY_WITH_TIMEOUT(player.preparedAt(200), 3000);
+        QCOMPARE(preparations, 1); // seek frames cannot retire the budget twice
+        player.clearAsset();
+        QCOMPARE(releasedPrepared.size(), 2);
+        QVERIFY(releasedPrepared.last());
+
+        // Residency observers can retire a player synchronously as its first
+        // frame transfers the budget into the measured process allocation.
+        asset->playbackPrepared = [&] { ++preparations; player.clearAsset(); };
+        player.setAsset(asset);
+        QTRY_COMPARE_WITH_TIMEOUT(preparations, 2, 3000);
+        QCOMPARE(reservations, 3);
+        QVERIFY(!player.asset());
+        QCOMPARE(releasedPrepared.size(), 3);
+        QVERIFY(releasedPrepared.last());
+
+        asset->reservePlayback = [&] { ++reservations; player.clearAsset(); return true; };
+        player.setAsset(asset);
+        QCOMPARE(reservations, 4);
+        QCOMPARE(preparations, 2);
+        QVERIFY(!player.asset());
+        QCOMPARE(releasedPrepared.size(), 4);
+        QVERIFY(!releasedPrepared.last());
+    }
+
+    void failedNativePreparationReleasesPendingReservation() {
+        QTemporaryDir directory;
+        const QString path = directory.filePath("failed-preparation.mp4");
+        QVERIFY(writeVideo(path));
+        const auto asset = MediaDecoder::decode(path);
+        QVERIFY(asset);
+        // Retain a valid cached poster, but force native source initialization
+        // to fail before a decoded frame can consume its pending reservation.
+        asset->compressedVideo = QByteArrayLiteral("invalid MP4 stream");
+        int reservations = 0;
+        int preparations = 0;
+        QList<bool> releasedPrepared;
+        asset->reservePlayback = [&] { ++reservations; return true; };
+        asset->playbackPrepared = [&] { ++preparations; };
+        asset->releasePlayback = [&](bool prepared) { releasedPrepared.append(prepared); };
+        QVideoSink sink;
+        ResidentVideoPlayer player;
+        player.setVideoSink(&sink);
+        QSignalSpy errors(&player, &ResidentVideoPlayer::errorOccurred);
+        player.setAsset(asset);
+        QTRY_COMPARE_WITH_TIMEOUT(releasedPrepared.size(), 1, 3000);
+        QCOMPARE(reservations, 1);
+        QCOMPARE(preparations, 0);
+        QVERIFY(!releasedPrepared.last());
+        QVERIFY(!errors.isEmpty());
+        QVERIFY(player.error() != QMediaPlayer::NoError);
+        QVERIFY(!player.errorString().isEmpty());
+        QCOMPARE(player.mediaStatus(), QMediaPlayer::InvalidMedia);
+        QCOMPARE(player.asset(), asset);
+        QVERIFY(sink.videoFrame().isValid());
+        player.clearAsset();
+        QCOMPARE(releasedPrepared.size(), 1); // teardown cannot release twice
     }
 
     void variableFrameRateUsesPresentationTimestamps() {
