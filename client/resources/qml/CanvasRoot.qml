@@ -451,6 +451,7 @@ Rectangle {
             return ""
         var hitId = ""
         var hitZ = -Infinity
+        var hitSelected = false
         for (var i = 0; i < mediaRepeater.count; ++i) {
             var candidate = mediaRepeater.itemAt(i)
             if (!candidate || !candidate.visible || !candidate.enabled || candidate.opacity <= 0)
@@ -458,9 +459,15 @@ Rectangle {
             var point = candidate.mapFromItem(viewport, viewX, viewY)
             if (point.x < 0 || point.y < 0 || point.x >= candidate.width || point.y >= candidate.height)
                 continue
-            if (candidate.z >= hitZ) {
+            // The selected body is an interaction surface above unselected
+            // media, just like its resize chrome. Preserve actual paint order;
+            // among equally selected candidates, use z and sibling order.
+            var selected = root.editingEnabled && candidate.isSelected
+            if ((selected && !hitSelected)
+                    || (selected === hitSelected && candidate.z >= hitZ)) {
                 hitId = candidate.currentMediaId
                 hitZ = candidate.z
+                hitSelected = selected
             }
         }
         return hitId

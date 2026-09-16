@@ -1022,6 +1022,101 @@ private slots:
         QCOMPARE(scene.selectionRequestCount, 4);
     }
 
+    void selectionChromeRendersAboveCoveredMedia()
+    {
+        CanvasFixture scene;
+        QVERIFY2(scene.initialize(), qPrintable(scene.error));
+        scene.add("a", "image", 140, 190);
+        scene.change("a", {{"width", 160}, {"height", 100}});
+        scene.add("b", "image", 100, 150);
+        scene.change("b", {{"z", 1000000}});
+        scene.select("a", false);
+
+        // Opaque content on the production foreground delegate makes actual
+        // occlusion observable, without an asynchronous image/video decoder.
+        QQmlComponent fill(&scene.engine);
+        fill.setData("import QtQuick; Rectangle { anchors.fill: parent; color: 'red'; z: 100 }", QUrl());
+        std::unique_ptr<QObject> fillObject(fill.create());
+        auto* fillItem = qobject_cast<QQuickItem*>(fillObject.get());
+        QVERIFY2(fillItem, qPrintable(fill.errorString()));
+        fillItem->setParentItem(scene.mediaDelegate("b"));
+        QQmlComponent palette(&scene.engine);
+        palette.setData("import QtQuick; import Mouffette.App as AppStyle; QtObject { "
+                        "property color borderColor: AppStyle.Theme.selectionBorder; "
+                        "property color handleColor: AppStyle.Theme.selectionHandle }", QUrl());
+        std::unique_ptr<QObject> colors(palette.create());
+        QVERIFY2(colors, qPrintable(palette.errorString()));
+        const QColor border = colors->property("borderColor").value<QColor>();
+        const QColor handle = colors->property("handleColor").value<QColor>();
+
+        const auto pixel = [&scene](QPointF point) {
+            const QImage frame = scene.window.grabWindow();
+            if (frame.isNull()) return QColor();
+            return frame.pixelColor(qRound(point.x() * frame.width() / scene.window.width()),
+                                    qRound(point.y() * frame.height() / scene.window.height()));
+        };
+        for (qreal zoom : {1.0, 1.5, 0.75}) {
+            scene.root->setProperty("viewScale", zoom);
+            scene.root->setProperty("panX", 200.0 - 220.0 * zoom);
+            scene.root->setProperty("panY", 230.0 - 240.0 * zoom);
+            auto* a = scene.mediaDelegate("a");
+            QVERIFY(a);
+            QTRY_COMPARE(pixel(a->mapToScene(QPointF(45, 0)) + QPointF(0, 0.1)), border);
+            for (QPointF corner : {QPointF(0, 0), QPointF(160, 0),
+                                   QPointF(0, 100), QPointF(160, 100),
+                                   QPointF(80, 0), QPointF(80, 100),
+                                   QPointF(0, 50), QPointF(160, 50)})
+                QCOMPARE(pixel(a->mapToScene(corner)), handle);
+            QCOMPARE(pixel(a->mapToScene(QPointF(80, 50))), QColor(Qt::red));
+        }
+        scene.clear();
+        QTRY_COMPARE(pixel(scene.mediaDelegate("a")->mapToScene(QPointF(0, 0))), QColor(Qt::red));
+    }
+
+    void selectedCoveredMediaKeepsInputPriority_data() { reselectMedia_data(); }
+
+    void selectedCoveredMediaKeepsInputPriority()
+    {
+        QFETCH(QString, type);
+        CanvasFixture scene;
+        QVERIFY2(scene.initialize(), qPrintable(scene.error));
+        scene.add("a", type, 140, 190);
+        scene.change("a", {{"width", 160}, {"height", 100}, {"z", 10}});
+        scene.add("b", "text", 100, 150);
+        scene.click({220, 240});
+        QCOMPARE(scene.selected, QStringList {"a"});
+        // Sending the selected item behind B must change only its paint order.
+        scene.change("a", {{"z", -1000000}});
+        scene.click({220, 240});
+        QCOMPARE(scene.selected, QStringList {"a"});
+        QSignalSpy moved(scene.root, SIGNAL(mediaMoveEnded(QString,double,double,bool)));
+        scene.drag({220, 240}, {244, 252});
+        QCOMPARE(moved.size(), 1);
+        QCOMPARE(moved.first().at(0).toString(), QString("a"));
+        QCOMPARE(scene.entry("a").value("x").toDouble(), 164.0);
+        QCOMPARE(scene.entry("a").value("y").toDouble(), 202.0);
+        QCOMPARE(scene.entry("a").value("z").toDouble(), -1000000.0);
+        QCOMPARE(scene.entry("b").value("x").toDouble(), 100.0);
+        QCOMPARE(scene.entry("b").value("y").toDouble(), 150.0);
+
+        scene.emulateResizePublication = true;
+        scene.drag({324, 302}, {340, 312});
+        QCOMPARE(scene.resizePublicationCount, 1);
+        QVERIFY2(scene.error.isEmpty(), qPrintable(scene.error));
+        QCOMPARE(scene.selected, QStringList {"a"});
+        QCOMPARE(scene.entry("a").value("scale").toDouble(), 1.1);
+        QCOMPARE(moved.size(), 1);
+        QCOMPARE(scene.root->property("interactionMode").toString(), QString("idle"));
+
+        // An exposed part of B remains selectable. Clearing selection restores
+        // ordinary visual stacking in the shared area as well.
+        scene.click({115, 230});
+        QCOMPARE(scene.selected, QStringList {"b"});
+        scene.clear();
+        scene.click({244, 252});
+        QCOMPARE(scene.selected, QStringList {"b"});
+    }
+
     void staleHandleAfterDeselectDoesNotCaptureBody()
     {
         CanvasFixture scene;

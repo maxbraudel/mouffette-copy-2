@@ -1,7 +1,7 @@
 import QtQuick
 import Mouffette.App as AppStyle
 // Renders the selection border and resize handles as a scene-space overlay.
-// Move drag is handled natively by each media item's DragHandler in contentRoot.
+// Move drag is handled by CanvasRoot's viewport-level DragHandler.
 // This component only handles resize (8 handles) and provides visual chrome.
 Item {
     id: root
@@ -356,87 +356,95 @@ Item {
 
     }
 
-    Repeater {
-        // Repeater owns sibling stacking: reparent it, not its delegates.
-        parent: root.contentItem ? root.contentItem : root
-        model: root.selectionModel
+    // Keep the visuals inside the selection overlay's stacking subtree.
+    // Reparenting them to contentItem puts them below the entire media layer,
+    // regardless of their own z. Mirror the camera here to retain scene-space
+    // geometry while both visuals and resize input stay above all media.
+    Item {
+        x: root.contentItem ? root.contentItem.x : 0
+        y: root.contentItem ? root.contentItem.y : 0
+        scale: root.contentItem ? root.contentItem.scale : 1
+        transformOrigin: Item.TopLeft
 
-        delegate: Item {
-            id: chrome
-            objectName: "selectionChromeVisual"
-            property var entry: modelData
-            readonly property var geometry: root.resolveEntryGeometry(entry)
-            readonly property real sceneX: geometry.sceneX
-            readonly property real sceneY: geometry.sceneY
-            readonly property real sceneW: geometry.sceneW
-            readonly property real sceneH: geometry.sceneH
-            readonly property real _viewScale: root.contentItem ? root.contentItem.scale : 1.0
-            readonly property bool hasLiveTransform: !!entry && !!interactionController
-                && !!interactionController.liveTransforms && !!interactionController.liveTransforms[entry.mediaId]
-            readonly property bool beingDragged: !hasLiveTransform && !!entry && root.draggedMediaId !== "" && root.draggedMediaId === entry.mediaId
-            // snapDragActive does NOT require beingDragged.
-            // liveDragMediaId (draggedMediaId) is cleared BEFORE mediaMoveEnded is signalled,
-            // so beingDragged becomes false before the snap freeze is lifted. The freeze
-            // (liveSnapDragActive) stays active until onMediaChanged fires and clears it.
-            // During that window we must keep the chrome at the snapped position, which is
-            // done by applying the snap offset independently of beingDragged.
-            readonly property bool snapDragActive: !hasLiveTransform && !!interactionController
-                                                   && !!interactionController.liveSnapDragActive
-                                                   && interactionController.liveSnapDragMediaId === (entry ? entry.mediaId : "")
-            // When snap is active: derive position offset from snapped scene position delta.
-            // liveSnapDragX/Y and sceneX are both in canvas QML units (scene * sceneUnitScale).
-            readonly property real effectiveDragOffsetX: snapDragActive
-                ? (interactionController.liveSnapDragX - sceneX) * _viewScale
-                : root.dragOffsetViewX
-            readonly property real effectiveDragOffsetY: snapDragActive
-                ? (interactionController.liveSnapDragY - sceneY) * _viewScale
-                : root.dragOffsetViewY
+        Repeater {
+            model: root.selectionModel
 
-            // Selection geometry belongs to the media shell, including while
-            // its content is loading or waiting for memory.
-            enabled: !!entry
-            visible: enabled
-            z: 98500
+            delegate: Item {
+                id: chrome
+                objectName: "selectionChromeVisual"
+                property var entry: modelData
+                readonly property var geometry: root.resolveEntryGeometry(entry)
+                readonly property real sceneX: geometry.sceneX
+                readonly property real sceneY: geometry.sceneY
+                readonly property real sceneW: geometry.sceneW
+                readonly property real sceneH: geometry.sceneH
+                readonly property real _viewScale: root.contentItem ? root.contentItem.scale : 1.0
+                readonly property bool hasLiveTransform: !!entry && !!interactionController
+                    && !!interactionController.liveTransforms && !!interactionController.liveTransforms[entry.mediaId]
+                readonly property bool beingDragged: !hasLiveTransform && !!entry && root.draggedMediaId !== "" && root.draggedMediaId === entry.mediaId
+                // snapDragActive does NOT require beingDragged.
+                // liveDragMediaId (draggedMediaId) is cleared BEFORE mediaMoveEnded is signalled,
+                // so beingDragged becomes false before the snap freeze is lifted. The freeze
+                // (liveSnapDragActive) stays active until onMediaChanged fires and clears it.
+                // During that window we must keep the chrome at the snapped position, which is
+                // done by applying the snap offset independently of beingDragged.
+                readonly property bool snapDragActive: !hasLiveTransform && !!interactionController
+                                                       && !!interactionController.liveSnapDragActive
+                                                       && interactionController.liveSnapDragMediaId === (entry ? entry.mediaId : "")
+                // When snap is active: derive position offset from snapped scene position delta.
+                // liveSnapDragX/Y and sceneX are both in canvas QML units (scene * sceneUnitScale).
+                readonly property real effectiveDragOffsetX: snapDragActive
+                    ? (interactionController.liveSnapDragX - sceneX) * _viewScale
+                    : root.dragOffsetViewX
+                readonly property real effectiveDragOffsetY: snapDragActive
+                    ? (interactionController.liveSnapDragY - sceneY) * _viewScale
+                    : root.dragOffsetViewY
 
-            // Apply offset when dragging OR when the snap freeze is active.
-            // The snap freeze outlives the drag by design (cleared by onMediaChanged),
-            // so gating on beingDragged alone would cause a 1-frame jump to the stale
-            // model sceneX/Y before selectionChromeModel is updated by C++.
-            x: sceneX + ((beingDragged || snapDragActive) ? (effectiveDragOffsetX / _viewScale) : 0)
-            y: sceneY + ((beingDragged || snapDragActive) ? (effectiveDragOffsetY / _viewScale) : 0)
-            width: Math.max(1, sceneW)
-            height: Math.max(1, sceneH)
+                // Selection geometry belongs to the media shell, including while
+                // its content is loading or waiting for memory.
+                enabled: !!entry
+                visible: enabled
 
-            // Use 4 separate opaque strips rather than a single transparent-fill Rectangle.
-            // A transparent-fill Rectangle with an opaque border can enter the opaque render
-            // batch in Qt Quick's scene graph — writes depth for the entire item bounds at
-            // chrome z=90000, causing the underlying Image (z≈0) to fail the depth test and
-            // render as black at high zoom levels. Pure opaque strips carry no fill, so they
-            // only occlude the exact edge pixels they cover.
-            readonly property real _bw: 1.0 / chrome._viewScale
+                // Apply offset when dragging OR when the snap freeze is active.
+                // The snap freeze outlives the drag by design (cleared by onMediaChanged),
+                // so gating on beingDragged alone would cause a 1-frame jump to the stale
+                // model sceneX/Y before selectionChromeModel is updated by C++.
+                x: sceneX + ((beingDragged || snapDragActive) ? (effectiveDragOffsetX / _viewScale) : 0)
+                y: sceneY + ((beingDragged || snapDragActive) ? (effectiveDragOffsetY / _viewScale) : 0)
+                width: Math.max(1, sceneW)
+                height: Math.max(1, sceneH)
 
-            // Top
-            Rectangle { x: 0; y: 0;                              width: chrome.width;  height: chrome._bw; color: AppStyle.Theme.selectionBorder; antialiasing: false }
-            // Bottom
-            Rectangle { x: 0; y: chrome.height - chrome._bw;     width: chrome.width;  height: chrome._bw; color: AppStyle.Theme.selectionBorder; antialiasing: false }
-            // Left
-            Rectangle { x: 0; y: chrome._bw;                     width: chrome._bw;    height: Math.max(0, chrome.height - 2 * chrome._bw); color: AppStyle.Theme.selectionBorder; antialiasing: false }
-            // Right
-            Rectangle { x: chrome.width - chrome._bw; y: chrome._bw; width: chrome._bw; height: Math.max(0, chrome.height - 2 * chrome._bw); color: AppStyle.Theme.selectionBorder; antialiasing: false }
+                // Use 4 separate opaque strips rather than a single transparent-fill Rectangle.
+                // A transparent-fill Rectangle with an opaque border can enter the opaque render
+                // batch in Qt Quick's scene graph — writes depth for the entire item bounds
+                // above the media, causing the underlying Image to fail the depth test and
+                // render as black at high zoom levels. Pure opaque strips carry no fill, so they
+                // only occlude the exact edge pixels they cover.
+                readonly property real _bw: 1.0 / chrome._viewScale
 
-            Repeater {
-                model: root.handleDefs
+                // Top
+                Rectangle { x: 0; y: 0;                              width: chrome.width;  height: chrome._bw; color: AppStyle.Theme.selectionBorder; antialiasing: false }
+                // Bottom
+                Rectangle { x: 0; y: chrome.height - chrome._bw;     width: chrome.width;  height: chrome._bw; color: AppStyle.Theme.selectionBorder; antialiasing: false }
+                // Left
+                Rectangle { x: 0; y: chrome._bw;                     width: chrome._bw;    height: Math.max(0, chrome.height - 2 * chrome._bw); color: AppStyle.Theme.selectionBorder; antialiasing: false }
+                // Right
+                Rectangle { x: chrome.width - chrome._bw; y: chrome._bw; width: chrome._bw; height: Math.max(0, chrome.height - 2 * chrome._bw); color: AppStyle.Theme.selectionBorder; antialiasing: false }
 
-                delegate: Rectangle {
-                    width: root.handleSize / chrome._viewScale
-                    height: root.handleSize / chrome._viewScale
-                    radius: 1.0 / chrome._viewScale
-                    color: AppStyle.Theme.selectionHandle
-                    border.width: 1.0 / chrome._viewScale
-                    border.color: AppStyle.Theme.selectionBorder
-                    antialiasing: false
-                    x: (modelData.ux * chrome.width) - width * 0.5
-                    y: (modelData.uy * chrome.height) - height * 0.5
+                Repeater {
+                    model: root.handleDefs
+
+                    delegate: Rectangle {
+                        width: root.handleSize / chrome._viewScale
+                        height: root.handleSize / chrome._viewScale
+                        radius: 1.0 / chrome._viewScale
+                        color: AppStyle.Theme.selectionHandle
+                        border.width: 1.0 / chrome._viewScale
+                        border.color: AppStyle.Theme.selectionBorder
+                        antialiasing: false
+                        x: (modelData.ux * chrome.width) - width * 0.5
+                        y: (modelData.uy * chrome.height) - height * 0.5
+                    }
                 }
             }
         }

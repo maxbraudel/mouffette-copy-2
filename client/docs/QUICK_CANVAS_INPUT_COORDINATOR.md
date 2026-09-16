@@ -82,7 +82,7 @@ transaction, including after the scene stops. Camera navigation remains availabl
 The always-enabled canvas `PointHandler` observes left presses and their
 release/cancellation, including presses which enter or leave text editing.
 
-1. Resolve the exact resize handle and topmost media at the press coordinates.
+1. Resolve the exact resize handle and media at the press coordinates, prioritizing selected bodies over unselected media.
 2. Finish an editor when the press targets another item, a handle or the background.
 3. `beginPrimaryGesture()` chooses **handle > media > canvas** once.
 4. The same decision controls background deselection and media ownership.
@@ -99,8 +99,12 @@ the active mode and primary owner. Synchronous text creation uses `try/finally`,
 not watchdog cleanup. The pan watchdog recognizes left and middle-button handlers.
 
 `CanvasRoot.mediaIdAtPoint()` examines live delegates, their actual transforms,
-visibility, enabled state, opacity and stacking order. Decorative children and
-delayed DTO geometry are not alternate pickers. Fully transparent media disable
+visibility, enabled state, opacity and stacking order. In editing mode, selected
+bodies take priority over unselected media even when visually covered. Among
+candidates with the same selection state, z and sibling order break ties. This
+changes only input priority, never the document's media stacking. Clicking an
+exposed part of another media or clearing selection restores access to it.
+Decorative children and delayed DTO geometry are not alternate pickers. Fully transparent media disable
 their whole input subtree so children cannot swallow another item's press.
 
 Native `containmentMask` checks make media and resize surfaces eligible before
@@ -110,8 +114,11 @@ Resize masks use exact handle hit tests even without an earlier mouse move.
 
 Qt documents the typed [containment mask](https://doc.qt.io/qt-6/qml-qtquick-item.html#containmentMask-prop)
 and distinguishes [opacity from input eligibility](https://doc.qt.io/qt-6/qml-qtquick-item.html#opacity-prop).
-Selection chrome reparents its `Repeater`, not individual delegates, respecting
-[Qt's sibling ownership](https://doc.qt.io/qt-6/qml-qtquick-repeater.html#details).
+Selection chrome keeps its `Repeater` and visuals inside the selection layer,
+above the entire media layer. A local transform mirrors the content camera for
+scene-space geometry and constant-size handles. The visuals must not be
+reparented into the lower content root: [Qt's z order](https://doc.qt.io/qt-6/qml-qtquick-item.html#z-prop)
+compares siblings, so even a very large child z cannot escape that subtree.
 
 ## Text edit lifecycle
 

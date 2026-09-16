@@ -50,7 +50,7 @@ Item {
             if (!inputLayer.interactionController
                     || typeof inputLayer.interactionController.mediaIdAtPoint !== "function")
                 return ""
-            // CanvasRoot resolves the actual, topmost visual delegate. Do not
+            // CanvasRoot resolves live delegates with selection priority. Do not
             // guess from decorative children or a stale geometry snapshot.
             return inputLayer.interactionController.mediaIdAtPoint(viewX, viewY) || ""
         }
