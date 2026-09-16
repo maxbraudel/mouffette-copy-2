@@ -79,6 +79,12 @@ if(APPLE)
 elseif(WIN32)
     target_link_libraries(MouffetteFFmpegMedia PRIVATE mf mfplat mfreadwrite mfuuid d3d11 dxgi)
     if(QT_FEATURE_cpp_winrt)
+        target_compile_features(MouffetteFFmpegMedia PRIVATE cxx_std_20)
+        if(MINGW)
+            # Qt's WinRT headers can be included before qffmpegwindowcapture_uwp.cpp
+            # reaches its own <unknwn.h> include.
+            target_compile_options(MouffetteFFmpegMedia PRIVATE -include unknwn.h)
+        endif()
         target_link_libraries(MouffetteFFmpegMedia PRIVATE Dwmapi Dxva2 windowsapp)
     endif()
 endif()

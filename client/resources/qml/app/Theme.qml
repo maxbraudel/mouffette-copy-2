@@ -90,8 +90,8 @@ QtObject {
 
     // Canvas chrome uses the same neutral hierarchy as the surrounding app.
     readonly property color canvasBackground: recessedBackground
-    readonly property color canvasScreenBackground: mix(text, canvasBackground, dark ? 0.09 : 0.12)
-    readonly property color canvasPrimaryScreenBackground: mix(bluePigment, canvasScreenBackground, 0.14)
+    readonly property color canvasScreenBackground: mix(text, canvasBackground, dark ? 0.16 : 0.18)
+    readonly property color canvasPrimaryScreenBackground: mix(bluePigment, canvasScreenBackground, 0.55)
     readonly property color canvasScreenBorder: controlBorder
     readonly property color canvasScreenText: text
     readonly property color canvasLabelShadow: withAlpha(canvasScreenBackground, 0.75)
@@ -99,8 +99,8 @@ QtObject {
     readonly property color selectionFill: withAlpha(bluePigment, 0.15)
     readonly property color selectionHandle: elevatedBackground
     readonly property color snapGuide: accent
-    readonly property color uiZoneFill: withAlpha(text, 0.12)
-    readonly property color uiZoneSystemFill: withAlpha(text, 0.20)
+    readonly property color uiZoneFill: withAlpha(elevatedBackground, 0.70)
+    readonly property color uiZoneSystemFill: withAlpha(elevatedBackground, 0.95)
     readonly property color mediaPlaceholder: mix(text, canvasBackground, 0.20)
     // The remote pointer must stay legible on arbitrary authored content.
     readonly property color remoteCursorFill: "#ffffff"

@@ -24,10 +24,14 @@ if (-not (Test-Path $cmake -PathType Leaf)) {
 
 $requiredPackages = @(
     (Join-Path $ucrtRoot 'lib\cmake\Qt6\Qt6Config.cmake'),
-    (Join-Path $ucrtRoot 'lib\cmake\Qt6Quick\Qt6QuickConfig.cmake')
+    (Join-Path $ucrtRoot 'lib\cmake\Qt6Quick\Qt6QuickConfig.cmake'),
+    (Join-Path $ucrtRoot 'include\winrt\base.h')
 )
 foreach ($requiredPackage in $requiredPackages) {
     if (-not (Test-Path $requiredPackage)) {
+        if ($requiredPackage -like '*\winrt\base.h') {
+            throw 'C++/WinRT headers not found. In the MSYS2 UCRT64 terminal, run: pacman -S --needed mingw-w64-ucrt-x86_64-cppwinrt'
+        }
         throw "Required Qt package not found: $requiredPackage"
     }
 }
