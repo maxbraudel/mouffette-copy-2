@@ -1,5 +1,6 @@
 #include "backend/network/UploadManager.h"
 #include "backend/media/MediaResidencyManager.h"
+#include "backend/media/ResidentVideoPlayer.h"
 #include <QApplication>
 #include <QFile>
 #include <QJsonArray>
@@ -721,8 +722,29 @@ private slots:
         client.disconnect();
     }
 
+    void targetKeepsThePrepareDeadlineUntilCommit_data()
+    {
+        QTest::addColumn<bool>("includeImage");
+        QTest::addColumn<int>("videoCount");
+        QTest::addColumn<int>("startMs");
+        QTest::addColumn<bool>("visible");
+        QTest::addColumn<bool>("offscreen");
+        QTest::newRow("text") << false << 0 << 0 << true << false;
+        QTest::newRow("cached-image") << true << 0 << 0 << true << false;
+        QTest::newRow("cached-video") << false << 1 << 0 << true << false;
+        QTest::newRow("cached-video-seek") << false << 1 << 1234 << true << false;
+        QTest::newRow("hidden-cached-video") << false << 1 << 1234 << false << false;
+        QTest::newRow("offscreen-cached-video") << false << 1 << 1234 << true << true;
+        QTest::newRow("mixed-shared-video") << true << 2 << 1234 << true << false;
+    }
+
     void targetKeepsThePrepareDeadlineUntilCommit()
     {
+        QFETCH(bool, includeImage);
+        QFETCH(int, videoCount);
+        QFETCH(int, startMs);
+        QFETCH(bool, visible);
+        QFETCH(bool, offscreen);
         QTemporaryDir directory;
         QVERIFY(directory.isValid());
         QWebSocketServer server(QStringLiteral("target-prepare-deadline-test"),
@@ -735,6 +757,9 @@ private slots:
         int successfulPreparedCount = 0;
         int failedPreparedCount = 0;
         int stoppedCount = 0;
+        QJsonArray preparedChecklist;
+        int armedCount = 0;
+        QJsonObject startedMessage;
         auto send = [&](QWebSocket* socket, QJsonObject message) {
             message.insert(QStringLiteral("protocolVersion"), 5);
             message.insert(QStringLiteral("serverBootId"), bootId);
@@ -791,9 +816,14 @@ private slots:
                 } else if (type == QLatin1String("prepared")) {
                     if (message.value(QStringLiteral("success")).toBool()) {
                         ++successfulPreparedCount;
+                        preparedChecklist = message.value(QStringLiteral("checklist")).toArray();
                     } else {
                         ++failedPreparedCount;
                     }
+                } else if (type == QLatin1String("armed")) {
+                    ++armedCount;
+                } else if (type == QLatin1String("started")) {
+                    startedMessage = message;
                 } else if (type == QLatin1String("stopped")) {
                     ++stoppedCount;
                 }
@@ -813,8 +843,66 @@ private slots:
         sceneSource->setScreens({ScreenInfo(0, 1920, 1080, 0, 0, true)});
         QVERIFY(sceneSource->document()->addText(
             QPointF(40, 60), QStringLiteral("Prepared target")));
-        const QJsonObject scene = sceneSource->document()->serializeSceneState();
-        const QJsonArray manifest;
+        auto& residency = MediaResidencyManager::instance();
+        QStringList receiverOwners;
+        const auto releaseOwners = qScopeGuard([&] {
+            for (const auto& owner : receiverOwners) residency.release(owner);
+        });
+        const RemoteCacheStore::Scope scope{ownerId, "target-deadline-session", 1};
+        QHash<QString, QJsonObject> assets;
+        const auto addCachedMedia = [&](const QString& path, bool video, int occurrence) {
+            CanvasMedia* media = sceneSource->document()->addPreparedFile(
+                path, QSize(160, 90), video,
+                offscreen ? QPointF(-10000, -10000) : QPointF(100 + occurrence * 200, 100));
+            QVERIFY(media);
+            QTRY_VERIFY_WITH_TIMEOUT(media->residencyReady(), 5000);
+            media->setContentVisible(visible);
+            const QString fileId = media->fileId();
+            QVERIFY(files.registerReceivedFilePath(scope, fileId, path));
+            const QString owner = UploadManager::residencyOwnerId(
+                scope.remoteSessionId, scope.generation, fileId);
+            if (!receiverOwners.contains(owner)) {
+                receiverOwners.append(owner);
+                residency.acquire(owner, path);
+                QTRY_VERIFY_WITH_TIMEOUT(residency.ready(owner), 5000);
+            }
+            auto asset = assets.value(fileId, QJsonObject{
+                {"assetId", fileId}, {"fileId", fileId}, {"sha256", fileId},
+                {"size", double(QFileInfo(path).size())},
+                {"extension", video ? "mp4" : "png"}});
+            auto ids = asset.value(QStringLiteral("mediaIds")).toArray();
+            ids.append(media->mediaId());
+            asset.insert(QStringLiteral("mediaIds"), ids);
+            assets.insert(fileId, asset);
+        };
+        if (includeImage) {
+            const QString path = directory.filePath(QStringLiteral("cached.png"));
+            QImage image(160, 90, QImage::Format_RGBA8888);
+            image.fill(Qt::cyan);
+            QVERIFY(image.save(path));
+            addCachedMedia(path, false, 0);
+        }
+        for (int index = 0; index < videoCount; ++index)
+            addCachedMedia(QString::fromUtf8(TEST_VIDEO_FILE), true, index);
+        QJsonObject scene = sceneSource->document()->serializeSceneState();
+        QJsonArray entries = scene.value(QStringLiteral("media")).toArray();
+        for (qsizetype index = 0; index < entries.size(); ++index) {
+            auto entry = entries.at(index).toObject();
+            if (entry.value(QStringLiteral("type")) != QLatin1String("text"))
+                entry.insert(QStringLiteral("assetId"), entry.value(QStringLiteral("fileId")));
+            if (entry.value(QStringLiteral("type")) == QLatin1String("video")) {
+                entry.insert(QStringLiteral("startPositionMs"), startMs);
+                entry.remove(QStringLiteral("displayedFrameTimestampMs"));
+                QCOMPARE(entry.value(QStringLiteral("spans")).toArray().isEmpty(), offscreen);
+            }
+            entries.replace(index, entry);
+        }
+        scene.insert(QStringLiteral("media"), entries);
+        QJsonArray manifest;
+        for (const auto& asset : assets) manifest.append(asset);
+        QString manifestError;
+        manifest = SceneRunCoordinator::normalizeManifest(manifest, &manifestError);
+        QVERIFY2(manifestError.isEmpty(), qPrintable(manifestError));
         const QString runId = QStringLiteral("target-prepare-deadline-run");
         const QString digest = SceneRunCoordinator::computeDigest(1, manifest, scene);
         const QJsonObject correlation{
@@ -826,10 +914,22 @@ private slots:
         prepare.insert(QStringLiteral("type"), QStringLiteral("scene_prepare"));
         prepare.insert(QStringLiteral("manifest"), manifest);
         prepare.insert(QStringLiteral("scene"), scene);
+        QElapsedTimer preparationTime;
+        preparationTime.start();
         send(peer, prepare);
 
+        QTRY_COMPARE_WITH_TIMEOUT(controller.findChildren<ResidentVideoPlayer*>().size(), videoCount, 3000);
+        for (auto* player : controller.findChildren<ResidentVideoPlayer*>()) {
+            QTRY_VERIFY_WITH_TIMEOUT(player->preparedAt(startMs), 3000);
+            QCOMPARE(player->playbackState(), QMediaPlayer::PausedState);
+        }
         QTRY_COMPARE_WITH_TIMEOUT(successfulPreparedCount, 1, 3000);
+        qInfo() << "Cached scene prepared in" << preparationTime.elapsed() << "ms";
         QCOMPARE(failedPreparedCount, 0);
+        QVERIFY(!preparedChecklist.isEmpty());
+        QCOMPARE(preparedChecklist.size(), SceneRunCoordinator::createLocalChecklist(scene).size());
+        for (const auto& stage : preparedChecklist)
+            QVERIFY(stage.toObject().value(QStringLiteral("ready")).toBool());
 
         // The former implementation replaced the 8 s PREPARE deadline here
         // with activationLead + startedAck (500 + 1000 ms), even though no
@@ -843,10 +943,35 @@ private slots:
             if (candidate && candidate->objectName()
                 == QLatin1String("RemoteScreenWindow_0")) {
                 remoteWindowPresent = true;
+                QVERIFY(!candidate->isVisible()); // PREPARE must finish while hidden.
                 break;
             }
         }
         QVERIFY(remoteWindowPresent);
+
+        // Continue through the real receiver's clock/COMMIT/presentation path.
+        // No test callback may manufacture a span-ready or first-frame signal.
+        QVERIFY(startedMessage.isEmpty());
+        QJsonObject prepared = correlation;
+        prepared.insert(QStringLiteral("type"), QStringLiteral("prepared"));
+        prepared.insert(QStringLiteral("allPrepared"), true);
+        send(peer, prepared);
+        QTRY_COMPARE_WITH_TIMEOUT(armedCount, 1, 3000);
+        QJsonObject armed = correlation;
+        armed.insert(QStringLiteral("type"), QStringLiteral("armed"));
+        send(peer, armed);
+        QJsonObject commit = correlation;
+        commit.insert(QStringLiteral("type"), QStringLiteral("commit"));
+        commit.insert(QStringLiteral("startServerMonotonicMs"),
+                      double(client.estimatedServerMonotonicMs() + 300));
+        commit.insert(QStringLiteral("startEpochMs"),
+                      double(QDateTime::currentMSecsSinceEpoch() + 300));
+        commit.insert(QStringLiteral("maximumClockUncertaintyMs"), 50);
+        commit.insert(QStringLiteral("activationLeadMs"), 500);
+        send(peer, commit);
+        QTRY_VERIFY_WITH_TIMEOUT(!startedMessage.isEmpty(), 3000);
+        QVERIFY(startedMessage.value(QStringLiteral("firstFramePresented")).toBool());
+        QCOMPARE(failedPreparedCount, 0);
 
         QJsonObject stop = correlation;
         stop.insert(QStringLiteral("type"), QStringLiteral("stop"));

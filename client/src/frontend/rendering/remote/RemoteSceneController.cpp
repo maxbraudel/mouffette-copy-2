@@ -3348,11 +3348,15 @@ void RemoteSceneController::publishMediaSpan(const std::shared_ptr<RemoteMediaIt
     media.insert(QStringLiteral("renderVisible"), item->renderVisible);
     media.insert(QStringLiteral("renderOpacity"), item->renderOpacity);
 
+    // MediaVisual gates both image and video readiness on this shared role.
+    // A resident frame alone cannot complete the hidden PREPARE barrier.
+    if (item->type != QLatin1String("text")) {
+        media.insert(QStringLiteral("residencyReady"),
+            MediaResidencyManager::instance().ready(item->residencyOwner));
+    }
     if (item->type == QLatin1String("image")) {
         media.insert(QStringLiteral("residentFrameSource"),
             QVariant::fromValue(static_cast<QObject*>(item->frameSource.data())));
-        media.insert(QStringLiteral("residencyReady"),
-            MediaResidencyManager::instance().ready(item->residencyOwner));
     } else if (item->type == QLatin1String("video")) {
         media.insert(QStringLiteral("remoteFrameSource"),
                      QVariant::fromValue(static_cast<QObject*>(item->frameSource.data())));
