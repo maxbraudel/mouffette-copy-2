@@ -169,7 +169,12 @@ copy_qt_plugin tls libqsecuretransportbackend.dylib
 copy_qt_plugin tls libqopensslbackend.dylib
 copy_qt_plugin tls libqcertonlybackend.dylib
 copy_qt_plugin iconengines libqsvgicon.dylib
-copy_qt_plugin multimedia libdarwinmediaplugin.dylib
+# The build bundles our Qt Darwin plugin with the first-seek precision fix.
+# Never overwrite it with the unpatched plugin from the Qt installation.
+[[ -f "$APP_PLUGIN_DIR/multimedia/libdarwinmediaplugin.dylib" ]] || {
+    echo "Missing patched Darwin media plugin in $APP" >&2
+    exit 1
+}
 copy_qt_plugin networkinformation libqapplenetworkinformation.dylib
 for IMAGE_PLUGIN in libqgif.dylib libqwebp.dylib libqico.dylib libqmacheif.dylib \
     libqjpeg.dylib libqtiff.dylib libqsvg.dylib libqicns.dylib; do

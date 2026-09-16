@@ -5,7 +5,7 @@ C++ Qt application for the Mouffette media sharing system.
 ## Prerequisites
 
 ### macOS
-- Qt 6.11 or newer, including matching Qt Quick/Gui private headers
+- Qt 6.11.2, including matching Qt Quick/Gui/Multimedia private headers
 - CMake 3.25 or newer and Ninja
 - Xcode Command Line Tools
 
@@ -56,6 +56,11 @@ Only select an older macOS deployment target when every linked Qt/OpenSSL
 framework was built for that target. Homebrew builds can be host-version-only;
 the script therefore defaults to the active macOS version rather than claiming
 unsupported compatibility.
+
+On macOS, CMake also builds the Qt Darwin media plugin with a precise-seek
+fix. Its pinned Qt source archive is downloaded once per build tree and
+verified by SHA-256; the installed Qt is untouched. See
+[the backend patch notes](docs/qt-darwin-seek.md) for offline builds and Qt upgrades.
 
 ## Running
 

@@ -68,6 +68,11 @@ int main(int argc, char *argv[]) {
     AppConfig::instance().applyPreApplicationEnvironment();
 
     QApplication app(argc, argv);
+#ifdef Q_OS_MACOS
+    // Prefer our bundled Qt backend, including the precise first-seek fix.
+    QCoreApplication::addLibraryPath(
+        QCoreApplication::applicationDirPath() + QStringLiteral("/../PlugIns"));
+#endif
 
     // Load bundled Impact font so it is available on all platforms
     QFontDatabase::addApplicationFont(QStringLiteral(":/fonts/impact.ttf"));

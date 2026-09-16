@@ -33,6 +33,66 @@ class VideoPlaybackBackendTest final : public QObject
     Q_OBJECT
 
 private slots:
+    void seekBeforeFirstPlay_data()
+    {
+        QTest::addColumn<bool>("whileLoading");
+        QTest::newRow("loaded") << false;
+        QTest::newRow("restored-while-loading") << true;
+    }
+
+    void seekBeforeFirstPlay()
+    {
+        QFETCH(bool, whileLoading);
+        CanvasDocument document;
+        auto* video = document.addPreparedFile(videoFixture(), QSize(160, 90), true, {});
+        QVERIFY(video);
+        auto* player = video->player();
+        QSignalSpy states(player, &QMediaPlayer::playbackStateChanged);
+        if (!whileLoading)
+            QTRY_VERIFY(player->duration() > 3000 && player->isSeekable());
+        for (qint64 target : {qint64(1234), qint64(2678), qint64(789), qint64(0)}) {
+            video->setPositionMs(target);
+            QCOMPARE(video->positionMs(), target);
+            QTRY_VERIFY(player->duration() > 3000 && player->isSeekable());
+            // setPosition() first reports the requested value optimistically.
+            // Allow the asynchronous native seek to complete: Qt's original
+            // Darwin backend then changed 1234 to 1000 before the first play.
+            QTest::qWait(700);
+            QVERIFY2(qAbs(player->position() - target) <= 1,
+                     qPrintable(QStringLiteral("Requested %1 ms, settled at %2 ms")
+                                    .arg(target).arg(player->position())));
+            QVERIFY(!video->isPlaying());
+        }
+        for (const auto& state : states)
+            QVERIFY(state[0].value<QMediaPlayer::PlaybackState>() != QMediaPlayer::PlayingState);
+    }
+
+    void seekAfterPauseAndSourceReload()
+    {
+        CanvasDocument document;
+        auto* video = document.addPreparedFile(videoFixture(), QSize(160, 90), true, {});
+        QVERIFY(video);
+        video->setMuted(true);
+        QTRY_VERIFY(video->player()->duration() > 3000);
+        video->togglePlayPause();
+        QTRY_VERIFY(video->positionMs() > 100);
+        video->togglePlayPause();
+        video->setPositionMs(1789);
+        QTest::qWait(700);
+        QVERIFY(qAbs(video->positionMs() - 1789) <= 1);
+        QVERIFY(!video->isPlaying());
+
+        video->setSourcePath(QString());
+        video->setSourcePath(videoFixture());
+        QTRY_VERIFY(video->player()->duration() > 3000 && video->player()->isSeekable());
+        video->seekToRatio(0.1234);
+        const qint64 target = qRound64(video->player()->duration() * 0.1234);
+        QTest::qWait(700);
+        QVERIFY(qAbs(video->positionMs() - target) <= 1);
+        QVERIFY(!video->isPlaying());
+        QVERIFY(video->muted());
+    }
+
     void previewAndMarkersAreIndependentAndPersist()
     {
         const QString fixture = videoFixture();

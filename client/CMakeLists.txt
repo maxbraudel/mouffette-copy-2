@@ -1011,3 +1011,24 @@ if(BUILD_TESTING)
             -DSOURCE_ROOT=${CMAKE_SOURCE_DIR}
             -P ${CMAKE_SOURCE_DIR}/tests/cmake/verify_qml_architecture.cmake)
 endif()
+
+if(APPLE)
+    include(cmake/QtDarwinMedia.cmake)
+    if(BUILD_TESTING)
+        # Exercise Darwin explicitly even when the selected Qt also has FFmpeg.
+        add_test(NAME VideoPlaybackDarwinSeek COMMAND tst_VideoPlaybackBackend
+            seekBeforeFirstPlay seekAfterPauseAndSourceReload)
+        set_tests_properties(VideoPlaybackDarwinSeek PROPERTIES
+            RUN_SERIAL TRUE
+            ENVIRONMENT "QT_MEDIA_BACKEND=darwin;QT_QUICK_CONTROLS_STYLE=Basic")
+        get_property(_tests DIRECTORY PROPERTY TESTS)
+        set_property(TEST ${_tests} APPEND PROPERTY ENVIRONMENT_MODIFICATION
+            "QT_PLUGIN_PATH=path_list_prepend:${CMAKE_CURRENT_BINARY_DIR}/plugins")
+        get_property(_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+        foreach(_target IN LISTS _targets)
+            if(_target MATCHES "^tst_")
+                add_dependencies(${_target} MouffetteDarwinMedia)
+            endif()
+        endforeach()
+    endif()
+endif()
