@@ -11,6 +11,33 @@
 #include <QSortFilterProxyModel>
 #include <QTimer>
 
+// Cache readiness belongs to this workspace's current remote endpoint. Keep it
+// out of the persisted document and update existing delegates when it changes.
+class WorkspaceMediaListModel final : public QSortFilterProxyModel
+{
+public:
+    WorkspaceMediaListModel(std::function<bool(const QString&)> cached, QObject* parent)
+        : QSortFilterProxyModel(parent), m_cached(std::move(cached)) {}
+
+    QVariant data(const QModelIndex& index, int role) const override
+    {
+        const QVariant value = QSortFilterProxyModel::data(index, role);
+        if (role != MediaListModel::ModelDataRole || !value.isValid()) return value;
+        auto row = value.toMap();
+        row.insert(QStringLiteral("remoteCached"), m_cached(row.value(QStringLiteral("mediaId")).toString()));
+        return row;
+    }
+
+    void refreshRemoteCache()
+    {
+        if (rowCount() > 0)
+            emit dataChanged(index(0, 0), index(rowCount() - 1, 0), {MediaListModel::ModelDataRole});
+    }
+
+private:
+    std::function<bool(const QString&)> m_cached;
+};
+
 ClientWorkspaceViewModel::ClientWorkspaceViewModel(QString workspaceEndpointId,
                                                ICanvasHost* canvas,
                                                std::function<void()> uploadAction,
@@ -27,10 +54,15 @@ ClientWorkspaceViewModel::ClientWorkspaceViewModel(QString workspaceEndpointId,
     , m_hasUnuploadedFiles(std::move(hasUnuploadedFiles))
     , m_hasProject(std::move(hasProject))
     , m_mediaSettings(new MediaSettingsViewModel(this))
-    , m_overlayMediaModel(new QSortFilterProxyModel(this))
+    , m_overlayMediaModel(new WorkspaceMediaListModel([this](const QString& mediaId) {
+        const auto* host = qobject_cast<QuickCanvasHost*>(m_canvas.data());
+        return host && host->remoteMediaCached(mediaId);
+    }, this))
 {
     m_overlayMediaModel->setSortRole(MediaListModel::ZRole);
     m_overlayMediaModel->sort(0, Qt::DescendingOrder);
+    connect(this, &ClientWorkspaceViewModel::actionStateChanged,
+            m_overlayMediaModel, &WorkspaceMediaListModel::refreshRemoteCache);
     if (m_uploadManager) {
         connect(m_uploadManager, &UploadManager::uiStateChanged, this, [this] {
             if (!uploadBelongsToSession() || !m_uploadManager->isBusy()

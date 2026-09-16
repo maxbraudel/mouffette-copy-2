@@ -20,6 +20,8 @@
 #include "backend/security/DeviceIdentityStore.h"
 #include "frontend/rendering/canvas/QuickCanvasController.h"
 #include "frontend/rendering/canvas/QuickCanvasHost.h"
+#include "frontend/rendering/canvas/MediaListModel.h"
+#include "frontend/qml/ClientWorkspaceViewModel.h"
 #include "frontend/rendering/remote/RemoteSceneController.h"
 
 class RemoteSceneLifecycleTest final : public QObject
@@ -313,6 +315,18 @@ private slots:
         host->setScreens({ScreenInfo(0, 1920, 1080, 0, 0, true)});
         host->setProjectEditingEnabled(true);
         host->setOverlayActionsEnabled(true);
+        ClientWorkspaceViewModel workspace(QStringLiteral("persistent-workspace"), host.get(),
+            [] {}, &uploads, [] { return true; }, [] { return false; }, [] { return true; });
+        auto* listModel = qobject_cast<QAbstractItemModel*>(workspace.mediaModel());
+        QVERIFY(listModel);
+        const auto rowCached = [listModel](const QString& mediaId) {
+            for (int row = 0; row < listModel->rowCount(); ++row) {
+                const auto value = listModel->data(listModel->index(row, 0), MediaListModel::ModelDataRole).toMap();
+                if (value.value(QStringLiteral("mediaId")).toString() == mediaId)
+                    return value.value(QStringLiteral("remoteCached")).toBool();
+            }
+            return false;
+        };
         QVERIFY(host->document()->addText(QPointF(40, 60), QStringLiteral("Scene title")));
         if (includeImage) {
             const QString path = directory.filePath(QStringLiteral("asset.png"));
@@ -327,14 +341,33 @@ private slots:
             QTRY_VERIFY_WITH_TIMEOUT(media->residencyReady(), 5000);
             if (uploaded) {
                 files.markFileUploadedToClient(media->fileId(), targetId);
+                media->setUploadUploaded();
+                QVERIFY(!rowCached(media->mediaId())); // Upload alone is not a cache acknowledgement.
                 if (memoryReady) {
-                    send(serverPeer, {{"type", "media_residency"},
+                    const auto report = [&](const QString& state, int sequence) {
+                        send(serverPeer, {{"type", "media_residency"},
                         {"remoteSessionId", "preparation-session"}, {"generation", 1},
                         {"ownerEndpointId", ownerId}, {"targetEndpointId", targetId},
-                        {"sequence", 1}, {"assets", QJsonArray{QJsonObject{
+                        {"sequence", sequence}, {"assets", QJsonArray{QJsonObject{
                             {"assetId", media->fileId()}, {"sha256", media->fileId()},
-                            {"state", "ready"}, {"progress", 1}, {"error", ""}}}}});
+                            {"state", state}, {"progress", state == "ready" ? 1 : 0}, {"error", ""}}}}});
+                    };
+                    QSignalSpy rowChanges(listModel, &QAbstractItemModel::dataChanged);
+                    report(QStringLiteral("ready"), 1);
                     QTRY_VERIFY_WITH_TIMEOUT(uploads.remoteMediaReady(targetId, media->fileId()), 2000);
+                    QTRY_VERIFY(rowCached(media->mediaId()));
+                    QVERIFY(!rowChanges.isEmpty());
+                    rowChanges.clear();
+                    report(QStringLiteral("waiting_for_memory"), 2);
+                    QTRY_VERIFY(!rowCached(media->mediaId()));
+                    QVERIFY(!rowChanges.isEmpty());
+                    report(QStringLiteral("ready"), 3);
+                    QTRY_VERIFY(rowCached(media->mediaId()));
+                    // A workspace ID and its current transport endpoint are different identities.
+                    host->setRemoteSceneTarget(QStringLiteral("another-peer"), {});
+                    QVERIFY(!rowCached(media->mediaId()));
+                    host->setRemoteSceneTarget(targetId, QStringLiteral("Client B"));
+                    QVERIFY(rowCached(media->mediaId()));
                 }
             }
             if (missingSource) {

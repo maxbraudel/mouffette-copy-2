@@ -93,12 +93,16 @@ Rectangle {
                         required property string uploadState
                         required property var modelData
                         readonly property bool textMedia: mediaType === "text"
+                        readonly property bool uploadedAndCached: uploadState === "uploaded" && !!modelData.remoteCached
+                        readonly property string statusText: uploadedAndCached ? "Uploaded and Cached"
+                            : uploadState === "uploaded" ? "Uploaded" : "Not uploaded"
                         readonly property bool selected: !!modelData.selected
                         readonly property string dimensions: Math.round(modelData.width || 0)
                             + " x " + Math.round(modelData.height || 0) + " px"
                         readonly property string detailsText: dimensions
                             + (textMedia ? "" : "  ·  " + root.humanSize(modelData.sourceSizeBytes))
-                        implicitWidth: Math.max(nameMetrics.advanceWidth, detailsMetrics.advanceWidth) + 40
+                        implicitWidth: Math.max(nameMetrics.advanceWidth, detailsMetrics.advanceWidth,
+                                                textMedia ? 0 : statusMetrics.advanceWidth) + 40
                         width: mediaColumn.width
                         height: details.implicitHeight + 16 + (index > 0 ? 1 : 0)
                         padding: 0
@@ -112,7 +116,7 @@ Rectangle {
                             if (!root.sceneLocked) root.session.selectMedia(mediaId, false)
                         }
                         Accessible.name: displayName
-                        Accessible.description: (textMedia ? "" : uploadState + ", ") + detailsText
+                        Accessible.description: (textMedia ? "" : (uploadState === "uploading" ? "Uploading" : statusText) + ", ") + detailsText
                         background: Rectangle {
                             color: root.sceneLocked ? Qt.rgba(1, 1, 1, 0.03)
                                  : row.selected ? Qt.rgba(1, 1, 1, 0.10)
@@ -126,6 +130,7 @@ Rectangle {
                         }
                         TextMetrics { id: nameMetrics; text: row.displayName; font: nameLabel.font }
                         TextMetrics { id: detailsMetrics; text: row.detailsText; font: detailLabel.font }
+                        TextMetrics { id: statusMetrics; text: row.statusText; font: statusLabel.font }
                         contentItem: Column {
                             id: details
                             spacing: 3
@@ -147,14 +152,16 @@ Rectangle {
                                 height: 20
                                 visible: !row.textMedia
                                 Text {
+                                    id: statusLabel
                                     objectName: "mediaStatus_" + row.index
                                     anchors.fill: parent
-                                    text: row.uploadState === "uploaded" ? "Uploaded" : "Not uploaded"
+                                    text: row.statusText
                                     visible: row.uploadState !== "uploading"
-                                    color: row.uploadState === "uploaded" ? Theme.mediaUploaded : Theme.mediaNotUploaded
+                                    color: row.uploadedAndCached ? Theme.mediaUploaded : Theme.mediaNotUploaded
                                     font.pixelSize: 14
                                     font.weight: Font.Medium
                                     verticalAlignment: Text.AlignVCenter
+                                    elide: Text.ElideRight
                                 }
                                 Rectangle {
                                     objectName: "mediaProgress_" + row.index

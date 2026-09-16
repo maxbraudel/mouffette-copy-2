@@ -9,7 +9,7 @@ class ICanvasHost;
 class MediaListModel;
 class MediaSettingsViewModel;
 class UploadManager;
-class QSortFilterProxyModel;
+class WorkspaceMediaListModel;
 
 class ClientWorkspaceViewModel : public QObject
 {
@@ -167,7 +167,7 @@ private:
     bool m_actionPending = false;
     bool m_settingsVisible = false;
     MediaSettingsViewModel* m_mediaSettings = nullptr;
-    QSortFilterProxyModel* m_overlayMediaModel = nullptr;
+    WorkspaceMediaListModel* m_overlayMediaModel = nullptr;
     int m_uploadPercent = 0;
     int m_uploadFilesCompleted = 0;
     int m_uploadFilesTotal = 0;

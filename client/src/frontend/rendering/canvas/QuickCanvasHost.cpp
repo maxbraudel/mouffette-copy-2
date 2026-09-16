@@ -486,6 +486,14 @@ QStringList QuickCanvasHost::residencyOwners() const
     return owners;
 }
 
+bool QuickCanvasHost::remoteMediaCached(const QString& mediaId) const
+{
+    const auto* media = m_document->mediaById(mediaId);
+    return media && !media->isText() && m_uploadManager
+        && media->uploadState() == CanvasMedia::UploadState::Uploaded
+        && m_uploadManager->remoteMediaReady(m_targetClientId, media->fileId());
+}
+
 QString QuickCanvasHost::mediaReadinessReason(bool remote) const
 {
     if (m_document->hasPendingImports())

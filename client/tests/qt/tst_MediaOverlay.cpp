@@ -564,6 +564,21 @@ void MediaOverlayTest::mediaPanelVisibilityAnchorInteractionAndScroll()
     QCoreApplication::processEvents();
     QCOMPARE(harness->property("selectionCalls").toInt(), 1);
 
+    auto cachedRow = rows[0].toMap();
+    cachedRow.insert(QStringLiteral("uploadState"), QStringLiteral("uploaded"));
+    for (const bool cached : {false, true, false}) {
+        cachedRow.insert(QStringLiteral("remoteCached"), cached);
+        rows[0] = cachedRow;
+        model.updateFromList(rows);
+        auto* status = findVisualItem(panel, QStringLiteral("mediaStatus_0"));
+        QVERIFY(status);
+        QTRY_COMPARE(status->property("text").toString(), cached
+            ? QStringLiteral("Uploaded and Cached") : QStringLiteral("Uploaded"));
+        QCOMPARE(status->property("color").value<QColor>(),
+                 QColor(cached ? "#2ecc71" : "#f39c12"));
+        QCOMPARE(findVisualItem(panel, QStringLiteral("mediaRow_0")), firstRow);
+    }
+
     for (int index = 1; index < 30; ++index) {
         rows.append(QVariantMap{
             {QStringLiteral("rowKey"), QStringLiteral("media-%1").arg(index)},
@@ -855,7 +870,7 @@ void MediaOverlayTest::mediaRowsAndProgress()
     QTRY_VERIFY(status->isVisible());
     QVERIFY(!progress->isVisible());
     QCOMPARE(status->property("text").toString(), QStringLiteral("Uploaded"));
-    QCOMPARE(status->property("color").value<QColor>(), QColor("#2ecc71"));
+    QCOMPARE(status->property("color").value<QColor>(), QColor("#f39c12"));
     QCOMPARE(row->height(), originalHeight);
     host->document()->select(photo->mediaId());
     QTRY_VERIFY(row->property("selected").toBool());

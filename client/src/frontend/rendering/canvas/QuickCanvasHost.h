@@ -61,6 +61,7 @@ public:
     bool remoteSceneActionEnabled() const override;
     bool testSceneActionEnabled() const override;
     QString mediaReadinessReason(bool remote) const;
+    bool remoteMediaCached(const QString& mediaId) const;
     void triggerRemoteSceneAction() override;
     void triggerTestSceneAction() override;
 
