@@ -184,6 +184,10 @@ is isolated in `TextOutlineItem.cpp`;
 build and package it with the same Qt version. See
 [the rendering investigation and validation notes](docs/text-outline-rendering.md).
 
+Images and remote video frames use source-sized scene-graph textures. Resizing
+their canvas rectangles reuses those textures without allocating larger painted
+surfaces. See [the image rendering incident and regression coverage](docs/media-frame-rendering.md).
+
 The client is built with:
 - **Qt 6.11 / Qt Quick**: Cross-platform UI and rendering framework
 - **WebSocket**: Real-time communication with server

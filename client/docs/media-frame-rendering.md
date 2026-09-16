@@ -28,6 +28,20 @@ The decoder and residency manager are not size-dependent: the image is decoded
 once at its source resolution, with orientation applied, and retained as an
 immutable shared `QImage`. Geometry changes do not decode another image.
 
+An isolated `QQuickRenderControl` probe on macOS/Metal with Qt 6.11.2 reproduced
+the allocation growth using the previous renderer and a **32 × 24** source:
+
+| Item dimensions | Target DPR | Observed old texture | RGBA pixel bytes |
+| --- | --- | --- | --- |
+| 128 × 96 | 1 | 128 × 96 | 49,152 |
+| 2,048 × 1,024 | 1 | 2,048 × 1,024 | 8,388,608 |
+| 128 × 96 | 2 | 256 × 192 | 196,608 |
+| 2,048 × 1,024 | 2 | 4,096 × 2,048 | 33,554,432 |
+
+These are texture pixel counts, not a measurement of total process memory.
+The replacement's GPU tests retain the same **32 × 24** texture (3,072 RGBA pixel
+bytes) even for a **1,000,000 × 750,000** destination at DPR 1 and 2.
+
 ## Rendering contract
 
 `RemoteVideoFrameItem` retains its existing QML name but is now a `QQuickItem`
@@ -68,6 +82,16 @@ identical file shares the resident frame without invalidating existing owners.
 Its existing canvas cases cover normal/Alt/group resize and loading shells.
 The remote lifecycle, video playback and media overlay suites exercise the
 shared QML integration.
+
+Validation on macOS 26.1 / Qt 6.11.2 / Metal: the development application and
+tests build successfully; the GPU regression suite passes all nine functional
+cases, and 34 of the 35 CTest entries pass across the full run and targeted
+reruns. The remaining `MediaOverlayScaled` native-window suite has intermittent
+focus/animation timing failures on the interactive desktop. Its toolbar case
+passes independently after waiting for the actual wide layout. Test fixtures
+also now keep panel rows and click targets within the real window dimensions
+when Cocoa constrains a high-DPR window. The baseline, schema, interaction
+parity/ownership/runtime-matrix and randomized-input checks pass.
 
 For a manual reproduction, import an image and a video; perform large Alt-resizes
 then shrink with normal resize, pan/zoom, and change selection. Repeat with a

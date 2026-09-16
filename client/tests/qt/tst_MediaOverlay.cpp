@@ -834,6 +834,15 @@ void MediaOverlayTest::mediaRowsAndProgress()
     QVERIFY2(harness, qPrintable(error));
     window.show();
     QVERIFY(QTest::qWaitForWindowExposed(&window));
+    // Cocoa can constrain the first window size on a scaled display. Keep
+    // the animated rows and click targets inside the actual visible surface.
+    harness->setSize(window.size());
+#ifdef Q_OS_MACOS
+    MacWindowManager::activateApplicationWindow(&window);
+#else
+    window.requestActivate();
+#endif
+    QVERIFY(QTest::qWaitForWindowActive(&window));
     auto* panel = findVisualItem(harness.get(), QStringLiteral("realMediaListPanel"));
     QVERIFY(panel);
     QTRY_VERIFY(findVisualItem(panel, QStringLiteral("mediaRow_1")));
@@ -885,11 +894,13 @@ void MediaOverlayTest::mediaRowsAndProgress()
     host->document()->select(photo->mediaId());
     QTRY_VERIFY(row->property("selected").toBool());
     const QPoint clickPoint = textRow->mapToScene({textRow->width() / 2, textRow->height() / 2}).toPoint();
+    QVERIFY(QRect(QPoint(), window.size()).contains(clickPoint));
     QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier, clickPoint);
     QTRY_COMPARE(host->document()->selectedMedia(), text);
     QVERIFY(!row->property("selected").toBool());
     text->setZ(20);
     QTRY_COMPARE(findVisualItem(panel, QStringLiteral("mediaRow_0"))->property("mediaId").toString(), text->mediaId());
+    harness->setWidth(900);
     text->setText(QString(80, QLatin1Char('W')));
     QTRY_COMPARE(panel->width(), 420.0);
     harness->setWidth(600);
@@ -1181,6 +1192,10 @@ void MediaOverlayTest::toolbarToolsAndGlobalMemoryUsage()
     auto* memory = findVisualItem(appWindow->contentItem(), QStringLiteral("memoryUsageButton"));
     QVERIFY(memory && memory->isEnabled());
     QCOMPARE(memory->property("text").toString(), QStringLiteral("Usage RAM"));
+    auto* topBar = memory->parentItem();
+    while (topBar && !topBar->property("columns").isValid())
+        topBar = topBar->parentItem();
+    QVERIFY(topBar);
     appWindow->resize(900, 650);
     appWindow->showNormal();
     QVERIFY(QTest::qWaitForWindowExposed(appWindow));
@@ -1190,6 +1205,14 @@ void MediaOverlayTest::toolbarToolsAndGlobalMemoryUsage()
     appWindow->requestActivate();
 #endif
     QVERIFY(QTest::qWaitForWindowActive(appWindow));
+    // First exposure can fit the window to a smaller screen at high DPR.
+    // Establish the same wide size used below. The nested Row/Flow/GridLayout
+    // can still be arranging after exposure or a frame swap, so wait for the
+    // actual wide layout before recording its position and clicking the button.
+    appWindow->resize(900, 650);
+    QCOMPARE(appWindow->width(), 900);
+    QTRY_COMPARE(topBar->property("columns").toInt(), 2);
+    QTRY_COMPARE(memory->mapToScene({0, 0}).y(), topBar->mapToScene({0, 0}).y());
     const qreal toolbarY = memory->mapToScene({0, 0}).y();
     const QPoint memoryCenter = memory->mapToScene({memory->width() / 2, memory->height() / 2}).toPoint();
     QTest::mouseClick(appWindow, Qt::LeftButton, Qt::NoModifier, memoryCenter);
@@ -1213,6 +1236,7 @@ void MediaOverlayTest::toolbarToolsAndGlobalMemoryUsage()
     QTRY_VERIFY(!memory->property("checked").toBool());
 
     appWindow->resize(480, 650);
+    QTRY_COMPARE(topBar->property("columns").toInt(), 1);
     QTRY_VERIFY(memory->mapToScene({memory->width(), 0}).x() <= appWindow->width());
     QVERIFY(memory->isVisible() && memory->width() >= memory->implicitWidth());
     QTest::mouseClick(appWindow, Qt::LeftButton, Qt::NoModifier,
@@ -1221,6 +1245,7 @@ void MediaOverlayTest::toolbarToolsAndGlobalMemoryUsage()
     QTest::keyClick(appWindow, Qt::Key_Escape);
     QTRY_VERIFY(!memory->property("checked").toBool());
     appWindow->resize(900, 650);
+    QTRY_COMPARE(topBar->property("columns").toInt(), 2);
     QTRY_COMPARE(memory->mapToScene({0, 0}).y(), toolbarY);
 }
 
