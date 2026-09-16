@@ -18,7 +18,7 @@ AbstractButton {
         : tone === OverlayActionButton.Uploaded ? Theme.mediaUploaded
         : tone === OverlayActionButton.Remote || tone === OverlayActionButton.Test
           ? Theme.overlaySceneText
-        : enabled && (hovered || down) ? "white" : Theme.overlayText
+        : Theme.overlayText
     readonly property color backgroundColor: {
         if (dimmed) return Theme.overlayDisabledBackground
         if (tone === OverlayActionButton.Uploading)
@@ -30,8 +30,8 @@ AbstractButton {
         if (tone === OverlayActionButton.Remote || tone === OverlayActionButton.Test)
             return down ? Theme.overlayScenePressed
                  : hovered ? Theme.overlaySceneHover : Theme.overlaySceneBackground
-        return down ? Qt.rgba(1, 1, 1, 0.10)
-             : hovered ? Qt.rgba(1, 1, 1, 0.05) : "transparent"
+        return down ? Theme.overlayPressed
+             : hovered ? Theme.overlayHover : "transparent"
     }
 
     implicitWidth: label.implicitWidth + 40

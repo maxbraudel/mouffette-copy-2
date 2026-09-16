@@ -1,4 +1,5 @@
 import QtQuick
+import Mouffette.App
 Rectangle {
     id: root
 
@@ -6,8 +7,8 @@ Rectangle {
     property real cursorX: 0
     property real cursorY: 0
     property int diameter: 30
-    property color fillColor: "#FFFFFFFF"
-    property color borderColor: "#E6000000"
+    property color fillColor: Theme.remoteCursorFill
+    property color borderColor: Theme.remoteCursorBorder
     property real borderWidth: 2
 
     visible: cursorVisible

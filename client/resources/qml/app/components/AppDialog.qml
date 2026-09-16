@@ -15,11 +15,13 @@ Dialog {
 
     modal: true
     focus: true
+    palette: Theme.controlPalette
+    Overlay.modal: Rectangle { color: Theme.modalScrim }
     closePolicy: Popup.CloseOnEscape
     padding: 20
 
     background: Rectangle {
-        color: Theme.windowBackground
+        color: Theme.elevatedBackground
         border.width: 1
         border.color: Theme.border
         radius: 10
@@ -40,7 +42,7 @@ Dialog {
             Layout.fillWidth: true
             visible: text.length > 0
             text: dialog.detail
-            color: Theme.text
+            color: Theme.mutedText
             font.pixelSize: 14
             wrapMode: Text.Wrap
         }

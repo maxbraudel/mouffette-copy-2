@@ -327,6 +327,11 @@ private slots:
     void initTestCase()
     {
         registerCanvasQmlTypes();
+        // This standalone target loads the canvas from source rather than
+        // embedding the application's QML module.
+        qmlRegisterSingletonType(
+            QUrl::fromLocalFile(TEST_SOURCE_DIR "/resources/qml/app/Theme.qml"),
+            "Mouffette.App", 1, 0, "Theme");
         QVERIFY(QFontDatabase::addApplicationFont(TEST_SOURCE_DIR "/resources/fonts/impact.ttf") >= 0);
     }
 

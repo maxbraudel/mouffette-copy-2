@@ -23,6 +23,9 @@ QtObject {
         visibility: root.controller.ready ? Window.Maximized : Window.Hidden
         title: "Mouffette"
         color: Theme.windowBackground
+        palette: Theme.controlPalette
+
+        Overlay.modal: Rectangle { color: Theme.modalScrim }
 
         onClosing: function(close) {
             close.accepted = false

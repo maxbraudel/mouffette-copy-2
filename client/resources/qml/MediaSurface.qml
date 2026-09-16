@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Window
+import Mouffette.App
 import Mouffette.Canvas
 
 Item {
@@ -59,7 +60,7 @@ Item {
         objectName: "mediaLoadingSkeleton"
         anchors.fill: parent
         visible: root.revealProgress < 1
-        color: "#808080"
+        color: Theme.mediaPlaceholder
         property real pulseOpacity: 0.28
         opacity: pulseOpacity * (1 - root.revealProgress)
         SequentialAnimation on pulseOpacity {

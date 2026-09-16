@@ -7,6 +7,7 @@
 #include <QInputMethodEvent>
 #include <QQmlComponent>
 #include <QQmlEngine>
+#include <QQmlPropertyMap>
 #include <QQuickWindow>
 #include <QSignalSpy>
 #include <QTest>
@@ -22,6 +23,16 @@ private slots:
         qmlRegisterType<TextOutlineItem>("Mouffette.Canvas", 1, 0, "TextOutlineItem");
         qmlRegisterSingletonType<TextEditHelper>("Mouffette.Canvas", 1, 0, "TextEditHelper",
             [](QQmlEngine*, QJSEngine*) -> QObject* { return new TextEditHelper; });
+        qmlRegisterSingletonType<QQmlPropertyMap>("Mouffette.Canvas", 1, 0, "UiTiming",
+            [](QQmlEngine*, QJSEngine*) -> QObject* {
+                auto* timing = QQmlPropertyMap::create();
+                timing->insert(QStringLiteral("toastAnimationDurationMs"), 0);
+                timing->freeze();
+                return timing;
+            });
+        qmlRegisterSingletonType(
+            QUrl::fromLocalFile(TEST_SOURCE_DIR "/resources/qml/app/Theme.qml"),
+            "Mouffette.App", 1, 0, "Theme");
     }
 
     void borderFitsAtEveryAlignmentAndAlphaIsUniform()

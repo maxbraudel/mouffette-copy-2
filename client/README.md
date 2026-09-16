@@ -171,6 +171,11 @@ the editor controls' lifecycle during test and remote scenes.
 
 ## Architecture
 
+UI colors and system appearance bindings are centralized in
+[`Theme.qml`](resources/qml/app/Theme.qml). See the
+[theme guide](docs/UI_THEME.md) for semantic roles, canvas styling and popup
+layering.
+
 The complete application interface is Qt Quick/QML. One
 `QQmlApplicationEngine` loads the `ApplicationWindow`; C++ exposes typed
 controllers, list models, and commands without locating or manipulating QML

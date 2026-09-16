@@ -1,4 +1,5 @@
 import QtQuick
+import Mouffette.App
 // Shared horizontal overlay slider.
 // Track + fill + draggable thumb. Value range [0, 1].
 // Blocks pointer events from reaching canvas handlers beneath it.
@@ -58,7 +59,7 @@ Item {
     implicitWidth: 120
     implicitHeight: 16
 
-    // Track background — gOverlayBorderColor = QColor(100,100,100,255)
+    // Track background
     Rectangle {
         id: track
         anchors.verticalCenter: parent.verticalCenter
@@ -66,10 +67,10 @@ Item {
         anchors.right: parent.right
         height: 4
         radius: 2
-        color: "#FF646464"
+        color: Theme.sliderTrack
     }
 
-    // Fill — gOverlayActiveBackgroundColor = QColor(52,87,128,240)
+    // Progress fill
     Rectangle {
         id: fill
         anchors.verticalCenter: track.verticalCenter
@@ -77,7 +78,7 @@ Item {
         width: Math.max(0, Math.min(track.width, root._visualValue * track.width))
         height: track.height
         radius: track.radius
-        color: "#F2345780"
+        color: Theme.sliderFill
     }
 
     // Thumb
@@ -86,7 +87,7 @@ Item {
         width: 12
         height: 12
         radius: 6
-        color: "#FFFFFF"
+        color: Theme.sliderHandle
         anchors.verticalCenter: track.verticalCenter
         x: Math.max(0, Math.min(track.width - width, root._visualValue * track.width - width * 0.5))
     }

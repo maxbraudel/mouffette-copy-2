@@ -71,11 +71,10 @@ Rectangle {
         background: Rectangle {
             color: {
                 if (tab.down)
-                    return Qt.rgba(1, 1, 1, 0.15)
+                    return Theme.overlayPressed
                 if (tab.active)
-                    return tab.hovered ? Qt.rgba(1, 1, 1, 0.15)
-                                       : Qt.rgba(1, 1, 1, 0.10)
-                return tab.hovered ? Qt.rgba(1, 1, 1, 0.05) : "transparent"
+                    return tab.hovered ? Theme.overlayPressed : Theme.overlaySelected
+                return tab.hovered ? Theme.overlayHover : "transparent"
             }
         }
     }
@@ -89,7 +88,7 @@ Rectangle {
         Accessible.name: text
         contentItem: Text {
             text: button.text
-            color: button.enabled ? Theme.overlayText : "#808080"
+            color: button.enabled ? Theme.overlayText : Theme.overlayDisabledText
             font.pixelSize: 12
             font.weight: Font.DemiBold
             horizontalAlignment: Text.AlignHCenter
@@ -97,17 +96,18 @@ Rectangle {
         }
         background: Rectangle {
             radius: 4
-            color: button.down ? "#345780" : button.hovered ? "#36404c" : "transparent"
-            border.color: button.enabled ? Theme.overlayBorder : "#505050"
+            color: !button.enabled ? Theme.overlayDisabledBackground
+                 : button.down ? Theme.overlayPressed
+                 : button.hovered ? Theme.overlayHover : "transparent"
+            border.color: button.activeFocus ? Theme.focusBorder
+                        : button.enabled ? Theme.controlBorder : Theme.controlDisabledBorder
         }
     }
 
     component SettingsCheckBox: AppCheckBox {
         implicitHeight: 25
-        textColor: enabled ? Theme.overlayText : "#808080"
-        uncheckedBorderColor: enabled ? "#c8c8c8" : "#808080"
-        checkedColor: Theme.brandBlue
-        checkmarkColor: "white"
+        textColor: enabled ? Theme.overlayText : Theme.overlayDisabledText
+        uncheckedBorderColor: enabled ? Theme.controlBorder : Theme.controlDisabledBorder
     }
 
     component OptionRow: Item {
@@ -345,18 +345,18 @@ Rectangle {
                 Rectangle {
                     anchors.fill: parent
                     radius: 6
-                    color: valueField.activeFocus ? Theme.brandBlue : "#3c3c3c"
+                    color: valueField.activeFocus ? Theme.selectionBackground : Theme.fieldBackground
                     border.width: 1
-                    border.color: valueField.activeFocus
-                                  ? Theme.brandBlue : "#c8c8c8"
-                    opacity: valueField.inputEnabled ? 1.0 : 0.55
+                    border.color: valueField.activeFocus ? Theme.focusBorder
+                                  : valueField.inputEnabled ? Theme.fieldBorder : Theme.controlDisabledBorder
 
                     Text {
                         anchors.fill: parent
                         leftPadding: 4
                         rightPadding: 4
                         text: valueField.draftText
-                        color: "white"
+                        color: !valueField.inputEnabled ? Theme.overlayDisabledText
+                             : valueField.activeFocus ? Theme.selectionText : Theme.overlayText
                         font.pixelSize: 14
                         font.weight: Font.Medium
                         horizontalAlignment: Text.AlignHCenter
@@ -406,7 +406,7 @@ Rectangle {
             Text {
                 anchors.verticalCenter: parent.verticalCenter
                 text: option.suffix
-                color: option.rowEnabled ? Theme.overlayText : "#808080"
+                color: option.rowEnabled ? Theme.overlayText : Theme.overlayDisabledText
                 font.pixelSize: 14
                 font.weight: Font.Medium
             }
@@ -460,7 +460,7 @@ Rectangle {
                 color: colorOption.colorValue
                 border.width: 1
                 border.color: swatch.activeFocus || swatch.down
-                              ? Theme.brandBlue : "#c8c8c8"
+                              ? Theme.focusBorder : Theme.controlBorder
             }
         }
 
@@ -594,9 +594,8 @@ Rectangle {
                 implicitWidth: 8
                 implicitHeight: 24
                 radius: 4
-                color: parent.pressed ? Qt.rgba(1, 1, 1, 0.70)
-                                      : parent.hovered ? Qt.rgba(1, 1, 1, 0.55)
-                                                       : Qt.rgba(1, 1, 1, 0.35)
+                color: settingsScrollBar.pressed ? Theme.scrollbarPressed
+                     : settingsScrollBar.hovered ? Theme.scrollbarHover : Theme.scrollbar
             }
             background: Item {}
 

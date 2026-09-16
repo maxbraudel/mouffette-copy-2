@@ -6,12 +6,15 @@ import Mouffette.Canvas
 QtObject {
     id: theme
 
+    // One source of truth for application chrome. SystemPalette updates these
+    // bindings immediately when the OS appearance/application palette changes.
+    // Authored media/text colors and projected scene output are not UI chrome.
     readonly property SystemPalette activePalette: SystemPalette {
         colorGroup: SystemPalette.Active
     }
-    readonly property SystemPalette disabledPalette: SystemPalette {
-        colorGroup: SystemPalette.Disabled
-    }
+    readonly property bool dark: (0.2126 * windowBackground.r
+                                 + 0.7152 * windowBackground.g
+                                 + 0.0722 * windowBackground.b) < 0.5
 
     function mix(left, right, leftRatio) {
         var ratio = Math.max(0.0, Math.min(1.0, leftRatio))
@@ -21,56 +24,147 @@ QtObject {
                        left.a * ratio + right.a * (1.0 - ratio))
     }
 
+    function withAlpha(color, alpha) {
+        return Qt.rgba(color.r, color.g, color.b, Math.max(0, Math.min(1, alpha)))
+    }
+
+    // Neutral surfaces are opaque so floating controls never inherit the
+    // unpredictable colors of the media underneath them.
     readonly property color windowBackground: activePalette.base
     readonly property color text: activePalette.text
-    readonly property color mutedText: activePalette.mid
-    readonly property color disabledText: disabledPalette.text
-    readonly property color border: mix(activePalette.text, activePalette.base, 0.2)
-    readonly property color interactionBackground: Qt.rgba(activePalette.text.r,
-                                                            activePalette.text.g,
-                                                            activePalette.text.b,
-                                                            8 / 255)
+    readonly property color surfaceBackground: mix(text, windowBackground, dark ? 0.035 : 0.025)
+    readonly property color elevatedBackground: mix(text, windowBackground, dark ? 0.065 : 0.0)
+    readonly property color recessedBackground: mix(dark ? "black" : text, windowBackground, dark ? 0.16 : 0.055)
+    // Palette.mid is a bevel/border role, not a readable secondary foreground.
+    readonly property color mutedText: mix(text, windowBackground, 0.70)
+    readonly property color disabledText: mix(text, windowBackground, 0.42)
+    readonly property color border: mix(text, windowBackground, 0.20)
+    readonly property color controlBorder: mix(text, windowBackground, 0.48)
+    readonly property color controlDisabledBorder: border
+    readonly property color interactionBackground: withAlpha(text, 0.035)
 
-    readonly property color brandBlue: "#4a90e2"
-    readonly property color brandBlueLight: Qt.rgba(74 / 255, 144 / 255, 226 / 255, 38 / 255)
-    readonly property color brandBlueDark: "#1f4ea8"
+    // Pigments are used only for translucent tints. Foregrounds have separate
+    // light/dark values so blue, green, amber and red labels remain readable.
+    readonly property color bluePigment: "#4a90e2"
+    readonly property color greenPigment: "#4caf50"
+    readonly property color amberPigment: "#ff9800"
+    readonly property color redPigment: "#f44336"
+    readonly property color scenePigment: "#b258b6"
+    readonly property color accent: dark ? "#8bbcff" : "#245ca6"
+    readonly property color onAccent: dark ? "#17202b" : "#ffffff"
+    readonly property color focusBorder: accent
+    readonly property color brandBlue: accent
+    readonly property color brandBlueLight: withAlpha(bluePigment, 38 / 255)
+    readonly property color brandBlueDark: accent
+    readonly property color connectedText: dark ? "#88d498" : "#216536"
+    readonly property color connectedBackground: withAlpha(greenPigment, 38 / 255)
+    readonly property color availableText: mutedText
+    readonly property color warningText: dark ? "#f3c26b" : "#885000"
+    readonly property color warningBackground: withAlpha(amberPigment, 38 / 255)
+    readonly property color errorText: dark ? "#ff9b96" : "#b52d30"
+    readonly property color errorBackground: withAlpha(redPigment, 38 / 255)
+    readonly property color sceneText: dark ? "#deb0f0" : "#853580"
+    readonly property color sceneBackground: withAlpha(scenePigment, 38 / 255)
 
-    readonly property color connectedText: "#4c9b50"
-    readonly property color connectedBackground: Qt.rgba(76 / 255, 175 / 255, 80 / 255, 38 / 255)
-    readonly property color availableText: Qt.rgba(activePalette.text.r,
-                                                   activePalette.text.g,
-                                                   activePalette.text.b,
-                                                   0.55)
-    readonly property color warningText: "#ffa000"
-    readonly property color warningBackground: Qt.rgba(255 / 255, 152 / 255, 0, 38 / 255)
-    readonly property color errorText: "#ff5753"
-    readonly property color errorBackground: Qt.rgba(244 / 255, 67 / 255, 54 / 255, 38 / 255)
-
-    readonly property color buttonBackground: Qt.rgba(0.5, 0.5, 0.5, 20 / 255)
-    readonly property color buttonHover: Qt.rgba(0.5, 0.5, 0.5, 41 / 255)
-    readonly property color buttonPressed: Qt.rgba(0.5, 0.5, 0.5, 61 / 255)
-    readonly property color buttonDisabled: Qt.rgba(0.5, 0.5, 0.5, 15 / 255)
+    // Controls: neutral interactions plus tinted accent/destructive variants.
+    readonly property color buttonBackground: withAlpha(text, 0.055)
+    readonly property color buttonHover: withAlpha(text, 0.09)
+    readonly property color buttonPressed: withAlpha(text, 0.13)
+    readonly property color buttonDisabled: withAlpha(text, 0.03)
     readonly property color primaryBackground: brandBlueLight
-    readonly property color primaryHover: Qt.rgba(74 / 255, 144 / 255, 226 / 255, 56 / 255)
-    readonly property color primaryPressed: Qt.rgba(74 / 255, 144 / 255, 226 / 255, 77 / 255)
+    readonly property color primaryHover: withAlpha(bluePigment, 0.20)
+    readonly property color primaryPressed: withAlpha(bluePigment, 0.25)
+    readonly property color destructiveBackground: errorBackground
+    readonly property color destructiveHover: withAlpha(redPigment, 0.20)
+    readonly property color destructivePressed: withAlpha(redPigment, 0.25)
+    readonly property color fieldBackground: recessedBackground
+    readonly property color fieldBorder: controlBorder
+    readonly property color selectionBackground: accent
+    readonly property color selectionText: onAccent
+    readonly property color scrollbar: mix(text, elevatedBackground, 0.38)
+    readonly property color scrollbarHover: mix(text, elevatedBackground, 0.55)
+    readonly property color scrollbarPressed: mix(text, elevatedBackground, 0.72)
 
-    readonly property color overlayBackground: Qt.rgba(50 / 255, 50 / 255, 50 / 255, 240 / 255)
-    readonly property color overlayActiveBackground: Qt.rgba(52 / 255, 87 / 255, 128 / 255, 240 / 255)
-    readonly property color overlayText: Qt.rgba(1, 1, 1, 230 / 255)
-    readonly property color overlayBorder: "#646464"
-    readonly property color mediaUploaded: "#2ecc71"
-    readonly property color mediaNotUploaded: "#f39c12"
-    readonly property color mediaProgress: "#2d8cff"
-    readonly property color mediaProgressBackground: Qt.rgba(1, 1, 1, 38 / 255)
-    readonly property color overlaySecondaryText: Qt.rgba(1, 1, 1, 217 / 255)
-    readonly property color overlayDisabledText: Qt.rgba(1, 1, 1, 0.4)
-    readonly property color overlayDisabledBackground: Qt.rgba(1, 1, 1, 0.04)
-    readonly property color overlaySceneText: "#ff96ff"
-    readonly property color overlaySceneBackground: Qt.rgba(1, 0, 1, 38 / 255)
-    readonly property color overlaySceneHover: Qt.rgba(1, 0, 1, 56 / 255)
-    readonly property color overlayScenePressed: Qt.rgba(1, 0, 1, 77 / 255)
-    readonly property color overlayUploadedHover: Qt.rgba(76 / 255, 175 / 255, 80 / 255, 56 / 255)
-    readonly property color overlayUploadedPressed: Qt.rgba(76 / 255, 175 / 255, 80 / 255, 77 / 255)
+    // Canvas chrome uses the same neutral hierarchy as the surrounding app.
+    readonly property color canvasBackground: recessedBackground
+    readonly property color canvasScreenBackground: mix(text, canvasBackground, dark ? 0.09 : 0.12)
+    readonly property color canvasPrimaryScreenBackground: mix(bluePigment, canvasScreenBackground, 0.14)
+    readonly property color canvasScreenBorder: controlBorder
+    readonly property color canvasScreenText: text
+    readonly property color canvasLabelShadow: withAlpha(canvasScreenBackground, 0.75)
+    readonly property color selectionBorder: accent
+    readonly property color selectionFill: withAlpha(bluePigment, 0.15)
+    readonly property color selectionHandle: elevatedBackground
+    readonly property color snapGuide: accent
+    readonly property color uiZoneFill: withAlpha(text, 0.12)
+    readonly property color uiZoneSystemFill: withAlpha(text, 0.20)
+    readonly property color mediaPlaceholder: mix(text, canvasBackground, 0.20)
+    // The remote pointer must stay legible on arbitrary authored content.
+    readonly property color remoteCursorFill: "#ffffff"
+    readonly property color remoteCursorBorder: "#e6000000"
+
+    readonly property color overlayBackground: elevatedBackground
+    readonly property color overlayActiveBackground: mix(bluePigment, overlayBackground, 0.22)
+    readonly property color overlayHover: mix(text, overlayBackground, 0.055)
+    readonly property color overlayPressed: mix(text, overlayBackground, 0.10)
+    readonly property color overlaySelected: mix(bluePigment, overlayBackground, 0.16)
+    readonly property color overlayText: text
+    readonly property color overlaySecondaryText: mutedText
+    readonly property color overlayDisabledText: disabledText
+    readonly property color overlayBorder: border
+    readonly property color overlayDisabledBackground: overlayBackground
+    readonly property color overlaySceneText: sceneText
+    readonly property color overlaySceneBackground: sceneBackground
+    readonly property color overlaySceneHover: withAlpha(scenePigment, 0.20)
+    readonly property color overlayScenePressed: withAlpha(scenePigment, 0.25)
+    readonly property color overlayUploadedHover: withAlpha(greenPigment, 0.20)
+    readonly property color overlayUploadedPressed: withAlpha(greenPigment, 0.25)
+    readonly property color mediaUploaded: connectedText
+    readonly property color mediaNotUploaded: warningText
+    readonly property color mediaProgress: accent
+    readonly property color mediaProgressBackground: mix(text, overlayBackground, 0.12)
+    readonly property color sliderTrack: mix(text, overlayBackground, 0.25)
+    readonly property color sliderFill: accent
+    readonly property color sliderHandle: accent
+    readonly property color toolTipBackground: elevatedBackground
+    readonly property color toolTipText: text
+    readonly property color toolTipBorder: border
+    readonly property color modalScrim: withAlpha("black", dark ? 0.50 : 0.25)
+    // ToastStack paints this opaque base, then a translucent severity tint.
+    readonly property color toastBackground: windowBackground
+    readonly property color chartProcess: accent
+    readonly property color chartOther: mutedText
+    readonly property color chartAvailable: connectedText
+
+    // Native Qt Quick controls (menus, dialogs, scrollbars, selections) inherit
+    // the same semantic colors as our custom components, including disabled UI.
+    readonly property Palette controlPalette: Palette {
+        window: theme.windowBackground
+        windowText: theme.text
+        base: theme.fieldBackground
+        alternateBase: theme.surfaceBackground
+        text: theme.text
+        placeholderText: theme.mutedText
+        button: theme.surfaceBackground
+        buttonText: theme.text
+        highlight: theme.selectionBackground
+        highlightedText: theme.selectionText
+        accent: theme.accent
+        light: theme.elevatedBackground
+        midlight: theme.surfaceBackground
+        mid: theme.border
+        dark: theme.controlBorder
+        shadow: theme.modalScrim
+        toolTipBase: theme.toolTipBackground
+        toolTipText: theme.toolTipText
+        link: theme.accent
+        linkVisited: theme.sceneText
+        disabled.text: theme.disabledText
+        disabled.windowText: theme.disabledText
+        disabled.buttonText: theme.disabledText
+        disabled.highlight: theme.buttonDisabled
+        disabled.highlightedText: theme.disabledText
+    }
 
     readonly property int windowMargin: 20
     readonly property int innerGap: 20

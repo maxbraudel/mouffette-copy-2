@@ -1,5 +1,7 @@
 import QtQuick
 import QtQuick.Controls
+import QtQuick.Effects
+import Mouffette.App
 // Reusable overlay icon button.
 // Blocks pointer events from reaching the canvas DragHandler/PointHandler beneath it.
 Item {
@@ -35,12 +37,14 @@ Item {
     // Resolved background fill color
     readonly property color _bgColor: {
         if (!root.enabled)
-            return "#61323232"
-        if ((root.isToggle && root.toggled) || pressArea.containsPress)
-            return "#F2345780"
+            return Theme.overlayDisabledBackground
+        if (pressArea.containsPress)
+            return Theme.overlayPressed
+        if (root.isToggle && root.toggled)
+            return Theme.overlaySelected
         if (pressArea.containsMouse)
-            return "#F236404C"
-        return "#F2323232"
+            return Theme.overlayHover
+        return Theme.overlayBackground
     }
 
     // Clipping container — clips away the rounded corners that should be flat.
@@ -61,7 +65,7 @@ Item {
             height: root.height
             radius: root._r
             color:  root._bgColor
-            border.color: "#FF646464"
+            border.color: Theme.overlayBorder
             border.width: 1
         }
     }
@@ -72,13 +76,13 @@ Item {
         visible: root._flatLeft
         anchors { left: parent.left; top: parent.top; bottom: parent.bottom }
         width: 1
-        color: "#FF646464"
+        color: Theme.overlayBorder
     }
     Rectangle {
         visible: root._flatRight
         anchors { right: parent.right; top: parent.top; bottom: parent.bottom }
         width: 1
-        color: "#FF646464"
+        color: Theme.overlayBorder
     }
 
     // SVG icon uses 60% of the button size.
@@ -94,6 +98,12 @@ Item {
         smooth: true
         mipmap: true
         opacity: root.enabled ? 1.0 : 0.35
+        layer.enabled: true
+        layer.effect: MultiEffect {
+            colorization: 1
+            colorizationColor: root.isToggle && root.toggled
+                               ? Theme.accent : Theme.overlayText
+        }
     }
 
     // Input capture — blocks drag/pan handlers beneath

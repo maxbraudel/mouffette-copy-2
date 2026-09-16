@@ -33,10 +33,11 @@ Window {
         Text {
             Layout.fillWidth: true
             text: root.controller.bootstrapDetail
-            color: Theme.text
+            color: Theme.mutedText
             wrapMode: Text.Wrap
         }
         ProgressBar {
+            palette: Theme.controlPalette
             Layout.fillWidth: true
             visible: !root.controller.bootstrapDecisionRequired
             indeterminate: true

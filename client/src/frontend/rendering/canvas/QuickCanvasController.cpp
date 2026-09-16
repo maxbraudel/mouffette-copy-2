@@ -369,18 +369,13 @@ void QuickCanvasController::publishScreens()
                                   rect.y() + zone.y * rect.height() / screen.height,
                                   zone.width * rect.width() / screen.width,
                                   zone.height * rect.height() / screen.height);
-            const QString type = zone.type.toLower();
             zones.append(QVariantMap{
                 {QStringLiteral("screenId"), screen.id},
                 {QStringLiteral("type"), zone.type},
                 {QStringLiteral("x"), zoneRect.x()},
                 {QStringLiteral("y"), zoneRect.y()},
                 {QStringLiteral("width"), zoneRect.width()},
-                {QStringLiteral("height"), std::max<qreal>(3.0, zoneRect.height())},
-                {QStringLiteral("fillColor"),
-                    type == QLatin1String("taskbar") || type == QLatin1String("dock")
-                        || type == QLatin1String("menu_bar")
-                    ? QStringLiteral("#50000000") : QStringLiteral("#5A808080")}});
+                {QStringLiteral("height"), std::max<qreal>(3.0, zoneRect.height())}});
         }
     }
     m_screensModel = screens;

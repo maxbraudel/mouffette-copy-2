@@ -1,4 +1,5 @@
 import QtQuick
+import Mouffette.App
 Rectangle {
     id: root
 
@@ -6,7 +7,7 @@ Rectangle {
     property real zoneY: 0
     property real zoneWidth: 0
     property real zoneHeight: 0
-    property color fillColor: "#5A808080"
+    property color fillColor: Theme.uiZoneFill
 
     x: zoneX
     y: zoneY

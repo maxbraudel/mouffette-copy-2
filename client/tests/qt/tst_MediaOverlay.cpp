@@ -12,6 +12,7 @@
 #include <QScopeGuard>
 #include <QTemporaryDir>
 #include <QtTest>
+#include <cmath>
 #include <QtGui/private/qpointingdevice_p.h>
 #include <QtQuick/private/qquickhoverhandler_p.h>
 #include <QtQuick/private/qquickwindow_p.h>
@@ -72,6 +73,60 @@ private slots:
 };
 
 namespace {
+QObject* applicationTheme(QQmlEngine& engine)
+{
+    return engine.singletonInstance<QObject*>("Mouffette.App", "Theme");
+}
+
+QColor themeColor(QQmlEngine& engine, const char* name)
+{
+    QObject* theme = applicationTheme(engine);
+    return theme ? theme->property(name).value<QColor>() : QColor();
+}
+
+QColor compositeOver(const QColor& foreground, const QColor& background)
+{
+    const qreal alpha = foreground.alphaF();
+    return QColor::fromRgbF(
+        foreground.redF() * alpha + background.redF() * (1.0 - alpha),
+        foreground.greenF() * alpha + background.greenF() * (1.0 - alpha),
+        foreground.blueF() * alpha + background.blueF() * (1.0 - alpha));
+}
+
+qreal luminance(const QColor& color)
+{
+    const auto linear = [](qreal channel) {
+        return channel <= 0.04045 ? channel / 12.92
+                                : std::pow((channel + 0.055) / 1.055, 2.4);
+    };
+    return 0.2126 * linear(color.redF()) + 0.7152 * linear(color.greenF())
+        + 0.0722 * linear(color.blueF());
+}
+
+qreal contrastRatio(const QColor& foreground, const QColor& background)
+{
+    const qreal text = luminance(compositeOver(foreground, background));
+    const qreal surface = luminance(background);
+    return (qMax(text, surface) + 0.05) / (qMin(text, surface) + 0.05);
+}
+
+QPalette testPalette(bool dark)
+{
+    QPalette palette = QGuiApplication::palette();
+    const QColor background(dark ? "#202124" : "#f4f5f6");
+    const QColor foreground(dark ? "#f1f3f4" : "#111213");
+    for (auto group : {QPalette::Active, QPalette::Inactive}) {
+        palette.setColor(group, QPalette::Base, background);
+        palette.setColor(group, QPalette::Window, background);
+        palette.setColor(group, QPalette::Text, foreground);
+        palette.setColor(group, QPalette::WindowText, foreground);
+        // Platform Mid is a bevel role, not a readable text color. Setting
+        // it to Base reproduces the invisible empty-state text regression.
+        palette.setColor(group, QPalette::Mid, background);
+    }
+    return palette;
+}
+
 QQuickItem* createStatusCard(QQmlEngine& engine, QQuickWindow& window,
                              bool auxiliaryVisible = false)
 {
@@ -218,6 +273,8 @@ import QtQuick
 import "../components"
 
 Item {
+    property int severityKind: 0
+    onSeverityKindChanged: toastRows.setProperty(0, "severityKind", severityKind)
     ListModel {
         id: toastRows
         ListElement {
@@ -478,8 +535,10 @@ void MediaOverlayTest::availableStatusUsesNeutralGreyPalette()
 
     const QColor foreground = card->property("statusForeground").value<QColor>();
     const QColor background = card->property("statusBackground").value<QColor>();
-    QVERIFY(foreground.alphaF() > 0.5);
-    QVERIFY(foreground.alphaF() < 0.6);
+    QCOMPARE(foreground, themeColor(engine, "availableText"));
+    QCOMPARE(foreground.alpha(), 255);
+    QVERIFY(contrastRatio(foreground, compositeOver(background,
+        themeColor(engine, "windowBackground"))) >= 4.5);
     QVERIFY(qAbs(foreground.red() - foreground.green()) <= 8);
     QVERIFY(qAbs(foreground.green() - foreground.blue()) <= 8);
     QVERIFY(qAbs(background.red() - background.green()) <= 8);
@@ -585,7 +644,7 @@ void MediaOverlayTest::mediaPanelVisibilityAnchorInteractionAndScroll()
         QTRY_COMPARE(status->property("text").toString(), cached
             ? QStringLiteral("Uploaded and Cached") : QStringLiteral("Uploaded"));
         QCOMPARE(status->property("color").value<QColor>(),
-                 QColor(cached ? "#2ecc71" : "#f39c12"));
+                 themeColor(engine, cached ? "mediaUploaded" : "mediaNotUploaded"));
         QCOMPARE(findVisualItem(panel, QStringLiteral("mediaRow_0")), firstRow);
     }
 
@@ -734,30 +793,39 @@ void MediaOverlayTest::typedCapabilitiesGuardDirectCppInvocations()
 
 void MediaOverlayTest::mediaActionPalette_data()
 {
+    QTest::addColumn<bool>("dark");
     QTest::addColumn<int>("tone");
     QTest::addColumn<bool>("enabled");
     QTest::addColumn<bool>("busy");
-    QTest::addColumn<QColor>("foreground");
-    QTest::addColumn<QColor>("idle");
-    QTest::addColumn<QColor>("hover");
-    QTest::addColumn<QColor>("pressed");
-    QTest::newRow("idle") << 0 << true << false << QColor(255, 255, 255, 230)
-        << QColor(Qt::transparent) << QColor(255, 255, 255, 13) << QColor(255, 255, 255, 26);
-    QTest::newRow("uploading") << 1 << true << true << QColor("#4a90e2")
-        << QColor(74, 144, 226, 38) << QColor(74, 144, 226, 56) << QColor(74, 144, 226, 77);
-    QTest::newRow("awaiting-ack") << 1 << false << true << QColor("#4a90e2")
-        << QColor(74, 144, 226, 38) << QColor(74, 144, 226, 38) << QColor(74, 144, 226, 38);
-    QTest::newRow("unload") << 2 << true << false << QColor("#2ecc71")
-        << QColor(76, 175, 80, 38) << QColor(76, 175, 80, 56) << QColor(76, 175, 80, 77);
-    for (int scene : {3, 4}) {
-        QTest::newRow(scene == 3 ? "remote-active" : "test-active")
-            << scene << true << false << QColor("#ff96ff")
-            << QColor(255, 0, 255, 38) << QColor(255, 0, 255, 56) << QColor(255, 0, 255, 77);
-    }
-    for (int disabledTone : {0, 1, 2, 3, 4}) {
-        QTest::newRow(qPrintable(QStringLiteral("disabled-%1").arg(disabledTone)))
-            << disabledTone << false << false << QColor(255, 255, 255, 102)
-            << QColor(255, 255, 255, 10) << QColor(255, 255, 255, 10) << QColor(255, 255, 255, 10);
+    QTest::addColumn<QByteArray>("foregroundToken");
+    QTest::addColumn<QByteArray>("idleToken");
+    QTest::addColumn<QByteArray>("hoverToken");
+    QTest::addColumn<QByteArray>("pressedToken");
+    for (const bool dark : {false, true}) {
+        const auto row = [dark](const char* name, int tone, bool enabled, bool busy,
+                              const char* foreground, const char* idle,
+                              const char* hover, const char* pressed) {
+            QTest::newRow(qPrintable(QStringLiteral("%1-%2")
+                .arg(dark ? "dark" : "light", name)))
+                << dark << tone << enabled << busy << QByteArray(foreground)
+                << QByteArray(idle) << QByteArray(hover) << QByteArray(pressed);
+        };
+        row("idle", 0, true, false, "overlayText", "transparent",
+            "overlayHover", "overlayPressed");
+        row("uploading", 1, true, true, "brandBlue", "primaryBackground",
+            "primaryHover", "primaryPressed");
+        row("awaiting-ack", 1, false, true, "brandBlue", "primaryBackground",
+            "primaryBackground", "primaryBackground");
+        row("unload", 2, true, false, "mediaUploaded", "connectedBackground",
+            "overlayUploadedHover", "overlayUploadedPressed");
+        for (int scene : {3, 4})
+            row(scene == 3 ? "remote-active" : "test-active", scene, true, false,
+                "overlaySceneText", "overlaySceneBackground", "overlaySceneHover",
+                "overlayScenePressed");
+        for (int tone : {0, 1, 2, 3, 4})
+            row(qPrintable(QStringLiteral("disabled-%1").arg(tone)), tone, false, false,
+                "overlayDisabledText", "overlayDisabledBackground",
+                "overlayDisabledBackground", "overlayDisabledBackground");
     }
 }
 
@@ -766,14 +834,27 @@ void MediaOverlayTest::mediaActionPalette()
     QFETCH(int, tone);
     QFETCH(bool, enabled);
     QFETCH(bool, busy);
-    QFETCH(QColor, foreground);
-    QFETCH(QColor, idle);
-    QFETCH(QColor, hover);
-    QFETCH(QColor, pressed);
+    QFETCH(bool, dark);
+    QFETCH(QByteArray, foregroundToken);
+    QFETCH(QByteArray, idleToken);
+    QFETCH(QByteArray, hoverToken);
+    QFETCH(QByteArray, pressedToken);
+    const QPalette original = QGuiApplication::palette();
+    const auto restorePalette = qScopeGuard([original] { QGuiApplication::setPalette(original); });
+    QGuiApplication::setPalette(testPalette(dark));
     QQmlEngine engine;
+    const auto resolve = [&](const QByteArray& token) {
+        return token == "transparent" ? QColor(Qt::transparent)
+                                      : themeColor(engine, token.constData());
+    };
+    const QColor foreground = resolve(foregroundToken);
+    const QColor idle = resolve(idleToken);
+    const QColor hover = resolve(hoverToken);
+    const QColor pressed = resolve(pressedToken);
+    QVERIFY(foreground.isValid() && idle.isValid() && hover.isValid() && pressed.isValid());
     QQuickWindow window;
     window.resize(360, 120);
-    window.setColor(Qt::white);
+    window.setColor(themeColor(engine, "overlayBackground"));
     QQmlComponent component(&engine, QUrl(QStringLiteral(
         "qrc:/qt/qml/Mouffette/App/resources/qml/app/canvas/OverlayActionButton.qml")));
     std::unique_ptr<QQuickItem> button(qobject_cast<QQuickItem*>(component.create()));
@@ -798,7 +879,8 @@ void MediaOverlayTest::mediaActionPalette()
     QCOMPARE(button->property("foregroundColor").value<QColor>(), foreground);
     auto verifyFill = [&](const QColor& fill) {
         const QImage frame = window.grabWindow();
-        return !frame.isNull() && nearColor(imagePixel(frame, window.size(), {25, 25}), overWhite(fill));
+        return !frame.isNull() && nearColor(imagePixel(frame, window.size(), {25, 25}),
+                                            compositeOver(fill, window.color()));
     };
     QTRY_VERIFY(verifyFill(idle));
     QTest::mouseMove(&window, {100, 40});
@@ -873,7 +955,7 @@ void MediaOverlayTest::mediaRowsAndProgress()
     QCOMPARE(progress->height(), 10.0);
     QCOMPARE(progress->width(), row->width() - 40);
     QCOMPARE(fill->width(), progress->width() * 0.37);
-    QCOMPARE(fill->property("color").value<QColor>(), QColor("#2d8cff"));
+    QCOMPARE(fill->property("color").value<QColor>(), themeColor(engine, "mediaProgress"));
     QCOMPARE(row->height(), originalHeight);
     // The border is painted over the fill; rounded corners reveal the canvas.
     const QImage frame = window.grabWindow();
@@ -981,7 +1063,7 @@ void MediaOverlayTest::overlayButtonHoverIsImmediate()
 
     QTest::mousePress(&window, Qt::LeftButton, Qt::NoModifier, QPoint(38, 38));
     QCOMPARE(button->property("currentBackgroundColor").value<QColor>(),
-             QColor(52, 87, 128, 242));
+             themeColor(engine, "overlayPressed"));
     QTest::mouseRelease(&window, Qt::LeftButton, Qt::NoModifier, QPoint(38, 38));
     QCOMPARE(button->property("currentBackgroundColor").value<QColor>(), hovered);
 }
@@ -1567,7 +1649,7 @@ void MediaOverlayTest::mediaSettingsPanelRestoresTabsAndBindings()
     if (contentFits) QTRY_COMPARE(scrollBar->opacity(), 0.0);
     QVERIFY(!opacityField->property("cursorVisible").isValid());
     QCOMPARE(opacityCheck->property("checkedColor").value<QColor>(),
-             QColor(QStringLiteral("#4a90e2")));
+             themeColor(engine, "brandBlue"));
 
     const QPoint opacityCenter = opacityCheck->mapToScene(
         QPointF(opacityCheck->width() / 2.0,

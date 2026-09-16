@@ -40,7 +40,7 @@ Item {
                 width: Math.min(420, Math.max(1, Math.ceil(toastMetrics.advanceWidth + 28)))
                 height: toastText.implicitHeight + 20
                 radius: Theme.toastRadius
-                color: Theme.windowBackground
+                color: Theme.toastBackground
                 opacity: entered && !dismissing ? 1 : 0
 
                 Rectangle {

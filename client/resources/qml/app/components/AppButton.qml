@@ -13,6 +13,7 @@ AbstractButton {
     implicitHeight: Theme.controlHeight
     hoverEnabled: true
     focusPolicy: Qt.TabFocus
+    palette: Theme.controlPalette
 
     Accessible.role: Accessible.Button
     Accessible.name: text
@@ -40,6 +41,9 @@ AbstractButton {
         color: {
             if (!control.enabled)
                 return Theme.buttonDisabled
+            if (control.destructive)
+                return control.down ? Theme.destructivePressed
+                     : control.hovered ? Theme.destructiveHover : Theme.destructiveBackground
             if (control.down)
                 return control.primary ? Theme.primaryPressed : Theme.buttonPressed
             if (control.hovered)
@@ -49,7 +53,7 @@ AbstractButton {
             return control.primary ? Theme.primaryBackground : Theme.buttonBackground
         }
         border.width: 1
-        border.color: Theme.border
+        border.color: control.visualFocus ? Theme.focusBorder : Theme.border
     }
 
 }

@@ -15,6 +15,8 @@ Dialog {
     width: Math.min(520, parent ? parent.width - 40 : 520)
     modal: true
     focus: true
+    palette: Theme.controlPalette
+    Overlay.modal: Rectangle { color: Theme.modalScrim }
     title: "Settings"
     padding: 20
     closePolicy: Popup.CloseOnEscape
@@ -26,7 +28,7 @@ Dialog {
     }
 
     background: Rectangle {
-        color: Theme.windowBackground
+        color: Theme.elevatedBackground
         border.width: 1
         border.color: Theme.border
         radius: 10

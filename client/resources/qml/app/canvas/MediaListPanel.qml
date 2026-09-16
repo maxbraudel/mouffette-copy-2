@@ -121,9 +121,9 @@ Rectangle {
                         Accessible.description: (textMedia ? "" : (uploadState === "uploading" ? "Uploading"
                             : awaitingRemoteCache ? "Uploaded, preparing remote cache" : statusText) + ", ") + detailsText
                         background: Rectangle {
-                            color: root.sceneLocked ? Qt.rgba(1, 1, 1, 0.03)
-                                 : row.selected ? Qt.rgba(1, 1, 1, 0.10)
-                                 : row.hovered ? Qt.rgba(1, 1, 1, 0.05) : "transparent"
+                            color: root.sceneLocked ? Theme.overlayDisabledBackground
+                                 : row.selected ? Theme.overlaySelected
+                                 : row.hovered ? Theme.overlayHover : "transparent"
                         }
                         Rectangle {
                             width: parent.width
@@ -144,7 +144,7 @@ Rectangle {
                                 height: Math.max(18, Math.ceil(implicitHeight) + 2)
                                 text: row.displayName
                                 textFormat: Text.PlainText
-                                color: "white"
+                                color: Theme.overlayText
                                 font.pixelSize: 14
                                 font.weight: Font.Medium
                                 verticalAlignment: Text.AlignVCenter
@@ -223,7 +223,8 @@ Rectangle {
                 hoverEnabled: true
                 contentItem: Rectangle {
                     radius: 4
-                    color: Qt.rgba(1, 1, 1, scrollbar.pressed ? 0.7 : scrollbar.hovered ? 0.55 : 0.35)
+                    color: scrollbar.pressed ? Theme.scrollbarPressed
+                         : scrollbar.hovered ? Theme.scrollbarHover : Theme.scrollbar
                 }
                 background: Item {}
                 onPressedChanged: scrollbarHide.restart()
@@ -282,6 +283,7 @@ Rectangle {
         z: -1
         anchors.fill: parent
         radius: root.radius
+        // Alpha mask only; this is not a visible surface.
         color: "white"
         visible: false
         layer.enabled: true

@@ -1,4 +1,5 @@
 import QtQuick
+import Mouffette.App
 Item {
     id: root
 
@@ -47,7 +48,7 @@ Item {
                 y: vertical ? Math.round(minY) : Math.round(minY)
                 width: vertical ? 1 : Math.max(1, Math.round(parent.guideLength))
                 height: vertical ? Math.max(1, Math.round(parent.guideLength)) : 1
-                color: "#48C2FF"
+                color: Theme.snapGuide
                 opacity: 0.95
                 antialiasing: false
             }

@@ -1,4 +1,5 @@
 import QtQuick
+import Mouffette.App
 Rectangle {
     id: root
 
@@ -24,7 +25,7 @@ Rectangle {
     z: -1000
     clip: false
 
-    color: primary ? "#B44A90E2" : "#B4505050"
+    color: primary ? Theme.canvasPrimaryScreenBackground : Theme.canvasScreenBackground
 
     // Per-screen UI zones (taskbar/menu bar/dock) rendered INSIDE this screen,
     // so they look painted into the screen background rather than global overlays.
@@ -38,6 +39,8 @@ Rectangle {
             model: root.uiZonesModel || []
             delegate: Rectangle {
                 readonly property bool belongsToScreen: (modelData && modelData.screenId === root.screenId)
+                readonly property string zoneType: belongsToScreen ? String(modelData.type || "").toLowerCase() : ""
+                readonly property bool systemZone: zoneType === "taskbar" || zoneType === "dock" || zoneType === "menu_bar"
                 visible: belongsToScreen
 
                 x: belongsToScreen ? (modelData.x - root.screenX) : 0
@@ -45,7 +48,8 @@ Rectangle {
                 width: belongsToScreen ? modelData.width : 0
                 height: belongsToScreen ? modelData.height : 0
 
-                color: belongsToScreen ? modelData.fillColor : "transparent"
+                color: !belongsToScreen ? "transparent"
+                     : systemZone ? Theme.uiZoneSystemFill : Theme.uiZoneFill
                 border.width: 0
             }
         }
@@ -68,7 +72,7 @@ Rectangle {
             origin.y: 0
         }
 
-        readonly property color strokeColor: "#A0A0A0"
+        readonly property color strokeColor: Theme.canvasScreenBorder
 
         Rectangle {
             x: 0
@@ -127,7 +131,7 @@ Rectangle {
         Text {
             id: screenLabel
             text: "Screen " + root.screenIndex + " (" + root.pixelWidth + "x" + root.pixelHeight + ")"
-            color: "#FFFFFF"
+            color: Theme.canvasScreenText
             font.family: "Arial"
             font.pixelSize: 13
             font.weight: Font.Bold
@@ -135,9 +139,9 @@ Rectangle {
             x: -implicitWidth / 2
             // 6 screen-pixels above the anchor (= 6 px above the screen top edge)
             y: -(implicitHeight + 6)
-            // Thin dark outline for readability on any background color
+            // Theme-aware outline keeps the label legible over overlapping media.
             style: Text.Outline
-            styleColor: "#99000000"
+            styleColor: Theme.canvasLabelShadow
         }
     }
 }

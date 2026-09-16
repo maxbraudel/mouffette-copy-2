@@ -48,7 +48,7 @@ Item {
                 width: historyList.width - 6
                 height: content.implicitHeight + 21
                 radius: 8
-                color: Theme.interactionBackground
+                color: Theme.surfaceBackground
                 border.width: 1
                 border.color: Theme.border
 
@@ -97,6 +97,8 @@ Item {
                         text: card.message
                         color: Theme.text
                         readOnly: true
+                        selectionColor: Theme.selectionBackground
+                        selectedTextColor: Theme.selectionText
                         selectByMouse: true
                         wrapMode: TextEdit.Wrap
                     }

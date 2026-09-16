@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Layouts
+import Mouffette.App
 // Bottom overlay panel attached below a selected video media item.
 // Video controls panel:
 //   Row 1: play/pause | stop | repeat | mute | volume slider
@@ -45,8 +46,8 @@ Item {
     readonly property real sliderMinWidth: 120
     readonly property real progressHeight: btnSize
     readonly property real chromeRadius: 6
-    readonly property color chromeBackground: "#F2323232"
-    readonly property color chromeBorder: "#FF646464"
+    readonly property color chromeBackground: Theme.overlayBackground
+    readonly property color chromeBorder: Theme.overlayBorder
 
     // panelWidth/panelHeight exposed so CanvasRoot can read them for centering.
     readonly property real panelWidth:  implicitWidth
@@ -162,11 +163,11 @@ Item {
                     x: -width / 2
                     y: -height / 2
                     radius: 1
-                    color: "#4a90e2"
+                    color: Theme.accent
                 }
                 Text {
                     text: parent.label
-                    color: "#4a90e2"
+                    color: Theme.accent
                     font.pixelSize: 10
                     font.weight: Font.DemiBold
                     anchors.horizontalCenter: parent.horizontalCenter

@@ -15,11 +15,13 @@ Popup {
     y: parent ? (parent.height - height) / 2 : 0
     modal: true
     focus: true
+    palette: Theme.controlPalette
+    Overlay.modal: Rectangle { color: Theme.modalScrim }
     padding: 20
     closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
     readonly property var usage: MediaMemory.summary
     readonly property real total: Math.max(1, usage.totalBytes || 1)
-    readonly property color secondaryText: Qt.rgba(Theme.text.r, Theme.text.g, Theme.text.b, 0.72)
+    readonly property color secondaryText: Theme.mutedText
 
     function bytes(value) {
         var gib = Number(value || 0) / 1073741824
@@ -39,7 +41,7 @@ Popup {
     }
 
     background: Rectangle {
-        color: Theme.windowBackground
+        color: Theme.elevatedBackground
         border.color: Theme.border
         radius: 10
     }
@@ -83,7 +85,7 @@ Popup {
             text: root.usage.pressure === "critical"
                   ? "Critical memory pressure: loading is paused and media may be released."
                   : "System memory warning: new loading is paused until pressure recovers."
-            color: root.usage.pressure === "critical" ? Theme.errorText : Theme.text
+            color: root.usage.pressure === "critical" ? Theme.errorText : Theme.warningText
             font.pixelSize: 12
             wrapMode: Text.Wrap
         }
@@ -92,7 +94,7 @@ Popup {
             objectName: "memoryDistributionBar"
             Layout.fillWidth: true
             implicitHeight: 26
-            color: "#46a875"
+            color: Theme.chartAvailable
             radius: 4
             clip: true
             Row {
@@ -100,12 +102,12 @@ Popup {
                 Rectangle {
                     height: parent.height
                     width: ramBar.width * Math.min(1, (root.usage.processBytes || 0) / root.total)
-                    color: Theme.brandBlue
+                    color: Theme.chartProcess
                 }
                 Rectangle {
                     height: parent.height
                     width: ramBar.width * Math.min(1, (root.usage.otherBytes || 0) / root.total)
-                    color: "#8a8a94"
+                    color: Theme.chartOther
                 }
             }
         }
@@ -114,10 +116,10 @@ Popup {
             spacing: 18
             Repeater {
                 model: [
-                    {label: "Mouffette", amount: root.usage.processBytes, tint: Theme.brandBlue},
-                    {label: "System and other apps", amount: root.usage.otherBytes, tint: "#8a8a94"},
+                    {label: "Mouffette", amount: root.usage.processBytes, tint: Theme.chartProcess},
+                    {label: "System and other apps", amount: root.usage.otherBytes, tint: Theme.chartOther},
                     {label: "Available" + (root.usage.availableEstimated ? " (estimated)" : ""),
-                     amount: root.usage.availableBytes, tint: "#46a875"}
+                     amount: root.usage.availableBytes, tint: Theme.chartAvailable}
                 ]
                 delegate: RowLayout {
                     required property var modelData
@@ -151,7 +153,7 @@ Popup {
                 required property var modelData
                 width: assetList.width
                 height: details.implicitHeight + 18
-                color: Theme.interactionBackground
+                color: Theme.surfaceBackground
                 radius: 5
                 RowLayout {
                     anchors.fill: parent
