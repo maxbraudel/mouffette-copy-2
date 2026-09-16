@@ -163,6 +163,7 @@ private:
     RuntimeStorageBootstrap::Result m_bootstrapResult;
     BootstrapDecision m_bootstrapDecision = BootstrapDecision::None;
     bool m_bootstrapStarted = false;
+    bool m_multimediaBootstrapPending = false;
     bool m_ready = false;
     QString m_bootstrapTitle = QStringLiteral("Starting Mouffette");
     QString m_bootstrapDetail = QStringLiteral("Preparing local storage…");

@@ -8,6 +8,7 @@
 #include "backend/files/FileManager.h"
 #include "backend/media/MediaResidencyManager.h"
 #include "backend/media/MediaDecoder.h"
+#include "backend/media/MediaBackendBootstrap.h"
 #include "backend/runtime/RuntimeProfile.h"
 #include "frontend/ui/notifications/ToastNotificationSystem.h"
 #include <QFile>
@@ -204,12 +205,10 @@ private slots:
         QVERIFY(!blocker.isFinished());
         if (video) {
             QVERIFY(media->player());
-            QVERIFY(!media->videoSink());
-            QVERIFY(!media->audioOutput());
             media->setMuted(true);
             media->setVolume(0.27);
             QVERIFY(media->muted());
-            QCOMPARE(media->volume(), 0.27);
+            QVERIFY(qAbs(media->volume() - 0.27) < 0.001);
         }
     }
 
@@ -1656,14 +1655,22 @@ private slots:
     void droppedMediaReportsFirstSkeletonTiming_data()
     {
         QTest::addColumn<QString>("mediaType");
-        QTest::newRow("large-png") << QStringLiteral("large-png");
-        QTest::newRow("webp") << QStringLiteral("webp");
-        QTest::newRow("video") << QStringLiteral("video");
+        QTest::addColumn<bool>("backendPrepared");
+        QTest::newRow("large-png") << QStringLiteral("large-png") << false;
+        QTest::newRow("webp") << QStringLiteral("webp") << false;
+        QTest::newRow("video") << QStringLiteral("video") << false;
+        QTest::newRow("video-prepared") << QStringLiteral("video") << true;
     }
 
     void droppedMediaReportsFirstSkeletonTiming()
     {
         QFETCH(QString, mediaType);
+        QFETCH(bool, backendPrepared);
+        if (backendPrepared) {
+            const auto preparation = MediaBackendBootstrap::initialize();
+            QTRY_VERIFY_WITH_TIMEOUT(preparation.isFinished(), 15000);
+            QVERIFY2(preparation.result().ready, qPrintable(preparation.result().error));
+        }
         QTemporaryDir directory;
         QVERIFY(directory.isValid());
         QString path;
@@ -1751,7 +1758,7 @@ private slots:
         QVERIFY(fixture.controller.commitLocalFileDrop(dropPoint.x(), dropPoint.y()));
         const qreal commitMs = (elapsed.nsecsElapsed() - commitStartedNs) / 1000000.0;
         QTRY_VERIFY_WITH_TIMEOUT(skeletonFrameMs >= 0, 10000);
-        qInfo() << "Drop timing ms:" << "commit" << commitMs
+        qInfo() << "Drop timing ms:" << "backendPrepared" << backendPrepared << "commit" << commitMs
                 << "mediaAdded" << mediaAddedMs << "presentedFrame" << presentedFrameMs
                 << "skeletonFrame" << skeletonFrameMs
                 << "maxHeartbeatGap" << maxHeartbeatGapMs << "heartbeats" << heartbeatCount

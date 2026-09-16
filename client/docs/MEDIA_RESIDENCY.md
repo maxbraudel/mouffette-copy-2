@@ -1,5 +1,13 @@
 # Resident media and bounded video playback
 
+Application bootstrap prepares the Qt media backend, decoder capabilities and
+current audio devices before publishing `ApplicationController.ready`. The loading
+window remains responsive; activation requests cannot reveal the main window early.
+A failed preparation keeps startup on its retry screen. The startup probe does not
+open media or retain a player, video sink, audio stream, decoder queue or polling timer.
+Per-occurrence outputs still use the current audio device, including after hotplug.
+The worker expires when idle; shutdown joins outstanding discovery before Qt teardown.
+
 Every image/video occurrence has an asynchronous residency lease. The process-wide
 `MediaResidencyManager` owns immutable assets shared by SHA-256. Text does not
 need a file lease. RAM state is transient; project references retain the source

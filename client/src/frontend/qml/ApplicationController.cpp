@@ -2,6 +2,7 @@
 
 #include "backend/runtime/ApplicationRuntime.h"
 #include "backend/config/AppConfig.h"
+#include "backend/media/MediaBackendBootstrap.h"
 #include "backend/domain/scene/SceneActivityModel.h"
 #include "backend/domain/project/ProjectManager.h"
 #include "backend/managers/app/SettingsManager.h"
@@ -16,6 +17,7 @@
 #include <QCoreApplication>
 #include <QDateTime>
 #include <QGuiApplication>
+#include <QFutureWatcher>
 #include <QTimer>
 #include <QUrl>
 
@@ -202,9 +204,30 @@ void ApplicationController::quitBootstrap()
 
 void ApplicationController::finishBootstrap()
 {
+    if (m_multimediaBootstrapPending || m_ready) return;
     m_bootstrapDecision = BootstrapDecision::None;
     m_bootstrapDecisionRequired = false;
-    initializeBackend();
+    m_bootstrapDetail = QStringLiteral("Preparing audio and video…");
+    m_multimediaBootstrapPending = true;
+    emit bootstrapChanged();
+    auto* watcher = new QFutureWatcher<MediaBackendBootstrap::Result>(this);
+    connect(watcher, &QFutureWatcher<MediaBackendBootstrap::Result>::finished,
+            this, [this, watcher] {
+        const auto result = watcher->result();
+        watcher->deleteLater();
+        m_multimediaBootstrapPending = false;
+        if (!result.ready) {
+            m_bootstrapDecision = BootstrapDecision::Retry;
+            m_bootstrapDecisionRequired = true;
+            m_bootstrapTitle = QStringLiteral("Mouffette could not start");
+            m_bootstrapDetail = result.error;
+            m_bootstrapPrimaryText = QStringLiteral("Retry");
+            emit bootstrapChanged();
+            return;
+        }
+        initializeBackend();
+    });
+    watcher->setFuture(MediaBackendBootstrap::initialize());
 }
 
 void ApplicationController::initializeBackend()

@@ -106,8 +106,6 @@ int main(int argc, char *argv[]) {
         AppConfig::instance().mediaRamReservePercent(),
         AppConfig::instance().mediaRamReserveMinMiB());
 
-    logRuntimeDiagnostics();
-
     // Keep application alive when window is closed (so user can reopen via other means later)
     app.setQuitOnLastWindowClosed(false);
 
@@ -147,6 +145,9 @@ int main(int argc, char *argv[]) {
     QObject::connect(&app, &QCoreApplication::aboutToQuit,
                      &controller, &ApplicationController::handleApplicationAboutToQuit,
                      Qt::DirectConnection);
+    QObject::connect(&controller, &ApplicationController::readyChanged, &app, [&controller] {
+        if (controller.ready()) logRuntimeDiagnostics();
+    });
     controller.start();
     return app.exec();
 }

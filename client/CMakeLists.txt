@@ -156,6 +156,8 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET
     libavformat>=61 libavcodec>=61 libavutil libswscale libswresample)
 add_library(MouffetteResidentMedia STATIC
+    src/backend/media/MediaBackendBootstrap.h
+    src/backend/media/MediaBackendBootstrap.cpp
     src/backend/media/ResidentMediaAsset.h
     src/backend/media/MediaDecoder.h
     src/backend/media/MediaDecoder.cpp
@@ -624,6 +626,10 @@ endif()
 include(CTest)
 if(BUILD_TESTING)
     find_package(Qt6 REQUIRED COMPONENTS Test)
+
+    add_executable(tst_MediaBackendBootstrap tests/qt/tst_MediaBackendBootstrap.cpp)
+    target_link_libraries(tst_MediaBackendBootstrap PRIVATE MouffetteResidentMedia Qt6::Test)
+    add_test(NAME MediaBackendBootstrap COMMAND tst_MediaBackendBootstrap)
 
     add_executable(tst_ResidentMedia tests/qt/tst_ResidentMedia.cpp)
     target_link_libraries(tst_ResidentMedia PRIVATE MouffetteResidentMedia Qt6::Test)

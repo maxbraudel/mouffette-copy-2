@@ -15,6 +15,7 @@
 #include <QWebSocketServer>
 
 #include "backend/runtime/ApplicationRuntime.h"
+#include "backend/media/MediaBackendBootstrap.h"
 #include "backend/runtime/ApplicationActivityMonitor.h"
 #include "backend/runtime/RuntimeProfile.h"
 #include "backend/runtime/RuntimeStorageBootstrap.h"
@@ -2549,8 +2550,24 @@ private slots:
             context,
             {QStringLiteral("tst_ClientConnectionFlow"),
              QStringLiteral("--server-url=%1").arg(serverUrl)});
+        bool observedMediaBootstrap = false;
+        bool backendReadyAtPublication = false;
+        connect(&controller, &ApplicationController::bootstrapChanged, this, [&] {
+            if (controller.bootstrapDetail() == QStringLiteral("Preparing audio and video…")
+                && !controller.ready()) {
+                observedMediaBootstrap = true;
+                QVERIFY(!controller.connectionEnabled());
+            }
+        });
+        connect(&controller, &ApplicationController::readyChanged, this, [&] {
+            const auto prepared = MediaBackendBootstrap::initialize();
+            backendReadyAtPublication = prepared.isFinished() && prepared.result().ready;
+        });
         controller.start();
-        QTRY_VERIFY_WITH_TIMEOUT(controller.ready(), 2'000);
+        QVERIFY(!controller.ready());
+        QTRY_VERIFY_WITH_TIMEOUT(controller.ready(), 8'000);
+        QVERIFY(observedMediaBootstrap);
+        QVERIFY(backendReadyAtPublication);
         QTRY_VERIFY_WITH_TIMEOUT(!ownerEndpointId.isEmpty(), 2'000);
         QTRY_VERIFY_WITH_TIMEOUT(!endpointSnapshots.isEmpty(), 2'000);
 

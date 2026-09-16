@@ -177,6 +177,12 @@ QtObject {
             target: root.controller
             function onDialogRequested() { confirmation.open() }
             function onRaiseRequested() {
+                if (!root.controller.ready) {
+                    root.bootstrap.show()
+                    root.bootstrap.raise()
+                    root.bootstrap.requestActivate()
+                    return
+                }
                 window.show()
                 window.raise()
                 window.requestActivate()

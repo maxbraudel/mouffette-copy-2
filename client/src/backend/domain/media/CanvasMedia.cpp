@@ -1,74 +1,22 @@
 #include "backend/domain/media/CanvasMedia.h"
 #include "backend/domain/media/TextRenderState.h"
 #include "backend/media/MediaResidencyManager.h"
+#include "backend/media/MediaBackendBootstrap.h"
 #include "shared/rendering/MediaFrameSource.h"
 
 #include <QAudioOutput>
 #include <QAudioDevice>
-#include <QCoreApplication>
 #include <QFileInfo>
 #include <QFutureWatcher>
-#include <QList>
-#include <QMediaDevices>
 #include <QUrl>
 #include <QUuid>
 #include <QVideoFrame>
 #include <QVideoSink>
-#include <QtConcurrent/QtConcurrentRun>
 
 #include <algorithm>
 #include <cmath>
 
 namespace {
-// Device discovery can take hundreds of milliseconds on a cold audio backend.
-// Keep it outside the UI thread and independent of an occurrence's lifetime.
-// Only application shutdown waits for unfinished discovery; deleting a loading
-// medium merely disconnects its result watcher.
-class AudioDeviceDiscovery final : public QFutureWatcher<QAudioDevice> {
-public:
-    explicit AudioDeviceDiscovery(QObject* parent) : QFutureWatcher(parent)
-    {
-        auto& active = activeJobs();
-        if (active.isEmpty()) qAddPostRoutine(waitForAll);
-        active.append(this);
-    }
-
-    ~AudioDeviceDiscovery() override
-    {
-        waitForFinished();
-        auto& active = activeJobs();
-        active.removeOne(this);
-        if (active.isEmpty()) qRemovePostRoutine(waitForAll);
-    }
-
-private:
-    static QList<AudioDeviceDiscovery*>& activeJobs()
-    {
-        // Creation, destruction and application cleanup all run on the GUI
-        // thread; the worker never accesses this registry.
-        static QList<AudioDeviceDiscovery*> jobs;
-        return jobs;
-    }
-
-    static void waitForAll()
-    {
-        // QApplication can be destroyed without exec()/aboutToQuit, as in
-        // QTest. Child destructors run after qApp is cleared, so join here
-        // while the audio backend can still access the application object.
-        for (auto* job : activeJobs()) job->waitForFinished();
-    }
-};
-
-QFuture<QAudioDevice> discoverDefaultAudioOutput()
-{
-    auto* job = new AudioDeviceDiscovery(QCoreApplication::instance());
-    QObject::connect(job, &QFutureWatcher<QAudioDevice>::finished, job, &QObject::deleteLater);
-    QObject::connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit,
-                     job, [job] { job->waitForFinished(); });
-    job->setFuture(QtConcurrent::run([] { return QMediaDevices::defaultAudioOutput(); }));
-    return job->future();
-}
-
 QString uploadStateName(CanvasMedia::UploadState state)
 {
     switch (state) {
@@ -620,7 +568,7 @@ void CanvasMedia::initializeVideoRuntime()
         m_player->setAudioOutput(m_audioOutput);
         refreshResidency();
     });
-    audio->setFuture(discoverDefaultAudioOutput());
+    audio->setFuture(MediaBackendBootstrap::defaultAudioOutput());
 }
 
 bool CanvasMedia::isPlaying() const

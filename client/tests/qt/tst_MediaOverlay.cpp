@@ -54,6 +54,7 @@ private slots:
     void mediaCountTracksRealCanvasInsertions();
     void typedCapabilitiesGuardDirectCppInvocations();
     void overlayButtonHoverIsImmediate();
+    void activationDuringBootstrapKeepsMainWindowHidden();
     void mainWindowPointerActivity_data();
     void mainWindowPointerActivity();
     void mediaActionPalette_data();
@@ -969,6 +970,38 @@ void MediaOverlayTest::overlayButtonHoverIsImmediate()
              QColor(52, 87, 128, 242));
     QTest::mouseRelease(&window, Qt::LeftButton, Qt::NoModifier, QPoint(38, 38));
     QCOMPARE(button->property("currentBackgroundColor").value<QColor>(), hovered);
+}
+
+void MediaOverlayTest::activationDuringBootstrapKeepsMainWindowHidden()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    RuntimeProfileContext profile;
+    profile.ordinal = 2;
+    profile.instanceId = QStringLiteral("bootstrap-activation-test");
+    profile.profileId = profile.instanceId;
+    profile.rootPath = directory.path();
+    profile.persistent = false;
+    QQmlEngine engine;
+    ApplicationController controller(profile, {});
+    QQmlComponent component(&engine, QUrl(QStringLiteral(
+        "qrc:/qt/qml/Mouffette/App/resources/qml/app/Main.qml")));
+    std::unique_ptr<QObject> root(component.createWithInitialProperties({
+        {QStringLiteral("controller"), QVariant::fromValue(&controller)}
+    }));
+    QVERIFY2(root, qPrintable(component.errorString()));
+    auto* bootstrap = qobject_cast<QWindow*>(root->property("bootstrap").value<QObject*>());
+    auto* window = qobject_cast<QWindow*>(root->property("window").value<QObject*>());
+    QVERIFY(bootstrap && window);
+    QVERIFY(!controller.ready());
+    QVERIFY(!window->isVisible());
+    bootstrap->hide();
+    // A second launch/activation must raise the loading window, not bypass
+    // the storage and multimedia readiness gate on the main application.
+    controller.raiseRequested();
+    QTRY_VERIFY(bootstrap->isVisible());
+    QVERIFY(!window->isVisible());
+    bootstrap->hide();
 }
 
 void MediaOverlayTest::mainWindowPointerActivity_data()
