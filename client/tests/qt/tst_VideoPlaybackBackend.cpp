@@ -307,6 +307,7 @@ private slots:
         QVERIFY(QTest::qWaitForWindowExposed(&view));
 
         ResidentVideoPlayer* player = video->player();
+        QTRY_VERIFY_WITH_TIMEOUT(video->audioOutput(), 8000);
         QAudioOutput* audio = video->audioOutput();
         QVERIFY(player && audio && video->videoSink());
         QTRY_VERIFY_WITH_TIMEOUT(player->videoSink() != nullptr, 8000);

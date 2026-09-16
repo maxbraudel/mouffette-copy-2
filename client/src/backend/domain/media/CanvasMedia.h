@@ -220,6 +220,8 @@ private:
     RemoteVideoFrameSource* m_residentFrameSource = nullptr;
     QVideoSink* m_videoSink = nullptr;
     QAudioOutput* m_audioOutput = nullptr;
+    bool m_muted = false;
+    qreal m_volume = 1.0;
     qint64 m_pendingPositionMs = -1;
     bool m_repeatEnabled = false;
     qint64 m_startMarkerMs = -1;

@@ -9,6 +9,7 @@ BaseMediaItem {
     property var remoteFrameSource: null
     property var boundMediaPlayer: null
     property var boundFallbackSink: null
+    property var boundVideoOutput: null
     property int videoPlaybackErrorCode: 0
     property string videoPlaybackErrorString: ""
     property bool videoHasRenderedFrame: false
@@ -17,7 +18,8 @@ BaseMediaItem {
     property bool requireInitialSkeleton: true
     readonly property bool remoteFrameMode: remoteFrameSource !== null
     readonly property bool hasLiveFrame: remoteFrameMode
-                                          ? remoteFrameSurface.hasFrame : localFrameSeen
+        ? !!remoteFrameLoader.item && remoteFrameLoader.item.hasFrame
+        : !!localVideoLoader.item && localFrameSeen
     property bool localFrameSeen: false
     contentReady: root.residencyReady && hasLiveFrame
     initialFramePresented: !requireInitialSkeleton || mediaSurface.firstFramePresented
@@ -25,25 +27,29 @@ BaseMediaItem {
     function restoreBoundPlayer() {
         var previousPlayer = boundMediaPlayer
         var previousSink = boundFallbackSink
+        var previousOutput = boundVideoOutput
         boundMediaPlayer = null
         boundFallbackSink = null
+        boundVideoOutput = null
+        localFrameSeen = false
         if (!previousPlayer || !("videoOutput" in previousPlayer))
             return
         try {
             // Restore only our own binding. A newer delegate/output must never
             // be detached by destruction of an older delegate.
-            if (previousPlayer.videoOutput === videoOutput)
+            if (previousPlayer.videoOutput === previousOutput)
                 previousPlayer.videoOutput = previousSink
         } catch (e) { }
     }
 
     function bindPlayerToOutput() {
+        var videoOutput = localVideoLoader.item
         if (!videoOutput || !cppMediaPlayer || !("videoOutput" in cppMediaPlayer)) {
             restoreBoundPlayer()
             return
         }
 
-        if (boundMediaPlayer === cppMediaPlayer) {
+        if (boundMediaPlayer === cppMediaPlayer && boundVideoOutput === videoOutput) {
             try {
                 if (cppMediaPlayer.videoOutput === videoOutput) {
                     // The fallback role can settle one event-loop turn after
@@ -62,37 +68,73 @@ BaseMediaItem {
             cppMediaPlayer.videoOutput = videoOutput
             boundMediaPlayer = cppMediaPlayer
             boundFallbackSink = cppVideoSink
+            boundVideoOutput = videoOutput
+            // setVideoOutput can deliver the poster synchronously before the
+            // loader's signal connections have settled. Inspect the real sink.
+            updateLocalFrameSeen(videoOutput)
         } catch (e) {
-            boundMediaPlayer = null
-            boundFallbackSink = null
+            restoreBoundPlayer()
         }
+    }
+
+    function updateLocalFrameSeen(videoOutput) {
+        if (!videoOutput || videoOutput !== localVideoLoader.item)
+            return
+        var size = videoOutput.videoSink.videoSize
+        localFrameSeen = size.width > 0 && size.height > 0
     }
 
     MediaSurface {
         id: mediaSurface
         anchors.fill: parent
         requireInitialSkeleton: root.requireInitialSkeleton
-        contentReady: root.residencyReady && root.hasLiveFrame
+        contentReady: root.contentReady
 
-        VideoOutput {
-            id: videoOutput
+        Loader {
+            id: localVideoLoader
             anchors.fill: parent
             z: 1
-            fillMode: VideoOutput.Stretch
-            visible: !root.remoteFrameMode
+            active: !root.remoteFrameMode && root.residencyReady && root.cppVideoSink !== null
+                    && (!root.requireInitialSkeleton || mediaSurface.firstFramePresented)
+            onItemChanged: {
+                root.localFrameSeen = false
+                Qt.callLater(root.bindPlayerToOutput)
+            }
+            sourceComponent: VideoOutput {
+                id: videoOutput
+                fillMode: VideoOutput.Stretch
 
-            onWindowChanged: function(window) {
-                if (window)
-                    Qt.callLater(root.bindPlayerToOutput)
+                onWindowChanged: function(window) {
+                    if (window)
+                        Qt.callLater(root.bindPlayerToOutput)
+                }
+
+                Component.onDestruction: {
+                    if (root.boundVideoOutput === videoOutput)
+                        root.restoreBoundPlayer()
+                }
+
+                Connections {
+                    target: videoOutput.videoSink
+                    function onVideoFrameChanged(frame) {
+                        root.updateLocalFrameSeen(videoOutput)
+                    }
+                }
             }
         }
 
-        RemoteVideoFrameItem {
-            id: remoteFrameSurface
+        Loader {
+            id: remoteFrameLoader
             anchors.fill: parent
             z: 1
-            visible: root.remoteFrameMode
-            frameSource: root.remoteFrameSource
+            // Local video uses VideoOutput only. Passive remote spans create a
+            // painted surface once their shared source holds a resident frame.
+            active: root.remoteFrameMode && root.residencyReady
+                    && root.remoteFrameSource.hasFrame === true
+                    && (!root.requireInitialSkeleton || mediaSurface.firstFramePresented)
+            sourceComponent: RemoteVideoFrameItem {
+                frameSource: root.remoteFrameSource
+            }
         }
     }
 
@@ -131,14 +173,6 @@ BaseMediaItem {
         function onPlaybackStateChanged(state) {
             if (!root.residencyReady)
                 root.localFrameSeen = false
-        }
-    }
-
-    Connections {
-        target: videoOutput ? videoOutput.videoSink : null
-        ignoreUnknownSignals: true
-        function onVideoFrameChanged(frame) {
-            root.localFrameSeen = true
         }
     }
 

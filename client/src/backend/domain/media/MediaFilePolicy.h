@@ -46,8 +46,14 @@ struct PreparationValidationResult {
 inline constexpr quint64 MaximumImagePixels = 64ULL * 1000ULL * 1000ULL;
 
 // Structural/header validation. Does not decode pixels or create a player;
-// suitable for the asynchronous import probe and the resident decoder.
+// checks installed video decoder capabilities for the resident decoder.
 ValidationResult validateLocalFileMetadata(const QString& path);
+
+// Import-only structural/header validation with the same format/codec allowlist.
+// Defers installed video decoder discovery so obtaining shell geometry never
+// initializes the Qt multimedia backend. Residency still validates capabilities
+// and complete decoding before any content becomes ready.
+ValidationResult validateLocalFileGeometry(const QString& path);
 
 // Classifies an existing local file from both its extension and its contents.
 // Video support is deliberately strict: only an ISO-BMFF/MP4 file whose final

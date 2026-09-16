@@ -4,6 +4,7 @@
 #include <QAbstractVideoBuffer>
 #include <QCryptographicHash>
 #include <QDateTime>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
 #include <QImageReader>
@@ -58,7 +59,8 @@ int interrupted(void* opaque) {
 }
 
 FormatPtr openFormat(const QString& path, QString& error,
-                     const MediaDecoder::DecodeCallbacks* callbacks = nullptr) {
+                     const MediaDecoder::DecodeCallbacks* callbacks = nullptr,
+                     bool inspectStreams = true) {
     AVFormatContext* context = avformat_alloc_context();
     if (!context) { error = QStringLiteral("Unable to allocate the media reader"); return {}; }
     context->interrupt_callback = {interrupted, const_cast<MediaDecoder::DecodeCallbacks*>(callbacks)};
@@ -67,8 +69,10 @@ FormatPtr openFormat(const QString& path, QString& error,
     int result = avformat_open_input(&context, encoded.constData(), nullptr, nullptr);
     if (result < 0) { error = avError(result); return {}; }
     FormatPtr format(context);
-    result = avformat_find_stream_info(context, nullptr);
-    if (result < 0) { error = avError(result); return {}; }
+    if (inspectStreams) {
+        result = avformat_find_stream_info(context, nullptr);
+        if (result < 0) { error = avError(result); return {}; }
+    }
     return format;
 }
 
@@ -356,6 +360,73 @@ bool hashSource(const QString& path, DecoderJob& job) {
     return true;
 }
 } // namespace
+
+MediaDecoder::Geometry MediaDecoder::inspectGeometry(
+    const QString& path, const std::function<bool()>& cancelled) {
+    Geometry result;
+    QElapsedTimer deadline;
+    deadline.start();
+    bool cancellationRequested = false;
+    auto interruptedInspection = [&] {
+        cancellationRequested = cancellationRequested || (cancelled && cancelled());
+        return cancellationRequested || deadline.hasExpired(5000);
+    };
+    auto stopped = [&] {
+        if (!interruptedInspection()) return false;
+        result.error = cancellationRequested ? QStringLiteral("cancelled")
+            : QStringLiteral("Media metadata inspection timed out");
+        return true;
+    };
+    if (stopped()) return result;
+    const auto validation = MediaFilePolicy::validateLocalFileGeometry(path);
+    if (stopped()) return result;
+    if (!validation.accepted()) {
+        result.error = MediaFilePolicy::validationErrorDescription(validation);
+        return result;
+    }
+    result.video = validation.kind == MediaFilePolicy::Kind::Mp4Video;
+    if (!result.video) {
+        QImageReader reader(path);
+        reader.setDecideFormatFromContent(true);
+        reader.setAutoTransform(true);
+        result.displaySize = validation.imageSize;
+        if (reader.transformation() & QImageIOHandler::TransformationRotate90)
+            result.displaySize.transpose();
+        stopped();
+        return result;
+    }
+
+    DecodeCallbacks callbacks;
+    callbacks.cancelled = interruptedInspection;
+    // MP4 headers normally contain the complete display geometry. Do not read
+    // and decode stream packets just to insert an empty canvas shell.
+    auto format = openFormat(path, result.error, &callbacks, false);
+    if (stopped() || !format) return result;
+    int index = av_find_best_stream(format.get(), AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
+    bool needsStreamInfo = index < 0;
+    if (index >= 0) {
+        AVStream* stream = format->streams[index];
+        const AVRational sar = av_guess_sample_aspect_ratio(format.get(), stream, nullptr);
+        // An unspecified SAR can still be encoded in the bitstream. Preserve
+        // that geometry rather than assuming square pixels for such files.
+        needsStreamInfo = !displaySize(format.get(), stream).isValid()
+            || sar.num <= 0 || sar.den <= 0;
+    }
+    if (needsStreamInfo) {
+        const int status = avformat_find_stream_info(format.get(), nullptr);
+        if (stopped()) return result;
+        if (status < 0) { result.error = avError(status); return result; }
+        index = av_find_best_stream(format.get(), AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
+    }
+    if (stopped()) return result;
+    if (index < 0) {
+        result.error = QStringLiteral("The MP4 contains no decodable video stream");
+        return result;
+    }
+    result.displaySize = displaySize(format.get(), format->streams[index]);
+    if (!result.displaySize.isValid()) result.error = QStringLiteral("Invalid video dimensions");
+    return result;
+}
 
 MediaDecoder::Probe MediaDecoder::probe(const QString& path) {
     Probe result;

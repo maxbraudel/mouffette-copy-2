@@ -6,9 +6,12 @@
 #include "backend/media/MediaDecoder.h"
 
 #include <QDateTime>
+#include <QCoreApplication>
 #include <QFileInfo>
 #include <QFutureWatcher>
 #include <QJsonArray>
+#include <QPointer>
+#include <QThreadPool>
 #include <QUuid>
 #include <QUrl>
 #include <QtConcurrent/QtConcurrentRun>
@@ -20,6 +23,20 @@
 
 namespace {
 constexpr int kProjectTextSettingsSchemaVersion = 1;
+
+QThreadPool* importMetadataPool()
+{
+    // A new shell must not queue behind full-file validation, hashing or other
+    // bulk QtConcurrent work. Bound this short metadata lane across documents.
+    static QPointer<QThreadPool> pool;
+    if (!pool) {
+        pool = new QThreadPool(QCoreApplication::instance());
+        pool->setMaxThreadCount(2);
+        QObject::connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit,
+                         pool, [] { if (pool) pool->waitForDone(); });
+    }
+    return pool;
+}
 
 QString sourceSignature(const QString& path)
 {
@@ -110,8 +127,8 @@ void CanvasDocument::startPendingImport(const QString& mediaId)
     const PendingImport pending = stored;
     const quint64 generation = m_importGeneration;
     m_activeImports.insert(mediaId);
-    auto* watcher = new QFutureWatcher<MediaDecoder::Probe>(this);
-    connect(watcher, &QFutureWatcher<MediaDecoder::Probe>::finished, this,
+    auto* watcher = new QFutureWatcher<MediaDecoder::Geometry>(this);
+    connect(watcher, &QFutureWatcher<MediaDecoder::Geometry>::finished, this,
             [this, watcher, pending, generation] {
         const auto probe = watcher->result();
         watcher->deleteLater();
@@ -148,14 +165,15 @@ void CanvasDocument::startPendingImport(const QString& mediaId)
         emit pendingImportsChanged();
         emit documentChanged();
     });
-    watcher->setFuture(QtConcurrent::run([pending] {
-        MediaDecoder::Probe probe;
+    watcher->setFuture(QtConcurrent::run(importMetadataPool(), [pending] {
+        MediaDecoder::Geometry probe;
         if (pending.cancelled->load()) return probe;
         if (sourceSignature(pending.sourcePath) != pending.sourceSignature) {
             probe.error = QStringLiteral("The source file changed or disappeared before import.");
             return probe;
         }
-        return MediaDecoder::probe(pending.sourcePath);
+        return MediaDecoder::inspectGeometry(pending.sourcePath,
+            [cancelled = pending.cancelled] { return cancelled->load(); });
     }));
 }
 

@@ -6,6 +6,12 @@
 class MediaDecoder final
 {
 public:
+    struct Geometry {
+        bool video = false;
+        QSize displaySize;
+        QString error;
+        bool accepted() const { return error.isEmpty() && displaySize.isValid(); }
+    };
     struct Probe {
         bool video = false;
         QSize displaySize;
@@ -27,6 +33,9 @@ public:
     };
 
     // Worker-thread APIs: never construct QMediaPlayer or enter an event loop.
+    // Import geometry does not establish residency or replace full validation.
+    static Geometry inspectGeometry(const QString& path,
+                                    const std::function<bool()>& cancelled = {});
     static Probe probe(const QString& path);
     static std::shared_ptr<ResidentMediaAsset> decode(
         const QString& path, const DecodeCallbacks& callbacks = {},

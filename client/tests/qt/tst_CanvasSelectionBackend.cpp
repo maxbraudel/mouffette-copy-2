@@ -1,11 +1,13 @@
 #include <QApplication>
 #include <QClipboard>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QJsonArray>
 #include <QMimeData>
 #include <QMouseEvent>
 #include "backend/files/FileManager.h"
 #include "backend/media/MediaResidencyManager.h"
+#include "backend/media/MediaDecoder.h"
 #include "backend/runtime/RuntimeProfile.h"
 #include "frontend/ui/notifications/ToastNotificationSystem.h"
 #include <QFile>
@@ -16,8 +18,12 @@
 #include <QQuickItem>
 #include <QQuickStyle>
 #include <QQuickView>
+#include <QScopeGuard>
+#include <QSemaphore>
 #include <QTemporaryDir>
+#include <QThreadPool>
 #include <QTimer>
+#include <QtConcurrent/QtConcurrentRun>
 #include <QtTest>
 #include <limits>
 #include <array>
@@ -30,6 +36,7 @@
 #include "frontend/rendering/canvas/MediaListModel.h"
 #include "frontend/rendering/canvas/QuickCanvasController.h"
 #include "frontend/rendering/canvas/QuickCanvasHost.h"
+#include "frontend/rendering/remote/RemoteVideoFrameItem.h"
 #include "frontend/qml/ClientWorkspaceViewModel.h"
 #include "frontend/qml/MediaSettingsViewModel.h"
 #ifdef Q_OS_MACOS
@@ -139,6 +146,71 @@ private slots:
     {
         // The complete page must use the same controls as production main().
         QQuickStyle::setStyle(QStringLiteral("Basic"));
+    }
+
+    void pendingMetadataImportDoesNotWaitForBulkWorkers_data()
+    {
+        QTest::addColumn<bool>("video");
+        QTest::newRow("image") << false;
+        QTest::newRow("video") << true;
+    }
+
+    void pendingMetadataImportDoesNotWaitForBulkWorkers()
+    {
+        QFETCH(bool, video);
+        QTemporaryDir directory;
+        const QString path = video ? QString::fromUtf8(TEST_VIDEO_FILE)
+            : directory.filePath(QStringLiteral("queued-behind-video.png"));
+        if (!video) {
+            QImage image(96, 54, QImage::Format_ARGB32);
+            image.fill(Qt::cyan);
+            QVERIFY(image.save(path));
+        }
+        const auto geometry = MediaDecoder::inspectGeometry(path);
+        QVERIFY(geometry.accepted());
+
+        QThreadPool* pool = QThreadPool::globalInstance();
+        const int previousThreadCount = pool->maxThreadCount();
+        QSemaphore started;
+        QSemaphore releaseWorker;
+        QFuture<void> blocker;
+        const auto restorePool = qScopeGuard([&] {
+            // QVERIFY/QCOMPARE return early on failure; always release the
+            // worker before its referenced semaphores leave this scope.
+            releaseWorker.release();
+            blocker.waitForFinished();
+            pool->setMaxThreadCount(previousThreadCount);
+        });
+        pool->setMaxThreadCount(1);
+        blocker = QtConcurrent::run(pool, [&] {
+            started.release();
+            releaseWorker.acquire();
+        });
+        QTRY_VERIFY_WITH_TIMEOUT(started.available() == 1, 5000);
+
+        // Simulate a full video validation occupying every bulk worker. The
+        // canvas shell only needs metadata and must still be adopted now.
+        CanvasDocument document;
+        const QPointF center(431.25, -62.5);
+        const QString id = document.queueFileImport(path, center);
+        QVERIFY(!id.isEmpty());
+        QTRY_VERIFY_WITH_TIMEOUT(document.mediaById(id) != nullptr, 5000);
+        CanvasMedia* media = document.mediaById(id);
+        QCOMPARE(media->sceneRect().size(), QSizeF(geometry.displaySize));
+        QCOMPARE(media->sceneRect().center(), center);
+        QVERIFY(media->selected());
+        QVERIFY(!document.hasPendingImports());
+        QVERIFY(!media->residencyReady());
+        QVERIFY(!blocker.isFinished());
+        if (video) {
+            QVERIFY(media->player());
+            QVERIFY(!media->videoSink());
+            QVERIFY(!media->audioOutput());
+            media->setMuted(true);
+            media->setVolume(0.27);
+            QVERIFY(media->muted());
+            QCOMPARE(media->volume(), 0.27);
+        }
     }
 
     void pendingMetadataImportSurvivesProjectRoundTrip()
@@ -1579,6 +1651,144 @@ private slots:
             originalPosition.y() + 25, false);
         QCOMPARE(imported->position(), originalPosition + QPointF(50, 25));
         QVERIFY(imported->residencyReady());
+    }
+
+    void droppedMediaReportsFirstSkeletonTiming_data()
+    {
+        QTest::addColumn<QString>("mediaType");
+        QTest::newRow("large-png") << QStringLiteral("large-png");
+        QTest::newRow("webp") << QStringLiteral("webp");
+        QTest::newRow("video") << QStringLiteral("video");
+    }
+
+    void droppedMediaReportsFirstSkeletonTiming()
+    {
+        QFETCH(QString, mediaType);
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        QString path;
+        if (mediaType == QLatin1String("large-png")) {
+            path = directory.filePath(QStringLiteral("large-drop.png"));
+            // Generate before timing, and release the source pixels before
+            // importing. At DPR 2 this also exercises a large painted surface.
+            QImage source(7680, 4320, QImage::Format_RGB32);
+            source.fill(Qt::cyan);
+            QVERIFY(source.save(path));
+        } else if (mediaType == QLatin1String("video")) {
+            path = qEnvironmentVariable("MOUFFETTE_TEST_VIDEO_FILE");
+            if (path.isEmpty()) path = QString::fromUtf8(TEST_VIDEO_FILE);
+        } else {
+            path = QString::fromUtf8(TEST_WEBP_FILE);
+        }
+        QVERIFY2(QFile::exists(path), qPrintable(path));
+        auto& memory = MediaResidencyManager::instance();
+        memory.setMemorySnapshotForTesting({8ULL << 30, 0, 512ULL << 20, false, 0});
+        Fixture fixture;
+        QVERIFY(fixture.initialize());
+        fixture.view.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&fixture.view));
+#ifdef Q_OS_MACOS
+        MacWindowManager::activateApplicationWindow(&fixture.view);
+#else
+        fixture.view.requestActivate();
+#endif
+        QVERIFY(QTest::qWaitForWindowActive(&fixture.view));
+        const QPointF dropPoint(500, 350);
+        const QImage emptyFrame = fixture.view.grabWindow();
+        QVERIFY(!emptyFrame.isNull());
+        QElapsedTimer elapsed;
+        qint64 mediaAddedMs = -1;
+        qint64 skeletonFrameMs = -1;
+        qint64 presentedFrameMs = -1;
+        qint64 lastHeartbeatMs = 0;
+        qint64 maxHeartbeatGapMs = 0;
+        int heartbeatCount = 0;
+        bool capturePending = false;
+        QImage skeletonFrame;
+        QObject observer;
+        QTimer heartbeat;
+        heartbeat.setTimerType(Qt::PreciseTimer);
+        heartbeat.setInterval(5);
+        connect(&heartbeat, &QTimer::timeout, &observer, [&] {
+            const qint64 now = elapsed.elapsed();
+            maxHeartbeatGapMs = qMax(maxHeartbeatGapMs, now - lastHeartbeatMs);
+            lastHeartbeatMs = now;
+            ++heartbeatCount;
+        });
+        connect(&fixture.document, &CanvasDocument::mediaAdded, &observer,
+                [&](CanvasMedia* media) {
+            mediaAddedMs = elapsed.elapsed();
+            // Import publishes only the lightweight model/facade. Platform
+            // sinks and audio must never initialize synchronously on adoption.
+            if (media->isVideo()) {
+                QVERIFY(media->player());
+                QVERIFY(!media->videoSink());
+                QVERIFY(!media->audioOutput());
+            }
+        });
+        connect(&fixture.view, &QQuickWindow::frameSwapped, &observer, [&] {
+            if (skeletonFrameMs >= 0 || capturePending || mediaAddedMs < 0) return;
+            auto* skeleton = findQuickItemWithProperty(
+                fixture.view.rootObject(), "objectName", "mediaLoadingSkeleton");
+            if (!skeleton || !skeleton->isVisible()) return;
+            capturePending = true;
+            presentedFrameMs = elapsed.elapsed();
+            // Read back pixels outside the frame callback. The measured first
+            // frame and heartbeat gap include this final readback, consistently
+            // across cases; model insertion alone does not count as a display.
+            QTimer::singleShot(0, &observer, [&] {
+                skeletonFrame = fixture.view.grabWindow();
+                skeletonFrameMs = elapsed.elapsed();
+                maxHeartbeatGapMs = qMax(maxHeartbeatGapMs, skeletonFrameMs - lastHeartbeatMs);
+                heartbeat.stop();
+            });
+        });
+        elapsed.start();
+        heartbeat.start();
+        QVERIFY(fixture.controller.beginLocalFileDrag(
+            {QUrl::fromLocalFile(path)}, dropPoint.x(), dropPoint.y()));
+        const qint64 commitStartedNs = elapsed.nsecsElapsed();
+        QVERIFY(fixture.controller.commitLocalFileDrop(dropPoint.x(), dropPoint.y()));
+        const qreal commitMs = (elapsed.nsecsElapsed() - commitStartedNs) / 1000000.0;
+        QTRY_VERIFY_WITH_TIMEOUT(skeletonFrameMs >= 0, 10000);
+        qInfo() << "Drop timing ms:" << "commit" << commitMs
+                << "mediaAdded" << mediaAddedMs << "presentedFrame" << presentedFrameMs
+                << "skeletonFrame" << skeletonFrameMs
+                << "maxHeartbeatGap" << maxHeartbeatGapMs << "heartbeats" << heartbeatCount
+                << "DPR" << fixture.view.devicePixelRatio();
+        QVERIFY(!skeletonFrame.isNull());
+        const auto colorAtDrop = [&](const QImage& frame) {
+            return frame.pixelColor(qRound(dropPoint.x() * frame.width() / fixture.view.width()),
+                                    qRound(dropPoint.y() * frame.height() / fixture.view.height()));
+        };
+        const QColor before = colorAtDrop(emptyFrame);
+        const QColor shown = colorAtDrop(skeletonFrame);
+        QVERIFY2(shown.red() > before.red() + 10 && shown.green() > before.green() + 10
+                     && shown.blue() > before.blue() + 10,
+                 "The rendered frame must contain the loading skeleton at the drop location");
+        QPointer<CanvasMedia> media = fixture.document.selectedMedia();
+        QVERIFY(media && !media->residencyReady());
+        // RAM admission is still refused: an empty shell must not allocate a
+        // full-size painted image/video surface behind its loading skeleton.
+        QVERIFY(fixture.view.rootObject()->findChildren<RemoteVideoFrameItem*>().isEmpty());
+        QCOMPARE(media->sceneRect().center(), dropPoint);
+        const QString owner = media->residencyOwnerId();
+        const QString artifactDir = qEnvironmentVariable("MOUFFETTE_OVERLAY_ARTIFACT_DIR");
+        if (!artifactDir.isEmpty()) {
+            QVERIFY(QDir().mkpath(artifactDir));
+            QVERIFY(skeletonFrame.save(QDir(artifactDir).filePath(
+                QStringLiteral("drop-skeleton-%1.png").arg(mediaType))));
+        }
+        // Removing a loading shell cancels its lease before RAM is restored.
+        fixture.controller.deleteSelectedMedia();
+        memory.setMemorySnapshotForTesting({8ULL << 30, 6ULL << 30, 512ULL << 20, false, 0});
+        memory.sampleNow();
+        memory.sampleNow();
+        QTRY_VERIFY(media.isNull());
+        QTRY_VERIFY_WITH_TIMEOUT(!memory.hasBackgroundWorkForPath(path), 10000);
+        QVERIFY(fixture.document.media().isEmpty());
+        QVERIFY(!fixture.document.hasPendingImports());
+        QVERIFY(!memory.asset(owner));
     }
 
     void coldMediaKeepsEditableShell_data()

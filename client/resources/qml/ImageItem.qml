@@ -6,18 +6,25 @@ BaseMediaItem {
     property var residentFrameSource: null
     property bool residencyReady: false
     property bool requireInitialSkeleton: true
-    contentReady: root.residencyReady && image.hasFrame
+    contentReady: root.residencyReady && !!imageLoader.item && imageLoader.item.hasFrame
     initialFramePresented: !requireInitialSkeleton || surface.firstFramePresented
 
     MediaSurface {
         id: surface
         anchors.fill: parent
         requireInitialSkeleton: root.requireInitialSkeleton
-        contentReady: root.residencyReady && image.hasFrame
-        RemoteVideoFrameItem {
-            id: image
+        contentReady: root.contentReady
+        Loader {
+            id: imageLoader
             anchors.fill: parent
-            frameSource: root.residentFrameSource
+            // A hidden painted item still allocates its backing surface during
+            // scene-graph synchronization. Create it only for a resident frame.
+            active: root.residencyReady && !!root.residentFrameSource
+                    && root.residentFrameSource.hasFrame === true
+                    && (!root.requireInitialSkeleton || surface.firstFramePresented)
+            sourceComponent: RemoteVideoFrameItem {
+                frameSource: root.residentFrameSource
+            }
         }
     }
 }

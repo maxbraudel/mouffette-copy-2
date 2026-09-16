@@ -9,8 +9,21 @@ Accepted drops also receive an immediate media ID and an optional canvas
 identity and drop center across restart; changed or missing sources are rejected
 on resume. A canvas with pending metadata imports cannot start a scene.
 
-Drop only performs asynchronous metadata discovery before inserting the exact-size
-skeleton. Hashing, validation and complete decoding run outside the GUI thread.
+Drop performs geometry discovery in a dedicated, bounded worker pool before
+inserting the exact-size skeleton. MP4 geometry comes from headers when complete;
+only missing geometry requires an interruptible stream probe. Geometry inspection
+does not initialize Qt multimedia or enumerate hardware codecs. Import cancellation,
+source signatures and document generations still govern publication. Bulk hashing
+and decoding cannot occupy the geometry pool.
+
+The skeleton and its editable shell do not allocate image/video rendering surfaces.
+Those surfaces are created when resident content is available, after the first host
+skeleton frame; the passive remote renderer does not have that presentation gate.
+Platform backend and audio device discovery also run outside the GUI thread, before
+creating the first native video sink or QML VideoOutput. Volume, mute and cursor
+changes are retained while it is pending, and the player receives its asset only
+after its audio output exists. Deleting an occurrence discards its pending callback.
+Hashing, validation and complete decoding run outside the GUI thread.
 Images retain decoded pixels. Videos retain the **exact original compressed MP4**
 (no transcoding) and one native-format poster frame, shared across occurrences.
 Validation still decodes every video frame and the selected audio stream through
@@ -23,8 +36,9 @@ and bounded codec scratch, independent of duration/FPS except for compressed siz
 player. Every occurrence shares the MP4 allocation but has independent playback
 queues, audio, cursor and settings. Codecs run during playback/seeks, with native
 hardware decoding where available. Playback never receives a filesystem URL.
-Players are opened lazily for playback, seeking or scene preparation; idle posters
-do not each hold a decoder. The macOS Qt plugin includes pinned memory-stream
+Players prime their bounded decoder queues as residency becomes available, including
+at cursor zero, so the first Play need not initialize the decoder. Opportunistic
+preparation at zero can defer if its playback budget is unavailable. The macOS Qt plugin includes pinned memory-stream
 fixes (UTI, metadata request completion, byte-range bounds) as well as precise seeks.
 
 The application uses ordinary pageable memory, not physical page locking. The OS

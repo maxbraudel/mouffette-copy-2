@@ -309,7 +309,8 @@ bool decoderSupportsMp4Codec(QMediaFormat::VideoCodec codec) {
 
 VideoTrackValidation validateVideoSampleDescription(QFile& file,
                                                     const IsoBox& sampleDescription,
-                                                    IsoParseBudget& budget) {
+                                                    IsoParseBudget& budget,
+                                                    bool checkDecoderCapabilities) {
     // SampleDescriptionBox: FullBox header + entry_count + sample entries.
     const quint64 payloadSize = sampleDescription.size - sampleDescription.headerSize;
     if (payloadSize < 8) return VideoTrackValidation::Invalid;
@@ -353,7 +354,8 @@ VideoTrackValidation validateVideoSampleDescription(QFile& file,
         if (width == 0 || height == 0) return VideoTrackValidation::Invalid;
 
         const auto codec = videoCodecForSampleEntry(entry.type);
-        if (!codec.has_value() || !decoderSupportsMp4Codec(*codec)) {
+        if (!codec.has_value()
+            || (checkDecoderCapabilities && !decoderSupportsMp4Codec(*codec))) {
             allCodecsSupported = false;
         }
         cursor = entry.endOffset();
@@ -366,7 +368,8 @@ VideoTrackValidation validateVideoSampleDescription(QFile& file,
 
 VideoTrackValidation validateVideoSampleTable(QFile& file,
                                               const IsoBox& sampleTable,
-                                              IsoParseBudget& budget) {
+                                              IsoParseBudget& budget,
+                                              bool checkDecoderCapabilities) {
     quint64 cursor = sampleTable.payloadOffset();
     bool hasDescription = false;
     VideoTrackValidation descriptionStatus = VideoTrackValidation::Invalid;
@@ -378,7 +381,8 @@ VideoTrackValidation validateVideoSampleTable(QFile& file,
         if (child.type == QByteArrayLiteral("stsd")) {
             if (hasDescription) return VideoTrackValidation::Invalid;
             hasDescription = true;
-            descriptionStatus = validateVideoSampleDescription(file, child, budget);
+            descriptionStatus = validateVideoSampleDescription(file, child, budget,
+                                                               checkDecoderCapabilities);
         }
         cursor = child.endOffset();
     }
@@ -387,7 +391,8 @@ VideoTrackValidation validateVideoSampleTable(QFile& file,
 
 VideoTrackValidation validateVideoMediaInformation(QFile& file,
                                                    const IsoBox& mediaInformation,
-                                                   IsoParseBudget& budget) {
+                                                   IsoParseBudget& budget,
+                                                   bool checkDecoderCapabilities) {
     quint64 cursor = mediaInformation.payloadOffset();
     bool hasSampleTable = false;
     VideoTrackValidation sampleTableStatus = VideoTrackValidation::Invalid;
@@ -399,7 +404,8 @@ VideoTrackValidation validateVideoMediaInformation(QFile& file,
         if (child.type == QByteArrayLiteral("stbl")) {
             if (hasSampleTable) return VideoTrackValidation::Invalid;
             hasSampleTable = true;
-            sampleTableStatus = validateVideoSampleTable(file, child, budget);
+            sampleTableStatus = validateVideoSampleTable(file, child, budget,
+                                                        checkDecoderCapabilities);
         }
         cursor = child.endOffset();
     }
@@ -408,7 +414,8 @@ VideoTrackValidation validateVideoMediaInformation(QFile& file,
 
 VideoTrackValidation validateMediaBox(QFile& file,
                                       const IsoBox& media,
-                                      IsoParseBudget& budget) {
+                                      IsoParseBudget& budget,
+                                      bool checkDecoderCapabilities) {
     quint64 cursor = media.payloadOffset();
     bool hasMediaHeader = false;
     bool hasHandler = false;
@@ -446,12 +453,14 @@ VideoTrackValidation validateMediaBox(QFile& file,
     if (handlerType != QByteArrayLiteral("vide")) {
         return VideoTrackValidation::NotVideo;
     }
-    return validateVideoMediaInformation(file, mediaInformation, budget);
+    return validateVideoMediaInformation(file, mediaInformation, budget,
+                                         checkDecoderCapabilities);
 }
 
 VideoTrackValidation validateTrack(QFile& file,
                                    const IsoBox& track,
-                                   IsoParseBudget& budget) {
+                                   IsoParseBudget& budget,
+                                   bool checkDecoderCapabilities) {
     quint64 cursor = track.payloadOffset();
     bool hasTrackHeader = false;
     bool hasMediaBox = false;
@@ -471,7 +480,7 @@ VideoTrackValidation validateTrack(QFile& file,
         } else if (child.type == QByteArrayLiteral("mdia")) {
             if (hasMediaBox) return VideoTrackValidation::Invalid;
             hasMediaBox = true;
-            mediaStatus = validateMediaBox(file, child, budget);
+            mediaStatus = validateMediaBox(file, child, budget, checkDecoderCapabilities);
         }
         cursor = child.endOffset();
     }
@@ -481,7 +490,8 @@ VideoTrackValidation validateTrack(QFile& file,
 
 VideoTrackValidation validateMovieBox(QFile& file,
                                       const IsoBox& movie,
-                                      IsoParseBudget& budget) {
+                                      IsoParseBudget& budget,
+                                      bool checkDecoderCapabilities) {
     quint64 cursor = movie.payloadOffset();
     bool hasSupportedVideoTrack = false;
     bool hasUnsupportedVideoTrack = false;
@@ -491,7 +501,8 @@ VideoTrackValidation validateMovieBox(QFile& file,
             return VideoTrackValidation::Invalid;
         }
         if (child.type == QByteArrayLiteral("trak")) {
-            const VideoTrackValidation status = validateTrack(file, child, budget);
+            const VideoTrackValidation status = validateTrack(file, child, budget,
+                                                              checkDecoderCapabilities);
             if (status == VideoTrackValidation::Invalid) {
                 return VideoTrackValidation::Invalid;
             }
@@ -509,7 +520,7 @@ VideoTrackValidation validateMovieBox(QFile& file,
         : VideoTrackValidation::Invalid;
 }
 
-VideoTrackValidation validateMp4Container(const QString& path) {
+VideoTrackValidation validateMp4Container(const QString& path, bool checkDecoderCapabilities) {
     QFile file(path);
     if (!file.open(QIODevice::ReadOnly) || file.size() < 16) {
         return VideoTrackValidation::Invalid;
@@ -530,7 +541,8 @@ VideoTrackValidation validateMp4Container(const QString& path) {
         if (box.type == QByteArrayLiteral("ftyp")) {
             validFtyp = validFtyp || hasMp4Brand(file, box);
         } else if (box.type == QByteArrayLiteral("moov")) {
-            const VideoTrackValidation status = validateMovieBox(file, box, budget);
+            const VideoTrackValidation status = validateMovieBox(file, box, budget,
+                                                                 checkDecoderCapabilities);
             if (status == VideoTrackValidation::Invalid) {
                 return VideoTrackValidation::Invalid;
             }
@@ -723,7 +735,8 @@ bool isKnownVideoExtension(const QString& extension) {
     return extensions.contains(normalizedExtension(extension));
 }
 
-static ValidationResult validateLocalFileImpl(const QString& path, bool metadataOnly) {
+static ValidationResult validateLocalFileImpl(const QString& path, bool metadataOnly,
+                                               bool checkDecoderCapabilities) {
     ValidationResult result;
     const QFileInfo info(path);
     if (!info.exists() || !info.isFile() || !info.isReadable()) {
@@ -733,7 +746,8 @@ static ValidationResult validateLocalFileImpl(const QString& path, bool metadata
 
     const QString extension = normalizedExtension(info.suffix());
     if (extension == QLatin1String("mp4")) {
-        const VideoTrackValidation mp4Status = validateMp4Container(info.absoluteFilePath());
+        const VideoTrackValidation mp4Status = validateMp4Container(info.absoluteFilePath(),
+                                                                   checkDecoderCapabilities);
         result.kind = Kind::UnsupportedVideo;
         if (mp4Status == VideoTrackValidation::UnsupportedCodec) {
             result.errorCode = QStringLiteral("video_codec_not_supported");
@@ -838,12 +852,16 @@ static ValidationResult validateLocalFileImpl(const QString& path, bool metadata
 }
 
 ValidationResult validateLocalFileMetadata(const QString& path) {
-    return validateLocalFileImpl(path, true);
+    return validateLocalFileImpl(path, true, true);
+}
+
+ValidationResult validateLocalFileGeometry(const QString& path) {
+    return validateLocalFileImpl(path, true, false);
 }
 
 ValidationResult validateLocalFile(const QString& path, quint64 preparedImageBytes) {
     Q_UNUSED(preparedImageBytes);
-    return validateLocalFileImpl(path, false);
+    return validateLocalFileImpl(path, false, true);
 }
 
 QString validationErrorDescription(const ValidationResult& validation)

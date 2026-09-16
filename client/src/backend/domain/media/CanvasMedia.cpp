@@ -4,16 +4,71 @@
 #include "shared/rendering/MediaFrameSource.h"
 
 #include <QAudioOutput>
+#include <QAudioDevice>
+#include <QCoreApplication>
 #include <QFileInfo>
+#include <QFutureWatcher>
+#include <QList>
+#include <QMediaDevices>
 #include <QUrl>
 #include <QUuid>
 #include <QVideoFrame>
 #include <QVideoSink>
+#include <QtConcurrent/QtConcurrentRun>
 
 #include <algorithm>
 #include <cmath>
 
 namespace {
+// Device discovery can take hundreds of milliseconds on a cold audio backend.
+// Keep it outside the UI thread and independent of an occurrence's lifetime.
+// Only application shutdown waits for unfinished discovery; deleting a loading
+// medium merely disconnects its result watcher.
+class AudioDeviceDiscovery final : public QFutureWatcher<QAudioDevice> {
+public:
+    explicit AudioDeviceDiscovery(QObject* parent) : QFutureWatcher(parent)
+    {
+        auto& active = activeJobs();
+        if (active.isEmpty()) qAddPostRoutine(waitForAll);
+        active.append(this);
+    }
+
+    ~AudioDeviceDiscovery() override
+    {
+        waitForFinished();
+        auto& active = activeJobs();
+        active.removeOne(this);
+        if (active.isEmpty()) qRemovePostRoutine(waitForAll);
+    }
+
+private:
+    static QList<AudioDeviceDiscovery*>& activeJobs()
+    {
+        // Creation, destruction and application cleanup all run on the GUI
+        // thread; the worker never accesses this registry.
+        static QList<AudioDeviceDiscovery*> jobs;
+        return jobs;
+    }
+
+    static void waitForAll()
+    {
+        // QApplication can be destroyed without exec()/aboutToQuit, as in
+        // QTest. Child destructors run after qApp is cleared, so join here
+        // while the audio backend can still access the application object.
+        for (auto* job : activeJobs()) job->waitForFinished();
+    }
+};
+
+QFuture<QAudioDevice> discoverDefaultAudioOutput()
+{
+    auto* job = new AudioDeviceDiscovery(QCoreApplication::instance());
+    QObject::connect(job, &QFutureWatcher<QAudioDevice>::finished, job, &QObject::deleteLater);
+    QObject::connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit,
+                     job, [job] { job->waitForFinished(); });
+    job->setFuture(QtConcurrent::run([] { return QMediaDevices::defaultAudioOutput(); }));
+    return job->future();
+}
+
 QString uploadStateName(CanvasMedia::UploadState state)
 {
     switch (state) {
@@ -158,7 +213,9 @@ void CanvasMedia::refreshResidency()
     if (manager.ready(m_residencyOwnerId) && asset) {
         if (isVideo()) {
             initializeVideoRuntime();
-            if (m_player->asset() != asset) m_player->setAsset(asset);
+            // Publish a playable asset only after audio discovery completes,
+            // so the first Play never starts silently and changes clocks later.
+            if (m_audioOutput && m_player->asset() != asset) m_player->setAsset(asset);
         } else if (m_residentFrameSource) {
             m_residentFrameSource->setFrame(asset->image);
         }
@@ -509,19 +566,6 @@ void CanvasMedia::initializeVideoRuntime()
 {
     if (!isVideo() || m_player) return;
     m_player = new ResidentVideoPlayer(this);
-    m_videoSink = new QVideoSink(this);
-    m_audioOutput = new QAudioOutput(this);
-    m_player->setAudioOutput(m_audioOutput);
-    m_player->setVideoOutput(m_videoSink);
-    m_audioOutput->setVolume(1.0);
-    connect(m_videoSink, &QVideoSink::videoFrameChanged, this,
-            [this](const QVideoFrame& frame) {
-        if (frame.isValid()) {
-            m_hasRenderedFrame = true;
-            m_firstFramePrimed = true;
-            emit runtimeStateChanged();
-        }
-    });
     connect(m_player, &ResidentVideoPlayer::playbackStateChanged,
             this, &CanvasMedia::runtimeStateChanged);
     connect(m_player, &ResidentVideoPlayer::positionChanged,
@@ -551,8 +595,32 @@ void CanvasMedia::initializeVideoRuntime()
     connect(m_player, &ResidentVideoPlayer::errorChanged,
             this, &CanvasMedia::runtimeStateChanged);
     updateVideoLoops();
-    const auto asset = MediaResidencyManager::instance().asset(m_residencyOwnerId);
-    if (residencyReady() && asset) m_player->setAsset(asset);
+    auto* audio = new QFutureWatcher<QAudioDevice>(this);
+    connect(audio, &QFutureWatcher<QAudioDevice>::finished, this, [this, audio] {
+        const QAudioDevice device = audio->result();
+        audio->deleteLater();
+        if (m_residencyRetired) return;
+        // QObjects stay on the GUI thread. The potentially slow enumeration
+        // above returns only the thread-safe, implicitly shared device value.
+        // The first QVideoSink also initializes Qt's platform backend. Create
+        // it only after discovery has warmed that backend off the GUI thread.
+        m_videoSink = new QVideoSink(this);
+        m_player->setVideoOutput(m_videoSink);
+        connect(m_videoSink, &QVideoSink::videoFrameChanged, this,
+                [this](const QVideoFrame& frame) {
+            if (frame.isValid()) {
+                m_hasRenderedFrame = true;
+                m_firstFramePrimed = true;
+                emit runtimeStateChanged();
+            }
+        });
+        m_audioOutput = new QAudioOutput(device, this);
+        m_audioOutput->setMuted(m_muted);
+        m_audioOutput->setVolume(m_volume);
+        m_player->setAudioOutput(m_audioOutput);
+        refreshResidency();
+    });
+    audio->setFuture(discoverDefaultAudioOutput());
 }
 
 bool CanvasMedia::isPlaying() const
@@ -563,28 +631,30 @@ bool CanvasMedia::isPlaying() const
 
 bool CanvasMedia::muted() const
 {
-    return m_audioOutput && m_audioOutput->isMuted();
+    return m_audioOutput ? m_audioOutput->isMuted() : m_muted;
 }
 
 void CanvasMedia::setMuted(bool muted)
 {
-    if (!m_audioOutput || m_audioOutput->isMuted() == muted) return;
-    m_audioOutput->setMuted(muted);
+    if (this->muted() == muted) return;
+    m_muted = muted;
+    if (m_audioOutput) m_audioOutput->setMuted(muted);
     emit audioStateChanged();
     emit runtimeStateChanged();
 }
 
 qreal CanvasMedia::volume() const
 {
-    return m_audioOutput ? m_audioOutput->volume() : 1.0;
+    return m_audioOutput ? m_audioOutput->volume() : m_volume;
 }
 
 void CanvasMedia::setVolume(qreal volume)
 {
-    if (!m_audioOutput || !std::isfinite(volume)) return;
+    if (!std::isfinite(volume)) return;
     const qreal normalized = std::clamp<qreal>(volume, 0.0, 1.0);
-    if (qFuzzyCompare(qreal(m_audioOutput->volume()), normalized)) return;
-    m_audioOutput->setVolume(normalized);
+    if (qFuzzyCompare(this->volume(), normalized)) return;
+    m_volume = normalized;
+    if (m_audioOutput) m_audioOutput->setVolume(normalized);
     emit audioStateChanged();
     emit runtimeStateChanged();
 }

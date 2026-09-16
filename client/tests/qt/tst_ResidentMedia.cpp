@@ -158,6 +158,10 @@ private slots:
         QImage source(128, 64, QImage::Format_RGBA8888);
         source.fill(Qt::magenta);
         QVERIFY(source.save(path));
+        const auto geometry = MediaDecoder::inspectGeometry(path);
+        QVERIFY2(geometry.accepted(), qPrintable(geometry.error));
+        QCOMPARE(geometry.displaySize, source.size());
+        QVERIFY(!geometry.video);
         const auto probe = MediaDecoder::probe(path);
         QVERIFY2(probe.accepted(), qPrintable(probe.error));
         QCOMPARE(probe.displaySize, source.size());
@@ -179,6 +183,36 @@ private slots:
         QCOMPARE(asset->image.pixelColor(5, 5), QColor(Qt::magenta));
     }
 
+    void importGeometryPreservesExifOrientation() {
+        QTemporaryDir directory;
+        const QString path = directory.filePath("rotated.jpg");
+        QImage source(80, 40, QImage::Format_RGB32);
+        source.fill(Qt::cyan);
+        QVERIFY(source.save(path));
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::ReadWrite));
+        QByteArray bytes = file.readAll();
+        QVERIFY(bytes.startsWith(QByteArray::fromHex("ffd8")));
+        // JPEG APP1 containing a little-endian EXIF Orientation=6 (90 degrees).
+        // Encoded pixels remain 80x40; displayed dimensions must be 40x80.
+        bytes.insert(2, QByteArray::fromHex(
+            "ffe1002245786966000049492a0008000000010012010300010000000600000000000000"));
+        QVERIFY(file.seek(0));
+        QCOMPARE(file.write(bytes), qint64(bytes.size()));
+        file.close();
+        const auto geometry = MediaDecoder::inspectGeometry(path);
+        QVERIFY2(geometry.accepted(), qPrintable(geometry.error));
+        QVERIFY(!geometry.video);
+        QCOMPARE(geometry.displaySize, QSize(40, 80));
+        const auto probe = MediaDecoder::probe(path);
+        QVERIFY2(probe.accepted(), qPrintable(probe.error));
+        QCOMPARE(geometry.displaySize, probe.displaySize);
+        QString error;
+        const auto asset = MediaDecoder::decode(path, {}, &error);
+        QVERIFY2(asset, qPrintable(error));
+        QCOMPARE(asset->displaySize, geometry.displaySize);
+    }
+
     void reservationRefusalAndCancellationNeverPublish() {
         QTemporaryDir directory;
         const QString path = directory.filePath("image.png");
@@ -194,12 +228,19 @@ private slots:
         callbacks.cancelled = [] { return true; };
         QVERIFY(!MediaDecoder::decode(path, callbacks, &error));
         QCOMPARE(error, QStringLiteral("cancelled"));
+        const auto geometry = MediaDecoder::inspectGeometry(path, callbacks.cancelled);
+        QVERIFY(!geometry.accepted());
+        QCOMPARE(geometry.error, QStringLiteral("cancelled"));
     }
 
     void decodeDelayedFramesAndAudioTail() {
         QTemporaryDir directory;
         const QString path = directory.filePath("video.mp4");
         QVERIFY(writeVideo(path));
+        const auto geometry = MediaDecoder::inspectGeometry(path);
+        QVERIFY2(geometry.accepted(), qPrintable(geometry.error));
+        QVERIFY(geometry.video);
+        QCOMPARE(geometry.displaySize, QSize(64, 48));
         const auto probe = MediaDecoder::probe(path);
         QVERIFY2(probe.accepted(), qPrintable(probe.error));
         QVERIFY(probe.video);
@@ -351,6 +392,9 @@ private slots:
         const QString path = directory.filePath("corrupt.mp4");
         QVERIFY(writeVideo(path));
         QVERIFY(corruptLastVideoPacket(path));
+        const auto geometry = MediaDecoder::inspectGeometry(path);
+        QVERIFY2(geometry.accepted(), qPrintable(geometry.error));
+        QCOMPARE(geometry.displaySize, QSize(64, 48));
         QString error;
         const auto asset = MediaDecoder::decode(path, {}, &error);
         QVERIFY(!asset);
@@ -371,6 +415,10 @@ private slots:
         QTemporaryDir directory;
         const QString path = directory.filePath("rotated.mp4");
         QVERIFY(writeVideo(path, true));
+        const auto geometry = MediaDecoder::inspectGeometry(path);
+        QVERIFY2(geometry.accepted(), qPrintable(geometry.error));
+        QVERIFY(geometry.video);
+        QCOMPARE(geometry.displaySize, QSize(48, 128));
         const auto probe = MediaDecoder::probe(path);
         QVERIFY2(probe.accepted(), qPrintable(probe.error));
         QCOMPARE(probe.displaySize, QSize(48, 128));
