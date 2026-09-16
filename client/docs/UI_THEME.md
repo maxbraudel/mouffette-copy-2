@@ -16,6 +16,7 @@ the OS appearance does not require reopening a page, canvas, or popup.
 | `border`, `controlBorder`, `focusBorder` | Separators, input outlines and keyboard focus |
 | `accent`, `onAccent` | Blue actions and text/icons placed on a solid blue fill |
 | `selectionBackground`, `selectionText` | Text selection, including canvas text editing |
+| `controlSelectionBackground`, `controlSelectionText` | Soft blue fill and readable foreground for checked boxes and focused numeric fields |
 | `connected*`, `warning*`, `error*`, `scene*` | Shared green, amber, red and purple state colors |
 | `canvas*`, `selection*`, `snapGuide`, `uiZone*` | Editor screens, selection handles, guides and system zones |
 | `overlay*`, `slider*`, `media*` | Canvas floating controls and media transfer indicators |

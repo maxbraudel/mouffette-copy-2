@@ -6,10 +6,10 @@ CheckBox {
     id: control
 
     property color textColor: control.enabled ? Theme.text : Theme.disabledText
-    property color checkedColor: control.enabled ? Theme.accent : Theme.buttonDisabled
+    property color checkedColor: control.enabled ? Theme.controlSelectionBackground : Theme.buttonDisabled
     property color uncheckedColor: "transparent"
     property color uncheckedBorderColor: control.enabled ? Theme.controlBorder : Theme.controlDisabledBorder
-    property color checkmarkColor: control.enabled ? Theme.onAccent : Theme.disabledText
+    property color checkmarkColor: control.enabled ? Theme.controlSelectionText : Theme.disabledText
 
     palette: Theme.controlPalette
 
@@ -23,7 +23,7 @@ CheckBox {
         color: control.checked ? control.checkedColor : control.uncheckedColor
         border.width: 1
         border.color: control.visualFocus ? Theme.focusBorder
-                      : control.checked && control.enabled ? control.checkedColor : control.uncheckedBorderColor
+                      : control.checked && control.enabled ? Theme.focusBorder : control.uncheckedBorderColor
 
         Text {
             anchors.centerIn: parent

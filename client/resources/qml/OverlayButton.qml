@@ -70,17 +70,11 @@ Item {
         }
     }
 
-    // Explicit border lines on flat sides — drawn outside the clip so they are
-    // always visible. These are the seam dividers between segmented buttons.
+    // Each joint belongs to the segment on its right. Painting both flat
+    // edges would put two adjacent one-pixel lines at every shared boundary.
     Rectangle {
         visible: root._flatLeft
         anchors { left: parent.left; top: parent.top; bottom: parent.bottom }
-        width: 1
-        color: AppStyle.Theme.overlayBorder
-    }
-    Rectangle {
-        visible: root._flatRight
-        anchors { right: parent.right; top: parent.top; bottom: parent.bottom }
         width: 1
         color: AppStyle.Theme.overlayBorder
     }

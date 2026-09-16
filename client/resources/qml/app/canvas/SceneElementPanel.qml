@@ -53,6 +53,7 @@ Rectangle {
         id: tab
 
         required property bool active
+        property bool leading: false
 
         hoverEnabled: true
         focusPolicy: Qt.TabFocus
@@ -69,6 +70,10 @@ Rectangle {
         }
 
         background: Rectangle {
+            // Item.clip is rectangular. Match the panel's inner top corners
+            // explicitly so every tab fill stays inside its rounded border.
+            topLeftRadius: tab.leading ? Math.max(0, root.radius - root.border.width) : 0
+            topRightRadius: tab.leading ? 0 : Math.max(0, root.radius - root.border.width)
             color: {
                 if (tab.down)
                     return Theme.overlayPressed
@@ -343,20 +348,22 @@ Rectangle {
                 }
 
                 Rectangle {
+                    objectName: "settingsValueBackground"
                     anchors.fill: parent
                     radius: 6
-                    color: valueField.activeFocus ? Theme.selectionBackground : Theme.fieldBackground
+                    color: valueField.activeFocus ? Theme.controlSelectionBackground : Theme.fieldBackground
                     border.width: 1
                     border.color: valueField.activeFocus ? Theme.focusBorder
                                   : valueField.inputEnabled ? Theme.fieldBorder : Theme.controlDisabledBorder
 
                     Text {
+                        objectName: "settingsValueText"
                         anchors.fill: parent
                         leftPadding: 4
                         rightPadding: 4
                         text: valueField.draftText
                         color: !valueField.inputEnabled ? Theme.overlayDisabledText
-                             : valueField.activeFocus ? Theme.selectionText : Theme.overlayText
+                             : valueField.activeFocus ? Theme.controlSelectionText : Theme.overlayText
                         font.pixelSize: 14
                         font.weight: Font.Medium
                         horizontalAlignment: Text.AlignHCenter
@@ -524,6 +531,7 @@ Rectangle {
             anchors.bottom: parent.bottom
             width: (parent.width - tabDivider.width) / 2
             text: "Scene"
+            leading: true
             active: root.activeTab === 0
             onClicked: root.activeTab = 0
         }

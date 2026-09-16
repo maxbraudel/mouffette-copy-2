@@ -82,6 +82,10 @@ QtObject {
     readonly property color destructivePressed: withAlpha(redPigment, 0.25)
     readonly property color fieldBackground: recessedBackground
     readonly property color fieldBorder: controlBorder
+    // Checked boxes and focused numeric controls use a soft opaque blue fill
+    // with the normal foreground, separate from the stronger accent ink.
+    readonly property color controlSelectionBackground: mix(bluePigment, elevatedBackground, dark ? 0.32 : 0.24)
+    readonly property color controlSelectionText: text
     readonly property color selectionBackground: accent
     readonly property color selectionText: onAccent
     readonly property color scrollbar: mix(text, elevatedBackground, 0.38)

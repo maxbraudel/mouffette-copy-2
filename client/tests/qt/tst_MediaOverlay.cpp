@@ -66,6 +66,7 @@ private slots:
     void toolbarToolsAndGlobalMemoryUsage();
     void scenePlaybackUnloadsEditorOverlays_data();
     void scenePlaybackUnloadsEditorOverlays();
+    void mediaSettingsPanelRestoresTabsAndBindings_data();
     void mediaSettingsPanelRestoresTabsAndBindings();
     void videoVolumeAndMuteStayIndependentAndSyncWithSettings();
     void toastUsesBottomLeftDoubleBackground();
@@ -1252,6 +1253,16 @@ void MediaOverlayTest::toolbarToolsAndGlobalMemoryUsage()
     window.requestActivate();
 #endif
     QVERIFY(QTest::qWaitForWindowActive(&window));
+    // The shared edge has one logical pixel of border, with a button fill on
+    // either side. Sampling both neighbors catches adjacent duplicate lines.
+    const QPointF joint = text->mapToScene({0, text->height() / 2});
+    const QImage toolbarFrame = window.grabWindow();
+    QVERIFY(nearColor(imagePixel(toolbarFrame, window.size(), joint + QPointF(-0.9, 0)),
+                      selection->property("currentBackgroundColor").value<QColor>()));
+    QVERIFY(nearColor(imagePixel(toolbarFrame, window.size(), joint + QPointF(0.1, 0)),
+                      themeColor(engine, "overlayBorder")));
+    QVERIFY(nearColor(imagePixel(toolbarFrame, window.size(), joint + QPointF(1.1, 0)),
+                      text->property("currentBackgroundColor").value<QColor>()));
     const QPoint textCenter = text->mapToScene(
         QPointF(text->width() / 2.0, text->height() / 2.0)).toPoint();
     QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier, textCenter);
@@ -1463,10 +1474,22 @@ void MediaOverlayTest::scenePlaybackUnloadsEditorOverlays()
     QCOMPARE(findVisualItem(page, QStringLiteral("mediaListPanel")), mediaList.data());
 }
 
+void MediaOverlayTest::mediaSettingsPanelRestoresTabsAndBindings_data()
+{
+    QTest::addColumn<bool>("dark");
+    QTest::newRow("light") << false;
+    QTest::newRow("dark") << true;
+}
+
 void MediaOverlayTest::mediaSettingsPanelRestoresTabsAndBindings()
 {
+    QFETCH(bool, dark);
+    const QPalette original = QGuiApplication::palette();
+    const auto restorePalette = qScopeGuard([original] { QGuiApplication::setPalette(original); });
+    QGuiApplication::setPalette(testPalette(dark));
     QQmlEngine engine;
     QQuickWindow window;
+    window.setColor(Qt::magenta);
     window.resize(640, 480);
     QString error;
     std::unique_ptr<QuickCanvasHost> host(QuickCanvasHost::create(&error));
@@ -1526,6 +1549,21 @@ void MediaOverlayTest::mediaSettingsPanelRestoresTabsAndBindings()
     QCOMPARE(panel->property("activeTab").toInt(), 0);
     QVERIFY(scenePage->isVisible());
     QVERIFY(!elementPage->isVisible());
+
+    // Hovered/pressed tab backgrounds must not paint into either rounded
+    // outer corner. A contrasting canvas reveals any rectangular overflow.
+    for (auto* tab : {sceneTab, elementTab}) {
+        const QPoint center = tab->mapToScene({tab->width() / 2, tab->height() / 2}).toPoint();
+        QTest::mouseMove(&window, center);
+        for (const bool pressed : {false, true}) {
+            if (pressed) QTest::mousePress(&window, Qt::LeftButton, Qt::NoModifier, center);
+            const QImage frame = window.grabWindow();
+            QVERIFY(nearColor(imagePixel(frame, window.size(), panel->mapToScene({1.1, 1.1})), window.color()));
+            QVERIFY(nearColor(imagePixel(frame, window.size(), panel->mapToScene({panel->width() - 2.1, 1.1})), window.color()));
+            if (pressed) QTest::mouseRelease(&window, Qt::LeftButton, Qt::NoModifier, center);
+        }
+    }
+    panel->setProperty("activeTab", 0);
     auto* contentFlick = findVisualItem(
         harness.get(), QStringLiteral("settingsContentFlick"));
     auto* scrollBar = findVisualItem(
@@ -1654,7 +1692,7 @@ void MediaOverlayTest::mediaSettingsPanelRestoresTabsAndBindings()
     if (contentFits) QTRY_COMPARE(scrollBar->opacity(), 0.0);
     QVERIFY(!opacityField->property("cursorVisible").isValid());
     QCOMPARE(opacityCheck->property("checkedColor").value<QColor>(),
-             themeColor(engine, "brandBlue"));
+             themeColor(engine, "controlSelectionBackground"));
 
     const QPoint opacityCenter = opacityCheck->mapToScene(
         QPointF(opacityCheck->width() / 2.0,
@@ -1662,6 +1700,10 @@ void MediaOverlayTest::mediaSettingsPanelRestoresTabsAndBindings()
     QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier,
                       opacityCenter);
     QTRY_VERIFY(media->settings().opacityOverrideEnabled);
+    auto* indicator = opacityCheck->property("indicator").value<QQuickItem*>();
+    QVERIFY(indicator && !indicator->childItems().isEmpty());
+    QVERIFY(contrastRatio(indicator->childItems().first()->property("color").value<QColor>(),
+                          indicator->property("color").value<QColor>()) >= 4.5);
 
     const QPoint opacityFieldCenter = opacityField->mapToScene(
         QPointF(opacityField->width() / 2.0,
@@ -1674,6 +1716,19 @@ void MediaOverlayTest::mediaSettingsPanelRestoresTabsAndBindings()
     QCOMPARE(harness->property("canvasPrimaryPressCount").toInt(),
              canvasPressesBeforeInput);
     QCOMPARE(host->document()->selectedMedia(), media);
+    QVERIFY(opacityField->hasActiveFocus());
+    auto* valueBackground = findVisualItem(opacityField, QStringLiteral("settingsValueBackground"));
+    auto* valueText = findVisualItem(opacityField, QStringLiteral("settingsValueText"));
+    QVERIFY(valueBackground && valueText);
+    QVERIFY(contrastRatio(valueText->property("color").value<QColor>(),
+                          valueBackground->property("color").value<QColor>()) >= 4.5);
+    QCOMPARE(valueBackground->property("color").value<QColor>(), indicator->property("color").value<QColor>());
+    const QString artifactDir = qEnvironmentVariable("MOUFFETTE_OVERLAY_ARTIFACT_DIR");
+    if (!artifactDir.isEmpty()) {
+        QVERIFY(QDir().mkpath(artifactDir));
+        QVERIFY(window.grabWindow().save(QDir(artifactDir).filePath(
+            dark ? QStringLiteral("settings-focused-dark.png") : QStringLiteral("settings-focused-light.png"))));
+    }
     QTest::keyClick(&window, Qt::Key_7);
     QTest::keyClick(&window, Qt::Key_5);
     QCOMPARE(opacityField->property("draftText").toString(),
