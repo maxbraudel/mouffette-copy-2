@@ -1,7 +1,9 @@
 #include "frontend/rendering/canvas/TextOutlineItem.h"
 
 #include <QAbstractTextDocumentLayout>
+#include <QCoreApplication>
 #include <QElapsedTimer>
+#include <QFutureWatcher>
 #include <QGlyphRun>
 #include <QHash>
 #include <QPainter>
@@ -14,10 +16,13 @@
 #include <QTextBlock>
 #include <QTextDocument>
 #include <QTextLayout>
+#include <QThreadPool>
+#include <QtConcurrent/QtConcurrentRun>
 #include <QtGui/private/qtextengine_p.h>
 #include <QtQuick/private/qquicktextedit_p_p.h>
 #include <cmath>
 #include <algorithm>
+#include <atomic>
 
 namespace {
 constexpr int glyphsPerChunk = 64;
@@ -25,8 +30,60 @@ constexpr int glyphsPerChunk = 64;
 struct GlyphMesh {
     QImage mask;
     QRectF bounds;
+    QPainterPath path;
+    QColor maskColor = Qt::white;
 };
 using Mesh = std::shared_ptr<const GlyphMesh>;
+
+Mesh rasterizeGlyph(const QPainterPath& path, qreal width, qreal rasterScale,
+                    const QColor& color)
+{
+    auto mesh = std::make_shared<GlyphMesh>();
+    mesh->path = path;
+    mesh->maskColor = color;
+    if (!path.isEmpty()) {
+        const QRectF ink = path.boundingRect().adjusted(-width, -width, width, width);
+        // Guard extreme font sizes without allocating unbounded images.
+        const qreal scale = qMin(rasterScale,
+            2044.0 / qMax(qreal(1), qMax(ink.width(), ink.height())));
+        const QRect pixels = QRectF(ink.topLeft() * scale,
+            ink.size() * scale).toAlignedRect().adjusted(-2, -2, 2, 2);
+        mesh->bounds = QRectF(pixels.topLeft() / scale, QSizeF(pixels.size()) / scale);
+        mesh->mask = QImage(pixels.size(), QImage::Format_ARGB32_Premultiplied);
+        if (mesh->mask.isNull())
+            return {};
+        mesh->mask.fill(Qt::transparent);
+        QPainter painter(&mesh->mask);
+        painter.setRenderHint(QPainter::Antialiasing);
+        painter.scale(scale, scale);
+        painter.translate(-mesh->bounds.topLeft());
+        painter.strokePath(path, QPen(color, width * 2, Qt::SolidLine,
+                                     Qt::RoundCap, Qt::RoundJoin));
+    }
+    return mesh;
+}
+
+struct RefinementGlyph {
+    Mesh previous;
+    QPainterPath path;
+};
+struct RefinementResult {
+    QHash<const GlyphMesh*, Mesh> replacements;
+    qint64 nanoseconds = 0;
+    bool complete = false;
+};
+
+QThreadPool* outlineQualityPool()
+{
+    // This is quality work for existing content, never an input/render task.
+    // One shared lane bounds CPU/memory pressure across all open canvases.
+    static QPointer<QThreadPool> pool;
+    if (!pool) {
+        pool = new QThreadPool(QCoreApplication::instance());
+        pool->setMaxThreadCount(1);
+    }
+    return pool;
+}
 struct CachedGlyph {
     Mesh glyph;
     quint64 lastUse = 0;
@@ -93,6 +150,11 @@ struct TextOutlineItem::Private {
     bool layoutDirty = true;
     bool viewportDirty = true;
     bool rasterUpdatesDeferred = false;
+    bool refinementRequested = false;
+    bool refinementInFlight = false;
+    bool refinementFailed = false;
+    quint64 refinementGeneration = 0;
+    std::shared_ptr<std::atomic_bool> refinementCancelled;
     qreal rasterScale = 1;
     // GUI-thread-only font objects. Only immutable, font-free masks cross
     // into updatePaintNode while the GUI thread is blocked by Qt's sync phase.
@@ -102,8 +164,17 @@ struct TextOutlineItem::Private {
     QList<Chunk> chunks;
     Statistics stats;
 
+    void invalidateRefinement()
+    {
+        ++refinementGeneration;
+        refinementFailed = false;
+        if (refinementCancelled)
+            refinementCancelled->store(true, std::memory_order_relaxed);
+    }
+
     void clearCache()
     {
+        invalidateRefinement();
         cache.clear();
         cacheBytes = 0;
     }
@@ -146,25 +217,10 @@ struct TextOutlineItem::Private {
             it->lastUse = cacheEpoch;
             return it->glyph;
         }
-        auto mesh = std::make_shared<GlyphMesh>();
-        const QPainterPath path = font.pathForGlyph(index);
-        if (!path.isEmpty()) {
-            const QRectF ink = path.boundingRect().adjusted(-width, -width, width, width);
-            // Guard extreme font sizes without allocating unbounded images.
-            const qreal scale = qMin(rasterScale,
-                2044.0 / qMax(qreal(1), qMax(ink.width(), ink.height())));
-            const QRect pixels = QRectF(ink.topLeft() * scale,
-                ink.size() * scale).toAlignedRect().adjusted(-2, -2, 2, 2);
-            mesh->bounds = QRectF(pixels.topLeft() / scale, QSizeF(pixels.size()) / scale);
-            mesh->mask = QImage(pixels.size(), QImage::Format_ARGB32_Premultiplied);
-            mesh->mask.fill(Qt::transparent);
-            QPainter painter(&mesh->mask);
-            painter.setRenderHint(QPainter::Antialiasing);
-            painter.scale(scale, scale);
-            painter.translate(-mesh->bounds.topLeft());
-            painter.strokePath(path, QPen(Qt::white, width * 2, Qt::SolidLine,
-                                         Qt::RoundCap, Qt::RoundJoin));
-        }
+        const Mesh mesh = rasterizeGlyph(font.pathForGlyph(index), width, rasterScale,
+                                         Qt::white);
+        if (!mesh)
+            return std::make_shared<GlyphMesh>();
         ++stats.generatedGlyphs;
         cacheBytes += mesh->mask.sizeInBytes();
         glyphs.insert(index, {mesh, cacheEpoch});
@@ -186,7 +242,7 @@ TextOutlineItem::TextOutlineItem(QQuickItem* parent)
         itemChange(ItemSceneChange, ItemChangeData(window()));
 }
 
-TextOutlineItem::~TextOutlineItem() = default;
+TextOutlineItem::~TextOutlineItem() { d->invalidateRefinement(); }
 QQuickItem* TextOutlineItem::source() const { return d->source; }
 qreal TextOutlineItem::outlinePixels() const { return d->width; }
 QColor TextOutlineItem::color() const { return d->color; }
@@ -194,9 +250,14 @@ bool TextOutlineItem::rasterUpdatesDeferred() const { return d->rasterUpdatesDef
 QRectF TextOutlineItem::renderedRect() const { return d->renderedRect; }
 QSize TextOutlineItem::renderedPixelSize() const { return d->renderedPixelSize; }
 TextOutlineItem::Statistics TextOutlineItem::statistics() const { return d->stats; }
+bool TextOutlineItem::qualityRefinementPending() const
+{ return (d->refinementRequested && !d->refinementFailed) || d->refinementInFlight; }
 
 void TextOutlineItem::scheduleLayout()
 {
+    // Invalidate at notification time, before any already-queued worker result
+    // can run ahead of the next polish and install obsolete content.
+    d->invalidateRefinement();
     // Text/source geometry may keep changing during Alt-resize even though no
     // border exists. Once the old node is gone, none of those signals require
     // polish or a render-thread update until a positive width is enabled.
@@ -209,6 +270,7 @@ void TextOutlineItem::scheduleLayout()
 
 void TextOutlineItem::scheduleViewport()
 {
+    d->invalidateRefinement();
     if (!d->source || d->width <= 0)
         return;
     d->viewportDirty = true;
@@ -289,7 +351,10 @@ void TextOutlineItem::setColor(const QColor& color)
 {
     if (d->color == color)
         return;
+    d->invalidateRefinement();
     d->color = color;
+    if (d->refinementRequested)
+        scheduleViewport();
     update();
     emit colorChanged();
 }
@@ -298,14 +363,138 @@ void TextOutlineItem::setRasterUpdatesDeferred(bool deferred)
 {
     if (d->rasterUpdatesDeferred == deferred)
         return;
+    d->invalidateRefinement();
     d->rasterUpdatesDeferred = deferred;
     // Uniform resizing is a scene-graph transform. Keep its existing masks
-    // throughout the gesture, then refine to the settled density on the next
-    // polish even if no further transform notification arrives. Document edits
-    // and newly visible content still use the normal layout/culling path.
+    // throughout the gesture. The next polish requests background refinement;
+    // neither release nor a quick following swipe must pay the mask cost.
+    // Document edits/newly visible glyphs keep the normal layout/culling path.
+    d->refinementRequested = !deferred && d->source && d->width > 0;
     if (!deferred)
         scheduleViewport();
     emit rasterUpdatesDeferredChanged();
+}
+
+void TextOutlineItem::startQualityRefinement(qreal rasterScale)
+{
+    if (!d->refinementRequested || d->rasterUpdatesDeferred || d->refinementInFlight
+        || d->refinementFailed)
+        return;
+    QList<RefinementGlyph> glyphs;
+    QSet<const GlyphMesh*> seen;
+    for (const Chunk& chunk : std::as_const(d->chunks)) {
+        for (const PlacedGlyph& glyph : chunk.glyphs) {
+            if (seen.contains(glyph.mesh.get()))
+                continue;
+            seen.insert(glyph.mesh.get());
+            // Own the contour value on the worker, including its lazy bounds
+            // caches. No QRawFont, QTextDocument or QObject crosses threads.
+            QPainterPath path;
+            path.setFillRule(glyph.mesh->path.fillRule());
+            path.addPath(glyph.mesh->path);
+            glyphs.append({glyph.mesh, std::move(path)});
+        }
+    }
+    if (glyphs.isEmpty()) {
+        d->refinementRequested = false;
+        return;
+    }
+    const quint64 generation = d->refinementGeneration;
+    const auto cancelled = std::make_shared<std::atomic_bool>(false);
+    d->refinementCancelled = cancelled;
+    d->refinementInFlight = true;
+    ++d->stats.refinementJobsStarted;
+    auto* watcher = new QFutureWatcher<RefinementResult>(this);
+    connect(watcher, &QFutureWatcher<RefinementResult>::finished, this,
+        [this, watcher, generation, cancelled, rasterScale] {
+        const RefinementResult result = watcher->result();
+        watcher->deleteLater();
+        d->refinementInFlight = false;
+        d->refinementCancelled.reset();
+        if (generation != d->refinementGeneration
+            || cancelled->load(std::memory_order_relaxed)
+            || d->rasterUpdatesDeferred || !d->refinementRequested) {
+            ++d->stats.refinementJobsDiscarded;
+            // There is at most one queued/running job for this item. Changes
+            // coalesce while it exits, then this requests only the latest state.
+            if (d->refinementRequested && !d->rasterUpdatesDeferred)
+                scheduleViewport();
+            return;
+        }
+        if (!result.complete) {
+            // Keep usable old masks after an allocation failure, without an
+            // immediate retry loop or a synchronous fallback on the GUI. A
+            // later content/viewport change may request another background try.
+            d->refinementFailed = true;
+            return;
+        }
+        QElapsedTimer applyTimer;
+        applyTimer.start();
+        d->refinementRequested = false;
+        d->rasterScale = rasterScale;
+        d->cacheBytes = 0;
+        // Historical masks have the previous density; retain just the current
+        // working set, preserving the font/index keys exclusively on the GUI.
+        for (auto font = d->cache.begin(); font != d->cache.end();) {
+            for (auto glyph = font->begin(); glyph != font->end();) {
+                const auto replacement = result.replacements.constFind(glyph->glyph.get());
+                if (replacement == result.replacements.cend()) {
+                    glyph = font->erase(glyph);
+                } else {
+                    glyph->glyph = *replacement;
+                    d->cacheBytes += glyph->glyph->mask.sizeInBytes();
+                    ++glyph;
+                }
+            }
+            if (font->isEmpty())
+                font = d->cache.erase(font);
+            else
+                ++font;
+        }
+        for (Chunk& chunk : d->chunks) {
+            chunk.key = 0;
+            for (PlacedGlyph& glyph : chunk.glyphs) {
+                glyph.mesh = result.replacements.value(glyph.mesh.get());
+                Q_ASSERT(glyph.mesh);
+                chunk.key = qHashMulti(chunk.key, quintptr(glyph.mesh.get()));
+            }
+        }
+        d->stats.cachedMaskBytes = d->cacheBytes;
+        ++d->stats.refinementJobsApplied;
+        d->stats.refinementNanoseconds = result.nanoseconds;
+        const auto extent = [rasterScale](qreal size) {
+            return int(qBound(qreal(1), std::ceil(size * rasterScale), qreal(4096)));
+        };
+        const QSize pixelSize(extent(d->renderedRect.width()), extent(d->renderedRect.height()));
+        if (d->renderedPixelSize != pixelSize) {
+            d->renderedPixelSize = pixelSize;
+            emit viewportChanged();
+        }
+        d->stats.refinementApplyNanoseconds = applyTimer.nsecsElapsed();
+        update();
+    });
+    const qreal width = d->width;
+    // Opaque RGB can be baked without losing coverage. Keep white coverage for
+    // direct C++ users supplying translucent colors, so a later SourceIn color
+    // change can still recover full opacity instead of multiplying old alpha.
+    const QColor color = d->color.alpha() == 255 ? d->color : QColor(Qt::white);
+    watcher->setFuture(QtConcurrent::run(outlineQualityPool(),
+        [glyphs = std::move(glyphs), cancelled, rasterScale, width, color] {
+        RefinementResult result;
+        QElapsedTimer timer;
+        timer.start();
+        for (const RefinementGlyph& glyph : glyphs) {
+            if (cancelled->load(std::memory_order_relaxed))
+                return result;
+            const Mesh replacement = rasterizeGlyph(glyph.path, width, rasterScale, color);
+            if (!replacement)
+                return result;
+            result.replacements.insert(glyph.previous.get(), replacement);
+        }
+        result.nanoseconds = timer.nsecsElapsed();
+        result.complete = !cancelled->load(std::memory_order_relaxed);
+        return result;
+    }));
 }
 
 void TextOutlineItem::geometryChange(const QRectF& now, const QRectF& before)
@@ -354,6 +543,7 @@ void TextOutlineItem::updatePolish()
     d->stats.layoutPasses = d->stats.uploadedGlyphs = 0;
     d->stats.polishNanoseconds = d->stats.syncNanoseconds = 0;
     if (!d->source || d->width <= 0) {
+        d->refinementRequested = false;
         const bool hadSceneGraphContent = !d->chunks.isEmpty();
         d->chunks.clear();
         d->stats = {};
@@ -389,10 +579,15 @@ void TextOutlineItem::updatePolish()
     // Hysteresis also prevents tiny floating-point translation errors at exact
     // zoom powers from repeatedly invalidating every glyph in the cache.
     const qreal wantedScale = qMax(qreal(0.0625), density);
-    if (!d->rasterUpdatesDeferred
-        && (wantedScale > d->rasterScale * (1 + 1e-5)
-            || wantedScale < d->rasterScale * 0.5)) {
-        d->rasterScale = std::exp2(std::ceil(std::log2(wantedScale) * 2 - 1e-5) / 2);
+    const bool needsDensityChange = wantedScale > d->rasterScale * (1 + 1e-5)
+        || wantedScale < d->rasterScale * 0.5;
+    const qreal refinementScale = std::exp2(std::ceil(std::log2(wantedScale) * 2 - 1e-5) / 2);
+    if (d->refinementRequested && !needsDensityChange) {
+        d->invalidateRefinement();
+        d->refinementRequested = false;
+    }
+    if (!d->rasterUpdatesDeferred && !d->refinementRequested && needsDensityChange) {
+        d->rasterScale = refinementScale;
         d->clearCache();
         contentChanged = true;
     }
@@ -420,6 +615,7 @@ void TextOutlineItem::updatePolish()
         emit viewportChanged();
     }
     if (!contentChanged && previousBounds == visibleBounds) {
+        startQualityRefinement(refinementScale);
         d->stats.polishNanoseconds = timer.nsecsElapsed();
         return;
     }
@@ -555,6 +751,7 @@ void TextOutlineItem::updatePolish()
 
     d->stats.chunks = int(d->chunks.size());
     d->trimCache();
+    startQualityRefinement(refinementScale);
     d->stats.polishNanoseconds = timer.nsecsElapsed();
     update();
 }
@@ -583,7 +780,7 @@ QSGNode* TextOutlineItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData*
         if (it != root->textures.cend())
             return it->texture;
         QImage colored = glyph->mask;
-        if (d->color != QColor(Qt::white)) {
+        if (d->color != glyph->maskColor) {
             QPainter painter(&colored);
             painter.setCompositionMode(QPainter::CompositionMode_SourceIn);
             painter.fillRect(colored.rect(), d->color);

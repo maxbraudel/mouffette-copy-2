@@ -54,11 +54,16 @@ ownership.
 
 Uniform previews also defer text-outline raster-density changes. The renderer
 keeps the existing glyph masks while their scene-graph transform changes, then
-refines the masks in the next polish after the gesture settles. Text edits and
-viewport culling remain active; camera-only zoom and free resize keep their normal
-quality policy. This avoids synchronous glyph rasterization and texture uploads
-at resolution-bucket crossings during a scale gesture. The motion benchmark
-measures gesture frames and the final quality refresh separately.
+requests background refinement after the gesture settles. One shared worker
+processes immutable contour values; font/document objects remain on the GUI
+thread and GPU textures remain on the scene-graph thread. Each item has at most
+one outstanding job, with changes coalesced into the latest request. A generation
+check discards obsolete results after another gesture, content/style change or
+view change. The old masks stay visible until a complete replacement is ready.
+Text edits and viewport culling remain active; camera-only zoom and free resize
+keep their normal quality policy. This avoids synchronous glyph rasterization
+at resolution-bucket crossings and on release. The motion benchmark measures
+gesture frames, release, worker preparation and publication separately.
 
 Images and videos keep this same selectable, movable and resizable shell while
 their content is loading or waiting for memory. Uniform and Alt resize, including

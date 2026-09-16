@@ -573,6 +573,169 @@ private slots:
         QVERIFY(zoomedStats.glyphs < 160);
     }
 
+    void uniformScaleQualityRefinesAsynchronously_data()
+    {
+        QTest::addColumn<QColor>("color");
+        QTest::newRow("opaque-precolored") << QColor(Qt::red);
+        QTest::newRow("translucent-keeps-coverage") << QColor(255, 0, 0, 64);
+    }
+
+    void uniformScaleQualityRefinesAsynchronously()
+    {
+        QFETCH(QColor, color);
+        Scene scene(QStringLiteral("ÉAO"), QQuickTextEdit::AlignLeft, 64, 24);
+        auto* camera = new QQuickItem(scene.window.contentItem());
+        camera->setTransformOrigin(QQuickItem::TopLeft);
+        scene.outline->setParentItem(camera);
+        scene.edit->setParentItem(camera);
+        scene.edit->setColor(Qt::transparent);
+        scene.outline->setColor(color);
+        QVERIFY(scene.expose());
+        QVERIFY(!grabAfterSync(scene.window, scene.outline).isNull());
+        const qint64 originalCacheBytes = scene.outline->statistics().cachedMaskBytes;
+
+        scene.outline->setRasterUpdatesDeferred(true);
+        camera->setScale(1.75);
+        scene.outline->rebuildNow();
+        QCOMPARE(scene.outline->statistics().generatedGlyphs, 0);
+        QCOMPARE(scene.outline->statistics().cachedMaskBytes, originalCacheBytes);
+        scene.outline->setRasterUpdatesDeferred(false);
+        scene.outline->rebuildNow();
+        QVERIFY(scene.outline->qualityRefinementPending());
+        QCOMPARE(scene.outline->statistics().refinementJobsStarted, 1);
+        QCOMPARE(scene.outline->statistics().refinementJobsApplied, 0);
+        QCOMPARE(scene.outline->statistics().generatedGlyphs, 0);
+        QCOMPARE(scene.outline->statistics().cachedMaskBytes, originalCacheBytes);
+        QTRY_VERIFY_WITH_TIMEOUT(!scene.outline->qualityRefinementPending(), 5000);
+        QCOMPARE(scene.outline->statistics().refinementJobsApplied, 1);
+        QCOMPARE(scene.outline->statistics().refinementJobsDiscarded, 0);
+        QVERIFY(scene.outline->statistics().cachedMaskBytes > originalCacheBytes);
+
+        // Both opaque precoloring and direct translucent C++ colors must keep
+        // the complete coverage mask recoverable by a later material change.
+        scene.outline->setColor(Qt::white);
+        const OutlineCapture capture = captureOutline(scene);
+        QVERIFY2(capture.iou >= 0.90,
+                 qPrintable(QStringLiteral("refined mask IoU: %1").arg(capture.iou)));
+        int maximumRed = 0;
+        for (int y = 0; y < capture.rendered.height(); ++y) {
+            for (int x = 0; x < capture.rendered.width(); ++x)
+                maximumRed = qMax(maximumRed, capture.rendered.pixelColor(x, y).red());
+        }
+        QCOMPARE(maximumRed, 255);
+        QCOMPARE(scene.outline->statistics().generatedGlyphs, 0);
+        QCOMPARE(scene.outline->statistics().cachedMaskBytes,
+                 scene.outline->statistics().textureBytes);
+    }
+
+    void uniformScaleQualityRejectsObsoleteResults_data()
+    {
+        QTest::addColumn<QString>("change");
+        for (const char* name : {"new-gesture", "text", "font", "color", "width", "scale", "source"})
+            QTest::newRow(name) << QString::fromLatin1(name);
+    }
+
+    void uniformScaleQualityRejectsObsoleteResults()
+    {
+        QFETCH(QString, change);
+        Scene scene(QStringLiteral("ÉAO"), QQuickTextEdit::AlignLeft, 64, 24);
+        auto* camera = new QQuickItem(scene.window.contentItem());
+        camera->setTransformOrigin(QQuickItem::TopLeft);
+        scene.outline->setParentItem(camera);
+        scene.edit->setParentItem(camera);
+        scene.edit->setColor(Qt::transparent);
+        QVERIFY(scene.expose());
+        QVERIFY(!grabAfterSync(scene.window, scene.outline).isNull());
+        scene.outline->setRasterUpdatesDeferred(true);
+        camera->setScale(1.75);
+        scene.outline->rebuildNow();
+        scene.outline->setRasterUpdatesDeferred(false);
+        scene.outline->rebuildNow();
+        QCOMPARE(scene.outline->statistics().refinementJobsStarted, 1);
+
+        // Mutate before processing completion events. This deterministically
+        // tests an already-finished/queued result as well as a running worker.
+        if (change == QLatin1String("new-gesture")) {
+            scene.outline->setRasterUpdatesDeferred(true);
+            camera->setScale(2.0);
+        } else if (change == QLatin1String("text")) {
+            scene.edit->setText(QStringLiteral("ÉBO"));
+        } else if (change == QLatin1String("font")) {
+            QFont font = scene.edit->font();
+            font.setPixelSize(48);
+            scene.edit->setFont(font);
+        } else if (change == QLatin1String("color")) {
+            scene.outline->setColor(Qt::green);
+        } else if (change == QLatin1String("width")) {
+            scene.outline->setOutlinePixels(12);
+        } else if (change == QLatin1String("scale")) {
+            camera->setScale(2.0);
+        } else {
+            scene.outline->setSource(nullptr);
+        }
+        scene.outline->rebuildNow();
+        // A canceled worker occupies at most the existing slot; mutations
+        // cannot enqueue additional contour/image copies behind it.
+        QVERIFY(scene.outline->statistics().refinementJobsStarted <= 1);
+        QCOMPARE(scene.outline->statistics().refinementJobsApplied, 0);
+        QTRY_VERIFY_WITH_TIMEOUT(!scene.outline->qualityRefinementPending(), 5000);
+        QVERIFY(scene.outline->statistics().refinementJobsDiscarded >= 1);
+        if (change == QLatin1String("source")) {
+            QCOMPARE(scene.outline->statistics().refinementJobsApplied, 0);
+            QCOMPARE(scene.outline->statistics().cachedMaskBytes, 0);
+            return;
+        }
+        if (change == QLatin1String("new-gesture")) {
+            QCOMPARE(scene.outline->statistics().refinementJobsApplied, 0);
+            scene.outline->setRasterUpdatesDeferred(false);
+            scene.outline->rebuildNow();
+            QTRY_VERIFY_WITH_TIMEOUT(!scene.outline->qualityRefinementPending(), 5000);
+        }
+        QCOMPARE(scene.outline->statistics().refinementJobsApplied, 1);
+        scene.outline->setColor(Qt::white);
+        const OutlineCapture capture = captureOutline(scene);
+        QVERIFY2(capture.iou >= 0.90,
+                 qPrintable(QStringLiteral("replacement mask IoU: %1").arg(capture.iou)));
+        QCOMPARE(scene.outline->statistics().cachedMaskBytes,
+                 scene.outline->statistics().textureBytes);
+    }
+
+    void deletingOutlineDoesNotWaitForQualityWorker()
+    {
+        Scene scene(QStringLiteral("ÉAO"), QQuickTextEdit::AlignLeft, 64, 24);
+        auto* camera = new QQuickItem(scene.window.contentItem());
+        camera->setTransformOrigin(QQuickItem::TopLeft);
+        scene.outline->setParentItem(camera);
+        scene.edit->setParentItem(camera);
+        QVERIFY(scene.expose());
+        QVERIFY(!grabAfterSync(scene.window, scene.outline).isNull());
+        scene.outline->setRasterUpdatesDeferred(true);
+        camera->setScale(1.75);
+        scene.outline->rebuildNow();
+        scene.outline->setRasterUpdatesDeferred(false);
+        scene.outline->rebuildNow();
+        QVERIFY(scene.outline->qualityRefinementPending());
+        QElapsedTimer deletion;
+        deletion.start();
+        delete scene.outline;
+        scene.outline = nullptr;
+        QVERIFY(deletion.elapsed() < 50);
+        // A surviving job on the same serial lane proves the canceled worker
+        // has exited, without accessing a destroyed watcher/item or blocking it.
+        auto* survivor = new TestableTextOutlineItem(camera);
+        survivor->setSize({900, 520});
+        survivor->setSource(scene.edit);
+        survivor->setOutlinePixels(12);
+        survivor->rebuildNow();
+        survivor->setRasterUpdatesDeferred(true);
+        camera->setScale(2.5);
+        survivor->rebuildNow();
+        survivor->setRasterUpdatesDeferred(false);
+        survivor->rebuildNow();
+        QTRY_VERIFY_WITH_TIMEOUT(!survivor->qualityRefinementPending(), 5000);
+        QCOMPARE(survivor->statistics().refinementJobsApplied, 1);
+    }
+
     void fractionalMotionRetainsRasterAndLayout_data()
     {
         QTest::addColumn<qreal>("physicalDensity");

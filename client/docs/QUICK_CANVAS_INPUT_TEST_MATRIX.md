@@ -44,7 +44,12 @@ selection change, editing revocation and removal during a gesture.
 protect the highlight, border and movement optimizations. Continuous uniform
 scaling at DPR 1/2 checks that text layout stays unchanged, existing outline masks
 are reused throughout the gesture, and the settled raster quality is refreshed
-once afterward. Gesture and settled-refresh timings are reported separately.
+in the background afterward. Gesture, release, worker and publication timings
+are reported separately so deferred work cannot hide a release-time stall.
+The outline tests also verify that another gesture, text/font/color/width/scale
+change or source removal rejects obsolete quality results. Deleting an item
+must not wait for its worker; opaque and translucent colors must preserve full
+coverage when recolored after refinement.
 
 JS baselines remain supplemental checks. Performance checks below are manual
 workload checks, not claims made by the interaction suite.

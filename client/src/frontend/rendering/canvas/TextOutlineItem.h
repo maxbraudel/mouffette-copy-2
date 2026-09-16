@@ -49,8 +49,14 @@ public:
         qint64 triangles = 0;
         qint64 polishNanoseconds = 0;
         qint64 syncNanoseconds = 0;
+        int refinementJobsStarted = 0;
+        int refinementJobsApplied = 0;
+        int refinementJobsDiscarded = 0;
+        qint64 refinementNanoseconds = 0;
+        qint64 refinementApplyNanoseconds = 0;
     };
     Statistics statistics() const;
+    bool qualityRefinementPending() const;
 
 signals:
     void sourceChanged();
@@ -68,6 +74,7 @@ protected:
 private:
     void scheduleLayout();
     void scheduleViewport();
+    void startQualityRefinement(qreal rasterScale);
     struct Private;
     std::unique_ptr<Private> d;
 };

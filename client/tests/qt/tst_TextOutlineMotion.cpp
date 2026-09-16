@@ -472,9 +472,37 @@ private slots:
                 const qint64 previousTextureBytes = outline->statistics().textureBytes;
                 outline->setRasterUpdatesDeferred(false);
                 const FrameTimings settled = renderFrame();
-                reportFrames("alt-wheel-scale-settled-quality", {settled});
-                QVERIFY(settled.generatedGlyphs > 0);
-                QVERIFY(settled.uploadedGlyphs > 0);
+                reportFrames("alt-wheel-scale-release", {settled});
+                QCOMPARE(settled.generatedGlyphs, 0);
+                QCOMPARE(settled.uploadedGlyphs, 0);
+                QVERIFY(settled.totalUs < 50000);
+                QVERIFY(outline->qualityRefinementPending());
+                QList<FrameTimings> refinementFrames;
+                QElapsedTimer refinementTimeout;
+                refinementTimeout.start();
+                while (outline->qualityRefinementPending() && refinementTimeout.elapsed() < 10000) {
+                    // Leave the worker time to run without blocking the GUI.
+                    QTest::qWait(1);
+                    refinementFrames.append(renderFrame());
+                }
+                QVERIFY(!outline->qualityRefinementPending());
+                QCOMPARE(outline->statistics().refinementJobsApplied, 1);
+                reportFrames("alt-wheel-scale-background-quality", refinementFrames);
+                QList<qint64> refinementFrameTimes;
+                int qualityUploads = 0;
+                for (const auto& frame : refinementFrames) {
+                    refinementFrameTimes.append(frame.totalUs);
+                    QCOMPARE(frame.generatedGlyphs, 0);
+                    qualityUploads += frame.uploadedGlyphs;
+                }
+                QVERIFY(qualityUploads > 0);
+                QVERIFY2(percentile(refinementFrameTimes, 1) < 50000,
+                         "Background quality publication stalled the GUI/render frame");
+                const auto qualityStats = outline->statistics();
+                qInfo() << "outline quality worker/apply (us)"
+                        << qualityStats.refinementNanoseconds / 1000
+                        << qualityStats.refinementApplyNanoseconds / 1000;
+                QVERIFY(qualityStats.refinementApplyNanoseconds < 50'000'000);
                 QVERIFY(outline->statistics().textureBytes > previousTextureBytes);
                 QCOMPARE(edit->size(), initialEditSize);
                 QCOMPARE(QSizeF(edit->contentWidth(), edit->contentHeight()), initialContentSize);

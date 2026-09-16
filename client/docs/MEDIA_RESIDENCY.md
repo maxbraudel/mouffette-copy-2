@@ -57,7 +57,9 @@ fixes (UTI, metadata request completion, byte-range bounds) as well as precise s
 
 The application uses ordinary pageable memory, not physical page locking. The OS
 may compress or swap memory. A one-second monitor and native memory-pressure
-notifications enforce a fixed reserve of **548 MiB** by default.
+notifications enforce the configured reserve. The compiled fallback is
+**548 MiB**; an embedded or external environment file can override it, including
+with an explicit zero.
 Configure `MOUFFETTE_MEDIA_RAM_RESERVE_PERCENT` and
 `MOUFFETTE_MEDIA_RAM_RESERVE_MIN_MIB` in `client/.env` (or an external env file
 selected with `--env-file` / `MOUFFETTE_ENV_FILE`). Rebuild after changing the
