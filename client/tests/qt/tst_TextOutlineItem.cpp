@@ -573,6 +573,43 @@ private slots:
         QVERIFY(zoomedStats.glyphs < 160);
     }
 
+    void cameraZoomRefinesOnlyAfterMotionStops()
+    {
+        Scene scene(QStringLiteral("ÉAO"), QQuickTextEdit::AlignLeft, 64, 64 * 0.30);
+        auto* camera = new QQuickItem(scene.window.contentItem());
+        camera->setTransformOrigin(QQuickItem::TopLeft);
+        scene.outline->setParentItem(camera);
+        scene.edit->setParentItem(camera);
+        QVERIFY(scene.expose());
+        QVERIFY(!grabAfterSync(scene.window, scene.outline).isNull());
+        const QSizeF editorSize = scene.edit->size();
+        const qint64 originalCacheBytes = scene.outline->statistics().cachedMaskBytes;
+        const QPointF anchor = documentGlyphPath(scene.edit, camera).boundingRect().center();
+        const QPointF screenAnchor(scene.window.width() / 2, scene.window.height() / 2);
+
+        // No explicit gesture hint: camera transforms must be sufficient.
+        // Keep moving longer than the idle delay so an uncoalesced timer would
+        // publish intermediate masks and cause uploads during the zoom.
+        for (int i = 1; i <= 30; ++i) {
+            const qreal scale = 1 + i * 0.30;
+            camera->setScale(scale);
+            camera->setPosition(screenAnchor - anchor * scale);
+            scene.outline->rebuildNow();
+            QCOMPARE(scene.outline->statistics().generatedGlyphs, 0);
+            QCOMPARE(scene.outline->statistics().cachedMaskBytes, originalCacheBytes);
+            QCOMPARE(scene.outline->statistics().refinementJobsStarted, 0);
+            QTest::qWait(8);
+        }
+        QVERIFY(scene.outline->qualityRefinementPending());
+        QTRY_VERIFY_WITH_TIMEOUT(!scene.outline->qualityRefinementPending(), 5000);
+        QCOMPARE(scene.outline->statistics().refinementJobsApplied, 1);
+        QCOMPARE(scene.edit->size(), editorSize);
+        const OutlineCapture capture = captureOutline(scene);
+        QVERIFY(capture.renderedBounds.pixels > 1000);
+        QVERIFY2(capture.iou >= 0.95,
+                 qPrintable(QStringLiteral("settled camera border IoU: %1").arg(capture.iou)));
+    }
+
     void uniformScaleQualityRefinesAsynchronously_data()
     {
         QTest::addColumn<QColor>("color");

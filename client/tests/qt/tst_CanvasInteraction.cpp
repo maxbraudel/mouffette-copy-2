@@ -409,6 +409,47 @@ private slots:
         QCOMPARE(scene.root->property("interactionMode").toString(), QString("idle"));
     }
 
+    void selectedBorderedTextRetainsMasksDuringCameraZoom()
+    {
+        CanvasFixture scene;
+        QVERIFY2(scene.initialize(), qPrintable(scene.error));
+        scene.add("text", "text", 100, 150);
+        scene.change("text", {{"textOutlineWidthPx", 40 * 0.30},
+                              {"textContent", "CAMERA ZOOM"}});
+        scene.click({240, 230});
+        QCOMPARE(scene.selected, QStringList {"text"});
+        auto* visual = scene.visual("text");
+        QVERIFY(visual);
+        auto* outline = visual->findChild<TextOutlineItem*>();
+        QVERIFY(outline);
+        auto* edit = qobject_cast<QQuickTextEdit*>(outline->source());
+        QVERIFY(edit);
+        QVERIFY(!scene.window.grabWindow().isNull());
+        const QSizeF editorSize = edit->size();
+        const QVariantMap original = scene.entry("text");
+        const qint64 cacheBytes = outline->statistics().cachedMaskBytes;
+        QVERIFY(cacheBytes > 0);
+        const QPointF anchor(240, 235);
+        const QPointF screenAnchor(scene.window.width() / 2, scene.window.height() / 2);
+        for (int i = 1; i <= 30; ++i) {
+            const qreal scale = 1 + i * 0.30;
+            scene.root->setProperty("viewScale", scale);
+            scene.root->setProperty("panX", screenAnchor.x() - anchor.x() * scale);
+            scene.root->setProperty("panY", screenAnchor.y() - anchor.y() * scale);
+            QVERIFY(!scene.window.grabWindow().isNull());
+            QCOMPARE(outline->statistics().generatedGlyphs, 0);
+            QCOMPARE(outline->statistics().cachedMaskBytes, cacheBytes);
+            QCOMPARE(outline->statistics().refinementJobsApplied, 0);
+            QVERIFY(!outline->rasterUpdatesDeferred());
+            QCOMPARE(scene.selected, QStringList {"text"});
+        }
+        QTRY_VERIFY_WITH_TIMEOUT(!outline->qualityRefinementPending(), 5000);
+        QCOMPARE(outline->statistics().refinementJobsApplied, 1);
+        QCOMPARE(edit->size(), editorSize);
+        QCOMPARE(scene.entry("text"), original);
+        QCOMPARE(scene.commitCount, 0);
+    }
+
     void externalDeselectionEndsEditing()
     {
         CanvasFixture scene;

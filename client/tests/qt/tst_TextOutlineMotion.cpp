@@ -123,13 +123,14 @@ private slots:
         QTest::addColumn<bool>("translucent");
         QTest::addColumn<bool>("liveResize");
         QTest::addColumn<bool>("liveScale");
+        QTest::addColumn<bool>("cameraZoom");
         for (const qreal dpr : {qreal(1), qreal(2)}) {
             const QByteArray suffix = dpr == 1 ? QByteArray() : QByteArray("-retina");
             const auto addRow = [&](const char* name, bool border, bool cameraPan,
                                     qreal scale, bool liveResize = false,
                                     bool liveScale = false) {
                 QTest::newRow((QByteArray(name) + suffix).constData())
-                    << border << cameraPan << scale << dpr << false << liveResize << liveScale;
+                    << border << cameraPan << scale << dpr << false << liveResize << liveScale << false;
             };
             addRow("native-camera-pan", false, true, 1);
             addRow("border-camera-pan", true, true, 1);
@@ -145,9 +146,17 @@ private slots:
             addRow("border-alt-wheel-scale", true, false, 1, false, true);
         }
         QTest::newRow("zoomed-translucent-camera-pan-retina")
-            << true << true << qreal(0.35) << qreal(2) << true << false << false;
+            << true << true << qreal(0.35) << qreal(2) << true << false << false << false;
         QTest::newRow("zoomed-translucent-element-drag-retina")
-            << true << false << qreal(0.35) << qreal(2) << true << false << false;
+            << true << false << qreal(0.35) << qreal(2) << true << false << false << false;
+        for (const qreal dpr : {qreal(1), qreal(2)}) {
+            QTest::newRow(dpr == 1 ? "border-camera-zoom" : "border-camera-zoom-retina")
+                << true << true << qreal(0.35) << dpr << false << false << false << true;
+        }
+        QTest::newRow("translucent-camera-zoom-retina")
+            << true << true << qreal(0.35) << qreal(2) << true << false << false << true;
+        QTest::newRow("native-camera-zoom-retina")
+            << false << true << qreal(0.35) << qreal(2) << false << false << false << true;
     }
 
     void unchangedParagraphMotion()
@@ -159,6 +168,7 @@ private slots:
         QFETCH(bool, translucent);
         QFETCH(bool, liveResize);
         QFETCH(bool, liveScale);
+        QFETCH(bool, cameraZoom);
         QString text;
         const QString phrase = QStringLiteral("MOUFFETTE OUTLINE PERFORMANCE 0123456789 ");
         while (text.size() < 12000)
@@ -193,7 +203,7 @@ private slots:
 
         auto* outline = new MotionOutline(element);
         outline->setColor(QColor(QStringLiteral("#cc4040")));
-        outline->setOutlinePixels(border ? 48 : 0);
+        outline->setOutlinePixels(border ? (cameraZoom ? 48 * 0.30 : 48) : 0);
         outline->setZ(0);
 
         auto* edit = new QQuickTextEdit(element);
@@ -224,6 +234,10 @@ private slots:
         outline->setSize(element->size());
         outline->setSource(edit);
         camera->setY(-documentHeight * cameraScale / 2);
+        const QPointF zoomAnchor(600, documentHeight / 2);
+        const QPointF screenAnchor(targetSize.width() / 2, targetSize.height() / 2);
+        if (cameraZoom)
+            camera->setPosition(screenAnchor - zoomAnchor * cameraScale);
 
         // Match production TextItem.qml's alpha composition. The opaque glyph
         // union is rendered once to a cropped source before applying 50% alpha;
@@ -388,6 +402,71 @@ private slots:
             stationaryFrames.append(renderFrame());
         }
         reportFrames("stationary", stationaryFrames);
+
+        if (cameraZoom) {
+            const auto settleQuality = [&] {
+                QElapsedTimer timeout;
+                timeout.start();
+                QList<FrameTimings> frames;
+                do {
+                    QTest::qWait(1);
+                    frames.append(renderFrame());
+                } while (outline->qualityRefinementPending() && timeout.elapsed() < 10000);
+                reportFrames("camera-zoom-settled-quality", frames);
+                for (const auto& frame : frames) {
+                    if (frame.generatedGlyphs || frame.totalUs >= 50000)
+                        return false;
+                }
+                return !outline->qualityRefinementPending();
+            };
+            const auto initialEditSize = edit->size();
+            const auto initialContentSize = QSizeF(edit->contentWidth(), edit->contentHeight());
+            for (bool zoomIn : {true, false}) {
+                QList<FrameTimings> zoomFrames;
+                const int qualityJobs = outline->statistics().refinementJobsStarted;
+                for (int i = 1; i <= 48; ++i) {
+                    // Exercise actual camera transforms at input cadence, with
+                    // no Alt-preview hint, across every bucket up to 1000%.
+                    QTest::qWait(8);
+                    const qreal progress = qreal(i) / 48;
+                    const qreal scale = 0.35 * std::pow(10 / 0.35,
+                                                       zoomIn ? progress : 1 - progress);
+                    camera->setScale(scale);
+                    camera->setPosition(screenAnchor - zoomAnchor * scale);
+                    zoomFrames.append(renderFrame());
+                    QCOMPARE(outline->statistics().refinementJobsStarted, qualityJobs);
+                    if (border) {
+                        // The retained crop must shrink as the camera zooms,
+                        // or settling refines thousands of offscreen glyphs.
+                        QVERIFY(outline->renderedRect().width() * scale
+                                <= targetSize.width() + 4 * 96 + 2 * scale);
+                        QVERIFY(outline->renderedRect().height() * scale
+                                <= targetSize.height() + 4 * 96 + 2 * scale);
+                    }
+                }
+                reportFrames(zoomIn ? "camera-zoom-in" : "camera-zoom-out", zoomFrames);
+                for (const auto& frame : zoomFrames) {
+                    if (zoomIn) {
+                        QCOMPARE(frame.generatedGlyphs, 0);
+                        QCOMPARE(frame.uploadedGlyphs, 0);
+                    }
+                    QVERIFY2(frame.totalUs < 50000, "Camera zoom exceeded a 50 ms frame");
+                }
+                QVERIFY(settleQuality());
+            }
+            QCOMPARE(edit->size(), initialEditSize);
+            QCOMPARE(QSizeF(edit->contentWidth(), edit->contentHeight()), initialContentSize);
+            if (border)
+                QVERIFY(outline->statistics().refinementJobsApplied >= 2);
+            if (alphaObject) {
+                alphaObject->setProperty("sourceItem", QVariant::fromValue<QQuickItem*>(nullptr));
+                alphaObject.reset();
+                renderFrame();
+            }
+            window.setRenderTarget({});
+            control.invalidate();
+            return;
+        }
 
         QQuickItem* movingItem = cameraPan ? camera : element;
         const QPointF initialPosition = movingItem->position();

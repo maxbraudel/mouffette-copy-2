@@ -17,6 +17,7 @@
 #include <QTextDocument>
 #include <QTextLayout>
 #include <QThreadPool>
+#include <QTimer>
 #include <QtConcurrent/QtConcurrentRun>
 #include <QtGui/private/qtextengine_p.h>
 #include <QtQuick/private/qquicktextedit_p_p.h>
@@ -32,6 +33,7 @@ struct GlyphMesh {
     QRectF bounds;
     QPainterPath path;
     QColor maskColor = Qt::white;
+    qreal rasterScale = 1;
 };
 using Mesh = std::shared_ptr<const GlyphMesh>;
 
@@ -41,6 +43,7 @@ Mesh rasterizeGlyph(const QPainterPath& path, qreal width, qreal rasterScale,
     auto mesh = std::make_shared<GlyphMesh>();
     mesh->path = path;
     mesh->maskColor = color;
+    mesh->rasterScale = rasterScale;
     if (!path.isEmpty()) {
         const QRectF ink = path.boundingRect().adjusted(-width, -width, width, width);
         // Guard extreme font sizes without allocating unbounded images.
@@ -153,6 +156,7 @@ struct TextOutlineItem::Private {
     bool refinementRequested = false;
     bool refinementInFlight = false;
     bool refinementFailed = false;
+    QTimer refinementTimer;
     quint64 refinementGeneration = 0;
     std::shared_ptr<std::atomic_bool> refinementCancelled;
     qreal rasterScale = 1;
@@ -209,7 +213,7 @@ struct TextOutlineItem::Private {
         stats.cachedMaskBytes = cacheBytes;
     }
 
-    Mesh glyphMesh(const QRawFont& font, quint32 index)
+    Mesh glyphMesh(const QRawFont& font, quint32 index, qreal scale)
     {
         auto& glyphs = cache[font];
         auto it = glyphs.find(index);
@@ -217,7 +221,7 @@ struct TextOutlineItem::Private {
             it->lastUse = cacheEpoch;
             return it->glyph;
         }
-        const Mesh mesh = rasterizeGlyph(font.pathForGlyph(index), width, rasterScale,
+        const Mesh mesh = rasterizeGlyph(font.pathForGlyph(index), width, scale,
                                          Qt::white);
         if (!mesh)
             return std::make_shared<GlyphMesh>();
@@ -231,6 +235,14 @@ struct TextOutlineItem::Private {
 TextOutlineItem::TextOutlineItem(QQuickItem* parent)
     : QQuickItem(parent), d(std::make_unique<Private>())
 {
+    d->refinementTimer.setSingleShot(true);
+    d->refinementTimer.setInterval(120);
+    connect(&d->refinementTimer, &QTimer::timeout, this, [this] {
+        if (d->refinementRequested && !d->rasterUpdatesDeferred) {
+            d->viewportDirty = true;
+            polish();
+        }
+    });
     setFlag(ItemHasContents, false);
     setVisible(false);
     // A disabled outline must be completely dormant. ItemObservesViewport
@@ -273,6 +285,8 @@ void TextOutlineItem::scheduleViewport()
     d->invalidateRefinement();
     if (!d->source || d->width <= 0)
         return;
+    if (d->refinementRequested && !d->rasterUpdatesDeferred)
+        d->refinementTimer.start();
     d->viewportDirty = true;
     polish();
     // The inherited scene-graph transform already moves the existing quads.
@@ -370,15 +384,19 @@ void TextOutlineItem::setRasterUpdatesDeferred(bool deferred)
     // neither release nor a quick following swipe must pay the mask cost.
     // Document edits/newly visible glyphs keep the normal layout/culling path.
     d->refinementRequested = !deferred && d->source && d->width > 0;
-    if (!deferred)
+    if (!deferred) {
         scheduleViewport();
+        // An explicit resize release already tells us the gesture ended.
+        // Subsequent viewport motion will defer/cancel this work again.
+        d->refinementTimer.stop();
+    }
     emit rasterUpdatesDeferredChanged();
 }
 
 void TextOutlineItem::startQualityRefinement(qreal rasterScale)
 {
     if (!d->refinementRequested || d->rasterUpdatesDeferred || d->refinementInFlight
-        || d->refinementFailed)
+        || d->refinementFailed || d->refinementTimer.isActive())
         return;
     QList<RefinementGlyph> glyphs;
     QSet<const GlyphMesh*> seen;
@@ -582,14 +600,36 @@ void TextOutlineItem::updatePolish()
     const bool needsDensityChange = wantedScale > d->rasterScale * (1 + 1e-5)
         || wantedScale < d->rasterScale * 0.5;
     const qreal refinementScale = std::exp2(std::ceil(std::log2(wantedScale) * 2 - 1e-5) / 2);
+    bool visibleGlyphsNeedRefinement = false;
     if (d->refinementRequested && !needsDensityChange) {
+        for (const Chunk& chunk : std::as_const(d->chunks)) {
+            for (const PlacedGlyph& glyph : chunk.glyphs) {
+                if (glyph.mesh->rasterScale < wantedScale * (1 - 1e-5)) {
+                    visibleGlyphsNeedRefinement = true;
+                    break;
+                }
+            }
+            if (visibleGlyphsNeedRefinement)
+                break;
+        }
+    }
+    if (d->refinementRequested && !needsDensityChange && !visibleGlyphsNeedRefinement) {
         d->invalidateRefinement();
         d->refinementRequested = false;
+        d->refinementTimer.stop();
     }
     if (!d->rasterUpdatesDeferred && !d->refinementRequested && needsDensityChange) {
-        d->rasterScale = refinementScale;
-        d->clearCache();
-        contentChanged = true;
+        if (d->cache.isEmpty()) {
+            d->rasterScale = refinementScale;
+            contentChanged = true;
+        } else {
+            // Camera zoom, fitting and inherited transforms need the same
+            // retained-mask path as Alt-resize. Density is quality, not text
+            // content: changing it must never clear/rasterize the cache in
+            // polish. Coalesce successive transforms until motion settles.
+            d->refinementRequested = true;
+            d->refinementTimer.start();
+        }
     }
     // Keep a small screen-space guard around the visible area. Panning or
     // dragging within it needs neither document access nor node rebuilding,
@@ -597,16 +637,23 @@ void TextOutlineItem::updatePolish()
     const QRectF itemBounds = boundingRect().toAlignedRect();
     const QRectF previousBounds = d->renderedRect;
     if (!visibleBounds.isEmpty()) {
-        if (previousBounds.contains(visibleBounds) && itemBounds.contains(previousBounds)) {
+        const qreal guard = 96 * dpr / qMax(qreal(0.0625), density);
+        const QRectF retentionBounds = visibleBounds.adjusted(-2 * guard, -2 * guard,
+                                                              2 * guard, 2 * guard);
+        if (previousBounds.contains(visibleBounds) && itemBounds.contains(previousBounds)
+            && retentionBounds.contains(previousBounds)) {
             visibleBounds = previousBounds;
         } else {
-            const qreal guard = 96 * dpr / qMax(qreal(0.0625), density);
             visibleBounds = visibleBounds.adjusted(-guard, -guard, guard, guard)
                 .toAlignedRect().intersected(itemBounds.toRect());
         }
     }
-    const auto textureExtent = [this](qreal extent) {
-        return int(qBound(qreal(1), std::ceil(extent * d->rasterScale), qreal(4096)));
+    // During zoom-out, existing glyph masks may still be very dense. The
+    // translucent composition target only needs the current screen density;
+    // using the old mask density would repeatedly allocate 4096-square layers.
+    const qreal textureScale = qMin(d->rasterScale, refinementScale);
+    const auto textureExtent = [textureScale](qreal extent) {
+        return int(qBound(qreal(1), std::ceil(extent * textureScale), qreal(4096)));
     };
     const QSize pixelSize(textureExtent(visibleBounds.width()), textureExtent(visibleBounds.height()));
     if (d->renderedRect != visibleBounds || d->renderedPixelSize != pixelSize) {
@@ -635,6 +682,11 @@ void TextOutlineItem::updatePolish()
     // its alignment formulas was the cause of fill/border drift in the SVG path.
     const QPointF offset = edit->mapToItem(this, QPointF(text->xoff, text->yoff));
     QList<PlacedGlyph> placed;
+    // Panning/zooming out can reveal uncached letters even within the current
+    // density bucket. Give these a cheap preview instead of rasterizing at the
+    // previous extreme zoom. Visible preview masks are refined after motion.
+    const qreal newGlyphScale = !contentChanged || d->refinementRequested || d->rasterUpdatesDeferred
+        ? std::min({qreal(1), d->rasterScale, refinementScale}) : d->rasterScale;
 
     for (QTextBlock block = doc->begin(); block.isValid(); block = block.next()) {
         if (!block.isVisible() || !block.layout())
@@ -668,11 +720,16 @@ void TextOutlineItem::updatePolish()
                         .adjusted(-d->width - 2, -d->width - 2, d->width + 2, d->width + 2);
                     if (!visibleBounds.intersects(bounds.translated(position)))
                         continue;
-                    const Mesh mesh = d->glyphMesh(font, indexes[i]);
+                    const Mesh mesh = d->glyphMesh(font, indexes[i], newGlyphScale);
                     if (mesh->mask.isNull())
                         continue;
                     if (!visibleBounds.intersects(mesh->bounds.translated(position)))
                         continue;
+                    if (mesh->rasterScale < wantedScale * (1 - 1e-5)
+                        && !d->rasterUpdatesDeferred && !d->refinementRequested) {
+                        d->refinementRequested = true;
+                        d->refinementTimer.start();
+                    }
                     placed.append({mesh, position});
                     ++d->stats.glyphs;
                     d->stats.triangles += 2; // One ordinary Qt image quad.
