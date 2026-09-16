@@ -1619,12 +1619,43 @@ private slots:
         QVERIFY(media && !media->residencyReady());
         media->setScale(2.0);
         QTRY_VERIFY(!media->residencyState().isEmpty());
+        auto* root = fixture.view.rootObject();
+        const auto clickTopAction = [&](const QString& icon) {
+            // Model changes can recreate the overlay; resolve each button
+            // after the row has been positioned for the current selection.
+            QTest::qWait(20);
+            auto* overlay = findQuickItemWithProperty(root, "objectName", "mediaTopOverlay");
+            auto* button = findQuickItemWithProperty(overlay, "iconSource", icon);
+            if (!button || !button->isVisible() || !button->isEnabled()) return false;
+            QTest::mouseClick(&fixture.view, Qt::LeftButton, Qt::NoModifier,
+                             button->mapToScene({button->width() / 2, button->height() / 2}).toPoint());
+            return true;
+        };
+        QVERIFY(clickTopAction(QStringLiteral("qrc:/icons/icons/visibility-on.svg")));
+        QTRY_VERIFY(!media->contentVisible());
+        QVERIFY(clickTopAction(QStringLiteral("qrc:/icons/icons/visibility-off.svg")));
+        QTRY_VERIFY(media->contentVisible());
+        const qreal originalZ = media->z();
+        QVERIFY(clickTopAction(QStringLiteral("qrc:/icons/icons/arrow-up.svg")));
+        QTRY_VERIFY(media->z() > originalZ);
+        const qreal raisedZ = media->z();
+        QVERIFY(clickTopAction(QStringLiteral("qrc:/icons/icons/arrow-down.svg")));
+        QTRY_VERIFY(media->z() < raisedZ);
+        QVERIFY(!media->residencyReady());
+        QVERIFY(clickTopAction(QStringLiteral("qrc:/icons/icons/delete.svg")));
+        QTRY_VERIFY(fixture.document.media().isEmpty());
+
+        media = fixture.document.addPreparedFile(path, image.size(), video, {100, 100});
+        QVERIFY(media && !media->residencyReady());
+        media->setScale(2.0);
         MediaSettingsViewModel settings;
         settings.setController(&fixture.controller);
         QVERIFY(!settings.available());
         auto* top = findQuickItemWithProperty(fixture.view.rootObject(), "objectName", "mediaTopOverlay");
         QVERIFY(top);
-        QVERIFY(!top->property("actionsAvailable").toBool());
+        QVERIFY(top->property("actionsAvailable").toBool());
+        auto* videoControls = findQuickItemWithProperty(root, "objectName", "videoMuteButton");
+        QVERIFY(videoControls && !videoControls->isVisible() && !videoControls->isEnabled());
         auto* chrome = findQuickItemWithProperty(fixture.view.rootObject(), "objectName", "selectionChromeVisual");
         QVERIFY(chrome && chrome->isVisible());
         QCOMPARE(chrome->size(), QSizeF(320, 180));
@@ -1642,7 +1673,6 @@ private slots:
         QCOMPARE(persistentChanges.size(), 0);
         // Drive the actual handle with native events so both QML hit testing
         // and the backend transaction must accept the loading media.
-        auto* root = fixture.view.rootObject();
         QPointer<QQuickItem> delegate = findQuickItemWithProperty(root, "currentMediaId", media->mediaId());
         QVERIFY(delegate);
         const QPoint start = chrome->mapToScene({chrome->width(), chrome->height()}).toPoint();
@@ -1668,7 +1698,9 @@ private slots:
         QVERIFY(!settings.available());
         top = findQuickItemWithProperty(root, "objectName", "mediaTopOverlay");
         QVERIFY(top);
-        QVERIFY(!top->property("actionsAvailable").toBool());
+        QVERIFY(top->property("actionsAvailable").toBool());
+        videoControls = findQuickItemWithProperty(root, "objectName", "videoMuteButton");
+        QVERIFY(videoControls && !videoControls->isVisible() && !videoControls->isEnabled());
         fixture.controller.handleMediaMoveStarted(media->mediaId(), 100, 100, false);
         fixture.controller.handleMediaMoveUpdated(media->mediaId(), 130, 120, false);
         fixture.controller.handleMediaMoveEnded(media->mediaId(), 130, 120, false);
@@ -1703,6 +1735,10 @@ private slots:
         memory.sampleNow();
         QTRY_VERIFY_WITH_TIMEOUT(media->residencyReady(), 5000);
         QTRY_VERIFY(!skeleton->isVisible());
+        videoControls = findQuickItemWithProperty(root, "objectName", "videoMuteButton");
+        QVERIFY(videoControls);
+        QCOMPARE(videoControls->isVisible(), video);
+        QCOMPARE(videoControls->isEnabled(), video);
         QVERIFY2(!fadingFrame.isNull(), "Media must render a visible intermediate fade frame");
         const QImage readyFrame = fixture.view.grabWindow();
         QVERIFY(!readyFrame.isNull());
@@ -1804,7 +1840,7 @@ private slots:
         auto* chrome = findQuickItemWithProperty(fixture.view.rootObject(), "objectName", "selectionChromeVisual");
         auto* skeleton = findQuickItemWithProperty(fixture.view.rootObject(), "objectName", "mediaLoadingSkeleton");
         QVERIFY(top && chrome && skeleton);
-        QVERIFY(!top->property("actionsAvailable").toBool());
+        QVERIFY(top->property("actionsAvailable").toBool());
         QVERIFY(chrome->isVisible());
         QVERIFY(skeleton->isVisible());
 

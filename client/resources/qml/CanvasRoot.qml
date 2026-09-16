@@ -450,13 +450,13 @@ Rectangle {
         return null
     }
 
-    function mediaOverlaysReady(mediaId, entry) {
+    function mediaPlaybackControlsReady(mediaId, entry) {
         if (!entry || entry.residencyReady !== true)
             return false
         if (entry.canvasMedia !== true)
             return true
         var delegate = mediaDelegateById(mediaId)
-        return !!delegate && delegate.initialFramePresented
+        return !!delegate && delegate.initialFramePresented && delegate.contentReady
     }
 
     function finishActiveMoveInteraction(reason) {
@@ -845,6 +845,7 @@ Rectangle {
                     delegate: Item {
                     id: mediaDelegate
                     property var media: modelData
+                    readonly property bool contentReady: mediaContentLoader.contentReady
                     readonly property bool initialFramePresented: mediaContentLoader.initialFramePresented
 
                     // Local position/scale — tracks model when idle, free during drag
@@ -1654,7 +1655,7 @@ Rectangle {
                     id: topOverlay
                     mediaId: overlayDelegate.mid
                     displayName: overlayDelegate.mediaEntry ? (overlayDelegate.mediaEntry.displayName || "") : ""
-                    actionsAvailable: root.mediaOverlaysReady(overlayDelegate.mid, overlayDelegate.mediaEntry)
+                    actionsAvailable: !!overlayDelegate.mediaEntry
                     contentVisible: overlayDelegate.mediaEntry ? (overlayDelegate.mediaEntry.contentVisible !== false) : true
                     visible: true
 
@@ -1672,8 +1673,9 @@ Rectangle {
                 MediaVideoOverlay {
                     id: bottomOverlay
                     mediaId: overlayDelegate.mid
-                    visible: root.mediaOverlaysReady(overlayDelegate.mid, overlayDelegate.mediaEntry)
+                    visible: root.mediaPlaybackControlsReady(overlayDelegate.mid, overlayDelegate.mediaEntry)
                              && overlayDelegate.mediaEntry.mediaType === "video"
+                    enabled: visible
 
                     isPlaying: overlayDelegate.videoState ? !!overlayDelegate.videoState.isPlaying : false
                     isMuted:   overlayDelegate.videoState ? !!overlayDelegate.videoState.isMuted   : false
