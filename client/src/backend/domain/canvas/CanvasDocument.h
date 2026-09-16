@@ -35,8 +35,10 @@ public:
 
     QList<CanvasMedia*> media() const { return m_media; }
     CanvasMedia* mediaById(const QString& mediaId) const;
+    // A zero initial height preserves the default scale for noninteractive callers.
     CanvasMedia* addText(const QPointF& position,
-                         const QString& text = QStringLiteral("Text"));
+                         const QString& text = QStringLiteral("Text"),
+                         qreal initialSceneHeight = 0.0);
     CanvasMedia* addPreparedFile(const QString& sourcePath,
                                  const QSize& nativeSize,
                                  bool video,

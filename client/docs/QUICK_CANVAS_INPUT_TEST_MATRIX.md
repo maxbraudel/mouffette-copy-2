@@ -6,6 +6,10 @@
 production QML, not a JavaScript approximation of the state machine:
 
 - Creation tool, automatic selection, deselection, reselection and double-click editing.
+- Double-click across the full text body at independent media/camera scales,
+  including oversized clipped media, native hover and double-click events.
+- Adjacent-media clicks cannot combine into text activation; Shift preserves
+  multiselection and resize-handle double-clicks never activate text.
 - Repeated selection and dragging for text, image and video delegates.
 - External deselection during editing; switching text; Shift multiselection.
 - Highlighted multiline text preservation, real keyboard edit, commit and re-entry.
@@ -21,7 +25,12 @@ production QML, not a JavaScript approximation of the state machine:
 
 `CanvasSelectionBackend` uses the real controller and scene to check external and
 additive selection, late commits, pending content publication across selection
-changes, and deleted-ID requests. It does not initialize the full application.
+changes, and deleted-ID requests. Its packaged `CanvasPage` regression covers
+creation, keyboard input, leaving/reopening editing, actual media enlargement,
+viewport resize, caret placement and overlapping page controls. It also checks
+initial text size against the camera square at multiple percentages/zooms, and
+persisted scale without resizing old media. It does not initialize application
+networking or runtime storage.
 
 `TextItemQml` / `TextItemQmlScaled`, `TextOutlineItem` and `TextOutlineMotion`
 protect the prior highlight, border and movement optimizations.

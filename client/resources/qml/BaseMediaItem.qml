@@ -15,26 +15,7 @@ Item {
     property bool initialFramePresented: true
 
     property bool pointerEnabled: true
-    property bool doubleClickEnabled: false
-
-    signal selectRequested(string mediaId, bool additive)
     signal primaryPressed(string mediaId, bool additive)
-    signal primaryDoubleClicked(string mediaId, bool additive,
-                                bool hasScenePosition, real sceneX, real sceneY)
-
-    // Called by the parent delegate's TapHandler (which sits at a higher level
-    // in the scene graph and receives events before child MouseAreas).
-    function fireDoubleClick(additive, sceneX, sceneY) {
-        if (!root.doubleClickEnabled)
-            return
-        var hasScenePosition = typeof sceneX === "number"
-            && typeof sceneY === "number"
-            && isFinite(sceneX) && isFinite(sceneY)
-        root.primaryDoubleClicked(root.mediaId, !!additive,
-                                  hasScenePosition,
-                                  hasScenePosition ? sceneX : 0.0,
-                                  hasScenePosition ? sceneY : 0.0)
-    }
 
     x: mediaX
     y: mediaY
@@ -52,9 +33,8 @@ Item {
     }
 
     // Single-press handling for selection/primary press.
-    // Double-click is handled at delegate level (CanvasRoot mediaDoubleClick)
-    // and forwarded via fireDoubleClick() so it can coexist with parent
-    // PointerHandlers used for selection/drag arbitration.
+    // Double-click is handled by the viewport's passive TapHandler so it can
+    // coexist with the viewport handlers used for selection/drag arbitration.
     MouseArea {
         anchors.fill: parent
         enabled: root.pointerEnabled

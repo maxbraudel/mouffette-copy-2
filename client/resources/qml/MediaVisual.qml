@@ -20,11 +20,6 @@ Item {
     signal textCommitRequested(string mediaId, string text)
     signal textLiveUpdateRequested(string mediaId, string text)
 
-    function fireDoubleClick(additive, sceneX, sceneY) {
-        if (visualItem && typeof visualItem.fireDoubleClick === "function")
-            visualItem.fireDoubleClick(!!additive, sceneX, sceneY)
-    }
-
     Loader {
         id: visualLoader
         anchors.fill: parent

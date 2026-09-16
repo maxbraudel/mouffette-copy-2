@@ -1474,7 +1474,10 @@ void QuickCanvasController::handleTextLiveUpdateRequested(const QString& mediaId
 void QuickCanvasController::handleTextCreateRequested(qreal viewX, qreal viewY)
 {
     if (!m_projectEditingEnabled || !m_document || editsLocked()) return;
-    CanvasMedia* media = m_document->addText(mapViewPointToScene({viewX, viewY}));
+    const qreal initialHeight = m_document->cameraSquareSceneSize()
+        * (AppConfig::instance().canvasTextInitialHeightPercent() / 100.0);
+    CanvasMedia* media = m_document->addText(mapViewPointToScene({viewX, viewY}),
+                                           QStringLiteral("Text"), initialHeight);
     if (!media) return;
     setTextToolActive(false);
     emit textEditingRequested(media->mediaId());

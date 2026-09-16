@@ -36,6 +36,7 @@ class AppConfigTest final : public QObject {
 private slots:
     void loadsEmbeddedDefaults();
     void configuresMediaRamReserve();
+    void configuresCanvasTextInitialHeight();
     void compiledDefaultDisablesMultipleInstances();
     void appliesDocumentedPrecedence();
     void commandLineEnvFileReplacesProcessSelection();
@@ -77,6 +78,7 @@ void AppConfigTest::loadsEmbeddedDefaults() {
     QCOMPARE(config.uiScrollbarHideDelayMs(), 500);
     QCOMPARE(config.uiInputWatchdogIntervalMs(), 120);
     QCOMPARE(config.uiSnapFreezeCleanupDelayMs(), 300);
+    QCOMPARE(config.canvasTextInitialHeightPercent(), 8);
     QCOMPARE(config.clientCountdownRefreshIntervalMs(), 1000);
     QCOMPARE(config.toastDefaultDurationMs(), 4000);
     QCOMPARE(config.toastInfoDurationMs(), 2000);
@@ -116,6 +118,42 @@ void AppConfigTest::configuresMediaRamReserve() {
     QVERIFY2(config.load(options, &error), qPrintable(error));
     QCOMPARE(config.mediaRamReservePercent(), 0);
     QCOMPARE(config.mediaRamReserveMinMiB(), 0);
+}
+
+void AppConfigTest::configuresCanvasTextInitialHeight() {
+    AppConfig config;
+    auto options = isolatedOptions(QString());
+    QString error;
+    QVERIFY2(config.load(options, &error), qPrintable(error));
+    QCOMPARE(config.canvasTextInitialHeightPercent(), 8);
+
+    QTemporaryDir directory;
+    options.defaultEnvFilePath = writeEnvFile(directory, "text.env",
+        "MOUFFETTE_CANVAS_TEXT_INITIAL_HEIGHT_PERCENT=12\n");
+    QVERIFY(!options.defaultEnvFilePath.isEmpty());
+    QVERIFY2(config.load(options, &error), qPrintable(error));
+    QCOMPARE(config.canvasTextInitialHeightPercent(), 12);
+    options.processEnvironment.insert("MOUFFETTE_CANVAS_TEXT_INITIAL_HEIGHT_PERCENT", "5");
+    QVERIFY2(config.load(options, &error), qPrintable(error));
+    QCOMPARE(config.canvasTextInitialHeightPercent(), 5);
+    options.arguments << "--canvas-text-initial-height-percent=9";
+    QVERIFY2(config.load(options, &error), qPrintable(error));
+    QCOMPARE(config.canvasTextInitialHeightPercent(), 9);
+    QCOMPARE(config.provenance(AppConfig::Key::CanvasTextInitialHeightPercent),
+             QStringLiteral("cli:--canvas-text-initial-height-percent"));
+    options.arguments.removeLast();
+    for (const QString value : {"0", "-1", "101", "8.5", "abc"}) {
+        options.processEnvironment.insert("MOUFFETTE_CANVAS_TEXT_INITIAL_HEIGHT_PERCENT", value);
+        QVERIFY(!config.load(options, &error));
+        QVERIFY(error.contains("MOUFFETTE_CANVAS_TEXT_INITIAL_HEIGHT_PERCENT"));
+        QCOMPARE(config.canvasTextInitialHeightPercent(), 9); // Atomic failed reload.
+    }
+    for (int value : {1, 100}) {
+        options.processEnvironment.insert("MOUFFETTE_CANVAS_TEXT_INITIAL_HEIGHT_PERCENT",
+                                          QString::number(value));
+        QVERIFY2(config.load(options, &error), qPrintable(error));
+        QCOMPARE(config.canvasTextInitialHeightPercent(), value);
+    }
 }
 
 void AppConfigTest::compiledDefaultDisablesMultipleInstances() {

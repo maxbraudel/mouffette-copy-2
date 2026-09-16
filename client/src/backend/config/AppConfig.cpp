@@ -24,7 +24,7 @@ struct SettingSpec {
     bool boolean;
 };
 
-constexpr std::array<SettingSpec, 61> kSpecs{{
+constexpr std::array<SettingSpec, 62> kSpecs{{
     {Key::ServerUrl, "MOUFFETTE_SERVER_URL", "server-url", "serverUrl", "ws://localhost:8080", false},
     {Key::RemoteSessionHiddenTimeoutMs, "MOUFFETTE_REMOTE_SESSION_HIDDEN_TIMEOUT_MS", "remote-session-hidden-timeout-ms", nullptr, "60000", false},
     {Key::ProjectHiddenRetentionMs, "MOUFFETTE_PROJECT_HIDDEN_RETENTION_MS", "project-hidden-retention-ms", nullptr, "300000", false},
@@ -72,6 +72,7 @@ constexpr std::array<SettingSpec, 61> kSpecs{{
     {Key::UiScrollbarHideDelayMs, "MOUFFETTE_UI_SCROLLBAR_HIDE_DELAY_MS", "ui-scrollbar-hide-delay-ms", nullptr, "500", false},
     {Key::UiInputWatchdogIntervalMs, "MOUFFETTE_UI_INPUT_WATCHDOG_INTERVAL_MS", "ui-input-watchdog-interval-ms", nullptr, "120", false},
     {Key::UiSnapFreezeCleanupDelayMs, "MOUFFETTE_UI_SNAP_FREEZE_CLEANUP_DELAY_MS", "ui-snap-freeze-cleanup-delay-ms", nullptr, "300", false},
+    {Key::CanvasTextInitialHeightPercent, "MOUFFETTE_CANVAS_TEXT_INITIAL_HEIGHT_PERCENT", "canvas-text-initial-height-percent", nullptr, "8", false},
     {Key::ToastDefaultDurationMs, "MOUFFETTE_TOAST_DEFAULT_DURATION_MS", "toast-default-duration-ms", nullptr, "4000", false},
     {Key::ToastInfoDurationMs, "MOUFFETTE_TOAST_INFO_DURATION_MS", "toast-info-duration-ms", nullptr, "2000", false},
     {Key::ToastWarningDurationMs, "MOUFFETTE_TOAST_WARNING_DURATION_MS", "toast-warning-duration-ms", nullptr, "3500", false},
@@ -420,6 +421,7 @@ void AppConfig::resetToCompiledDefaults() {
     m_toastErrorDurationMs = 5000;
     m_toastAnimationDurationMs = 300;
     m_mediaRamReservePercent = 0;
+    m_canvasTextInitialHeightPercent = 8;
     m_mediaRamReserveMinMiB = 548;
     m_uploadConcurrency = 2;
     m_autoUploadImportedMedia = false;
@@ -614,7 +616,9 @@ bool AppConfig::load(const LoadOptions& options, QString* errorMessage) {
         *destination = static_cast<int>(parsed);
         return true;
     };
-    if (!parseIntSetting(Key::MediaRamReservePercent, 0, 100,
+    if (!parseIntSetting(Key::CanvasTextInitialHeightPercent, 1, 100,
+                         &candidate.m_canvasTextInitialHeightPercent)
+        || !parseIntSetting(Key::MediaRamReservePercent, 0, 100,
                          &candidate.m_mediaRamReservePercent)
         || !parseIntSetting(Key::MediaRamReserveMinMiB, 0, 2147483647,
                             &candidate.m_mediaRamReserveMinMiB)

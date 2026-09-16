@@ -34,6 +34,7 @@ public:
     int selectionRequestCount = 0;
     int textCreateCount = 0;
     int clearRequestCount = 0;
+    int nativeDoubleClickCount = 0;
     QString error;
     bool emulateResizePublication = false;
     int resizePublicationCount = 0;
@@ -84,6 +85,7 @@ public:
         if (watched == &window && (event->type() == QEvent::MouseButtonPress
                                   || event->type() == QEvent::MouseButtonRelease
                                   || event->type() == QEvent::MouseButtonDblClick)) {
+            if (event->type() == QEvent::MouseButtonDblClick) ++nativeDoubleClickCount;
             const QPointF position = static_cast<QMouseEvent*>(event)->position();
             QTest::qVerify(QRectF(QPointF(), window.size()).contains(position),
                           "Native click is inside the exposed window",
@@ -211,10 +213,14 @@ public:
         QCoreApplication::processEvents();
     }
 
-    void doubleClick(QPoint point)
+    void doubleClick(QPoint point, Qt::KeyboardModifiers modifiers = Qt::NoModifier)
     {
-        QTest::qWait(QGuiApplication::styleHints()->mouseDoubleClickInterval() + 20);
-        QTest::mouseDClick(&window, Qt::LeftButton, Qt::NoModifier, point);
+        // Advance the synthetic input clock too: qWait alone does not separate
+        // taps for platforms whose native double-click interval exceeds 500ms.
+        QTest::mouseMove(&window, point,
+            QGuiApplication::styleHints()->mouseDoubleClickInterval() + 20);
+        QCoreApplication::processEvents();
+        QTest::mouseDClick(&window, Qt::LeftButton, modifiers, point);
         QCoreApplication::processEvents();
     }
 
@@ -495,6 +501,168 @@ private slots:
         QVERIFY(editor->cursorPosition() != editor->length());
     }
 
+    void doubleClickEditsEntireScaledTextBody_data()
+    {
+        QTest::addColumn<qreal>("mediaScale");
+        QTest::addColumn<qreal>("viewScale");
+        QTest::addColumn<bool>("fitToText");
+        QTest::addColumn<bool>("alreadySelected");
+        QTest::addColumn<bool>("partiallyClipped");
+        for (bool selected : {false, true}) {
+            const QByteArray suffix = selected ? "-selected" : "-unselected";
+            QTest::newRow(("unscaled-zoom-out-fixed-box" + suffix).constData())
+                << qreal(1.0) << qreal(0.75) << false << selected << false;
+            QTest::newRow(("unscaled-zoom-in-fit-text" + suffix).constData())
+                << qreal(1.0) << qreal(1.6) << true << selected << false;
+            QTest::newRow(("enlarged-zoom-out-fit-text" + suffix).constData())
+                << qreal(4.0) << qreal(0.75) << true << selected << false;
+            QTest::newRow(("enlarged-zoom-in-fixed-box" + suffix).constData())
+                << qreal(4.0) << qreal(1.6) << false << selected << false;
+            QTest::newRow(("enlarged-beyond-viewport" + suffix).constData())
+                << qreal(4.0) << qreal(1.6) << true << selected << true;
+        }
+    }
+
+    void doubleClickEditsEntireScaledTextBody()
+    {
+        QFETCH(qreal, mediaScale);
+        QFETCH(qreal, viewScale);
+        QFETCH(bool, fitToText);
+        QFETCH(bool, alreadySelected);
+        QFETCH(bool, partiallyClipped);
+        CanvasFixture scene;
+        QVERIFY2(scene.initialize(), qPrintable(scene.error));
+
+        // Keep the displayed body inside even a DPI-clamped window while
+        // varying the media transform independently of the camera transform.
+        // Testing only viewScale misses errors in delegate-local hit testing.
+        const QRectF displayedBody = partiallyClipped
+            ? QRectF(-scene.window.width() * 0.60, -scene.window.height() * 0.50,
+                     scene.window.width() * 1.50, scene.window.height() * 1.40)
+            : QRectF(scene.window.width() * 0.15, scene.window.height() * 0.20,
+                     scene.window.width() * 0.60, scene.window.height() * 0.55);
+        const qreal panX = 23.0;
+        const qreal panY = -17.0;
+        const qreal effectiveScale = mediaScale * viewScale;
+        scene.root->setProperty("viewScale", viewScale);
+        scene.root->setProperty("panX", panX);
+        scene.root->setProperty("panY", panY);
+        scene.add("text", "text", (displayedBody.x() - panX) / viewScale,
+                  (displayedBody.y() - panY) / viewScale);
+        const QString content = QStringLiteral("FIRST LINE\nSECOND LINE\nTHIRD LINE");
+        scene.change("text", {{"width", displayedBody.width() / effectiveScale},
+                              {"height", displayedBody.height() / effectiveScale},
+                              {"scale", mediaScale},
+                              {"textFontPixelSize", qRound(displayedBody.height()
+                                                          / (5.0 * effectiveScale))},
+                              {"textContent", content},
+                              {"textHorizontalAlignment", "left"},
+                              {"textVerticalAlignment", "top"},
+                              {"fitToTextEnabled", fitToText}});
+        auto* visual = scene.visual("text");
+        QVERIFY(visual);
+        auto* editor = visual->findChild<QQuickTextEdit*>();
+        QVERIFY(editor);
+
+        // The reported bug leaves only a strip near the upper edge editable.
+        // Include empty body space as well as glyphs: the whole media is a
+        // double-click target, with selection handles kept out of these points.
+        const QPointF positions[] {{0.25, 0.10}, {0.50, 0.50}, {0.75, 0.90}};
+        for (const QPointF& fraction : positions) {
+            scene.click(QPoint(scene.window.width() * 0.95, scene.window.height() * 0.95));
+            QVERIFY(!visual->property("editing").toBool());
+            if (alreadySelected) scene.select("text", false);
+
+            const QRectF visibleBody = visual->mapRectToScene(visual->boundingRect())
+                .intersected(QRectF(QPointF(), scene.window.size()));
+            const QPoint point = (visibleBody.topLeft()
+                + QPointF(visibleBody.width() * fraction.x(),
+                          visibleBody.height() * fraction.y())).toPoint();
+            const QPointF localPoint = editor->mapFromScene(point);
+            const int expectedCursor = editor->positionAt(localPoint.x(), localPoint.y());
+            const int doubleClicksBefore = scene.nativeDoubleClickCount;
+            scene.doubleClick(point);
+            QCOMPARE(scene.nativeDoubleClickCount, doubleClicksBefore + 1);
+            QTRY_VERIFY2_WITH_TIMEOUT(visual->property("editing").toBool(),
+                qPrintable(QString("Text body at (%1, %2), media scale %3, view scale %4 did not enter editing")
+                    .arg(fraction.x()).arg(fraction.y()).arg(mediaScale).arg(viewScale)), 1000);
+            QCOMPARE(scene.selected, QStringList {"text"});
+            QVERIFY(editor->hasActiveFocus());
+            QCOMPARE(editor->cursorPosition(), expectedCursor);
+            QCOMPARE(editor->selectionStart(), editor->selectionEnd());
+            QCOMPARE(editor->text(), content);
+        }
+    }
+
+    void nearbyClicksOnDifferentMediaDoNotEnterEditing()
+    {
+        CanvasFixture scene;
+        QVERIFY2(scene.initialize(), qPrintable(scene.error));
+        scene.add("a", "text", 100, 150);
+        scene.change("a", {{"width", 140.0}});
+        scene.add("b", "text", 240, 150);
+        scene.change("b", {{"width", 140.0}, {"z", 2}});
+        QVERIFY(QGuiApplication::styleHints()->mouseDoubleClickDistance() > 1);
+
+        // Adjacent text bodies are only one logical pixel apart here. Keep
+        // clear of the selected item's corner and middle resize handles.
+        const int nativeDoubleClicksBefore = scene.nativeDoubleClickCount;
+        QTest::mouseMove(&scene.window, {239, 190},
+            QGuiApplication::styleHints()->mouseDoubleClickInterval() + 20);
+        QTest::mouseClick(&scene.window, Qt::LeftButton, Qt::NoModifier, {239, 190}, 30);
+        QCOMPARE(scene.selected, QStringList {"a"});
+        QTest::mouseMove(&scene.window, {240, 190});
+        QTest::mouseClick(&scene.window, Qt::LeftButton, Qt::NoModifier, {240, 190}, 30);
+        QCOMPARE(scene.nativeDoubleClickCount, nativeDoubleClicksBefore + 1);
+        QCOMPARE(scene.selected, QStringList {"b"});
+        QVERIFY(!scene.root->property("anyMediaEditing").toBool());
+        QVERIFY(!scene.visual("a")->property("editing").toBool());
+        QVERIFY(!scene.visual("b")->property("editing").toBool());
+
+        scene.doubleClick({310, 230});
+        QTRY_VERIFY(scene.visual("b")->property("editing").toBool());
+        QVERIFY(!scene.visual("a")->property("editing").toBool());
+    }
+
+    void shiftDoubleClickPreservesMultipleSelection()
+    {
+        CanvasFixture scene;
+        QVERIFY2(scene.initialize(), qPrintable(scene.error));
+        scene.add("a", "text", 100, 150);
+        scene.change("a", {{"width", 160.0}});
+        scene.add("b", "text", 300, 150);
+        scene.change("b", {{"width", 160.0}});
+
+        for (bool alreadySelected : {false, true}) {
+            scene.click(scene.backgroundPoint());
+            scene.click({180, 230});
+            if (alreadySelected) scene.click({380, 230}, Qt::ShiftModifier);
+            scene.doubleClick({380, 230}, Qt::ShiftModifier);
+            QCOMPARE(scene.selected, (QStringList {"a", "b"}));
+            QTRY_VERIFY(scene.visual("b")->property("editing").toBool());
+            QVERIFY(!scene.visual("a")->property("editing").toBool());
+        }
+    }
+
+    void doubleClickOnResizeHandleDoesNotEnterEditing()
+    {
+        CanvasFixture scene;
+        QVERIFY2(scene.initialize(), qPrintable(scene.error));
+        scene.add("text", "text", 100, 150);
+        scene.click({240, 230});
+        QSignalSpy resized(scene.root, SIGNAL(mediaResizeRequested(QString,QString,double,double,bool,bool)));
+        QSignalSpy moved(scene.root, SIGNAL(mediaMoveStarted(QString,double,double,bool)));
+        scene.doubleClick({380, 320});
+        QVERIFY(!scene.root->property("anyMediaEditing").toBool());
+        QCOMPARE(resized.size(), 0);
+        QCOMPARE(moved.size(), 0);
+
+        scene.drag({380, 320}, {420, 355});
+        QVERIFY(!resized.isEmpty());
+        QCOMPARE(moved.size(), 0);
+        QVERIFY(!scene.root->property("anyMediaEditing").toBool());
+    }
+
     void textToolCreationCanBeReselectedAndEdited()
     {
         CanvasFixture scene;
@@ -565,6 +733,7 @@ private slots:
         QCOMPARE(scene.root->property("interactionMode").toString(), QString("idle"));
         QCOMPARE(scene.root->property("activeMediaDragCount").toInt(), 0);
         QVERIFY(scene.root->property("liveDragMediaId").toString().isEmpty());
+        QVERIFY(!scene.root->property("anyMediaEditing").toBool());
         scene.click(scene.backgroundPoint());
         QVERIFY(scene.selected.isEmpty());
         scene.click({312, 266});

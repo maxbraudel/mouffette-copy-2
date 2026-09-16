@@ -197,8 +197,8 @@ private slots:
         const QRect initial = highlightBounds();
         QVERIFY(!initial.isEmpty());
 
-        // The parent canvas forwards actual double-clicks through this method.
-        QVERIFY(QMetaObject::invokeMethod(item, "fireDoubleClick",
+        // Standalone editing uses the same entry point as a hosted canvas.
+        QVERIFY(QMetaObject::invokeMethod(item, "beginEditing",
                                           Q_ARG(QVariant, false),
                                           Q_ARG(QVariant, QVariant()),
                                           Q_ARG(QVariant, QVariant())));

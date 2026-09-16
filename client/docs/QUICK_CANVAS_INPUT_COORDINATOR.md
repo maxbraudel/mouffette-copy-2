@@ -85,6 +85,18 @@ Selection chrome reparents its `Repeater`, not individual delegates, respecting
 
 ## Text edit lifecycle
 
+Creation and the viewport's native `doubleTapped` signal share
+`CanvasRoot.requestTextEditing`. Creation selects the placeholder; reopening
+places the caret at the clicked window coordinate. Activation waits until the
+pointer release and selection publication finish, resolves the current visual
+by ID, and rechecks selection/editability. New presses, controller changes and
+edit cancellation invalidate pending requests. `TextEditSession` remains the
+only editor owner; neither a delayed callback nor an old renderer can revive it.
+Selection, movement and double-click activation all use the same viewport-space
+media picker, independent of scaled renderer subtrees. The one TapHandler keeps
+the first tap's media/controller identity so taps on adjacent texts or across
+workspace switches cannot combine into an edit request.
+
 Only a selected, editable text can enter the canvas edit session. Opening B
 finishes A first. External deselection finishes the current editor too. Finishing
 snapshots the live document and releases ownership before emitting the commit:
@@ -131,6 +143,17 @@ and cursor/pinch-anchored zoom update the document in one operation. Manual zoom
 uses `1000 / D` with limits `[0.2, 10]`; fitting can exceed these limits, and
 subsequent gestures can return gradually into the range. Screen labels, handles,
 and snap thresholds continue to use logical screen pixels.
+
+Interactive text creation uses `MOUFFETTE_CANVAS_TEXT_INITIAL_HEIGHT_PERCENT`
+(integer 1..100, default 8) from `AppConfig`. Its initial scene height is
+`D * percent / 100`; after fitting the placeholder, uniform media scale is that
+height divided by the fitted base height. Centering and publication happen only
+after this transform is set. The font size stays unchanged, fit-to-text continues
+to size the block during editing, and zoom/resize never recalculates existing
+media scale. `CanvasDocument.addText` accepts an optional scene height; callers
+omitting it retain the original default scale. Persistence uses the existing
+media scale field without a project migration. Rebuild after editing the bundled
+`client/.env`, or restart with `--env-file` for an external configuration file.
 
 The local project viewport stores `cameraVersion: 2`, `centerX`, `centerY`, and
 `squareSceneSize`, alongside the legacy matrix snapshot. A legacy matrix is

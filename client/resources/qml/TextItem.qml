@@ -30,7 +30,6 @@ BaseMediaItem {
 
     clip: true
     pointerEnabled: !root.editing
-    doubleClickEnabled: true
 
     // Radius of the border around the glyph, in scene-space pixels.
     readonly property real outlinePixels: Math.max(0, root.outlineWidthPx)
@@ -59,16 +58,22 @@ BaseMediaItem {
         textDisplayNode.select(position, position)
     }
 
-    onPrimaryDoubleClicked: function(mediaId, additive, hasScenePosition, sceneX, sceneY) {
+    function beginEditing(selectAll, sceneX, sceneY) {
         if (!root.textEditable)
-            return
-        root.selectRequested(mediaId, additive)
+            return false
         if (root.editingSession)
             root.editingSession.begin(root)
         else
             root.standaloneEditing = true
-        if (root.editing && hasScenePosition)
+        if (!root.editing)
+            return false
+        textDisplayNode.forceActiveFocus()
+        if (selectAll)
+            root.selectAllText()
+        else if (typeof sceneX === "number" && typeof sceneY === "number"
+                 && isFinite(sceneX) && isFinite(sceneY))
             root.placeCursorAtScenePoint(sceneX, sceneY)
+        return true
     }
 
     onEditingChanged: {

@@ -499,7 +499,6 @@ qt_add_qml_module(MouffetteClient
         resources/qml/CanvasViewport.qml
         resources/qml/ImageItem.qml
         resources/qml/InputLayer.qml
-        resources/qml/MediaInteractionHandlers.qml
         resources/qml/MediaLayer.qml
         resources/qml/MediaNamePill.qml
         resources/qml/MediaSurface.qml

@@ -127,6 +127,7 @@ Rectangle {
     // Reference to the TextItem currently in edit mode, or null. Used to commit
     // and exit editing when the user presses outside the item.
     readonly property Item currentEditingMediaItem: textEditSession.activeEditor
+    property int textEditingRequestSerial: 0
     TextEditSession {
         id: textEditSession
         selectionModel: root.selectionChromeModel
@@ -232,6 +233,7 @@ Rectangle {
     }
 
     function discardPointerEdits() {
+        ++root.textEditingRequestSerial
         abandonPointerInteractions("editing-canceled")
         for (var i = 0; i < mediaRepeater.count; ++i) {
             var item = mediaRepeater.itemAt(i)
@@ -260,27 +262,44 @@ Rectangle {
         synchronizeTransientState()
     }
 
-    onCanvasControllerChanged: registerCanvasSurface()
+    onCanvasControllerChanged: {
+        ++root.textEditingRequestSerial
+        registerCanvasSurface()
+    }
     onHostingWindowChanged: registerCanvasSurface()
     onWidthChanged: if (canvasController) canvasController.setViewportSize(width, height)
     onHeightChanged: if (canvasController) canvasController.setViewportSize(width, height)
     Component.onCompleted: registerCanvasSurface()
+
+    function requestTextEditing(mediaId, selectAll, additive, sceneX, sceneY) {
+        if (!root.editingEnabled || !mediaId)
+            return
+        // Creation has already selected the new media in the document. A
+        // double-click explicitly replaces selection unless Shift is held.
+        if (!selectAll)
+            root.mediaSelectRequested(mediaId, !!additive)
+        var controller = root.canvasController
+        var requestSerial = ++root.textEditingRequestSerial
+        // Finish insertion/selection bindings and the native release before
+        // entering the editor. Resolve its current visual by ID, never capture
+        // a renderer which publication or a workspace switch could destroy.
+        Qt.callLater(function() {
+            if (root.textEditingRequestSerial !== requestSerial
+                    || root.canvasController !== controller || !root.editingEnabled
+                    || !textEditSession.isSelected(mediaId))
+                return
+            var delegate = root.mediaDelegateById(mediaId)
+            if (delegate && delegate.visible && delegate.enabled)
+                delegate.beginTextEditing(!!selectAll, sceneX, sceneY)
+        })
+    }
 
     Connections {
         target: root.canvasController
         function onPresentationChanged() { root.synchronizeTransientState() }
         function onPendingEditsCanceled() { root.discardPointerEdits() }
         function onTextEditingRequested(mediaId) {
-            var controller = root.canvasController
-            // Let the insertion/selection bindings and creation tap finish
-            // before moving keyboard focus into the new delegate.
-            Qt.callLater(function() {
-                if (root.canvasController !== controller)
-                    return
-                var delegate = root.mediaDelegateById(mediaId)
-                if (delegate)
-                    delegate.beginTextEditing()
-            })
+            root.requestTextEditing(mediaId, true, false)
         }
     }
 
@@ -857,11 +876,10 @@ Rectangle {
                     property real localY: media ? media.y : 0.0
                     property real localScale: media ? (media.scale || 1.0) : 1.0
                     property bool localDragging: false
-                    property bool overlayHovered: false
-                    function beginTextEditing() {
+                    function beginTextEditing(selectAll, sceneX, sceneY) {
                         var editor = mediaContentLoader.visualItem
-                        if (editor && editor.textEditable && textEditSession.begin(editor))
-                            editor.selectAllText()
+                        return !!editor && editor.textEditable
+                            && editor.beginEditing(selectAll !== false, sceneX, sceneY)
                     }
                     // Actual rendered scale — switches to live scale during resize/alt-resize
                     // so overlay counter-scale stays correct every frame.
@@ -977,15 +995,6 @@ Rectangle {
                     // so invisible content cannot swallow another item's press.
                     enabled: opacity > 0
 
-                    MediaInteractionHandlers {
-                        id: mediaInteraction
-                        z: 10
-                        rootController: root
-                        coordinatorRef: inputLayer ? inputLayer.inputCoordinator : null
-                        delegateItem: mediaDelegate
-                        mediaContentItem: mediaContentLoader.visualItem
-                    }
-
                     MediaVisual {
                         id: mediaContentLoader
                         media: mediaDelegate.media
@@ -1012,9 +1021,6 @@ Rectangle {
                         }
                         function onTextLiveUpdateRequested(mediaId, text) {
                             root.textLiveUpdateRequested(mediaId, text)
-                        }
-                        function onSelectRequested(mediaId, additive) {
-                            root.requestMediaSelection(mediaId, additive)
                         }
                     }
 
@@ -1132,6 +1138,57 @@ Rectangle {
                         return !editor || editor.mediaId !== mediaId
                     }
                 }
+            }
+
+            // Use the exact same viewport-space body as selection and movement.
+            // Text renderers (and their scaling/clipping/native input subtrees)
+            // must not determine which part of a media accepts a double-click.
+            TapHandler {
+                id: mediaDoubleTap
+                parent: mediaMoveInputSurface
+                target: null
+                acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
+                acceptedButtons: Qt.LeftButton
+                grabPermissions: PointerHandler.ApprovesTakeOverByAnything
+                enabled: root.editingEnabled && !root.textToolActive
+                dragThreshold: globalMediaDrag.dragThreshold
+
+                property string firstTappedMediaId: ""
+                property var firstTapController: null
+
+                function mediaAtEventPoint(eventPoint) {
+                    var p = viewport.mapFromItem(null, eventPoint.scenePosition.x,
+                                                eventPoint.scenePosition.y)
+                    return root.mediaIdAtPoint(p.x, p.y)
+                }
+
+                onTapped: function(eventPoint) {
+                    if (mediaDoubleTap.tapCount === 1) {
+                        mediaDoubleTap.firstTappedMediaId = mediaDoubleTap.mediaAtEventPoint(eventPoint)
+                        mediaDoubleTap.firstTapController = root.canvasController
+                    }
+                }
+
+                onDoubleTapped: function(eventPoint) {
+                    var mediaId = mediaDoubleTap.mediaAtEventPoint(eventPoint)
+                    if (!mediaId || mediaId !== mediaDoubleTap.firstTappedMediaId
+                            || root.canvasController !== mediaDoubleTap.firstTapController)
+                        return
+                    var sceneX = eventPoint.scenePosition.x
+                    var sceneY = eventPoint.scenePosition.y
+                    if (!inputLayer.inputCoordinator.canActivateMediaAtScenePoint(
+                            mediaId, sceneX, sceneY))
+                        return
+                    var delegate = root.mediaDelegateById(mediaId)
+                    if (!delegate || !delegate.media || delegate.media.mediaType !== "text")
+                        return
+                    root.requestTextEditing(mediaId, false,
+                        (mediaDoubleTap.point.modifiers & Qt.ShiftModifier) !== 0,
+                        sceneX, sceneY)
+                }
+
+                onCanceled: mediaDoubleTap.firstTappedMediaId = ""
+                onEnabledChanged: if (!enabled) mediaDoubleTap.firstTappedMediaId = ""
             }
 
             DragHandler {
@@ -1318,6 +1375,7 @@ Rectangle {
                         return
 
                     if (active) {
+                        ++root.textEditingRequestSerial
                         var viewPoint = point ? point.position : centroid.position
                         var handle = selectionChrome ? selectionChrome.hitTestHandle(viewPoint.x, viewPoint.y) : null
                         var mediaId = root.mediaIdAtPoint(viewPoint.x, viewPoint.y)
@@ -1334,11 +1392,9 @@ Rectangle {
                             handle ? handle.mediaId : ""
                         )
                         // Dispatch selection from the same atomic hit-test that
-                        // assigned ownership. Delegated PointerHandlers may see
-                        // their active transition before or after this global
-                        // observer; relying on their ordering could lose a plain
-                        // click permanently. Local handlers may still call the
-                        // same method, whose per-gesture guard deduplicates it.
+                        // assigned ownership. Renderer primary-press callbacks
+                        // may also call this method; the per-gesture guard
+                        // deduplicates them regardless of delivery order.
                         // Keep clicks inside the active TextEdit untouched.
                         if (ownerKind === "media" && !textEditSession.activeEditor) {
                             var modifiers = Qt.application.keyboardModifiers

@@ -21,6 +21,7 @@
 #include <QQuickView>
 #include <QScopeGuard>
 #include <QSemaphore>
+#include <QStyleHints>
 #include <QTemporaryDir>
 #include <QThreadPool>
 #include <QTimer>
@@ -30,8 +31,10 @@
 #include <array>
 #include <cmath>
 #include <QtQuick/private/qquickpinchhandler_p.h>
+#include <QtQuick/private/qquicktextedit_p.h>
 
 #include "backend/domain/canvas/CanvasDocument.h"
+#include "backend/config/AppConfig.h"
 #include "backend/domain/media/CanvasMedia.h"
 #include "backend/domain/project/ProjectModel.h"
 #include "frontend/rendering/canvas/MediaListModel.h"
@@ -413,6 +416,84 @@ private slots:
         QTRY_VERIFY_WITH_TIMEOUT(document.mediaById(id), 5000);
         QVERIFY(!document.hasPendingImports());
         QCOMPARE(document.mediaById(id)->sceneRect().center(), QPointF(23, 42));
+    }
+
+    void textCreationSizeFollowsCameraSquare_data()
+    {
+        QTest::addColumn<int>("percent");
+        QTest::newRow("default") << 8;
+        QTest::newRow("custom") << 5;
+        QTest::newRow("minimum") << 1;
+        QTest::newRow("maximum") << 100;
+    }
+
+    void textCreationSizeFollowsCameraSquare()
+    {
+        QFETCH(int, percent);
+        const AppConfig previous = AppConfig::instance();
+        const auto restoreConfig = qScopeGuard([&] { AppConfig::instance() = previous; });
+        AppConfig::LoadOptions options;
+        options.defaultEnvFilePath = QString();
+        options.processEnvironment = QProcessEnvironment();
+        options.arguments = {"test", QString("--canvas-text-initial-height-percent=%1").arg(percent)};
+        QString error;
+        QVERIFY2(AppConfig::instance().load(options, &error), qPrintable(error));
+        CanvasDocument document;
+        QuickCanvasController controller(&document);
+        controller.setProjectEditingEnabled(true);
+        auto* legacy = document.addText({100, 200});
+        QCOMPARE(legacy->scale(), 1.0);
+        const QRectF legacyRect = legacy->sceneRect();
+        const QList<QSizeF> sizes{{1200, 800}, {600, 400}, {400, 900}, {400, 900}, {400, 900}};
+        const QList<qreal> spans{2000, 2000, 2000, 1000, 100};
+        QList<CanvasMedia*> created;
+        for (qsizetype i = 0; i < sizes.size(); ++i) {
+            controller.setViewportSize(sizes[i].width(), sizes[i].height());
+            document.setCameraView({320, -85}, spans[i]);
+            const qreal height = spans[i] * percent / 100.0;
+            const QPointF click(310, 220);
+            const QPointF center = (click - QPointF(controller.panX(), controller.panY()))
+                / controller.viewScale();
+            qreal publishedHeight = 0;
+            const auto connection = connect(&document, &CanvasDocument::mediaAdded,
+                &document, [&](CanvasMedia* media) {
+                    publishedHeight = media->sceneRect().height();
+                });
+            controller.handleTextCreateRequested(click.x(), click.y());
+            disconnect(connection);
+            auto* media = document.selectedMedia();
+            QVERIFY(media && media != legacy);
+            QVERIFY(qAbs(publishedHeight - height) < 1e-8);
+            QVERIFY(qAbs(media->sceneRect().height() - height) < 1e-8);
+            QVERIFY(QLineF(media->sceneRect().center(), center).length() < 1e-8);
+            QVERIFY(qAbs(media->sceneRect().height() * controller.viewScale()
+                / qMin(sizes[i].width(), sizes[i].height()) - percent / 100.0) < 1e-8);
+            QVERIFY(media->fitToTextEnabled());
+            QCOMPARE(media->fontPixelSize(), legacy->fontPixelSize());
+            created.append(media);
+            QCOMPARE(legacy->sceneRect(), legacyRect);
+        }
+        QCOMPARE(created[0]->sceneRect().height(), created[1]->sceneRect().height());
+        QCOMPARE(created[1]->sceneRect().height(), created[2]->sceneRect().height());
+        QCOMPARE(created[2]->sceneRect().height(), 2 * created[3]->sceneRect().height());
+        auto* edited = created.last();
+        const qreal scale = edited->scale();
+        const qreal originalHeight = edited->sceneRect().height();
+        edited->setText("First line\nSecond line");
+        QCOMPARE(edited->scale(), scale);
+        QVERIFY(edited->sceneRect().height() > originalHeight);
+        const QJsonObject saved = document.serializeProjectState();
+        CanvasDocument restored;
+        QVERIFY(restored.restoreProjectState(saved, {}));
+        QCOMPARE(restored.media().size(), document.media().size());
+        for (auto* media : document.media()) {
+            auto* copy = restored.mediaById(media->mediaId());
+            QVERIFY(copy);
+            QCOMPARE(copy->scale(), media->scale());
+            QCOMPARE(copy->sceneRect(), media->sceneRect());
+            QCOMPARE(copy->text(), media->text());
+            QVERIFY(copy->fitToTextEnabled());
+        }
     }
 
     void cameraResizePreservesSquareComposition()
@@ -1056,7 +1137,9 @@ private slots:
         fixture.document.select(text->mediaId());
         auto* delegate = findQuickItemWithProperty(root, "currentMediaId", text->mediaId());
         QVERIFY(delegate);
-        QVERIFY(QMetaObject::invokeMethod(delegate, "beginTextEditing"));
+        QVERIFY(QMetaObject::invokeMethod(root, "requestTextEditing",
+            Q_ARG(QVariant, text->mediaId()), Q_ARG(QVariant, true),
+            Q_ARG(QVariant, false), Q_ARG(QVariant, QVariant()), Q_ARG(QVariant, QVariant())));
         QTRY_VERIFY(root->property("anyMediaEditing").toBool());
         QVERIFY(!root->property("mediaShortcutsEnabled").toBool());
         QTest::keyClick(&fixture.view, Qt::Key_C, Qt::ControlModifier);
@@ -2476,6 +2559,222 @@ private slots:
         QCOMPARE(ended.count(), 1);
         QCOMPARE(media->position(), originalPosition + QPointF(90, 55));
         QCOMPARE(follower->position(), followerStart + QPointF(90, 55));
+    }
+
+    void pendingTextEditingRequestRespectsLifetime_data()
+    {
+        QTest::addColumn<QString>("interruption");
+        for (const QString name : {"deselect", "delete", "lock", "lock-unlock",
+                                   "workspace-roundtrip", "newer-editor"})
+            QTest::newRow(qPrintable(name)) << name;
+    }
+
+    void pendingTextEditingRequestRespectsLifetime()
+    {
+        QFETCH(QString, interruption);
+        Fixture fixture;
+        QVERIFY(fixture.initialize());
+        fixture.view.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&fixture.view));
+#ifdef Q_OS_MACOS
+        MacWindowManager::activateApplicationWindow(&fixture.view);
+#else
+        fixture.view.requestActivate();
+#endif
+        QVERIFY(QTest::qWaitForWindowActive(&fixture.view));
+        auto* root = fixture.view.rootObject();
+        auto* a = fixture.document.addText({300, 200}, "First");
+        auto* b = fixture.document.addText({500, 200}, "Second");
+        const QString aId = a->mediaId();
+        const auto request = [&](const QString& id) {
+            return QMetaObject::invokeMethod(root, "requestTextEditing",
+                Q_ARG(QVariant, id), Q_ARG(QVariant, false), Q_ARG(QVariant, false),
+                Q_ARG(QVariant, 300.0), Q_ARG(QVariant, 200.0));
+        };
+        QVERIFY(request(aId));
+        QVERIFY(!root->property("anyMediaEditing").toBool());
+        if (interruption == "deselect") fixture.document.clearSelection();
+        else if (interruption == "delete") QVERIFY(fixture.document.removeMedia(aId));
+        else if (interruption == "lock" || interruption == "lock-unlock") {
+            fixture.document.setEditsLocked(true);
+            if (interruption == "lock-unlock") fixture.document.setEditsLocked(false);
+        } else if (interruption == "workspace-roundtrip") {
+            root->setProperty("sessionViewModel", QVariant());
+            root->setProperty("sessionViewModel", QVariantMap{
+                {"canvasController", QVariant::fromValue<QObject*>(&fixture.controller)}});
+        } else if (interruption == "newer-editor") {
+            QVERIFY(request(b->mediaId()));
+        }
+        QCoreApplication::processEvents();
+        QTest::qWait(20);
+        if (interruption == "newer-editor") {
+            QTRY_VERIFY(root->property("anyMediaEditing").toBool());
+            auto* editor = root->property("currentEditingMediaItem").value<QQuickItem*>();
+            QVERIFY(editor);
+            QCOMPARE(editor->property("mediaId").toString(), b->mediaId());
+        } else {
+            QVERIFY(!root->property("anyMediaEditing").toBool());
+        }
+    }
+
+    void fullPageTextCreationAndDoubleClick_data()
+    {
+        QTest::addColumn<bool>("preselected");
+        QTest::addColumn<bool>("resizeViewport");
+        QTest::addColumn<qreal>("cameraScale");
+        QTest::addColumn<qreal>("bodyY");
+        QTest::addColumn<qreal>("enlargement");
+        QTest::newRow("unselected") << false << false << qreal(0.75) << qreal(-1) << qreal(1);
+        QTest::newRow("selected") << true << false << qreal(0.75) << qreal(-1) << qreal(1);
+        QTest::newRow("unselected-zoomed-resized") << false << true << qreal(1.6) << qreal(-1) << qreal(1);
+        QTest::newRow("selected-zoomed-resized") << true << true << qreal(1.6) << qreal(-1) << qreal(1);
+        QTest::newRow("enlarged-top") << false << false << qreal(0.75) << qreal(0.15) << qreal(4);
+        QTest::newRow("enlarged-middle") << true << false << qreal(0.75) << qreal(0.5) << qreal(4);
+        QTest::newRow("enlarged-bottom-zoomed-resized") << true << true << qreal(1.6) << qreal(0.85) << qreal(4);
+    }
+
+    void fullPageTextCreationAndDoubleClick()
+    {
+        QFETCH(bool, preselected);
+        QFETCH(bool, resizeViewport);
+        QFETCH(qreal, cameraScale);
+        QFETCH(qreal, bodyY);
+        QFETCH(qreal, enlargement);
+        QString error;
+        std::unique_ptr<QuickCanvasHost> host(QuickCanvasHost::create(&error));
+        QVERIFY2(host, qPrintable(error));
+        host->setProjectEditingEnabled(true);
+        ClientWorkspaceViewModel session(QStringLiteral("text-session"), host.get(),
+            [] {}, nullptr, [] { return false; }, [] { return true; },
+            [] { return true; });
+        session.setLoading(false);
+
+        QQmlEngine engine;
+        QQuickWindow window;
+        window.resize(1100, 800);
+        QQmlComponent component(&engine, QUrl(QStringLiteral(
+            "qrc:/qt/qml/Mouffette/App/resources/qml/app/pages/CanvasPage.qml")));
+        QTRY_VERIFY_WITH_TIMEOUT(!component.isLoading(), 3000);
+        std::unique_ptr<QObject> pageObject(component.createWithInitialProperties({
+            {QStringLiteral("controller"), QVariantMap{
+                {QStringLiteral("activeWorkspace"), QVariant::fromValue(&session)},
+                {QStringLiteral("canCreateProject"), false},
+                {QStringLiteral("canLaunchSession"), false},
+                {QStringLiteral("connectionEnabled"), false}}}}));
+        auto* page = qobject_cast<QQuickItem*>(pageObject.get());
+        QVERIFY2(page, qPrintable(component.errorString()));
+        page->setParentItem(window.contentItem());
+        page->setPosition({37, 29});
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+#ifdef Q_OS_MACOS
+        MacWindowManager::activateApplicationWindow(&window);
+#else
+        window.requestActivate();
+#endif
+        QVERIFY(QTest::qWaitForWindowActive(&window));
+        page->setSize(QSizeF(window.width() - 74, window.height() - 58));
+        auto* root = findQuickItemWithProperty(page, "canvasController",
+            QVariant::fromValue<QObject*>(host->controller()));
+        QVERIFY(root);
+        host->controller()->updateCamera(cameraScale, 130, 90);
+        if (resizeViewport)
+            page->setSize(page->size() - QSizeF(80, 60));
+
+        session.setActiveTool(QStringLiteral("text"));
+        const QPoint createPoint = root->mapToScene(
+            {root->width() * 0.45, root->height() * 0.45}).toPoint();
+        QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier, createPoint);
+        QTRY_COMPARE(host->document()->media().size(), 1);
+        QTRY_VERIFY(root->property("anyMediaEditing").toBool());
+        QCOMPARE(session.activeTool(), QStringLiteral("selection"));
+        auto* media = host->document()->media().constFirst();
+        auto* delegate = findQuickItemWithProperty(root, "currentMediaId", media->mediaId());
+        QVERIFY(delegate);
+        auto* editor = delegate->findChild<QQuickTextEdit*>();
+        QVERIFY(editor);
+        QVERIFY(editor->hasActiveFocus());
+        for (char character : QByteArray("First line")) QTest::keyClick(&window, character);
+        QTest::keyClick(&window, Qt::Key_Return);
+        for (char character : QByteArray("Second line")) QTest::keyClick(&window, character);
+        const QString original = QStringLiteral("First line\nSecond line");
+        QTRY_COMPARE(media->text(), original);
+
+        const QPoint background = root->mapToScene({24, root->height() - 24}).toPoint();
+        QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier, background);
+        QTRY_VERIFY(!root->property("anyMediaEditing").toBool());
+        QVERIFY(!editor->hasActiveFocus());
+        if (enlargement != 1) {
+            host->document()->select(media->mediaId());
+            const QRectF rect = media->sceneRect();
+            const qreal originalScale = media->scale();
+            host->controller()->handleMediaResizeRequested(media->mediaId(), "bottom-right",
+                rect.x() + rect.width() * enlargement,
+                rect.y() + rect.height() * enlargement, false, false);
+            host->controller()->handleMediaResizeEnded(media->mediaId());
+            QVERIFY(qAbs(media->scale() - originalScale * enlargement) < 1e-8);
+            // Keep the enlarged body in the visible canvas at either DPI.
+            const QPointF center = (QPointF(root->width() / 2, root->height() / 2)
+                - QPointF(host->controller()->panX(), host->controller()->panY()))
+                / host->controller()->viewScale();
+            media->setPosition(center - QPointF(media->sceneRect().width() / 2,
+                                                media->sceneRect().height() / 2));
+            host->document()->clearSelection();
+            QCoreApplication::processEvents();
+        }
+        // Hit the rendered geometry, after both the resize and QTextDocument
+        // layout have been polished, as a user clicking the visible item does.
+        QSignalSpy frames(&window, &QQuickWindow::frameSwapped);
+        window.update();
+        QTRY_VERIFY(!frames.isEmpty());
+        const QRectF caret = editor->positionToRectangle(15);
+        const QPointF editorPoint(caret.x(), caret.center().y());
+        const QPoint clickPoint = bodyY < 0 ? editor->mapToScene(editorPoint).toPoint()
+            : delegate->mapToScene({delegate->width() * 0.4, delegate->height() * bodyY}).toPoint();
+        const int expectedPosition = editor->positionAt(
+            editor->mapFromScene(clickPoint).x(), editor->mapFromScene(clickPoint).y());
+        QVERIFY(QRect(QPoint(), window.size()).contains(clickPoint));
+        if (preselected) {
+            QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier, clickPoint);
+            QCOMPARE(host->document()->selectedMedia(), media);
+            QVERIFY(!root->property("anyMediaEditing").toBool());
+        }
+        QTest::mouseMove(&window, clickPoint,
+            QGuiApplication::styleHints()->mouseDoubleClickInterval() + 20);
+        // Two full native press/release cycles, not a direct call into the editor.
+        QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier, clickPoint, 30);
+        QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier, clickPoint, 30);
+        QTRY_VERIFY_WITH_TIMEOUT(root->property("anyMediaEditing").toBool(), 1500);
+        QVERIFY(editor->hasActiveFocus());
+        QCOMPARE(editor->cursorPosition(), expectedPosition);
+        QCOMPARE(editor->selectedText(), QString());
+        QCOMPARE(media->text(), original);
+        QTest::keyClick(&window, Qt::Key_X);
+        QString expected = original;
+        expected.insert(expectedPosition, QLatin1Char('x'));
+        QTRY_COMPARE(media->text(), expected);
+        QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier, background);
+        QTRY_VERIFY(!root->property("anyMediaEditing").toBool());
+        QCOMPARE(media->text(), expected);
+
+        // A page-level settings control can overlap text. Its double-click
+        // must never open the media underneath the floating panel.
+        media->setFitToTextEnabled(false);
+        media->setBaseSize({600, 600});
+        media->setScale(1.0 / host->controller()->viewScale());
+        media->setPosition(-QPointF(host->controller()->panX(), host->controller()->panY())
+                           / host->controller()->viewScale());
+        host->document()->select(media->mediaId());
+        session.setSettingsVisible(true);
+        QQuickItem* panel = nullptr;
+        QTRY_VERIFY((panel = findQuickItemWithProperty(page, "objectName", "canvasSceneElementPanel")));
+        QTRY_VERIFY(panel->isVisible());
+        const QPoint tabPoint = panel->mapToScene({panel->width() * 0.25, 20}).toPoint();
+        QTest::mouseMove(&window, tabPoint);
+        QTest::mouseDClick(&window, Qt::LeftButton, Qt::NoModifier, tabPoint);
+        QCoreApplication::processEvents();
+        QVERIFY(!root->property("anyMediaEditing").toBool());
+        QCOMPARE(media->text(), expected);
     }
 
     void fullPageDragSurvivesPublicationAndResize_data()

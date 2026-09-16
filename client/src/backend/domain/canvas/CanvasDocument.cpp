@@ -222,12 +222,23 @@ void CanvasDocument::adoptMedia(CanvasMedia* media)
 }
 
 CanvasMedia* CanvasDocument::addText(const QPointF& position,
-                                     const QString& text)
+                                     const QString& text,
+                                     qreal initialSceneHeight)
 {
-    if (m_editsLocked) return nullptr;
+    if (m_editsLocked || !std::isfinite(initialSceneHeight)
+        || initialSceneHeight < 0.0) return nullptr;
     auto* media = new CanvasMedia(CanvasMedia::Type::Text, QSize(400, 200));
     media->setText(text.isEmpty() ? QStringLiteral("Text") : text);
     media->fitTextToContent();
+    if (initialSceneHeight > 0.0) {
+        media->setScale(initialSceneHeight / media->baseSize().height());
+        // Refuse a height outside the media transform's representable range;
+        // never publish an element at an unrelated default scale instead.
+        if (!qFuzzyCompare(media->sceneRect().height(), initialSceneHeight)) {
+            delete media;
+            return nullptr;
+        }
+    }
     media->setPosition(position - QPointF(media->sceneRect().width() * 0.5,
                                           media->sceneRect().height() * 0.5));
     media->setZ(nextZ());
