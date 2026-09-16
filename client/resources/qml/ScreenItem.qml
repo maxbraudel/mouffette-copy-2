@@ -1,5 +1,5 @@
 import QtQuick
-import Mouffette.App
+import Mouffette.App as AppStyle
 Rectangle {
     id: root
 
@@ -25,7 +25,7 @@ Rectangle {
     z: -1000
     clip: false
 
-    color: primary ? Theme.canvasPrimaryScreenBackground : Theme.canvasScreenBackground
+    color: primary ? AppStyle.Theme.canvasPrimaryScreenBackground : AppStyle.Theme.canvasScreenBackground
 
     // Per-screen UI zones (taskbar/menu bar/dock) rendered INSIDE this screen,
     // so they look painted into the screen background rather than global overlays.
@@ -49,7 +49,7 @@ Rectangle {
                 height: belongsToScreen ? modelData.height : 0
 
                 color: !belongsToScreen ? "transparent"
-                     : systemZone ? Theme.uiZoneSystemFill : Theme.uiZoneFill
+                     : systemZone ? AppStyle.Theme.uiZoneSystemFill : AppStyle.Theme.uiZoneFill
                 border.width: 0
             }
         }
@@ -72,7 +72,7 @@ Rectangle {
             origin.y: 0
         }
 
-        readonly property color strokeColor: Theme.canvasScreenBorder
+        readonly property color strokeColor: AppStyle.Theme.canvasScreenBorder
 
         Rectangle {
             x: 0
@@ -131,7 +131,7 @@ Rectangle {
         Text {
             id: screenLabel
             text: "Screen " + root.screenIndex + " (" + root.pixelWidth + "x" + root.pixelHeight + ")"
-            color: Theme.canvasScreenText
+            color: AppStyle.Theme.canvasScreenText
             font.family: "Arial"
             font.pixelSize: 13
             font.weight: Font.Bold
@@ -141,7 +141,7 @@ Rectangle {
             y: -(implicitHeight + 6)
             // Theme-aware outline keeps the label legible over overlapping media.
             style: Text.Outline
-            styleColor: Theme.canvasLabelShadow
+            styleColor: AppStyle.Theme.canvasLabelShadow
         }
     }
 }

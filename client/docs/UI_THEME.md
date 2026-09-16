@@ -43,6 +43,10 @@ theme values into component initialization handlers or cache them in C++ models;
 those copies do not update when the palette changes. Screen zone models publish
 their semantic type, with QML choosing the theme color.
 
+Canvas primitives use `import Mouffette.App as AppStyle` and
+`AppStyle.Theme.*`. The qualified import keeps sibling canvas types resolved
+locally, both in the packaged application and in tests that load QML from source.
+
 The SVG icon shapes remain unchanged. Canvas controls recolor their icon layer
 from the theme rather than displaying the SVG's embedded light foreground.
 
@@ -60,12 +64,12 @@ colors and transparent rectangles are not independent UI palettes.
 palette in both directions. It checks readable secondary/status colors, canvas
 and overlay updates, and the toast's opaque base plus translucent tint.
 `MediaOverlayScaled`, `CanvasInteraction`, `CanvasInteractionScaled`, and
-`TextItemQml` cover overlays, pointer behavior and text editing at normal and
+`TextItemQml` / `TextItemQmlScaled` cover overlays, pointer behavior and text editing at normal and
 scaled display densities.
 
 ```sh
 ctest --test-dir out/build/macos-debug --output-on-failure \
-  -R '^(MediaOverlay|MediaOverlayScaled|CanvasInteraction|CanvasInteractionScaled|TextItemQml)$'
+  -R '^(MediaOverlay|CanvasInteraction|TextItemQml)(Scaled)?$'
 ```
 
 Use the corresponding configured build directory on other platforms.

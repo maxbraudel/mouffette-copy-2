@@ -114,7 +114,10 @@ QPalette testPalette(bool dark)
 {
     QPalette palette = QGuiApplication::palette();
     const QColor background(dark ? "#202124" : "#f4f5f6");
-    const QColor foreground(dark ? "#f1f3f4" : "#111213");
+    QColor foreground(dark ? "#f1f3f4" : "#111213");
+    // Native macOS text colors may be translucent. UI surfaces and derived
+    // muted text still need an opaque semantic color before tint composition.
+    foreground.setAlphaF(0.9);
     for (auto group : {QPalette::Active, QPalette::Inactive}) {
         palette.setColor(group, QPalette::Base, background);
         palette.setColor(group, QPalette::Window, background);
@@ -971,10 +974,12 @@ void MediaOverlayTest::mediaRowsAndProgress()
     QTRY_COMPARE(fill->width(), progress->width());
     QVERIFY(progress->isVisible());
     QVERIFY(!status->isVisible());
-    QTRY_VERIFY_WITH_TIMEOUT(fill->opacity() < 0.6, 1000);
+    // Verify both pulse extrema, allowing two full 1400 ms cycles for native
+    // compositor scheduling at either scale factor. A frozen pulse still fails.
+    QTRY_VERIFY_WITH_TIMEOUT(fill->opacity() < 0.6, 3000);
     if (!artifactDir.isEmpty())
         QVERIFY(window.grabWindow().save(QDir(artifactDir).filePath(QStringLiteral("media-overlay-caching.png"))));
-    QTRY_VERIFY_WITH_TIMEOUT(fill->opacity() > 0.95, 1200);
+    QTRY_VERIFY_WITH_TIMEOUT(fill->opacity() > 0.95, 3000);
     QCOMPARE(row->height(), originalHeight);
     host->document()->select(photo->mediaId());
     QTRY_VERIFY(row->property("selected").toBool());
@@ -1942,49 +1947,210 @@ void MediaOverlayTest::toastUsesBottomLeftDoubleBackground()
 
     window.show();
     QVERIFY(QTest::qWaitForWindowExposed(&window));
+    // Native window managers can clamp the requested size at larger scale
+    // factors. Keep the standalone harness anchored to its actual viewport.
+    harness->setSize(window.size());
     QTRY_VERIFY(base->opacity() > 0.99);
     const QPointF origin = base->mapToItem(window.contentItem(), QPointF());
     QCOMPARE(qRound(origin.x()), 40);
-    QCOMPARE(qRound(origin.y() + base->height()), 440);
+    QCOMPARE(qRound(origin.y() + base->height()), window.height() - 40);
 
-    const QColor baseColor = base->property("color").value<QColor>();
-    const QColor tintColor = tint->property("color").value<QColor>();
-    const QColor textColor = textItem->property("color").value<QColor>();
-    QCOMPARE(baseColor, QGuiApplication::palette().color(QPalette::Active,
-                                                         QPalette::Base));
-    QCOMPARE(baseColor.alpha(), 255);
-    QCOMPARE(tintColor.alpha(), 38);
-    QCOMPARE(textColor, QColor(QStringLiteral("#4c9b50")));
+    const QPalette original = QGuiApplication::palette();
+    const auto restorePalette = qScopeGuard([original] { QGuiApplication::setPalette(original); });
+    const char* foregroundTokens[] = {"connectedText", "errorText", "warningText", "brandBlue"};
+    const char* tintTokens[] = {"connectedBackground", "errorBackground", "warningBackground", "brandBlueLight"};
+    for (const bool dark : {false, true, false}) {
+        QGuiApplication::setPalette(testPalette(dark));
+        QTRY_COMPARE(base->property("color").value<QColor>(),
+                     QGuiApplication::palette().color(QPalette::Active, QPalette::Base));
+        for (int severity = 0; severity < 4; ++severity) {
+            harness->setProperty("severityKind", severity);
+            QTRY_COMPARE(textItem->property("color").value<QColor>(),
+                         themeColor(engine, foregroundTokens[severity]));
+            const QColor baseColor = base->property("color").value<QColor>();
+            const QColor tintColor = tint->property("color").value<QColor>();
+            const QColor textColor = textItem->property("color").value<QColor>();
+            QCOMPARE(baseColor.alpha(), 255);
+            QCOMPARE(tintColor, themeColor(engine, tintTokens[severity]));
+            QCOMPARE(tintColor.alpha(), 38);
+            const QColor composite = compositeOver(tintColor, baseColor);
+            QVERIFY2(contrastRatio(textColor, composite) >= 4.5,
+                     "Every toast severity must remain readable in both themes");
+            const QPointF sample = base->mapToScene({base->width() / 2, base->height() - 4});
+            QColor rendered;
+            const auto matchesComposite = [&] {
+                rendered = imagePixel(window.grabWindow(), window.size(), sample);
+                return nearColor(rendered, composite);
+            };
+            QTRY_VERIFY2(matchesComposite(), qPrintable(QStringLiteral(
+                "Toast severity %1, dark=%2: rendered %3, expected %4 at %5,%6")
+                .arg(severity).arg(dark).arg(rendered.name()).arg(composite.name())
+                .arg(sample.x()).arg(sample.y())));
+        }
+    }
 }
 
 void MediaOverlayTest::themeTracksApplicationPalette()
 {
     const QPalette original = QGuiApplication::palette();
-    const auto restorePalette = qScopeGuard([original]() {
-        QGuiApplication::setPalette(original);
-    });
-
-    QPalette light = original;
-    light.setColor(QPalette::Active, QPalette::Base, QColor("#f4f5f6"));
-    light.setColor(QPalette::Active, QPalette::Text, QColor("#111213"));
-    QGuiApplication::setPalette(light);
-
+    const auto restorePalette = qScopeGuard([original] { QGuiApplication::setPalette(original); });
+    QGuiApplication::setPalette(testPalette(false));
     QQmlEngine engine;
+    QQuickWindow window;
+    window.resize(960, 640);
     QQmlComponent component(&engine);
     component.setData(R"QML(
 import QtQuick
 import Mouffette.App
-Rectangle { color: Theme.windowBackground }
+Rectangle {
+    color: Theme.windowBackground
+    Text {
+        x: 20; y: 16
+        text: "Mouffette"
+        color: Theme.text
+        font.pixelSize: 22
+        font.bold: true
+    }
+    ClientListPanel {
+        objectName: "emptyClients"
+        x: 20; y: 56; width: 360; height: 155
+        emptyText: "No clients connected. Make sure other devices are running Mouffette and connected to the same server."
+    }
+    ClientListPanel {
+        objectName: "emptyScenes"
+        x: 20; y: 227; width: 360; height: 155
+        sceneMode: true
+        emptyText: "No current ongoing scenes."
+    }
+    SegmentedStatusCard {
+        objectName: "themeStatus"
+        x: 20; y: 400
+        primaryText: "You"
+        statusText: "CONNECTED"
+        statusKind: 0
+    }
+    CanvasRoot {
+        objectName: "themeCanvas"
+        x: 400; y: 56; width: 540; height: 484
+        screensModel: [{ x: 50, y: 125, width: 440, height: 247,
+                         primary: true, screenId: 1, displayIndex: 1,
+                         pixelWidth: 1920, pixelHeight: 1080 }]
+    }
+    OverlayButton {
+        objectName: "themeOverlay"
+        x: 420; y: 76
+        iconSource: "qrc:/icons/icons/arrow-up.svg"
+    }
+    OverlayButton {
+        x: 462; y: 76
+        iconSource: "qrc:/icons/icons/arrow-down.svg"
+        isToggle: true
+        toggled: true
+    }
+    OverlayButton {
+        x: 504; y: 76
+        iconSource: "qrc:/icons/icons/delete.svg"
+        enabled: false
+    }
+    MediaNamePill {
+        x: 570; y: 76; width: 180; height: 36
+        displayName: "Selected media"
+    }
+    ListModel {
+        id: toasts
+        ListElement { severityKind: 0; message: "Connected"; dismissing: false }
+        ListElement { severityKind: 1; message: "Connection lost"; dismissing: false }
+        ListElement { severityKind: 2; message: "Reconnecting"; dismissing: false }
+        ListElement { severityKind: 3; message: "Project loaded"; dismissing: false }
+    }
+    QtObject {
+        id: testController
+        property var toastModel: toasts
+    }
+    ToastStack { controller: testController }
+}
 )QML", QUrl(QStringLiteral("qrc:/ThemePaletteHarness.qml")));
-    std::unique_ptr<QObject> surface(component.create());
+    std::unique_ptr<QQuickItem> surface(qobject_cast<QQuickItem*>(component.create()));
     QVERIFY2(surface, qPrintable(component.errorString()));
-    QTRY_COMPARE(surface->property("color").value<QColor>(), QColor("#f4f5f6"));
+    surface->setSize(window.size());
+    surface->setParentItem(window.contentItem());
+    auto* canvas = findVisualItem(surface.get(), QStringLiteral("themeCanvas"));
+    auto* overlay = findVisualItem(surface.get(), QStringLiteral("themeOverlay"));
+    auto* status = findVisualItem(surface.get(), QStringLiteral("themeStatus"));
+    QVERIFY(canvas && overlay && status);
+    const QRectF canvasGeometry(canvas->position(), canvas->size());
+    const QRectF overlayGeometry(overlay->position(), overlay->size());
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    QTest::mouseMove(&window, {5, 5});
 
-    QPalette dark = original;
-    dark.setColor(QPalette::Active, QPalette::Base, QColor("#202124"));
-    dark.setColor(QPalette::Active, QPalette::Text, QColor("#f1f3f4"));
-    QGuiApplication::setPalette(dark);
-    QTRY_COMPARE(surface->property("color").value<QColor>(), QColor("#202124"));
+    QColor previousCanvas;
+    QColor previousOverlay;
+    QColor previousMuted;
+    for (const bool dark : {false, true, false}) {
+        QGuiApplication::setPalette(testPalette(dark));
+        const QColor background = QGuiApplication::palette().color(QPalette::Active, QPalette::Base);
+        QTRY_COMPARE(surface->property("color").value<QColor>(), background);
+        QTRY_COMPARE(applicationTheme(engine)->property("dark").toBool(), dark);
+        QTRY_COMPARE(canvas->property("color").value<QColor>(), themeColor(engine, "canvasBackground"));
+        QTRY_COMPARE(overlay->property("currentBackgroundColor").value<QColor>(), themeColor(engine, "overlayBackground"));
+        const QColor canvasColor = canvas->property("color").value<QColor>();
+        const QColor overlayColor = overlay->property("currentBackgroundColor").value<QColor>();
+        const QColor muted = themeColor(engine, "mutedText");
+        QCOMPARE(themeColor(engine, "text").alpha(), 255);
+        QCOMPARE(muted.alpha(), 255);
+        QVERIFY(muted != QGuiApplication::palette().color(QPalette::Active, QPalette::Mid));
+        QVERIFY(contrastRatio(muted, background) >= 4.5);
+        QCOMPARE(canvasColor.alpha(), 255);
+        QCOMPARE(overlayColor.alpha(), 255);
+        QVERIFY(dark ? luminance(canvasColor) < 0.15 : luminance(canvasColor) > 0.65);
+        QVERIFY(contrastRatio(themeColor(engine, "overlayText"), overlayColor) >= 4.5);
+        QVERIFY(contrastRatio(themeColor(engine, "overlaySecondaryText"), overlayColor) >= 4.5);
+        QCOMPARE(QRectF(canvas->position(), canvas->size()), canvasGeometry);
+        QCOMPARE(QRectF(overlay->position(), overlay->size()), overlayGeometry);
+        if (previousCanvas.isValid()) {
+            QVERIFY(canvasColor != previousCanvas);
+            QVERIFY(overlayColor != previousOverlay);
+            QVERIFY(muted != previousMuted);
+        }
+        previousCanvas = canvasColor;
+        previousOverlay = overlayColor;
+        previousMuted = muted;
+        for (const char* name : {"emptyClients", "emptyScenes"}) {
+            auto* panel = findVisualItem(surface.get(), QString::fromLatin1(name));
+            QVERIFY(panel);
+            QList<QQuickItem*> pending = panel->childItems();
+            QQuickItem* emptyLabel = nullptr;
+            while (!pending.isEmpty()) {
+                auto* item = pending.takeLast();
+                if (item->property("text").toString() == panel->property("emptyText").toString()) {
+                    emptyLabel = item;
+                    break;
+                }
+                pending.append(item->childItems());
+            }
+            QVERIFY(emptyLabel && emptyLabel->isVisible());
+            QCOMPARE(emptyLabel->property("color").value<QColor>().rgba(), muted.rgba());
+            QVERIFY(contrastRatio(muted, panel->property("color").value<QColor>()) >= 4.5);
+        }
+        for (int kind = 0; kind < 4; ++kind) {
+            status->setProperty("statusKind", kind % 3);
+            status->setProperty("statusText", kind == 3 ? "AVAILABLE" : "CONNECTED");
+            QVERIFY(contrastRatio(status->property("statusForeground").value<QColor>(),
+                compositeOver(status->property("statusBackground").value<QColor>(), background)) >= 4.5);
+        }
+        status->setProperty("statusKind", 0);
+        status->setProperty("statusText", "CONNECTED");
+        const QString artifactDir = qEnvironmentVariable("MOUFFETTE_OVERLAY_ARTIFACT_DIR");
+        if (!artifactDir.isEmpty()) {
+            QVERIFY(QDir().mkpath(artifactDir));
+            auto* toast = findVisualItem(surface.get(), QStringLiteral("toastBase_0"));
+            QVERIFY(toast);
+            QTRY_VERIFY(toast->opacity() > 0.99);
+            QVERIFY(window.grabWindow().save(QDir(artifactDir).filePath(
+                dark ? QStringLiteral("theme-dark.png") : QStringLiteral("theme-light.png"))));
+        }
+    }
 }
 
 QTEST_MAIN(MediaOverlayTest)

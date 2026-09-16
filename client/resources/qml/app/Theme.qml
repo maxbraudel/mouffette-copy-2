@@ -30,11 +30,14 @@ QtObject {
 
     // Neutral surfaces are opaque so floating controls never inherit the
     // unpredictable colors of the media underneath them.
-    readonly property color windowBackground: activePalette.base
-    readonly property color text: activePalette.text
+    // Some native palettes expose translucent text. Resolve neutral roles to
+    // opaque RGB before mixing so surface opacity never depends on that alpha.
+    readonly property color windowBackground: withAlpha(activePalette.base, 1)
+    readonly property color text: withAlpha(activePalette.text, 1)
+    readonly property color shadowPigment: "#000000"
     readonly property color surfaceBackground: mix(text, windowBackground, dark ? 0.035 : 0.025)
     readonly property color elevatedBackground: mix(text, windowBackground, dark ? 0.065 : 0.0)
-    readonly property color recessedBackground: mix(dark ? "black" : text, windowBackground, dark ? 0.16 : 0.055)
+    readonly property color recessedBackground: mix(dark ? shadowPigment : text, windowBackground, dark ? 0.16 : 0.055)
     // Palette.mid is a bevel/border role, not a readable secondary foreground.
     readonly property color mutedText: mix(text, windowBackground, 0.70)
     readonly property color disabledText: mix(text, windowBackground, 0.42)
@@ -61,7 +64,7 @@ QtObject {
     readonly property color availableText: mutedText
     readonly property color warningText: dark ? "#f3c26b" : "#885000"
     readonly property color warningBackground: withAlpha(amberPigment, 38 / 255)
-    readonly property color errorText: dark ? "#ff9b96" : "#b52d30"
+    readonly property color errorText: dark ? "#ff9b96" : "#a52529"
     readonly property color errorBackground: withAlpha(redPigment, 38 / 255)
     readonly property color sceneText: dark ? "#deb0f0" : "#853580"
     readonly property color sceneBackground: withAlpha(scenePigment, 38 / 255)
@@ -129,7 +132,7 @@ QtObject {
     readonly property color toolTipBackground: elevatedBackground
     readonly property color toolTipText: text
     readonly property color toolTipBorder: border
-    readonly property color modalScrim: withAlpha("black", dark ? 0.50 : 0.25)
+    readonly property color modalScrim: withAlpha(shadowPigment, dark ? 0.50 : 0.25)
     // ToastStack paints this opaque base, then a translucent severity tint.
     readonly property color toastBackground: windowBackground
     readonly property color chartProcess: accent

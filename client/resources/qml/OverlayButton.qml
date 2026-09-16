@@ -1,7 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Effects
-import Mouffette.App
+import Mouffette.App as AppStyle
 // Reusable overlay icon button.
 // Blocks pointer events from reaching the canvas DragHandler/PointHandler beneath it.
 Item {
@@ -37,14 +37,14 @@ Item {
     // Resolved background fill color
     readonly property color _bgColor: {
         if (!root.enabled)
-            return Theme.overlayDisabledBackground
+            return AppStyle.Theme.overlayDisabledBackground
         if (pressArea.containsPress)
-            return Theme.overlayPressed
+            return AppStyle.Theme.overlayPressed
         if (root.isToggle && root.toggled)
-            return Theme.overlaySelected
+            return AppStyle.Theme.overlaySelected
         if (pressArea.containsMouse)
-            return Theme.overlayHover
-        return Theme.overlayBackground
+            return AppStyle.Theme.overlayHover
+        return AppStyle.Theme.overlayBackground
     }
 
     // Clipping container — clips away the rounded corners that should be flat.
@@ -65,7 +65,7 @@ Item {
             height: root.height
             radius: root._r
             color:  root._bgColor
-            border.color: Theme.overlayBorder
+            border.color: AppStyle.Theme.overlayBorder
             border.width: 1
         }
     }
@@ -76,13 +76,13 @@ Item {
         visible: root._flatLeft
         anchors { left: parent.left; top: parent.top; bottom: parent.bottom }
         width: 1
-        color: Theme.overlayBorder
+        color: AppStyle.Theme.overlayBorder
     }
     Rectangle {
         visible: root._flatRight
         anchors { right: parent.right; top: parent.top; bottom: parent.bottom }
         width: 1
-        color: Theme.overlayBorder
+        color: AppStyle.Theme.overlayBorder
     }
 
     // SVG icon uses 60% of the button size.
@@ -97,12 +97,16 @@ Item {
         fillMode: Image.PreserveAspectFit
         smooth: true
         mipmap: true
-        opacity: root.enabled ? 1.0 : 0.35
         layer.enabled: true
         layer.effect: MultiEffect {
+            // Normalize the monochrome SVG to its alpha mask before tinting;
+            // embedded source RGB must not darken the semantic icon color.
+            contrast: -1
+            brightness: 0.5
             colorization: 1
-            colorizationColor: root.isToggle && root.toggled
-                               ? Theme.accent : Theme.overlayText
+            colorizationColor: !root.enabled ? AppStyle.Theme.overlayDisabledText
+                             : root.isToggle && root.toggled
+                               ? AppStyle.Theme.accent : AppStyle.Theme.overlayText
         }
     }
 

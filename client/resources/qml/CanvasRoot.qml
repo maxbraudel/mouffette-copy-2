@@ -1,12 +1,12 @@
 import QtQuick
 import QtQuick.Window
-import Mouffette.App
+import Mouffette.App as AppStyle
 import Mouffette.Canvas
 Rectangle {
     id: root
-    color: Theme.canvasBackground
+    color: AppStyle.Theme.canvasBackground
     border.width: 1
-    border.color: Theme.border
+    border.color: AppStyle.Theme.border
     radius: 5
     clip: true
 
@@ -88,8 +88,8 @@ Rectangle {
     property real remoteCursorY: canvasController
                                  ? canvasController.remoteCursorY : 0
     property int remoteCursorDiameter: 30
-    property color remoteCursorFill: Theme.remoteCursorFill
-    property color remoteCursorBorder: Theme.remoteCursorBorder
+    property color remoteCursorFill: AppStyle.Theme.remoteCursorFill
+    property color remoteCursorBorder: AppStyle.Theme.remoteCursorBorder
     property real remoteCursorBorderWidth: 2
     property real viewScale: 1.0
     property real panX: 0.0

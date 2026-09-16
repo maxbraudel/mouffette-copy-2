@@ -1,5 +1,5 @@
 import QtQuick
-import Mouffette.App
+import Mouffette.App as AppStyle
 import Mouffette.Canvas
 BaseMediaItem {
     id: root
@@ -116,8 +116,8 @@ BaseMediaItem {
         rightPadding:  0
         bottomPadding: 0
         color: root.textColor
-        selectionColor: Theme.selectionBackground
-        selectedTextColor: Theme.selectionText
+        selectionColor: AppStyle.Theme.selectionBackground
+        selectedTextColor: AppStyle.Theme.selectionText
         textFormat: TextEdit.PlainText
         wrapMode: root.fitToTextEnabled ? TextEdit.NoWrap : TextEdit.Wrap
         renderType: Text.QtRendering

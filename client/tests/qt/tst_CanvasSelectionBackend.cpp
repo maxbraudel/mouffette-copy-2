@@ -1887,8 +1887,11 @@ private slots:
         };
         const QColor before = colorAtDrop(emptyFrame);
         const QColor shown = colorAtDrop(skeletonFrame);
-        QVERIFY2(shown.red() > before.red() + 10 && shown.green() > before.green() + 10
-                     && shown.blue() > before.blue() + 10,
+        // Loading chrome is lighter in dark mode and darker in light mode.
+        // Verify a visible rendered change without assuming a dark canvas.
+        const int colorDifference = qMax(qAbs(shown.red() - before.red()),
+            qMax(qAbs(shown.green() - before.green()), qAbs(shown.blue() - before.blue())));
+        QVERIFY2(colorDifference > 10,
                  "The rendered frame must contain the loading skeleton at the drop location");
         QPointer<CanvasMedia> media = fixture.document.selectedMedia();
         QVERIFY(media && !media->residencyReady());

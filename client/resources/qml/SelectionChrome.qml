@@ -1,5 +1,5 @@
 import QtQuick
-import Mouffette.App
+import Mouffette.App as AppStyle
 // Renders the selection border and resize handles as a scene-space overlay.
 // Move drag is handled natively by each media item's DragHandler in contentRoot.
 // This component only handles resize (8 handles) and provides visual chrome.
@@ -416,13 +416,13 @@ Item {
             readonly property real _bw: 1.0 / chrome._viewScale
 
             // Top
-            Rectangle { x: 0; y: 0;                              width: chrome.width;  height: chrome._bw; color: Theme.selectionBorder; antialiasing: false }
+            Rectangle { x: 0; y: 0;                              width: chrome.width;  height: chrome._bw; color: AppStyle.Theme.selectionBorder; antialiasing: false }
             // Bottom
-            Rectangle { x: 0; y: chrome.height - chrome._bw;     width: chrome.width;  height: chrome._bw; color: Theme.selectionBorder; antialiasing: false }
+            Rectangle { x: 0; y: chrome.height - chrome._bw;     width: chrome.width;  height: chrome._bw; color: AppStyle.Theme.selectionBorder; antialiasing: false }
             // Left
-            Rectangle { x: 0; y: chrome._bw;                     width: chrome._bw;    height: Math.max(0, chrome.height - 2 * chrome._bw); color: Theme.selectionBorder; antialiasing: false }
+            Rectangle { x: 0; y: chrome._bw;                     width: chrome._bw;    height: Math.max(0, chrome.height - 2 * chrome._bw); color: AppStyle.Theme.selectionBorder; antialiasing: false }
             // Right
-            Rectangle { x: chrome.width - chrome._bw; y: chrome._bw; width: chrome._bw; height: Math.max(0, chrome.height - 2 * chrome._bw); color: Theme.selectionBorder; antialiasing: false }
+            Rectangle { x: chrome.width - chrome._bw; y: chrome._bw; width: chrome._bw; height: Math.max(0, chrome.height - 2 * chrome._bw); color: AppStyle.Theme.selectionBorder; antialiasing: false }
 
             Repeater {
                 model: root.handleDefs
@@ -431,9 +431,9 @@ Item {
                     width: root.handleSize / chrome._viewScale
                     height: root.handleSize / chrome._viewScale
                     radius: 1.0 / chrome._viewScale
-                    color: Theme.selectionHandle
+                    color: AppStyle.Theme.selectionHandle
                     border.width: 1.0 / chrome._viewScale
-                    border.color: Theme.selectionBorder
+                    border.color: AppStyle.Theme.selectionBorder
                     antialiasing: false
                     x: (modelData.ux * chrome.width) - width * 0.5
                     y: (modelData.uy * chrome.height) - height * 0.5
