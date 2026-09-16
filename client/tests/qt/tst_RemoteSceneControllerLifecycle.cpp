@@ -152,6 +152,7 @@ QJsonObject videoScene(const QString& fileId)
     media[QStringLiteral("muteWhenVideoEnds")] = false;
     media[QStringLiteral("audioFadeInSeconds")] = 0.0;
     media[QStringLiteral("audioFadeOutSeconds")] = 0.0;
+    media[QStringLiteral("startPositionMs")] = 0;
     media[QStringLiteral("spans")] = QJsonArray{span};
 
     QJsonObject completedSpan = span;
@@ -267,6 +268,74 @@ private slots:
         QCOMPARE(teardownSpy.first().at(0).toString(), QString());
         QVERIFY(teardownSpy.first().at(1).toBool());
         QVERIFY(unrelatedQueuedCallbackRan);
+    }
+
+    void boundedRemotePlayback_data()
+    {
+        QTest::addColumn<bool>("loop");
+        QTest::addColumn<bool>("naturalEnd");
+        QTest::newRow("stop-at-end") << false << false;
+        QTest::newRow("loop-to-start") << true << false;
+        QTest::newRow("start-only-loop") << true << true;
+    }
+
+    void boundedRemotePlayback()
+    {
+        QFETCH(bool, loop);
+        QFETCH(bool, naturalEnd);
+        const QString fixture = QString::fromUtf8(TEST_VIDEO_FILE);
+        QVERIFY(QFile::exists(fixture));
+        const QString fileId(64, QLatin1Char('c'));
+        FileManager files;
+        files.registerReceivedFilePath(fileId, fixture);
+        RemoteSceneController controller(&files, nullptr);
+        auto scene = videoScene(fileId);
+        auto entries = scene.value("media").toArray();
+        auto entry = entries[0].toObject();
+        entry["startPositionMs"] = 1000;
+        if (!naturalEnd) entry["endPositionMs"] = 1800;
+        entry["continuousLoop"] = loop;
+        entry["autoPlay"] = false;
+        entries[0] = entry;
+        scene["media"] = entries;
+        QVERIFY(QMetaObject::invokeMethod(&controller, "onRemoteSceneStart", Qt::DirectConnection,
+            Q_ARG(QString, QStringLiteral("range-owner")), Q_ARG(QJsonObject, scene)));
+        auto* player = controller.findChild<QMediaPlayer*>();
+        QVERIFY(player);
+        int wraps = 0;
+        qint64 previous = 0;
+        connect(player, &QMediaPlayer::positionChanged, &controller, [&](qint64 pos) {
+            if (previous >= 1500 && pos == 1000) ++wraps;
+            previous = pos;
+        });
+        QTRY_VERIFY_WITH_TIMEOUT(player->position() == 1000
+            && player->playbackState() == QMediaPlayer::PausedState, 5000);
+        // Drive the renderer through the same authoritative playback snapshot
+        // used by the owner; preparation alone deliberately never auto-plays.
+        const QJsonArray videos{QJsonObject{
+            {"mediaId", "video-1"},
+            {"positionMs", naturalEnd ? double(player->duration() - 1000) : 1000.0},
+            {"durationMs", double(player->duration())}, {"playing", true},
+            {"muted", true}, {"visible", true}, {"repeatAvailable", loop}
+        }};
+        bool applied = false;
+        QVERIFY(QMetaObject::invokeMethod(&controller, "applyAuthoritativeStateSnapshot", Qt::DirectConnection,
+            Q_RETURN_ARG(bool, applied),
+            Q_ARG(QJsonObject, snapshotForScene(scene, videos)),
+            Q_ARG(quint64, quint64(1)), Q_ARG(qint64, qint64(0))));
+        QVERIFY(applied);
+        if (loop) {
+            QTRY_VERIFY_WITH_TIMEOUT(wraps >= (naturalEnd ? 1 : 2), 5000);
+            QCOMPARE(player->playbackState(), QMediaPlayer::PlayingState);
+        } else {
+            QTRY_VERIFY_WITH_TIMEOUT(player->position() == 1800
+                && player->playbackState() == QMediaPlayer::PausedState, 5000);
+            QCOMPARE(wraps, 0);
+        }
+        QVERIFY(QMetaObject::invokeMethod(&controller, "onRemoteSceneStop", Qt::DirectConnection,
+            Q_ARG(QString, QStringLiteral("range-owner")),
+            Q_ARG(QString, QStringLiteral("video-lifecycle-test-run"))));
+        files.removeReceivedFileMapping(fileId);
     }
 
     void activeVideoDecoderStopsWithoutNestedEventProcessing()

@@ -451,6 +451,10 @@ void QuickCanvasController::publishVideoState()
             {QStringLiteral("isMuted"), media->muted()},
             {QStringLiteral("isLooping"), media->repeatEnabled()},
             {QStringLiteral("progress"), progress},
+            {QStringLiteral("startProgress"), duration > 0 && media->startMarkerMs() >= 0
+                ? media->startMarkerMs() / qreal(duration) : -1.0},
+            {QStringLiteral("endProgress"), duration > 0 && media->endMarkerMs() >= 0
+                ? media->endMarkerMs() / qreal(duration) : -1.0},
             {QStringLiteral("volume"), media->volume()}});
     }
     if (m_videoStateModel == states) return;

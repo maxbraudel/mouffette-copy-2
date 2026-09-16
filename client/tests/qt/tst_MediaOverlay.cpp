@@ -1444,6 +1444,33 @@ void MediaOverlayTest::videoVolumeAndMuteStayIndependentAndSyncWithSettings()
         QTRY_VERIFY(qAbs(video->positionMs() - (right ? video->player()->duration() : 0)) < 100);
     }
 
+    auto* startButton = findVisualItem(page, QStringLiteral("videoStartButton"));
+    auto* endButton = findVisualItem(page, QStringLiteral("videoEndButton"));
+    QVERIFY(startButton && endButton);
+    video->setPositionMs(1200);
+    QTRY_VERIFY(startButton->isEnabled() && endButton->isEnabled());
+    click(startButton);
+    QTRY_COMPARE(video->startMarkerMs(), 1200);
+    QCOMPARE(startButton->property("text").toString(), QStringLiteral("Remove start"));
+    QVERIFY(!endButton->isEnabled());
+    video->setPositionMs(2400);
+    QTRY_VERIFY(endButton->isEnabled());
+    click(endButton);
+    QTRY_COMPARE(video->endMarkerMs(), 2400);
+    auto* startMarker = findVisualItem(page, QStringLiteral("videoStartMarker"));
+    auto* endMarker = findVisualItem(page, QStringLiteral("videoEndMarker"));
+    QVERIFY(startMarker && endMarker);
+    QTRY_VERIFY(startMarker->isVisible() && endMarker->isVisible());
+    QTRY_VERIFY(qAbs(startMarker->x() - progress->width() * 1200 / video->player()->duration()) < 1);
+    QTRY_VERIFY(qAbs(endMarker->x() - progress->width() * 2400 / video->player()->duration()) < 1);
+    click(startButton);
+    QTRY_VERIFY(!startMarker->isVisible());
+    video->setPositionMs(2500);
+    QTRY_VERIFY(!startButton->isEnabled());
+    click(endButton);
+    QTRY_VERIFY(!endMarker->isVisible());
+    QTRY_VERIFY(startButton->isEnabled());
+
 }
 
 void MediaOverlayTest::toastUsesBottomLeftDoubleBackground()

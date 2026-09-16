@@ -413,7 +413,10 @@ QJsonObject CanvasDocument::serializeSceneState() const
                         MediaSettingsSerialization::durationSeconds(
                             settings.audioFadeOutEnabled, settings.audioFadeOutText));
             item.insert(QStringLiteral("startPositionMs"),
-                        static_cast<double>(media->positionMs()));
+                        static_cast<double>(media->playbackStartMs()));
+            if (media->endMarkerMs() >= 0)
+                item.insert(QStringLiteral("endPositionMs"),
+                            static_cast<double>(media->endMarkerMs()));
         }
         serializedMedia.append(item);
     }
@@ -434,6 +437,14 @@ QJsonObject CanvasDocument::serializeProjectState() const
         if (source) {
             item.insert(QStringLiteral("projectMediaSettings"),
                         MediaSettingsSerialization::toProjectJson(source->settings()));
+            if (source->isVideo()) {
+                item.insert(QStringLiteral("videoStartMarkerMs"),
+                            static_cast<double>(source->startMarkerMs()));
+                item.insert(QStringLiteral("videoEndMarkerMs"),
+                            static_cast<double>(source->endMarkerMs()));
+                item.insert(QStringLiteral("previewPositionMs"),
+                            static_cast<double>(source->positionMs()));
+            }
             if (source->isText()) {
                 item.insert(QStringLiteral("projectTextSettings"), QJsonObject{
                     {QStringLiteral("schemaVersion"),
@@ -628,8 +639,13 @@ bool CanvasDocument::restoreProjectState(
             media->setMuted(source.value(QStringLiteral("muted")).toBool(false));
             media->setVolume(source.value(QStringLiteral("volume")).toDouble(1.0));
             media->setRepeatEnabled(source.value(QStringLiteral("continuousLoop")).toBool(false));
+            media->setPlaybackRange(
+                qRound64(source.value(QStringLiteral("videoStartMarkerMs")).toDouble(-1)),
+                qRound64(source.value(QStringLiteral("videoEndMarkerMs")).toDouble(-1)));
+            // Older projects stored the preview cursor as startPositionMs.
             media->setPositionMs(qMax<qint64>(0, qRound64(
-                source.value(QStringLiteral("startPositionMs")).toDouble())));
+                source.value(QStringLiteral("previewPositionMs")).toDouble(
+                    source.value(QStringLiteral("startPositionMs")).toDouble()))));
         }
         media->setUploadNotUploaded();
         adoptMedia(media);

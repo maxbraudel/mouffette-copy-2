@@ -723,7 +723,7 @@ void QuickCanvasHost::beginScenePresentation(bool remote)
             draft.muted = media->muted();
             draft.playing = media->isPlaying();
             draft.positionMs = media->positionMs();
-            media->player()->pause();
+            media->beginScenePlayback();
         }
         m_draftState.append(draft);
         media->setContentVisible(false);
@@ -766,6 +766,7 @@ void QuickCanvasHost::stopScenePresentation()
         media->setAnimatedDisplayOpacity(1.0);
         if (media->isVideo()) {
             media->player()->pause();
+            media->endScenePlayback();
             media->setPositionMs(draft.positionMs);
             media->setMuted(draft.muted);
             if (draft.playing) media->player()->play();
@@ -892,7 +893,7 @@ void QuickCanvasHost::sendVideoSnapshot()
             {QStringLiteral("playing"), media->isPlaying()},
             {QStringLiteral("muted"), media->muted()},
             {QStringLiteral("visible"), media->contentVisible()},
-            {QStringLiteral("repeatAvailable"), media->repeatEnabled()}});
+            {QStringLiteral("repeatAvailable"), media->repeatAvailable()}});
     }
     static quint64 sequence = 0;
     QJsonObject scene = m_document->serializeSceneState();

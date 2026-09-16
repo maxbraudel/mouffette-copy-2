@@ -760,4 +760,49 @@ for (const invalidCase of [
         'scene_prepare_ack_delivery_failed');
 }
 
+// Video bounds survive canonical validation; empty/inverted or malformed ranges fail.
+for (const [endPositionMs, accepted] of [
+    [undefined, true], [1800, true], [1000, false], [999, false],
+    [-1, false], [1800.5, false], ['1800', false], [604_800_001, false],
+]) {
+    const server = new MouffetteServer({ port: 0, metricLogger: () => {} });
+    const owner = addClient(server, 'range-owner', 'A');
+    const target = addClient(server, 'range-target', 'B');
+    const session = server.remoteSessions.open({
+        ownerEndpointId: 'A', targetEndpointId: 'B',
+        ownerRuntimeId: 'runtime-A', targetRuntimeId: 'runtime-B',
+        ownerConnectionGeneration: 1, targetConnectionGeneration: 1,
+    }).session;
+    session.serverBootId = server.serverBootId;
+    const videoAsset = { ...asset, extension: 'mp4' };
+    const video = {
+        ...scene.media[0], type: 'video', fileName: 'clip.mp4',
+        autoPlay: true, autoPlayDelayMs: 0, autoPause: false, autoPauseDelayMs: 0,
+        muted: true, volume: 1, continuousLoop: true, repeatEnabled: false, repeatCount: 0,
+        autoUnmute: false, autoUnmuteDelayMs: 0, autoMute: false, autoMuteDelayMs: 0,
+        muteWhenVideoEnds: false, audioFadeInSeconds: 0, audioFadeOutSeconds: 0,
+        startPositionMs: 1000,
+        ...(endPositionMs === undefined ? {} : { endPositionMs }),
+    };
+    const rangedScene = { ...scene, media: [video] };
+    server.sessionAssets.set(session.remoteSessionId, new Map([[
+        videoAsset.assetId, { ...videoAsset, remoteSessionId: session.remoteSessionId,
+            generation: session.generation, ownerEndpointId: 'A', targetEndpointId: 'B',
+            uploadId: 'range-upload' },
+    ]]));
+    server.handleMessage('range-owner', envelope(session, {
+        type: 'scene_prepare', sceneRunId: 'range-run', revision: 1,
+        digest: computeSceneDigest(1, [videoAsset], rangedScene),
+        manifest: [videoAsset], scene: rangedScene,
+    }));
+    if (accepted) {
+        assert.equal(messages(target, 'scene_prepare').length, 1, JSON.stringify(messages(owner, 'error')));
+        assert.equal(messages(target, 'scene_prepare')[0].scene.media[0].endPositionMs, endPositionMs);
+    } else {
+        assert.equal(messages(owner, 'error').at(-1).code, 'invalid_scene_manifest');
+        assert.equal(messages(target, 'scene_prepare').length, 0);
+        assert.equal(server.sceneRuns.get('range-run'), null);
+    }
+}
+
 console.log('scene protocol v4 tests passed');

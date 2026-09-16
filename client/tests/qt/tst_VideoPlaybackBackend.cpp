@@ -2,6 +2,9 @@
 #include <QAudioOutput>
 #include <QFile>
 #include <QMediaPlayer>
+#include <QJsonArray>
+#include "frontend/qml/MediaSettingsViewModel.h"
+#include "frontend/rendering/canvas/QuickCanvasHost.h"
 #include <QQuickItem>
 #include <QQuickView>
 #include <QVideoSink>
@@ -30,6 +33,175 @@ class VideoPlaybackBackendTest final : public QObject
     Q_OBJECT
 
 private slots:
+    void previewAndMarkersAreIndependentAndPersist()
+    {
+        const QString fixture = videoFixture();
+        QVERIFY(QFile::exists(fixture));
+        CanvasDocument document;
+        QuickCanvasController controller(&document);
+        controller.setProjectEditingEnabled(true);
+        auto* video = document.addPreparedFile(fixture, QSize(160, 90), true, {});
+        QVERIFY(video);
+        QTRY_VERIFY(video->player()->duration() > 3000);
+        MediaSettingsViewModel settings;
+        settings.setController(&controller);
+        QTRY_VERIFY(settings.available());
+        video->setPositionMs(1200);
+        QCOMPARE(document.serializeSceneState().value("media").toArray()[0]
+                     .toObject().value("startPositionMs").toInt(), 0);
+        QVERIFY(settings.canPlaceVideoStart());
+        QVERIFY(settings.canPlaceVideoEnd());
+        settings.toggleVideoStart();
+        QCOMPARE(video->startMarkerMs(), 1200);
+        QVERIFY(settings.hasVideoStart());
+        QVERIFY(!settings.canPlaceVideoEnd());
+        video->setPositionMs(900);
+        QVERIFY(!settings.canPlaceVideoEnd());
+        settings.toggleVideoEnd();
+        QCOMPARE(video->endMarkerMs(), -1);
+        video->setPositionMs(2400);
+        QVERIFY(settings.canPlaceVideoEnd());
+        settings.toggleVideoEnd();
+        QCOMPARE(video->endMarkerMs(), 2400);
+        video->setPositionMs(600);
+        const auto scene = document.serializeSceneState().value("media").toArray()[0].toObject();
+        QCOMPARE(scene.value("startPositionMs").toInt(), 1200);
+        QCOMPARE(scene.value("endPositionMs").toInt(), 2400);
+        QVERIFY(!video->setPlaybackRange(2400, 2400));
+        QVERIFY(!video->setPlaybackRange(2500, 2400));
+
+        const auto project = document.serializeProjectState();
+        QCOMPARE(project.value("media").toArray()[0].toObject().value("previewPositionMs").toInt(), 600);
+        CanvasDocument restored;
+        QVERIFY(restored.restoreProjectState(project, {{video->mediaId(), fixture}}));
+        auto* copy = restored.mediaById(video->mediaId());
+        QVERIFY(copy);
+        QCOMPARE(copy->startMarkerMs(), 1200);
+        QCOMPARE(copy->endMarkerMs(), 2400);
+        settings.toggleVideoStart();
+        QCOMPARE(video->startMarkerMs(), -1);
+        video->setPositionMs(2400);
+        QVERIFY(!settings.canPlaceVideoStart());
+        settings.toggleVideoStart();
+        QCOMPARE(video->startMarkerMs(), -1);
+        video->setPositionMs(2399);
+        QVERIFY(settings.canPlaceVideoStart());
+        settings.toggleVideoEnd();
+        QVERIFY(!settings.hasVideoEnd());
+
+        // Old projects only stored the preview cursor. Never migrate it into a marker.
+        auto legacy = project;
+        auto entries = legacy.value("media").toArray();
+        auto entry = entries[0].toObject();
+        entry.remove("videoStartMarkerMs");
+        entry.remove("videoEndMarkerMs");
+        entry.remove("previewPositionMs");
+        entries[0] = entry;
+        legacy["media"] = entries;
+        CanvasDocument oldProject;
+        QVERIFY(oldProject.restoreProjectState(legacy, {{video->mediaId(), fixture}}));
+        QCOMPARE(oldProject.mediaById(video->mediaId())->startMarkerMs(), -1);
+        QCOMPARE(oldProject.serializeSceneState().value("media").toArray()[0]
+                     .toObject().value("startPositionMs").toInt(), 0);
+    }
+
+    void boundedPlayback_data()
+    {
+        QTest::addColumn<bool>("continuous");
+        QTest::addColumn<int>("repeats");
+        QTest::newRow("stop-at-end") << false << 0;
+        QTest::newRow("continuous-range") << true << 0;
+        QTest::newRow("one-repeat") << false << 1;
+    }
+
+    void boundedPlayback()
+    {
+        QFETCH(bool, continuous);
+        QFETCH(int, repeats);
+        CanvasDocument document;
+        auto* video = document.addPreparedFile(videoFixture(), QSize(160, 90), true, {});
+        QVERIFY(video);
+        video->setMuted(true);
+        QTRY_VERIFY(video->player()->duration() > 3000);
+        QVERIFY(video->setPlaybackRange(1000, 1700));
+        video->setRepeatEnabled(continuous);
+        auto settings = video->settings();
+        settings.repeatEnabled = repeats > 0;
+        settings.repeatCountText = QString::number(repeats);
+        video->setSettings(settings);
+        video->setPositionMs(2600);
+        QCOMPARE(video->positionMs(), 2600); // Paused scrubbing is unrestricted.
+        video->beginScenePlayback();
+        QCOMPARE(video->positionMs(), 1000);
+        int wraps = 0;
+        qint64 previous = 1000;
+        connect(video->player(), &QMediaPlayer::positionChanged, &document,
+                [&](qint64 pos) {
+            if (previous > 1400 && pos == 1000) ++wraps;
+            previous = pos;
+        });
+        video->player()->play();
+        if (continuous) {
+            QTRY_VERIFY_WITH_TIMEOUT(wraps >= 2, 5000);
+            QVERIFY(video->isPlaying());
+            video->player()->pause();
+        } else {
+            QTRY_VERIFY_WITH_TIMEOUT(!video->isPlaying() && video->positionMs() == 1700, 5000);
+            QCOMPARE(wraps, repeats);
+        }
+        video->endScenePlayback();
+    }
+
+    void repeatWithMissingMarkers_data()
+    {
+        QTest::addColumn<qint64>("start");
+        QTest::addColumn<qint64>("end");
+        QTest::newRow("whole-video") << qint64(-1) << qint64(-1);
+        QTest::newRow("start-only") << qint64(1000) << qint64(-1);
+        QTest::newRow("end-only") << qint64(-1) << qint64(1700);
+    }
+
+    void repeatWithMissingMarkers()
+    {
+        QFETCH(qint64, start);
+        QFETCH(qint64, end);
+        CanvasDocument document;
+        auto* video = document.addPreparedFile(videoFixture(), QSize(160, 90), true, {});
+        QVERIFY(video);
+        video->setMuted(true);
+        QTRY_VERIFY(video->player()->duration() > 3000);
+        QVERIFY(video->setPlaybackRange(start, end));
+        video->setRepeatEnabled(true);
+        video->setPositionMs(video->playbackEndMs() - 250);
+        video->togglePlayPause();
+        QTRY_VERIFY_WITH_TIMEOUT(video->isPlaying()
+            && video->positionMs() >= video->playbackStartMs()
+            && video->positionMs() < video->playbackStartMs() + 500, 4000);
+        video->player()->pause();
+    }
+
+    void sceneLaunchResetsPreviewAndStopRestoresIt()
+    {
+        QString error;
+        std::unique_ptr<QuickCanvasHost> host(QuickCanvasHost::create(&error));
+        QVERIFY2(host, qPrintable(error));
+        host->setProjectEditingEnabled(true);
+        auto* video = host->document()->addPreparedFile(videoFixture(), QSize(160, 90), true, {});
+        QVERIFY(video);
+        QTRY_VERIFY(video->player()->duration() > 3000);
+        auto settings = video->settings();
+        settings.playAutomatically = false;
+        video->setSettings(settings);
+        for (qint64 start : {qint64(-1), qint64(1100)}) {
+            QVERIFY(video->setPlaybackRange(start, -1));
+            video->setPositionMs(2200);
+            host->triggerTestSceneAction();
+            QCOMPARE(video->positionMs(), qMax<qint64>(0, start));
+            host->triggerTestSceneAction();
+            QCOMPARE(video->positionMs(), 2200);
+        }
+    }
+
     void nativePreparationReadsDisplaySizeAndFirstFrame()
     {
         const QString fixture = videoFixture();

@@ -78,6 +78,28 @@ Rectangle {
         }
     }
 
+    component RangeButton: AbstractButton {
+        id: button
+        implicitHeight: 28
+        hoverEnabled: true
+        focusPolicy: Qt.TabFocus
+        Accessible.role: Accessible.Button
+        Accessible.name: text
+        contentItem: Text {
+            text: button.text
+            color: button.enabled ? Theme.overlayText : "#808080"
+            font.pixelSize: 12
+            font.weight: Font.DemiBold
+            horizontalAlignment: Text.AlignHCenter
+            verticalAlignment: Text.AlignVCenter
+        }
+        background: Rectangle {
+            radius: 4
+            color: button.down ? "#345780" : button.hovered ? "#36404c" : "transparent"
+            border.color: button.enabled ? Theme.overlayBorder : "#505050"
+        }
+    }
+
     component SettingsCheckBox: AppCheckBox {
         implicitHeight: 25
         textColor: enabled ? Theme.overlayText : "#808080"
@@ -811,6 +833,36 @@ Rectangle {
                         inputKind: "percent"
                         onCheckedEdited: checked => root.settings.opacityOverrideEnabled = checked
                         onTextEdited: text => root.settings.opacityText = text
+                    }
+                }
+
+                SettingsSection {
+                    objectName: "elementVideoRangeSection"
+                    visible: !!root.settings && root.settings.video
+                    title: "Video"
+
+                    Row {
+                        width: parent.width
+                        spacing: 6
+
+                        RangeButton {
+                            objectName: "videoStartButton"
+                            width: (parent.width - parent.spacing) / 2
+                            text: root.settings && root.settings.hasVideoStart
+                                  ? "Remove start" : "Place start"
+                            enabled: !!root.settings && root.settings.available
+                                     && (root.settings.hasVideoStart || root.settings.canPlaceVideoStart)
+                            onClicked: root.settings.toggleVideoStart()
+                        }
+                        RangeButton {
+                            objectName: "videoEndButton"
+                            width: (parent.width - parent.spacing) / 2
+                            text: root.settings && root.settings.hasVideoEnd
+                                  ? "Remove end" : "Place end"
+                            enabled: !!root.settings && root.settings.available
+                                     && (root.settings.hasVideoEnd || root.settings.canPlaceVideoEnd)
+                            onClicked: root.settings.toggleVideoEnd()
+                        }
                     }
                 }
 

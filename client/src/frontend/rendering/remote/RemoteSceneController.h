@@ -157,6 +157,7 @@ private:
 		bool readyNotified = false; // true after controller counts this media as ready
 		bool fadeInPending = false; // true when fade requested before global activation
 		qint64 startPositionMs = 0; bool hasStartPosition = false;
+        qint64 endPositionMs = -1;
 		qint64 displayTimestampMs = -1; bool hasDisplayTimestamp = false;
 		bool awaitingStartFrame = false;
 		QVideoFrame primedFrame;
@@ -227,6 +228,7 @@ private:
     void handleSceneReadyTimeout();
     void resetSceneSynchronization();
     void seekToConfiguredStart(const std::shared_ptr<RemoteMediaItem>& item);
+    qint64 effectiveEndPosition(const std::shared_ptr<RemoteMediaItem>& item) const;
     qint64 effectiveStartPosition(const std::shared_ptr<RemoteMediaItem>& item) const;
 	void startPendingPauseTimerIfEligible(const std::shared_ptr<RemoteMediaItem>& item);
 	void triggerAutoPlayNow(const std::shared_ptr<RemoteMediaItem>& item, quint64 epoch);

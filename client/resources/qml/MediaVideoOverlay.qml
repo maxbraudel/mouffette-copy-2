@@ -19,6 +19,8 @@ Item {
     property bool isMuted: false
     property bool isLooping: false
     property real progress: 0.0    // 0..1, authoritative playback position from C++
+    property real startProgress: -1.0
+    property real endProgress: -1.0
     property real volume: 1.0      // 0..1
 
     // --- Signals ---
@@ -146,6 +148,41 @@ Item {
             onDragStarted: function(r) { root.seekBeginRequested(root.mediaId, r) }
             onSeeked:      function(r) { root.seekUpdateRequested(root.mediaId, r) }
             onDragEnded:   function(r) { root.seekEndRequested(root.mediaId, r) }
+
+            component RangeMarker: Item {
+                required property real ratio
+                required property string label
+                visible: ratio >= 0
+                x: Math.max(0, Math.min(1, ratio)) * progressSlider.width
+                y: progressSlider.height / 2
+                z: 2
+                Rectangle {
+                    width: 3
+                    height: 12
+                    x: -width / 2
+                    y: -height / 2
+                    radius: 1
+                    color: "#4a90e2"
+                }
+                Text {
+                    text: parent.label
+                    color: "#4a90e2"
+                    font.pixelSize: 10
+                    font.weight: Font.DemiBold
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    y: -18
+                }
+            }
+            RangeMarker {
+                objectName: "videoStartMarker"
+                label: "S"
+                ratio: root.startProgress
+            }
+            RangeMarker {
+                objectName: "videoEndMarker"
+                label: "E"
+                ratio: root.endProgress
+            }
         }
     }
 }

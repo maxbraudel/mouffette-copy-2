@@ -428,10 +428,24 @@ void CanvasMedia::initializeVideoRuntime()
             this, &CanvasMedia::runtimeStateChanged);
     connect(m_player, &QMediaPlayer::positionChanged,
             this, &CanvasMedia::runtimeStateChanged);
+    connect(m_player, &QMediaPlayer::positionChanged, this,
+            [this](qint64 position) { enforcePlaybackEnd(position); });
+    connect(m_player, &QMediaPlayer::mediaStatusChanged, this,
+            [this](QMediaPlayer::MediaStatus status) {
+        if (status == QMediaPlayer::EndOfMedia) {
+            // The multimedia backend still finalizes its stopped state while
+            // delivering EndOfMedia. Restart after that transition has settled.
+            QMetaObject::invokeMethod(this, [this]() {
+                if (m_player->mediaStatus() == QMediaPlayer::EndOfMedia)
+                    enforcePlaybackEnd(m_player->duration(), true);
+            }, Qt::QueuedConnection);
+        }
+    });
     connect(m_player, &QMediaPlayer::durationChanged,
             this, &CanvasMedia::runtimeStateChanged);
     connect(m_player, &QMediaPlayer::errorChanged,
             this, &CanvasMedia::runtimeStateChanged);
+    updateVideoLoops();
     if (!m_sourcePath.isEmpty()) {
         m_player->setSource(QUrl::fromLocalFile(m_sourcePath));
     }
@@ -475,21 +489,119 @@ void CanvasMedia::setRepeatEnabled(bool enabled)
 {
     if (m_repeatEnabled == enabled) return;
     m_repeatEnabled = enabled;
-    if (m_player) m_player->setLoops(enabled ? QMediaPlayer::Infinite : 1);
+    updateVideoLoops();
     emit runtimeStateChanged();
+}
+
+bool CanvasMedia::setPlaybackRange(qint64 startMs, qint64 endMs)
+{
+    constexpr qint64 maximum = 7LL * 24 * 60 * 60 * 1000;
+    if (!isVideo() || startMs < -1 || endMs < -1
+        || startMs > maximum || endMs > maximum
+        || (endMs >= 0 && endMs <= qMax<qint64>(0, startMs))) return false;
+    if (m_startMarkerMs == startMs && m_endMarkerMs == endMs) return true;
+    m_startMarkerMs = startMs;
+    m_endMarkerMs = endMs;
+    updateVideoLoops();
+    notifyChanged();
+    emit runtimeStateChanged();
+    return true;
+}
+
+bool CanvasMedia::canPlaceStart() const
+{
+    return m_player && m_player->duration() > 0
+        && positionMs() < playbackEndMs();
+}
+
+bool CanvasMedia::canPlaceEnd() const
+{
+    return m_player && m_player->duration() > 0
+        && positionMs() > playbackStartMs();
+}
+
+qint64 CanvasMedia::playbackStartMs() const
+{
+    const qint64 start = qMax<qint64>(0, m_startMarkerMs);
+    return m_player && m_player->duration() > 0
+        ? qMin(start, m_player->duration() - 1) : start;
+}
+
+qint64 CanvasMedia::playbackEndMs() const
+{
+    const qint64 duration = m_player ? m_player->duration() : 0;
+    return m_endMarkerMs >= 0 ? (duration > 0 ? qMin(m_endMarkerMs, duration)
+                                                           : m_endMarkerMs)
+                             : duration;
+}
+
+void CanvasMedia::updateVideoLoops()
+{
+    if (m_player) m_player->setLoops(m_repeatEnabled
+        && m_startMarkerMs < 0 && m_endMarkerMs < 0
+        ? QMediaPlayer::Infinite : QMediaPlayer::Once);
+}
+
+bool CanvasMedia::repeatAvailable() const
+{
+    return m_repeatEnabled || (m_scenePlayback && m_repeatRemaining > 0);
+}
+
+void CanvasMedia::beginScenePlayback()
+{
+    if (!m_player) return;
+    m_player->pause();
+    m_scenePlayback = true;
+    m_repeatRemaining = m_settings.repeatEnabled
+        ? qMax(1, m_settings.repeatCountText.toInt()) : 0;
+    m_player->setPosition(playbackStartMs());
+}
+
+void CanvasMedia::endScenePlayback()
+{
+    m_scenePlayback = false;
+    m_repeatRemaining = 0;
+}
+
+void CanvasMedia::enforcePlaybackEnd(qint64 position, bool atEnd)
+{
+    if (!m_player || m_handlingPlaybackEnd || (!isPlaying() && !atEnd)) return;
+    const qint64 end = playbackEndMs();
+    if (end <= 0 || position < end || (atEnd && positionMs() < end)) return;
+    if (m_repeatEnabled && m_startMarkerMs < 0 && m_endMarkerMs < 0) return;
+    // Natural EOF has its own deferred status handler. Seeking during the last
+    // position notification would let the backend stop our newly started loop.
+    if (!atEnd && end >= m_player->duration()) return;
+    // Paused scrubbing remains unrestricted; only active playback consumes a range.
+    m_handlingPlaybackEnd = true;
+    if (repeatAvailable()) {
+        if (!m_repeatEnabled) --m_repeatRemaining;
+        m_player->setPosition(playbackStartMs());
+        m_player->play();
+    } else if (m_endMarkerMs >= 0) {
+        m_player->pause();
+        m_player->setPosition(end);
+    }
+    m_handlingPlaybackEnd = false;
 }
 
 void CanvasMedia::togglePlayPause()
 {
     if (!m_player) return;
-    isPlaying() ? m_player->pause() : m_player->play();
+    if (isPlaying()) {
+        m_player->pause();
+    } else {
+        if (positionMs() < playbackStartMs() || positionMs() >= playbackEndMs())
+            m_player->setPosition(playbackStartMs());
+        m_player->play();
+    }
 }
 
 void CanvasMedia::stopToBeginning()
 {
     if (!m_player) return;
     m_player->pause();
-    m_player->setPosition(0);
+    m_player->setPosition(playbackStartMs());
 }
 
 void CanvasMedia::seekToRatio(qreal ratio)

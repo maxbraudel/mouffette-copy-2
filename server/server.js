@@ -225,7 +225,7 @@ function isCanonicalSceneMedia(item, screenIds) {
             && horizontalAlignments.has(item.horizontalAlignment)
             && verticalAlignments.has(item.verticalAlignment);
     }
-    return hasOnlyKeys(item, [...SCENE_COMMON_MEDIA_KEYS, ...SCENE_VIDEO_MEDIA_KEYS])
+    return hasOnlyKeys(item, [...SCENE_COMMON_MEDIA_KEYS, ...SCENE_VIDEO_MEDIA_KEYS], ['endPositionMs'])
         && SHA256_PATTERN.test(item.fileId)
         && OPAQUE_ID_PATTERN.test(item.assetId)
         && item.fileName.length > 0
@@ -245,7 +245,10 @@ function isCanonicalSceneMedia(item, screenIds) {
         && typeof item.muteWhenVideoEnds === 'boolean'
         && isFiniteInRange(item.audioFadeInSeconds, 0, 3600)
         && isFiniteInRange(item.audioFadeOutSeconds, 0, 3600)
-        && isBoundedInteger(item.startPositionMs, 0, 604_800_000);
+        && isBoundedInteger(item.startPositionMs, 0, 604_800_000)
+        && (item.endPositionMs === undefined
+            || (isBoundedInteger(item.endPositionMs, 1, 604_800_000)
+                && item.endPositionMs > item.startPositionMs));
 }
 
 function isCanonicalScene(scene, maximumScreens, maximumMedia) {

@@ -7,7 +7,10 @@
 
 MediaSettingsViewModel::MediaSettingsViewModel(QObject* parent)
     : QObject(parent)
-{}
+{
+    connect(this, &MediaSettingsViewModel::changed,
+            this, &MediaSettingsViewModel::videoRangeChanged);
+}
 
 void MediaSettingsViewModel::setController(QuickCanvasController* controller)
 {
@@ -37,6 +40,33 @@ QString MediaSettingsViewModel::mediaId() const { return media() ? media()->medi
 QString MediaSettingsViewModel::mediaName() const { return media() ? media()->displayName() : QString(); }
 bool MediaSettingsViewModel::video() const { return media() && media()->isVideo(); }
 bool MediaSettingsViewModel::textMedia() const { return media() && media()->isText(); }
+
+bool MediaSettingsViewModel::hasVideoStart() const { return video() && media()->startMarkerMs() >= 0; }
+bool MediaSettingsViewModel::hasVideoEnd() const { return video() && media()->endMarkerMs() >= 0; }
+bool MediaSettingsViewModel::canPlaceVideoStart() const { return available() && video() && media()->canPlaceStart(); }
+bool MediaSettingsViewModel::canPlaceVideoEnd() const { return available() && video() && media()->canPlaceEnd(); }
+
+void MediaSettingsViewModel::toggleVideoStart()
+{
+    updateSettings([](CanvasMedia* item) {
+        if (!item->isVideo()) return;
+        if (item->startMarkerMs() >= 0)
+            item->setPlaybackRange(-1, item->endMarkerMs());
+        else if (item->canPlaceStart())
+            item->setPlaybackRange(item->positionMs(), item->endMarkerMs());
+    });
+}
+
+void MediaSettingsViewModel::toggleVideoEnd()
+{
+    updateSettings([](CanvasMedia* item) {
+        if (!item->isVideo()) return;
+        if (item->endMarkerMs() >= 0)
+            item->setPlaybackRange(item->startMarkerMs(), -1);
+        else if (item->canPlaceEnd())
+            item->setPlaybackRange(item->startMarkerMs(), item->positionMs());
+    });
+}
 
 #define MEDIA_STATE_BOOL_GETTER(name, field) \
 bool MediaSettingsViewModel::name() const { \
@@ -209,6 +239,8 @@ void MediaSettingsViewModel::refresh()
         if (m_observedMedia) {
             connect(m_observedMedia, &CanvasMedia::changed,
                     this, &MediaSettingsViewModel::changed);
+            connect(m_observedMedia, &CanvasMedia::runtimeStateChanged,
+                    this, &MediaSettingsViewModel::videoRangeChanged);
             connect(m_observedMedia, &CanvasMedia::audioStateChanged,
                     this, &MediaSettingsViewModel::changed);
         }

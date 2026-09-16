@@ -96,6 +96,15 @@ bool readBoundedInt64(const QJsonObject& object,
 	return true;
 }
 
+bool validVideoRange(const QJsonObject& state) {
+    qint64 start = 0;
+    qint64 end = 0;
+    return readBoundedInt64(state, "startPositionMs", 0, kMaxVideoPositionMs, start)
+        && (!state.contains(QStringLiteral("endPositionMs"))
+            || (readBoundedInt64(state, "endPositionMs", 1, kMaxVideoPositionMs, end)
+                && end > start));
+}
+
 bool readFiniteRect(const QJsonObject& object,
                     const char* xKey,
                     const char* yKey,
@@ -907,8 +916,7 @@ bool RemoteSceneController::applyAuthoritativeStateSnapshot(
                 || !requiredFinite(state, "volume", 0.0, 1.0)
                 || !requiredFinite(state, "audioFadeInSeconds", 0.0, 3600.0)
                 || !requiredFinite(state, "audioFadeOutSeconds", 0.0, 3600.0)
-                || !requiredFinite(state, "startPositionMs", 0.0,
-                                   static_cast<double>(kMaxVideoPositionMs))) {
+                || !validVideoRange(state)) {
                 return reject(QStringLiteral("Scene snapshot video configuration is malformed"));
             }
         }
@@ -1025,6 +1033,9 @@ bool RemoteSceneController::applyAuthoritativeStateSnapshot(
             item->autoPlayDelayMs = state.value(QStringLiteral("autoPlayDelayMs")).toInt();
             item->autoPause = state.value(QStringLiteral("autoPause")).toBool();
             item->autoPauseDelayMs = state.value(QStringLiteral("autoPauseDelayMs")).toInt();
+            item->startPositionMs = qRound64(state.value(QStringLiteral("startPositionMs")).toDouble());
+            item->hasStartPosition = true;
+            item->endPositionMs = qRound64(state.value(QStringLiteral("endPositionMs")).toDouble(-1));
             item->continuousLoop = state.value(QStringLiteral("continuousLoop")).toBool();
             item->repeatEnabled = state.value(QStringLiteral("repeatEnabled")).toBool();
             item->repeatCount = state.value(QStringLiteral("repeatCount")).toInt();
@@ -1527,15 +1538,11 @@ void RemoteSceneController::onRemoteSceneStart(const QString& senderClientId, co
         if (type == QLatin1String("video")) {
             int repeatCount = 0;
             double volume = 0.0;
-            double startPositionMs = 0.0;
             if (!readBoundedInteger(mediaObject, "repeatCount", 0, 1000000, repeatCount)
                 || !readFiniteNumber(mediaObject, "volume", volume)
                 || volume < 0.0 || volume > 1.0
-                || !readFiniteNumber(mediaObject, "startPositionMs", startPositionMs)
-                || std::floor(startPositionMs) != startPositionMs
-                || startPositionMs < 0.0
-                || startPositionMs > static_cast<double>(kMaxVideoPositionMs)) {
-                failWithMessage(QStringLiteral("Invalid repeat count for media %1").arg(mediaId));
+                || !validVideoRange(mediaObject)) {
+                failWithMessage(QStringLiteral("Invalid video playback settings for media %1").arg(mediaId));
                 return;
             }
         }
@@ -2095,19 +2102,24 @@ void RemoteSceneController::onRemoteSceneVideoSync(const QString& senderClientId
                 desiredPositionMs = std::min<qint64>(
                     kMaxVideoPositionMs, desiredPositionMs + projectedTransitMs);
             }
-            if (durationMs > 0) {
-                if (playing && repeatAvailable && desiredPositionMs >= durationMs) {
-                    desiredPositionMs %= durationMs;
+            const qint64 rangeStart = effectiveStartPosition(item);
+            const qint64 rangeEnd = item->endPositionMs >= 0
+                ? (durationMs > 0 ? std::min(item->endPositionMs, durationMs) : item->endPositionMs)
+                : durationMs;
+            const qint64 rangeLength = rangeEnd - rangeStart;
+            if (rangeLength > 0) {
+                if (playing && repeatAvailable && desiredPositionMs >= rangeEnd) {
+                    desiredPositionMs = rangeStart + (desiredPositionMs - rangeStart) % rangeLength;
                 } else {
-                    desiredPositionMs = std::min(desiredPositionMs, durationMs);
+                    desiredPositionMs = std::clamp(desiredPositionMs, rangeStart, rangeEnd);
                 }
             }
 
             const qint64 currentPositionMs = std::max<qint64>(0, item->player->position());
             qint64 positionErrorMs = desiredPositionMs - currentPositionMs;
-            if (playing && repeatAvailable && durationMs > 0) {
-                const qint64 wrappedForward = positionErrorMs + durationMs;
-                const qint64 wrappedBackward = positionErrorMs - durationMs;
+            if (playing && repeatAvailable && rangeLength > 0) {
+                const qint64 wrappedForward = positionErrorMs + rangeLength;
+                const qint64 wrappedBackward = positionErrorMs - rangeLength;
                 if (qAbs(wrappedForward) < qAbs(positionErrorMs)) positionErrorMs = wrappedForward;
                 if (qAbs(wrappedBackward) < qAbs(positionErrorMs)) positionErrorMs = wrappedBackward;
             }
@@ -2535,6 +2547,7 @@ void RemoteSceneController::teardownMediaItem(const std::shared_ptr<RemoteMediaI
     item->pendingPlayDelayMs = -1;
     item->pendingPauseDelayMs = -1;
     item->startPositionMs = 0;
+    item->endPositionMs = -1;
     item->hasStartPosition = false;
     item->displayTimestampMs = -1;
     item->hasDisplayTimestamp = false;
@@ -3034,6 +3047,14 @@ qint64 RemoteSceneController::effectiveStartPosition(const std::shared_ptr<Remot
         }
     }
     return target;
+}
+
+qint64 RemoteSceneController::effectiveEndPosition(const std::shared_ptr<RemoteMediaItem>& item) const {
+    if (!item) return 0;
+    const qint64 duration = item->player ? item->player->duration() : 0;
+    return item->endPositionMs >= 0
+        ? (duration > 0 ? std::min(item->endPositionMs, duration) : item->endPositionMs)
+        : duration;
 }
 
 qint64 RemoteSceneController::targetDisplayTimestamp(const std::shared_ptr<RemoteMediaItem>& item) const {
@@ -3536,6 +3557,7 @@ void RemoteSceneController::buildMedia(const QJsonArray& mediaArray) {
             item->startPositionMs = static_cast<qint64>(
                 std::llround(m.value("startPositionMs").toDouble()));
             item->hasStartPosition = true;
+            item->endPositionMs = qRound64(m.value("endPositionMs").toDouble(-1));
             item->awaitingStartFrame = item->startPositionMs > 0;
             if (m.contains("displayedFrameTimestampMs")) {
                 const qint64 displayTs = static_cast<qint64>(std::llround(m.value("displayedFrameTimestampMs").toDouble(-1.0)));
@@ -3612,26 +3634,31 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
                 seekToConfiguredStart(item);
                 evaluateItemReadiness(item);
             } else if (s == QMediaPlayer::EndOfMedia && item->player) {
-                // EndOfMedia reached: ensure we freeze on the final frame when not looping.
-                if (item->repeatActive) return;
-                const bool canRepeat = item->playAuthorized
-                    && (item->continuousLoop || (item->repeatEnabled && item->repeatRemaining > 0));
-                if (canRepeat) {
-                    item->repeatActive = true;
-                    item->lastRepeatTriggerMs = QDateTime::currentMSecsSinceEpoch();
-                    if (!item->continuousLoop) --item->repeatRemaining;
-                    item->pausedAtEnd = false;
-                    item->holdLastFrameAtEnd = false;
-                    restoreVideoOutput(item);
-                    item->player->setPosition(0);
-                    item->player->play();
-                } else {
-                    if (!item->pausedAtEnd) {
-                        item->pausedAtEnd = true;
-                        item->player->pause();
+                // Let the backend finish its EOF transition before restarting.
+                QMetaObject::invokeMethod(item->player, [this, epoch, weakItem]() {
+                    auto item = weakItem.lock();
+                    if (!item || epoch != m_sceneEpoch || !item->player
+                        || item->player->mediaStatus() != QMediaPlayer::EndOfMedia) return;
+                    if (item->repeatActive) return;
+                    const bool canRepeat = item->playAuthorized
+                        && (item->continuousLoop || (item->repeatEnabled && item->repeatRemaining > 0));
+                    if (canRepeat) {
+                        item->repeatActive = true;
+                        item->lastRepeatTriggerMs = QDateTime::currentMSecsSinceEpoch();
+                        if (!item->continuousLoop) --item->repeatRemaining;
+                        item->pausedAtEnd = false;
+                        item->holdLastFrameAtEnd = false;
+                        restoreVideoOutput(item);
+                        item->player->setPosition(effectiveStartPosition(item));
+                        item->player->play();
+                    } else {
+                        if (!item->pausedAtEnd) {
+                            item->pausedAtEnd = true;
+                            item->player->pause();
+                        }
+                        freezeVideoOutput(item);
                     }
-                    freezeVideoOutput(item);
-                }
+                }, Qt::QueuedConnection);
             }
         });
         QObject::connect(item->player, &QMediaPlayer::positionChanged, item->player, [this,epoch,weakItem](qint64 pos){
@@ -3640,12 +3667,14 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
             if (epoch != m_sceneEpoch) return;
             if (!item->player) return;
 
-            const qint64 dur = item->player->duration();
-            const qint64 repeatWindowMs = repeatLeadMarginMs(dur);
+            const qint64 dur = effectiveEndPosition(item);
+            const qint64 start = effectiveStartPosition(item);
+            const qint64 repeatWindowMs = repeatLeadMarginMs(dur - start);
             const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
-            if (nowMs < item->authoritativeSeekGuardUntilMs) return;
+            if (nowMs < item->authoritativeSeekGuardUntilMs
+                && (item->endPositionMs < 0 || pos < dur)) return;
             const bool repeatJustSettled = item->repeatActive
-                && (pos <= repeatWindowMs
+                && (pos <= start + repeatWindowMs
                     || (item->lastRepeatTriggerMs > 0
                         && (nowMs - item->lastRepeatTriggerMs)
                             > AppConfig::instance()
@@ -3655,16 +3684,19 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
                 item->lastRepeatTriggerMs = 0;
             }
 
-            if (dur <= 0 || pos <= 0) return;
+            if (dur <= 0 || pos <= 0 || !item->playAuthorized
+                || item->player->playbackState() != QMediaPlayer::PlayingState) return;
+            if (pos >= item->player->duration() && dur >= item->player->duration()) return;
 
             const bool repeatAvailable = item->playAuthorized
                 && (item->continuousLoop || (item->repeatEnabled && item->repeatRemaining > 0));
             if (repeatAvailable) {
-                if (!repeatJustSettled && !item->repeatActive && pos >= (dur - repeatWindowMs)) {
+                if (!repeatJustSettled && !item->repeatActive
+                    && pos >= (item->endPositionMs >= 0 ? dur : dur - repeatWindowMs)) {
                     item->repeatActive = true;
                     item->lastRepeatTriggerMs = nowMs;
                     item->pausedAtEnd = false;
-                    item->player->setPosition(0);
+                    item->player->setPosition(effectiveStartPosition(item));
                     item->player->play();
                     if (!item->continuousLoop) --item->repeatRemaining;
                 }
@@ -3690,6 +3722,12 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
             }
 
             if (item->pausedAtEnd) return;
+            if (item->endPositionMs >= 0 && pos >= dur) {
+                item->pausedAtEnd = true;
+                item->player->pause();
+                item->player->setPosition(dur);
+                freezeVideoOutput(item);
+            }
         });
         QObject::connect(item->player, &QMediaPlayer::errorOccurred, item->player, [this,epoch,weakItem](QMediaPlayer::Error e, const QString& err){ auto item = weakItem.lock(); if (!item) return; if (epoch != m_sceneEpoch) return; if (e != QMediaPlayer::NoError) qWarning() << "RemoteSceneController: player error" << int(e) << err << "for" << item->mediaId; });
     auto attemptLoadVid = [this, epoch, weakItem]() {

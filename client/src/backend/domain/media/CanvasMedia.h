@@ -127,6 +127,16 @@ public:
     void setVolume(qreal volume);
     bool repeatEnabled() const { return m_repeatEnabled; }
     void setRepeatEnabled(bool enabled);
+    qint64 startMarkerMs() const { return m_startMarkerMs; }
+    qint64 endMarkerMs() const { return m_endMarkerMs; }
+    bool setPlaybackRange(qint64 startMs, qint64 endMs);
+    bool canPlaceStart() const;
+    bool canPlaceEnd() const;
+    qint64 playbackStartMs() const;
+    qint64 playbackEndMs() const;
+    void beginScenePlayback();
+    void endScenePlayback();
+    bool repeatAvailable() const;
     void togglePlayPause();
     void stopToBeginning();
     void seekToRatio(qreal ratio);
@@ -147,6 +157,8 @@ private:
     void notifyChanged();
     bool updateFitToTextGeometry();
     void notifyTextMetricsChanged();
+    void updateVideoLoops();
+    void enforcePlaybackEnd(qint64 position, bool atEnd = false);
 
     Type m_type;
     QString m_mediaId;
@@ -189,6 +201,11 @@ private:
     QVideoSink* m_videoSink = nullptr;
     QAudioOutput* m_audioOutput = nullptr;
     bool m_repeatEnabled = false;
+    qint64 m_startMarkerMs = -1;
+    qint64 m_endMarkerMs = -1;
+    bool m_scenePlayback = false;
+    int m_repeatRemaining = 0;
+    bool m_handlingPlaybackEnd = false;
     bool m_hasRenderedFrame = false;
     bool m_firstFramePrimed = false;
 };

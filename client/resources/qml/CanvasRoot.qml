@@ -1753,6 +1753,8 @@ Rectangle {
                     isMuted:   overlayDelegate.videoState ? !!overlayDelegate.videoState.isMuted   : false
                     isLooping: overlayDelegate.videoState ? !!overlayDelegate.videoState.isLooping : false
                     progress:  overlayDelegate.videoState ? (overlayDelegate.videoState.progress || 0.0) : 0.0
+                    startProgress: overlayDelegate.videoState ? overlayDelegate.videoState.startProgress : -1.0
+                    endProgress: overlayDelegate.videoState ? overlayDelegate.videoState.endProgress : -1.0
                     volume: overlayDelegate.videoState && overlayDelegate.videoState.volume !== undefined
                             ? overlayDelegate.videoState.volume : 1.0
 

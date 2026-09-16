@@ -15,6 +15,10 @@ class MediaSettingsViewModel final : public QObject
     Q_PROPERTY(QString mediaName READ mediaName NOTIFY changed)
     Q_PROPERTY(bool video READ video NOTIFY changed)
     Q_PROPERTY(bool textMedia READ textMedia NOTIFY changed)
+    Q_PROPERTY(bool hasVideoStart READ hasVideoStart NOTIFY videoRangeChanged)
+    Q_PROPERTY(bool hasVideoEnd READ hasVideoEnd NOTIFY videoRangeChanged)
+    Q_PROPERTY(bool canPlaceVideoStart READ canPlaceVideoStart NOTIFY videoRangeChanged)
+    Q_PROPERTY(bool canPlaceVideoEnd READ canPlaceVideoEnd NOTIFY videoRangeChanged)
 
     Q_PROPERTY(bool displayAutomatically READ displayAutomatically WRITE setDisplayAutomatically NOTIFY changed)
     Q_PROPERTY(bool displayDelayEnabled READ displayDelayEnabled WRITE setDisplayDelayEnabled NOTIFY changed)
@@ -72,6 +76,12 @@ public:
     QString mediaName() const;
     bool video() const;
     bool textMedia() const;
+    bool hasVideoStart() const;
+    bool hasVideoEnd() const;
+    bool canPlaceVideoStart() const;
+    bool canPlaceVideoEnd() const;
+    Q_INVOKABLE void toggleVideoStart();
+    Q_INVOKABLE void toggleVideoEnd();
 
     bool displayAutomatically() const; void setDisplayAutomatically(bool value);
     bool displayDelayEnabled() const; void setDisplayDelayEnabled(bool value);
@@ -122,6 +132,7 @@ public:
 
 signals:
     void changed();
+    void videoRangeChanged();
 
 private:
     CanvasMedia* media() const;
