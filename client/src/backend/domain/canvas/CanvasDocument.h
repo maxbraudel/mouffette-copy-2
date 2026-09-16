@@ -73,6 +73,10 @@ public:
                              const QHash<QString, QString>& sourcePathByMediaId,
                              QStringList* skippedMediaIds = nullptr);
 
+    QStringList pasteMediaState(const QJsonObject& state,
+                                const QHash<QString, QString>& sourcePaths,
+                                QStringList* skippedMediaIds = nullptr);
+
 signals:
     void mediaAdded(CanvasMedia* media);
     void mediaAboutToBeRemoved(CanvasMedia* media);
@@ -88,6 +92,9 @@ signals:
 
 private:
     void adoptMedia(CanvasMedia* media);
+    QStringList insertProjectMedia(const QJsonObject& state,
+                                  const QHash<QString, QString>& sourcePaths,
+                                  QStringList* skippedMediaIds, bool freshIds);
     void rebuildScreenRects();
     qreal nextZ() const;
 

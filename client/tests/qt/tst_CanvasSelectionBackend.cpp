@@ -1,4 +1,10 @@
 #include <QApplication>
+#include <QClipboard>
+#include <QJsonArray>
+#include <QMimeData>
+#include "backend/files/FileManager.h"
+#include "backend/runtime/RuntimeProfile.h"
+#include "frontend/ui/notifications/ToastNotificationSystem.h"
 #include <QFile>
 #include <QImage>
 #include <QQmlComponent>
@@ -20,6 +26,30 @@
 #endif
 
 namespace {
+struct ClipboardAndToasts {
+    QTemporaryDir directory;
+    RuntimeProfileContext previousProfile = RuntimeProfile::context();
+    ToastNotificationSystem* previousSystem = ToastNotificationSystem::instance();
+    std::unique_ptr<ToastNotificationSystem> system;
+    QMimeData* previousClipboard = new QMimeData;
+    ClipboardAndToasts() {
+        if (const auto* mime = QGuiApplication::clipboard()->mimeData())
+            for (const auto& format : mime->formats())
+                previousClipboard->setData(format, mime->data(format));
+        auto profile = previousProfile;
+        profile.rootPath = directory.path();
+        RuntimeProfile::configure(profile);
+        system = std::make_unique<ToastNotificationSystem>();
+        ToastNotificationSystem::setInstance(system.get());
+    }
+    ~ClipboardAndToasts() {
+        ToastNotificationSystem::setInstance(previousSystem);
+        system.reset();
+        RuntimeProfile::configure(previousProfile);
+        QGuiApplication::clipboard()->setMimeData(previousClipboard);
+    }
+};
+
 QQuickItem* findQuickItemWithProperty(QQuickItem* root, const char* propertyName,
                                       const QVariant& value)
 {
@@ -84,6 +114,254 @@ private slots:
     {
         // The complete page must use the same controls as production main().
         QQuickStyle::setStyle(QStringLiteral("Basic"));
+    }
+
+    void clipboardPreservesAuthoringState_data()
+    {
+        QTest::addColumn<QString>("type");
+        for (const char* type : {"text", "image", "video"})
+            QTest::newRow(type) << QString::fromLatin1(type);
+    }
+
+    void clipboardPreservesAuthoringState()
+    {
+        QFETCH(QString, type);
+        ClipboardAndToasts environment;
+        QSignalSpy toasts(environment.system->notificationCenter(), &NotificationCenter::toastRequested);
+        CanvasDocument document;
+        QuickCanvasController controller(&document);
+        controller.setProjectEditingEnabled(true);
+        CanvasMedia* original = type == "text"
+            ? document.addText({40, 80}, QStringLiteral("Copied text"))
+            : document.addPreparedFile(QString::fromUtf8(type == "video" ? TEST_VIDEO_FILE : TEST_WEBP_FILE),
+                                       {320, 180}, type == "video", {40, 80});
+        QVERIFY(original);
+        if (original->isText()) {
+            original->setFitToTextEnabled(false);
+            original->setFontWeightOverrideEnabled(true);
+            original->setFontWeight(700);
+            original->setTextColorOverrideEnabled(true);
+            original->setTextColor(Qt::cyan);
+            original->setOutlineWidthPercent(17);
+            original->setOutlineWidthOverrideEnabled(true);
+            original->setItalic(true);
+            original->setHighlightEnabled(true);
+            original->setHorizontalAlignment("left");
+        }
+        if (original->isVideo()) {
+            QTRY_VERIFY(original->player()->duration() > 3000);
+            original->setPlaybackRange(500, 2500);
+            original->setPositionMs(1500);
+            original->setMuted(true);
+            original->setVolume(.37);
+            original->setRepeatEnabled(true);
+        }
+        original->setBaseSize({320, 180});
+        original->setPosition({123.25, -56.5});
+        original->setScale(1.25);
+        original->setZ(4.5);
+        original->setContentVisible(false);
+        auto settings = original->settings();
+        settings.fadeInEnabled = true;
+        settings.fadeInText = "2.50";
+        settings.playDelayEnabled = true;
+        settings.playDelayText = "3.25";
+        original->setSettings(settings);
+        auto expected = document.serializeProjectState().value("media").toArray()[0].toObject();
+        expected.remove("mediaId");
+        const QString originalId = original->mediaId();
+        controller.copySelectedMedia();
+        original->setPosition({800, 900});
+        controller.pasteMedia();
+        QCOMPARE(document.media().size(), 2);
+        auto* copy = document.selectedMedia();
+        QVERIFY(copy && copy != original);
+        QVERIFY(copy->mediaId() != originalId);
+        QCOMPARE(copy->sourcePath(), original->sourcePath());
+        auto actual = document.serializeProjectState().value("media").toArray()[1].toObject();
+        actual.remove("mediaId");
+        QCOMPARE(actual, expected);
+        if (copy->isVideo()) {
+            QVERIFY(copy->player() != original->player());
+            QVERIFY(!copy->isPlaying());
+            QTRY_COMPARE(copy->player()->position(), qint64(1500));
+        }
+        QCOMPARE(toasts.size(), 1);
+        QCOMPARE(toasts.last()[0].toString(), QStringLiteral("Media pasted."));
+        QVERIFY(document.removeMedia(originalId));
+        controller.pasteMedia();
+        QCOMPARE(document.media().size(), 2);
+        QVERIFY(document.selectedMedia() != copy);
+        document.setEditsLocked(true);
+        controller.pasteMedia();
+        controller.deleteSelectedMedia();
+        QCOMPARE(document.media().size(), 2);
+        document.setEditsLocked(false);
+        QGuiApplication::clipboard()->setText(QStringLiteral("ordinary text"));
+        controller.pasteMedia();
+        QCOMPARE(document.media().size(), 2);
+    }
+
+    void clipboardGroupKeepsSharedFilesAssociated()
+    {
+        ClipboardAndToasts environment;
+        FileManager files;
+        CanvasDocument document;
+        document.setFileManager(&files);
+        QuickCanvasController controller(&document);
+        controller.setProjectEditingEnabled(true);
+        auto* first = document.addPreparedFile(QString::fromUtf8(TEST_WEBP_FILE), {320,180}, false, {});
+        auto* second = document.addText({500,300}, "Group");
+        const QString fileId = first->fileId();
+        QVERIFY(!fileId.isEmpty());
+        document.select(first->mediaId(), true);
+        controller.copySelectedMedia();
+        controller.pasteMedia();
+        QCOMPARE(document.media().size(), 4);
+        QCOMPARE(document.selectedMediaIds().size(), 2);
+        QCOMPARE(files.getMediaIdsForFile(fileId).size(), 2);
+        controller.deleteSelectedMedia();
+        QCOMPARE(document.media().size(), 2);
+        QCOMPARE(files.getMediaIdsForFile(fileId), QList<QString>{first->mediaId()});
+        QVERIFY(document.mediaById(second->mediaId()));
+        QVERIFY(QFile::exists(files.getFilePathForId(fileId)));
+    }
+
+    void keyboardCopyDeleteAndTextEditing()
+    {
+        ClipboardAndToasts environment;
+        Fixture fixture;
+        QVERIFY(fixture.initialize());
+        auto* text = fixture.document.addText({300,200}, "Words");
+        fixture.view.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&fixture.view));
+#ifdef Q_OS_MACOS
+        MacWindowManager::activateApplicationWindow(&fixture.view);
+#else
+        fixture.view.requestActivate();
+#endif
+        QVERIFY(QTest::qWaitForWindowActive(&fixture.view));
+        auto* root = fixture.view.rootObject();
+        root->forceActiveFocus();
+        QTRY_VERIFY(root->property("mediaShortcutsEnabled").toBool());
+        QTest::keyClick(&fixture.view, Qt::Key_C, Qt::ControlModifier);
+        QTest::keyClick(&fixture.view, Qt::Key_V, Qt::ControlModifier);
+        QTRY_COMPARE(fixture.document.media().size(), 2);
+        QSignalSpy deleted(&fixture.controller, &QuickCanvasController::mediaDeleteRequested);
+        QTest::keyClick(&fixture.view, Qt::Key_Backspace);
+        QTRY_COMPARE(fixture.document.media().size(), 1);
+        QCOMPARE(deleted.size(), 1);
+#ifdef Q_OS_MACOS
+        fixture.document.select(text->mediaId());
+        QTest::keyClick(&fixture.view, Qt::Key_C, Qt::MetaModifier);
+        QTest::keyClick(&fixture.view, Qt::Key_V, Qt::MetaModifier);
+        QTRY_COMPARE(fixture.document.media().size(), 2);
+        fixture.controller.deleteSelectedMedia();
+        QCOMPARE(fixture.document.media().size(), 1);
+        deleted.clear();
+#endif
+        fixture.document.select(text->mediaId());
+        auto* delegate = findQuickItemWithProperty(root, "currentMediaId", text->mediaId());
+        QVERIFY(delegate);
+        QVERIFY(QMetaObject::invokeMethod(delegate, "beginTextEditing"));
+        QTRY_VERIFY(root->property("anyMediaEditing").toBool());
+        QVERIFY(!root->property("mediaShortcutsEnabled").toBool());
+        QTest::keyClick(&fixture.view, Qt::Key_C, Qt::ControlModifier);
+        QCOMPARE(QGuiApplication::clipboard()->text(), QStringLiteral("Words"));
+        QTest::keyClick(&fixture.view, Qt::Key_Backspace);
+        QCOMPARE(fixture.document.media().size(), 1);
+        QTest::keyClick(&fixture.view, Qt::Key_V, Qt::ControlModifier);
+        QTRY_COMPARE(text->text(), QStringLiteral("Words"));
+        QTest::mouseClick(&fixture.view, Qt::LeftButton, Qt::NoModifier, {800,500});
+        QTRY_VERIFY(!root->property("anyMediaEditing").toBool());
+        fixture.document.select(text->mediaId());
+        root->forceActiveFocus();
+        QTest::keyClick(&fixture.view, Qt::Key_Delete);
+        QTRY_VERIFY(fixture.document.media().isEmpty());
+#ifdef Q_OS_MACOS
+        QCOMPARE(deleted.size(), 1);
+#else
+        QCOMPARE(deleted.size(), 2);
+#endif
+    }
+
+    void keyboardVideoTransportAndRangeWarnings()
+    {
+        ClipboardAndToasts environment;
+        QSignalSpy toasts(environment.system->notificationCenter(), &NotificationCenter::toastRequested);
+        Fixture fixture;
+        QVERIFY(fixture.initialize());
+        auto* video = fixture.document.addPreparedFile(QString::fromUtf8(TEST_VIDEO_FILE), {160,90}, true, {400,200});
+        QVERIFY(video);
+        QTRY_VERIFY(video->player()->duration() > 3000);
+        fixture.view.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&fixture.view));
+#ifdef Q_OS_MACOS
+        MacWindowManager::activateApplicationWindow(&fixture.view);
+#else
+        fixture.view.requestActivate();
+#endif
+        QVERIFY(QTest::qWaitForWindowActive(&fixture.view));
+        fixture.view.rootObject()->forceActiveFocus();
+        QTRY_COMPARE(fixture.view.rootObject()->property("selectedVideoId").toString(), video->mediaId());
+        QTest::keyClick(&fixture.view, Qt::Key_Space);
+        QTRY_VERIFY(video->isPlaying());
+        QTest::keyClick(&fixture.view, Qt::Key_Space);
+        QTRY_VERIFY(!video->isPlaying());
+        QTest::keyClick(&fixture.view, Qt::Key_M);
+        QVERIFY(video->muted());
+        QTest::keyClick(&fixture.view, Qt::Key_M);
+        QVERIFY(!video->muted());
+        video->setPositionMs(1000);
+        QTest::keyClick(&fixture.view, Qt::Key_S);
+        QCOMPARE(video->startMarkerMs(), 1000);
+        video->setPositionMs(900);
+        QTest::keyClick(&fixture.view, Qt::Key_E);
+        QCOMPARE(video->endMarkerMs(), -1);
+        QCOMPARE(toasts.last()[0].toString(), QStringLiteral("Place end after start."));
+        video->setPositionMs(2000);
+        QTest::keyClick(&fixture.view, Qt::Key_E);
+        QCOMPARE(video->endMarkerMs(), 2000);
+        QTest::keyClick(&fixture.view, Qt::Key_S);
+        QCOMPARE(video->startMarkerMs(), -1);
+        video->setPositionMs(2100);
+        QTest::keyClick(&fixture.view, Qt::Key_S);
+        QCOMPARE(video->startMarkerMs(), -1);
+        QCOMPARE(toasts.last()[0].toString(), QStringLiteral("Place start before end."));
+        QTest::keyClick(&fixture.view, Qt::Key_E);
+        QCOMPARE(video->endMarkerMs(), -1);
+        fixture.document.setEditsLocked(true);
+        QTest::keyClick(&fixture.view, Qt::Key_M);
+        QVERIFY(!video->muted());
+        QTest::keyClick(&fixture.view, Qt::Key_Delete);
+        QCOMPARE(fixture.document.media().size(), 1);
+        fixture.document.setEditsLocked(false);
+        QQmlComponent inputComponent(fixture.view.engine());
+        inputComponent.setData("import QtQuick; TextInput { text: 'Input'; width: 200; height: 30 }", QUrl());
+        std::unique_ptr<QObject> inputObject(inputComponent.create());
+        auto* input = qobject_cast<QQuickItem*>(inputObject.get());
+        QVERIFY(input);
+        input->setParentItem(fixture.view.contentItem());
+        input->forceActiveFocus();
+        QTRY_VERIFY(fixture.view.rootObject()->property("textInputFocused").toBool());
+        for (Qt::Key key : {Qt::Key_S, Qt::Key_E, Qt::Key_M, Qt::Key_Space,
+                            Qt::Key_Delete, Qt::Key_Backspace})
+            QTest::keyClick(&fixture.view, key);
+        QTest::keyClick(&fixture.view, Qt::Key_A, Qt::ControlModifier);
+        QTest::keyClick(&fixture.view, Qt::Key_C, Qt::ControlModifier);
+        QTest::keyClick(&fixture.view, Qt::Key_V, Qt::ControlModifier);
+        QCOMPARE(fixture.document.media().size(), 1);
+        QVERIFY(!video->isPlaying());
+        QVERIFY(!video->muted());
+        QCOMPARE(video->startMarkerMs(), -1);
+        QCOMPARE(video->endMarkerMs(), -1);
+        auto* delegate = findQuickItemWithProperty(fixture.view.rootObject(), "currentMediaId", video->mediaId());
+        QVERIFY(delegate);
+        QTest::mouseClick(&fixture.view, Qt::LeftButton, Qt::NoModifier,
+                         delegate->mapToScene({80,45}).toPoint());
+        QTRY_VERIFY(fixture.view.rootObject()->property("mediaShortcutsEnabled").toBool());
+        QTest::keyClick(&fixture.view, Qt::Key_M);
+        QVERIFY(video->muted());
     }
 
     void documentSelectionIsTheSingleAuthority()

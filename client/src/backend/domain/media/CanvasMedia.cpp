@@ -67,6 +67,7 @@ void CanvasMedia::setSourcePath(const QString& path)
 {
     if (m_sourcePath == path) return;
     m_sourcePath = path;
+    m_pendingPositionMs = -1;
     const QFileInfo source(path);
     m_sourceSizeBytes = source.isFile() ? source.size() : -1;
     if (m_player) m_player->setSource(QUrl::fromLocalFile(path));
@@ -432,6 +433,13 @@ void CanvasMedia::initializeVideoRuntime()
             [this](qint64 position) { enforcePlaybackEnd(position); });
     connect(m_player, &QMediaPlayer::mediaStatusChanged, this,
             [this](QMediaPlayer::MediaStatus status) {
+        if ((status == QMediaPlayer::LoadedMedia || status == QMediaPlayer::BufferedMedia)
+            && m_pendingPositionMs >= 0) {
+            const qint64 target = m_pendingPositionMs;
+            m_pendingPositionMs = -1;
+            m_player->setPosition(target);
+            emit runtimeStateChanged();
+        }
         if (status == QMediaPlayer::EndOfMedia) {
             // The multimedia backend still finalizes its stopped state while
             // delivering EndOfMedia. Restart after that transition has settled.
@@ -554,7 +562,7 @@ void CanvasMedia::beginScenePlayback()
     m_scenePlayback = true;
     m_repeatRemaining = m_settings.repeatEnabled
         ? qMax(1, m_settings.repeatCountText.toInt()) : 0;
-    m_player->setPosition(playbackStartMs());
+    setPositionMs(playbackStartMs());
 }
 
 void CanvasMedia::endScenePlayback()
@@ -576,7 +584,7 @@ void CanvasMedia::enforcePlaybackEnd(qint64 position, bool atEnd)
     m_handlingPlaybackEnd = true;
     if (repeatAvailable()) {
         if (!m_repeatEnabled) --m_repeatRemaining;
-        m_player->setPosition(playbackStartMs());
+        setPositionMs(playbackStartMs());
         m_player->play();
     } else if (m_endMarkerMs >= 0) {
         m_player->pause();
@@ -592,7 +600,7 @@ void CanvasMedia::togglePlayPause()
         m_player->pause();
     } else {
         if (positionMs() < playbackStartMs() || positionMs() >= playbackEndMs())
-            m_player->setPosition(playbackStartMs());
+            setPositionMs(playbackStartMs());
         m_player->play();
     }
 }
@@ -601,24 +609,35 @@ void CanvasMedia::stopToBeginning()
 {
     if (!m_player) return;
     m_player->pause();
-    m_player->setPosition(playbackStartMs());
+    setPositionMs(playbackStartMs());
 }
 
 void CanvasMedia::seekToRatio(qreal ratio)
 {
     if (!m_player || m_player->duration() <= 0) return;
     ratio = std::clamp<qreal>(ratio, 0.0, 1.0);
-    m_player->setPosition(qRound64(ratio * m_player->duration()));
+    setPositionMs(qRound64(ratio * m_player->duration()));
 }
 
 void CanvasMedia::setPositionMs(qint64 positionMs)
 {
-    if (m_player) m_player->setPosition(qMax<qint64>(0, positionMs));
+    if (!m_player) return;
+    const qint64 target = qMax<qint64>(0, positionMs);
+    // A restored or pasted video can still be loading. Preserve the requested
+    // preview position until the decoder is ready to accept the seek.
+    if (m_player->duration() <= 0 || m_player->mediaStatus() == QMediaPlayer::LoadingMedia
+        || m_player->mediaStatus() == QMediaPlayer::NoMedia) {
+        m_pendingPositionMs = target;
+    } else {
+        m_pendingPositionMs = -1;
+        m_player->setPosition(target);
+    }
+    emit runtimeStateChanged();
 }
 
 qint64 CanvasMedia::positionMs() const
 {
-    return m_player ? m_player->position() : 0;
+    return m_pendingPositionMs >= 0 ? m_pendingPositionMs : (m_player ? m_player->position() : 0);
 }
 
 QVariantMap CanvasMedia::toModelMap(qreal unit) const

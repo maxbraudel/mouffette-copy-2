@@ -1452,7 +1452,9 @@ void MediaOverlayTest::videoVolumeAndMuteStayIndependentAndSyncWithSettings()
     click(startButton);
     QTRY_COMPARE(video->startMarkerMs(), 1200);
     QCOMPARE(startButton->property("text").toString(), QStringLiteral("Remove start"));
-    QVERIFY(!endButton->isEnabled());
+    QVERIFY(endButton->isEnabled());
+    click(endButton);
+    QCOMPARE(video->endMarkerMs(), -1);
     video->setPositionMs(2400);
     QTRY_VERIFY(endButton->isEnabled());
     click(endButton);
@@ -1466,7 +1468,9 @@ void MediaOverlayTest::videoVolumeAndMuteStayIndependentAndSyncWithSettings()
     click(startButton);
     QTRY_VERIFY(!startMarker->isVisible());
     video->setPositionMs(2500);
-    QTRY_VERIFY(!startButton->isEnabled());
+    QTRY_VERIFY(startButton->isEnabled());
+    click(startButton);
+    QCOMPARE(video->startMarkerMs(), -1);
     click(endButton);
     QTRY_VERIFY(!endMarker->isVisible());
     QTRY_VERIFY(startButton->isEnabled());

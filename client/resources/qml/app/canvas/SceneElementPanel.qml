@@ -851,7 +851,6 @@ Rectangle {
                             text: root.settings && root.settings.hasVideoStart
                                   ? "Remove start" : "Place start"
                             enabled: !!root.settings && root.settings.available
-                                     && (root.settings.hasVideoStart || root.settings.canPlaceVideoStart)
                             onClicked: root.settings.toggleVideoStart()
                         }
                         RangeButton {
@@ -860,7 +859,6 @@ Rectangle {
                             text: root.settings && root.settings.hasVideoEnd
                                   ? "Remove end" : "Place end"
                             enabled: !!root.settings && root.settings.available
-                                     && (root.settings.hasVideoEnd || root.settings.canPlaceVideoEnd)
                             onClicked: root.settings.toggleVideoEnd()
                         }
                     }

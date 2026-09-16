@@ -153,6 +153,11 @@ signals:
                                      const QString& alignment);
 
 public slots:
+    void copySelectedMedia();
+    void pasteMedia();
+    void deleteSelectedMedia();
+    void handleVideoStartToggle(const QString& mediaId);
+    void handleVideoEndToggle(const QString& mediaId);
     void handleMediaSelectRequested(const QString& mediaId, bool additive);
     void handleClearSelectionRequested();
     void handleMediaMoveStarted(const QString& mediaId, qreal sceneX,

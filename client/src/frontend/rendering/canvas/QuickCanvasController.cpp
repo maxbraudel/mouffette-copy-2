@@ -15,6 +15,11 @@
 #include "backend/platform/windows/WindowsVideoThumbnailer.h"
 #endif
 
+#include <QClipboard>
+#include <QGuiApplication>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QMimeData>
 #include <QFileInfo>
 #include <QImageReader>
 #include <QMetaObject>
@@ -27,6 +32,7 @@
 #include <limits>
 
 namespace {
+constexpr auto kCanvasClipboardMime = "application/x-mouffette-media-v1";
 constexpr qreal kSnapDistancePx = 10.0;
 constexpr qreal kCornerSnapDistancePx = 20.0;
 constexpr qreal kSnapReleaseFactor = 1.4;
@@ -1470,6 +1476,99 @@ void QuickCanvasController::handleOverlayBringBackward(const QString& id)
     if (!editingEnabled()) return;
     if (m_document) m_document->moveBackward(id);
     emit mediaBringBackwardRequested(id);
+}
+
+void QuickCanvasController::copySelectedMedia()
+{
+    if (!editingEnabled() || !m_document) return;
+    const QStringList selected = m_document->selectedMediaIds();
+    if (selected.isEmpty()) return;
+    QJsonArray entries;
+    QJsonObject paths;
+    const QJsonArray all = m_document->serializeProjectState().value(QStringLiteral("media")).toArray();
+    for (const QJsonValue& value : all) {
+        const QString id = value.toObject().value(QStringLiteral("mediaId")).toString();
+        if (!selected.contains(id)) continue;
+        entries.append(value);
+        if (const CanvasMedia* media = m_document->mediaById(id))
+            paths.insert(id, media->sourcePath());
+    }
+    // Capture authoring values at copy time; never retain pointers to live media.
+    const QJsonObject payload{{QStringLiteral("renderSchemaVersion"), 2},
+                              {QStringLiteral("media"), entries},
+                              {QStringLiteral("sourcePaths"), paths}};
+    auto* mime = new QMimeData;
+    mime->setData(kCanvasClipboardMime, QJsonDocument(payload).toJson(QJsonDocument::Compact));
+    QGuiApplication::clipboard()->setMimeData(mime);
+}
+
+void QuickCanvasController::pasteMedia()
+{
+    if (!editingEnabled() || !m_document) return;
+    const QMimeData* mime = QGuiApplication::clipboard()->mimeData();
+    if (!mime || !mime->hasFormat(kCanvasClipboardMime)) return;
+    const QByteArray encoded = mime->data(kCanvasClipboardMime);
+    if (encoded.size() > 32 * 1024 * 1024) return;
+    const QJsonObject payload = QJsonDocument::fromJson(encoded).object();
+    const QJsonArray entries = payload.value(QStringLiteral("media")).toArray();
+    if (entries.isEmpty() || entries.size() > 512) return;
+    QHash<QString, QString> paths;
+    const QJsonObject storedPaths = payload.value(QStringLiteral("sourcePaths")).toObject();
+    for (auto it = storedPaths.begin(); it != storedPaths.end(); ++it)
+        paths.insert(it.key(), it.value().toString());
+    QStringList skipped;
+    const QStringList inserted = m_document->pasteMediaState(payload, paths, &skipped);
+    if (!inserted.isEmpty()) {
+        TOAST_SUCCESS(inserted.size() == 1 ? QStringLiteral("Media pasted.")
+            : QStringLiteral("%1 media pasted.").arg(inserted.size()));
+    }
+    if (!skipped.isEmpty())
+        TOAST_WARNING(QStringLiteral("Some media could not be pasted. Check that their source files are still available."));
+}
+
+void QuickCanvasController::deleteSelectedMedia()
+{
+    if (!editingEnabled() || !m_document) return;
+    const QStringList selected = m_document->selectedMediaIds();
+    for (const QString& id : selected) handleOverlayDelete(id);
+}
+
+void QuickCanvasController::handleVideoStartToggle(const QString& id)
+{
+    if (!editingEnabled() || !m_document) return;
+    CanvasMedia* media = m_document->mediaById(id);
+    if (!media || !media->isVideo()) return;
+    if (media->startMarkerMs() >= 0) {
+        media->setPlaybackRange(-1, media->endMarkerMs());
+    } else if (!media->player() || media->player()->duration() <= 0) {
+        TOAST_WARNING(QStringLiteral("Wait for the video to load before placing start."));
+    } else if (!media->canPlaceStart()) {
+        TOAST_WARNING(media->endMarkerMs() >= 0
+            ? QStringLiteral("Place start before end.")
+            : QStringLiteral("Place start before the end of the video."));
+    } else {
+        media->setPlaybackRange(media->positionMs(), media->endMarkerMs());
+    }
+    publishVideoState();
+}
+
+void QuickCanvasController::handleVideoEndToggle(const QString& id)
+{
+    if (!editingEnabled() || !m_document) return;
+    CanvasMedia* media = m_document->mediaById(id);
+    if (!media || !media->isVideo()) return;
+    if (media->endMarkerMs() >= 0) {
+        media->setPlaybackRange(media->startMarkerMs(), -1);
+    } else if (!media->player() || media->player()->duration() <= 0) {
+        TOAST_WARNING(QStringLiteral("Wait for the video to load before placing end."));
+    } else if (!media->canPlaceEnd()) {
+        TOAST_WARNING(media->startMarkerMs() >= 0
+            ? QStringLiteral("Place end after start.")
+            : QStringLiteral("Place end after the beginning of the video."));
+    } else {
+        media->setPlaybackRange(media->startMarkerMs(), media->positionMs());
+    }
+    publishVideoState();
 }
 
 void QuickCanvasController::handleOverlayDelete(const QString& id)

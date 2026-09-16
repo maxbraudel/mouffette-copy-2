@@ -200,6 +200,7 @@ private:
     QMediaPlayer* m_player = nullptr;
     QVideoSink* m_videoSink = nullptr;
     QAudioOutput* m_audioOutput = nullptr;
+    qint64 m_pendingPositionMs = -1;
     bool m_repeatEnabled = false;
     qint64 m_startMarkerMs = -1;
     qint64 m_endMarkerMs = -1;

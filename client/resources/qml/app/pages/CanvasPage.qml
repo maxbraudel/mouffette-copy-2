@@ -14,7 +14,10 @@ AppPanel {
         anchors.fill: parent
         active: root.session !== null && root.session !== undefined
         source: Qt.resolvedUrl("../../CanvasRoot.qml")
-        onLoaded: if (root.session) item.sessionViewModel = root.session
+        onLoaded: {
+            item.shortcutScope = root
+            if (root.session) item.sessionViewModel = root.session
+        }
         onActiveChanged: if (!active && item) item.sessionViewModel = null
     }
 

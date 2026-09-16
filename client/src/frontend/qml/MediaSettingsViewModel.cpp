@@ -48,24 +48,12 @@ bool MediaSettingsViewModel::canPlaceVideoEnd() const { return available() && vi
 
 void MediaSettingsViewModel::toggleVideoStart()
 {
-    updateSettings([](CanvasMedia* item) {
-        if (!item->isVideo()) return;
-        if (item->startMarkerMs() >= 0)
-            item->setPlaybackRange(-1, item->endMarkerMs());
-        else if (item->canPlaceStart())
-            item->setPlaybackRange(item->positionMs(), item->endMarkerMs());
-    });
+    if (m_controller && media()) m_controller->handleVideoStartToggle(media()->mediaId());
 }
 
 void MediaSettingsViewModel::toggleVideoEnd()
 {
-    updateSettings([](CanvasMedia* item) {
-        if (!item->isVideo()) return;
-        if (item->endMarkerMs() >= 0)
-            item->setPlaybackRange(item->startMarkerMs(), -1);
-        else if (item->canPlaceEnd())
-            item->setPlaybackRange(item->startMarkerMs(), item->positionMs());
-    });
+    if (m_controller && media()) m_controller->handleVideoEndToggle(media()->mediaId());
 }
 
 #define MEDIA_STATE_BOOL_GETTER(name, field) \

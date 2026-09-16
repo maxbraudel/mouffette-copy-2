@@ -498,6 +498,36 @@ bool CanvasDocument::restoreProjectState(
     }
     if (!restoredScreens.isEmpty()) setScreens(restoredScreens);
 
+    insertProjectMedia(state, sourcePathByMediaId, skippedMediaIds, false);
+    const QJsonObject viewport = state.value(QStringLiteral("viewport")).toObject();
+    if (!viewport.isEmpty()) {
+        setCamera(viewport.value(QStringLiteral("m11")).toDouble(1.0),
+                  viewport.value(QStringLiteral("dx")).toDouble(),
+                  viewport.value(QStringLiteral("dy")).toDouble());
+    }
+    clearSelection();
+    return true;
+}
+
+QStringList CanvasDocument::pasteMediaState(
+    const QJsonObject& state, const QHash<QString, QString>& sourcePaths,
+    QStringList* skippedMediaIds)
+{
+    if (m_editsLocked || state.value(QStringLiteral("renderSchemaVersion")).toInt(-1) != 2)
+        return {};
+    const QStringList inserted = insertProjectMedia(state, sourcePaths, skippedMediaIds, true);
+    if (!inserted.isEmpty()) {
+        clearSelection();
+        for (const QString& id : inserted) select(id, true);
+    }
+    return inserted;
+}
+
+QStringList CanvasDocument::insertProjectMedia(
+    const QJsonObject& state, const QHash<QString, QString>& sourcePathByMediaId,
+    QStringList* skippedMediaIds, bool freshIds)
+{
+    QStringList inserted;
     const auto skip = [skippedMediaIds](const QString& id) {
         if (skippedMediaIds && !id.isEmpty() && !skippedMediaIds->contains(id)) {
             skippedMediaIds->append(id);
@@ -585,7 +615,7 @@ bool CanvasDocument::restoreProjectState(
             }
             if (media->isVideo()) media->initializeVideoRuntime();
         }
-        media->restoreMediaId(id);
+        if (!freshIds) media->restoreMediaId(id);
         if (m_fileManager && !media->isText() && !media->fileId().isEmpty()) {
             m_fileManager->associateMediaWithFile(media->mediaId(), media->fileId());
             if (!m_projectId.isEmpty()) {
@@ -649,15 +679,9 @@ bool CanvasDocument::restoreProjectState(
         }
         media->setUploadNotUploaded();
         adoptMedia(media);
+        inserted.append(media->mediaId());
     }
-    const QJsonObject viewport = state.value(QStringLiteral("viewport")).toObject();
-    if (!viewport.isEmpty()) {
-        setCamera(viewport.value(QStringLiteral("m11")).toDouble(1.0),
-                  viewport.value(QStringLiteral("dx")).toDouble(),
-                  viewport.value(QStringLiteral("dy")).toDouble());
-    }
-    clearSelection();
-    return true;
+    return inserted;
 }
 
 qreal CanvasDocument::nextZ() const

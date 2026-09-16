@@ -140,6 +140,74 @@ Rectangle {
                                   ? canvasController.videoStateModel : ({})
     focus: true
 
+    property Item shortcutScope: root
+    readonly property bool shortcutScopeFocused: {
+        var item = hostingWindow ? hostingWindow.activeFocusItem : null
+        while (item) {
+            if (item === shortcutScope)
+                return true
+            item = item.parent
+        }
+        return false
+    }
+    readonly property bool textInputFocused: {
+        var item = hostingWindow ? hostingWindow.activeFocusItem : null
+        while (item) {
+            if (item instanceof TextInput || item instanceof TextEdit)
+                return true
+            item = item.parent
+        }
+        return false
+    }
+    readonly property bool mediaShortcutsEnabled: visible && enabled && editingEnabled
+                                                  && !!canvasController && !anyMediaEditing
+                                                  && shortcutScopeFocused && !textInputFocused
+                                                  && interactionMode === "idle"
+    readonly property string selectedVideoId: selectionChromeModel.length === 1
+        && videoStateModel[selectionChromeModel[0].mediaId] !== undefined
+        ? selectionChromeModel[0].mediaId : ""
+
+    component CanvasShortcut: Shortcut {
+        property bool applicable: true
+        enabled: root.mediaShortcutsEnabled && applicable
+        context: Qt.WindowShortcut
+        autoRepeat: false
+    }
+    CanvasShortcut {
+        sequences: Qt.platform.os === "osx" ? [StandardKey.Copy, "Meta+C"] : [StandardKey.Copy]
+        applicable: root.selectionChromeModel.length > 0
+        onActivated: root.canvasController.copySelectedMedia()
+    }
+    CanvasShortcut {
+        sequences: Qt.platform.os === "osx" ? [StandardKey.Paste, "Meta+V"] : [StandardKey.Paste]
+        onActivated: root.canvasController.pasteMedia()
+    }
+    CanvasShortcut {
+        sequences: ["Delete", "Backspace"]
+        applicable: root.selectionChromeModel.length > 0
+        onActivated: root.canvasController.deleteSelectedMedia()
+    }
+    CanvasShortcut {
+        sequence: "Space"
+        applicable: root.selectedVideoId !== ""
+        onActivated: root.canvasController.handleOverlayPlayPause(root.selectedVideoId)
+    }
+    CanvasShortcut {
+        sequence: "M"
+        applicable: root.selectedVideoId !== ""
+        onActivated: root.canvasController.handleOverlayMuteToggle(root.selectedVideoId)
+    }
+    CanvasShortcut {
+        sequence: "S"
+        applicable: root.selectedVideoId !== ""
+        onActivated: root.canvasController.handleVideoStartToggle(root.selectedVideoId)
+    }
+    CanvasShortcut {
+        sequence: "E"
+        applicable: root.selectedVideoId !== ""
+        onActivated: root.canvasController.handleVideoEndToggle(root.selectedVideoId)
+    }
+
     function synchronizeTransientState() {
         if (!canvasController)
             return
@@ -1369,6 +1437,8 @@ Rectangle {
                         if (editor && (editor.mediaId !== mediaId || handle)) {
                             textEditSession.finish(editor)
                         }
+                        if (!editor || editor.mediaId !== mediaId || handle)
+                            root.forceActiveFocus(Qt.MouseFocusReason)
                         var ownerKind = inputLayer.inputCoordinator.beginPrimaryGesture(
                             viewPoint.x,
                             viewPoint.y,
