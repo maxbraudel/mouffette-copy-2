@@ -2038,6 +2038,178 @@ private slots:
         QVERIFY(survivor->residencyReady());
     }
 
+    void residentMediaSurvivesCanvasNavigation_data()
+    {
+        QTest::addColumn<bool>("video");
+        QTest::newRow("image") << false;
+        QTest::newRow("video") << true;
+    }
+
+    void residentMediaSurvivesCanvasNavigation()
+    {
+        QFETCH(bool, video);
+        QString error;
+        std::unique_ptr<QuickCanvasHost> host(QuickCanvasHost::create(&error));
+        QVERIFY2(host, qPrintable(error));
+        host->setProjectEditingEnabled(true);
+        host->document()->setCamera(1.0, 0.0, 0.0);
+        QTemporaryDir directory;
+        const QString path = video ? QString::fromUtf8(TEST_VIDEO_FILE)
+                                   : directory.filePath(QStringLiteral("navigation.png"));
+        QImage image(160, 90, QImage::Format_ARGB32_Premultiplied);
+        image.fill(Qt::cyan);
+        if (!video) QVERIFY(image.save(path));
+        auto* media = host->document()->addPreparedFile(path, image.size(), video, {600, 300});
+        QVERIFY(media);
+        QTRY_VERIFY_WITH_TIMEOUT(media->residencyReady(), 5000);
+        if (video) {
+            QTRY_VERIFY_WITH_TIMEOUT(media->firstFramePrimed(), 10000);
+            media->setPositionMs(250);
+            QTRY_VERIFY_WITH_TIMEOUT(media->player()->preparedAt(250), 5000);
+        }
+        auto& memory = MediaResidencyManager::instance();
+        auto residentAsset = memory.asset(media->residencyOwnerId());
+        auto* player = media->player();
+        const qint64 position = media->positionMs();
+        QSignalSpy residencyChanges(media, &CanvasMedia::residencyChanged);
+
+        ClientWorkspaceViewModel session(QStringLiteral("navigation-session"), host.get(),
+            [] {}, nullptr, [] { return false; }, [] { return true; }, [] { return true; });
+        session.setLoading(false);
+        QQmlEngine engine;
+        QQuickWindow window;
+        window.resize(1100, 800);
+        QQmlComponent component(&engine, QUrl(QStringLiteral(
+            "qrc:/qt/qml/Mouffette/App/resources/qml/app/pages/CanvasPage.qml")));
+        QTRY_VERIFY_WITH_TIMEOUT(!component.isLoading(), 3000);
+        const auto controller = [&](bool active) {
+            return QVariantMap{{QStringLiteral("activeWorkspace"),
+                QVariant::fromValue<QObject*>(active ? &session : nullptr)}};
+        };
+        std::unique_ptr<QObject> pageObject(component.createWithInitialProperties({
+            {QStringLiteral("controller"), controller(false)}}));
+        auto* page = qobject_cast<QQuickItem*>(pageObject.get());
+        QVERIFY2(page, qPrintable(component.errorString()));
+        page->setParentItem(window.contentItem());
+        page->setSize(window.size());
+
+        // Exercise the actual page Loader: navigation destroys only the view,
+        // while the workspace, asset, player and paused cursor remain alive.
+        for (int visit = 0; visit < 3; ++visit) {
+            bool sawLoadingFrame = false;
+            QObject observer;
+            connect(&window, &QQuickWindow::afterAnimating, &observer, [&] {
+                auto* loading = findQuickItemWithProperty(page, "objectName", "mediaLoadingSkeleton");
+                if (loading) sawLoadingFrame |= loading->isVisible();
+            });
+            page->setProperty("controller", controller(true));
+            auto* skeleton = findQuickItemWithProperty(page, "objectName", "mediaLoadingSkeleton");
+            QVERIFY(skeleton);
+            const QPointer<QQuickItem> surface = skeleton->parentItem();
+            QVERIFY(surface);
+            QTRY_VERIFY_WITH_TIMEOUT(surface->property("contentReady").toBool(), 1000);
+            QCOMPARE(surface->property("revealProgress").toReal(), 1.0);
+            QVERIFY(!skeleton->isVisible());
+            window.show();
+            QVERIFY(QTest::qWaitForWindowExposed(&window));
+            const QImage frame = window.grabWindow();
+            QVERIFY(!frame.isNull());
+            QTest::qWait(250);
+            QVERIFY2(!sawLoadingFrame, "Resident media must not replay its loading reveal on navigation");
+            // Compare actual content pixels with the settled view as well as
+            // opacity: a late texture must not pass by merely skipping a fade.
+            const QImage settledFrame = window.grabWindow();
+            auto* delegate = findQuickItemWithProperty(page, "currentMediaId", media->mediaId());
+            QVERIFY(delegate);
+            for (int y = 1; y <= 3; ++y) {
+                for (int x = 1; x <= 3; ++x) {
+                    const QPointF point = delegate->mapToScene(
+                        {delegate->width() * x / 4, delegate->height() * y / 4});
+                    const QPoint pixel(qRound(point.x() * frame.width() / window.width()),
+                                       qRound(point.y() * frame.height() / window.height()));
+                    QVERIFY(frame.rect().contains(pixel));
+                    QCOMPARE(frame.pixelColor(pixel), settledFrame.pixelColor(pixel));
+                    if (!video) QCOMPARE(frame.pixelColor(pixel), QColor(Qt::cyan));
+                }
+            }
+            QCOMPARE(memory.asset(media->residencyOwnerId()), residentAsset);
+            QCOMPARE(media->player(), player);
+            QCOMPARE(media->positionMs(), position);
+            QCOMPARE(residencyChanges.count(), 0);
+            page->setProperty("controller", controller(false));
+            QTRY_VERIFY(surface.isNull());
+            QVERIFY(media->residencyReady());
+        }
+
+        // A real eviction on the same visual must still show loading and fade
+        // after readmission. The test must not keep the evicted asset alive.
+        residentAsset.reset();
+        page->setProperty("controller", controller(true));
+        auto* skeleton = findQuickItemWithProperty(page, "objectName", "mediaLoadingSkeleton");
+        QVERIFY(skeleton);
+        const QPointer<QQuickItem> surface = skeleton->parentItem();
+        QTRY_COMPARE(surface->property("revealProgress").toReal(), 1.0);
+        memory.setMemorySnapshotForTesting({8ULL << 30, 0, 512ULL << 20, false, 0});
+        memory.sampleNow();
+        QTRY_VERIFY(!media->residencyReady());
+        QTRY_VERIFY(skeleton->isVisible());
+        QCOMPARE(surface->property("revealProgress").toReal(), 0.0);
+        QVERIFY(page->findChildren<RemoteVideoFrameItem*>().isEmpty());
+        bool sawPartialOpacity = false;
+        QObject observer;
+        connect(&window, &QQuickWindow::afterAnimating, &observer, [&] {
+            if (!surface) return;
+            const qreal progress = surface->property("revealProgress").toReal();
+            sawPartialOpacity |= progress > 0 && progress < 1;
+        });
+        memory.setMemorySnapshotForTesting({8ULL << 30, 6ULL << 30, 512ULL << 20, false, 0});
+        memory.sampleNow();
+        memory.sampleNow();
+        QTRY_VERIFY_WITH_TIMEOUT(media->residencyReady(), 5000);
+        QTRY_COMPARE_WITH_TIMEOUT(surface->property("revealProgress").toReal(), 1.0, 5000);
+        QVERIFY2(sawPartialOpacity, "A real residency reload must still animate its loading reveal");
+        QVERIFY(!skeleton->isVisible());
+        QCOMPARE(media->player(), player);
+        QCOMPARE(media->positionMs(), position);
+    }
+
+    void mediaSurfaceDoesNotAnimateOutputRebinding_data()
+    {
+        QTest::addColumn<bool>("local");
+        QTest::newRow("canvas") << true;
+        QTest::newRow("remote") << false;
+    }
+
+    void mediaSurfaceDoesNotAnimateOutputRebinding()
+    {
+        QFETCH(bool, local);
+        QQmlEngine engine;
+        QQuickWindow window;
+        window.resize(320, 180);
+        QQmlComponent component(&engine, QUrl(QStringLiteral(
+            "qrc:/qt/qml/Mouffette/App/resources/qml/MediaSurface.qml")));
+        QTRY_VERIFY_WITH_TIMEOUT(!component.isLoading(), 3000);
+        std::unique_ptr<QObject> object(component.createWithInitialProperties({
+            {QStringLiteral("requireInitialSkeleton"), local}}));
+        auto* surface = qobject_cast<QQuickItem*>(object.get());
+        QVERIFY2(surface, qPrintable(component.errorString()));
+        surface->setParentItem(window.contentItem());
+        surface->setSize(window.size());
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        surface->setProperty("residencyReady", true);
+        surface->setProperty("contentReady", true);
+        if (!local) QCOMPARE(surface->property("revealProgress").toReal(), 1.0);
+        QTRY_COMPARE(surface->property("revealProgress").toReal(), 1.0);
+
+        // Replacing a GPU surface/sink can temporarily clear contentReady.
+        // Residency did not change, so the completed fade must not replay.
+        surface->setProperty("contentReady", false);
+        QCOMPARE(surface->property("revealProgress").toReal(), 0.0);
+        surface->setProperty("contentReady", true);
+        QCOMPARE(surface->property("revealProgress").toReal(), 1.0);
+    }
+
     void cachedMediaWaitsForInitialSkeletonBeforeShowingControls()
     {
         QTemporaryDir directory;

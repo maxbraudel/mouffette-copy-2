@@ -25,8 +25,14 @@ source signatures and document generations still govern publication. Bulk hashin
 and decoding cannot occupy the geometry pool.
 
 The skeleton and its editable shell do not allocate image/video rendering surfaces.
-Those surfaces are created when resident content is available, after the first host
-skeleton frame; the passive remote renderer does not have that presentation gate.
+For content that is still loading when its visual attaches, those surfaces are
+created when resident content is available, after the first host skeleton frame,
+and the content fades in. A visual attaching to already-resident content creates
+its surface immediately and presents at full opacity, including after canvas page
+navigation. Delegate creation and video-output rebinding are presentation events,
+not residency transitions; neither may replay the loading reveal. A subsequent
+loss of residency arms a new loading reveal. The passive remote renderer does not
+have this presentation gate or loading fade; its scene owns its transitions.
 Platform backend and audio device discovery also run outside the GUI thread, before
 creating the first native video sink or QML VideoOutput. Volume, mute and cursor
 changes are retained while it is pending, and the player receives its asset only

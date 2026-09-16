@@ -22,7 +22,7 @@ BaseMediaItem {
         : !!localVideoLoader.item && localFrameSeen
     property bool localFrameSeen: false
     contentReady: root.residencyReady && hasLiveFrame
-    initialFramePresented: !requireInitialSkeleton || mediaSurface.firstFramePresented
+    initialFramePresented: mediaSurface.renderingAllowed
 
     function restoreBoundPlayer() {
         var previousPlayer = boundMediaPlayer
@@ -88,6 +88,7 @@ BaseMediaItem {
         id: mediaSurface
         anchors.fill: parent
         requireInitialSkeleton: root.requireInitialSkeleton
+        residencyReady: root.residencyReady
         contentReady: root.contentReady
 
         Loader {
@@ -95,11 +96,12 @@ BaseMediaItem {
             anchors.fill: parent
             z: 1
             active: !root.remoteFrameMode && root.residencyReady && root.cppVideoSink !== null
-                    && (!root.requireInitialSkeleton || mediaSurface.firstFramePresented)
+                    && mediaSurface.renderingAllowed
             onItemChanged: {
                 root.localFrameSeen = false
                 Qt.callLater(root.bindPlayerToOutput)
             }
+            onLoaded: root.bindPlayerToOutput()
             sourceComponent: VideoOutput {
                 id: videoOutput
                 fillMode: VideoOutput.Stretch
@@ -131,7 +133,7 @@ BaseMediaItem {
             // painted surface once their shared source holds a resident frame.
             active: root.remoteFrameMode && root.residencyReady
                     && root.remoteFrameSource.hasFrame === true
-                    && (!root.requireInitialSkeleton || mediaSurface.firstFramePresented)
+                    && mediaSurface.renderingAllowed
             sourceComponent: RemoteVideoFrameItem {
                 frameSource: root.remoteFrameSource
             }
@@ -159,7 +161,9 @@ BaseMediaItem {
     }
 
     Component.onCompleted: {
-        Qt.callLater(bindPlayerToOutput)
+        // Initial properties are settled here. Restore a resident frame before
+        // the first canvas render; later role changes still coalesce above.
+        bindPlayerToOutput()
     }
 
     Component.onDestruction: {

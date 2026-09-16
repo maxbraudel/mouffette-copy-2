@@ -4,12 +4,28 @@ import Mouffette.Canvas
 
 Item {
     id: root
+    property bool residencyReady: false
     property bool contentReady: false
     property bool firstFramePresented: false
     property bool requireInitialSkeleton: true
-    readonly property bool revealed: contentReady && (!requireInitialSkeleton || firstFramePresented)
+    property bool initialized: false
+    property bool loadingRevealPending: false
+    readonly property bool renderingAllowed: initialized && (!loadingRevealPending || firstFramePresented)
+    readonly property bool revealed: residencyReady && contentReady && renderingAllowed
     property real revealProgress: 0
     default property alias content: contentHost.data
+
+    // Residency outlives this visual. A page revisit must create its rendering
+    // surface immediately, even though that new surface has no frame yet.
+    // Only observing missing resident data arms the skeleton gate and fade.
+    Component.onCompleted: {
+        loadingRevealPending = requireInitialSkeleton && !residencyReady
+        initialized = true
+    }
+    onResidencyReadyChanged: {
+        if (initialized && !residencyReady)
+            loadingRevealPending = requireInitialSkeleton
+    }
 
     states: State {
         name: "revealed"
@@ -21,7 +37,11 @@ Item {
     // Returning to the skeleton is immediate; remote scenes own their fades.
     transitions: Transition {
         to: "revealed"
-        enabled: root.requireInitialSkeleton
+        enabled: root.loadingRevealPending
+        onRunningChanged: {
+            if (!running && root.revealed && root.revealProgress === 1)
+                root.loadingRevealPending = false
+        }
         NumberAnimation {
             property: "revealProgress"
             duration: UiTiming.contentFadeDurationMs

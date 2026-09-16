@@ -1534,6 +1534,9 @@ void MediaOverlayTest::videoVolumeAndMuteStayIndependentAndSyncWithSettings()
     auto* check = findVisualItem(page, QStringLiteral("volumeCheck"));
     auto* field = findVisualItem(page, QStringLiteral("volumeField"));
     QVERIFY(mute && check && field);
+    // Residency can precede asynchronous player/output preparation. Clicking
+    // the still-hidden transport hits the canvas and clears the selection.
+    QTRY_VERIFY_WITH_TIMEOUT(mute->isVisible() && mute->isEnabled(), 8000);
     auto* settingsFlick = findVisualItem(page, QStringLiteral("settingsContentFlick"));
     QVERIFY(settingsFlick);
     const auto revealSettingsControl = [&](QQuickItem* item) {
