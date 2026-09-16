@@ -7,20 +7,15 @@
 #include <QString>
 #include <QVideoFrame>
 #include <memory>
-#include <vector>
+#include <functional>
 
-// Published only after the entire source has decoded successfully. Copies of
-// frames share their read-only CPU planes; occurrences never share a cursor.
+// Published only after validation to EOF. Video bytes retain the original
+// compression; only the poster is decoded permanently. Players share the bytes,
+// but own independent, bounded decoder queues and cursors.
 struct ResidentVideoFrame {
     QVideoFrame frame;
     qint64 timestampUs = 0;
     qint64 durationUs = 0;
-};
-
-struct ResidentAudioChunk {
-    QByteArray pcm; // interleaved float32, in audioFormat's channel order
-    qint64 timestampUs = 0;
-    qint64 sampleFrames = 0;
 };
 
 struct ResidentMediaAsset {
@@ -30,7 +25,15 @@ struct ResidentMediaAsset {
     QImage image;
     quint64 residentBytes = 0;
     qint64 durationUs = 0;
-    std::vector<ResidentVideoFrame> frames;
+    QByteArray compressedVideo;
+    ResidentVideoFrame firstFrame;
+    quint64 videoFrameCount = 0;
+    quint64 audioSampleCount = 0;
+    quint64 playbackBudgetBytes = 0; // estimate, never reported as allocated bytes
+    int videoTrack = 0;
+    int audioTrack = -1;
     QAudioFormat audioFormat;
-    std::vector<ResidentAudioChunk> audio;
+    // Main-thread admission, installed by the owning residency manager.
+    std::function<bool()> reservePlayback;
+    std::function<void()> releasePlayback;
 };

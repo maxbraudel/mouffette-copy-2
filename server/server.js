@@ -1005,7 +1005,7 @@ class MouffetteServer {
         if (!this.sceneMemoryReady(session, manifest)) {
             this.countScenePreparationFailure(message);
             return reject('scene_memory_unavailable',
-                'Every scene asset must be fully decoded in target memory before preparation');
+                'Every scene asset must be validated and resident in target memory before preparation');
         }
         const prepared = this.sceneRuns.prepare({
             remoteSessionId: session.remoteSessionId,

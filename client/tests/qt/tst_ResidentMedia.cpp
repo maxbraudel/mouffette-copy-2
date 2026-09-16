@@ -206,22 +206,18 @@ private slots:
         QString error;
         const auto asset = MediaDecoder::decode(path, {}, &error);
         QVERIFY2(asset, qPrintable(error));
-        QCOMPARE(asset->frames.size(), size_t(12));
+        QCOMPARE(asset->videoFrameCount, quint64(12));
         QVERIFY(asset->durationUs >= 480000);
         QCOMPARE(asset->audioFormat.sampleFormat(), QAudioFormat::Float);
         QCOMPARE(asset->audioFormat.sampleRate(), 48000);
         QCOMPARE(asset->audioFormat.channelCount(), 1);
-        qint64 samples = 0;
-        for (const auto& chunk : asset->audio) {
-            samples += chunk.sampleFrames;
-            QCOMPARE(chunk.pcm.size(), chunk.sampleFrames * qint64(sizeof(float)));
-        }
-        QVERIFY(samples >= 23 * 1024);
-        for (size_t i = 0; i < asset->frames.size(); ++i) {
-            QCOMPARE(asset->frames[i].timestampUs, qint64(i) * 40000);
-            QCOMPARE(asset->frames[i].frame.pixelFormat(), QVideoFrameFormat::Format_YUV420P);
-        }
-        QVideoFrame first = asset->frames.front().frame;
+        QVERIFY(asset->audioSampleCount >= 23 * 1024);
+        QFile original(path);
+        QVERIFY(original.open(QIODevice::ReadOnly));
+        QCOMPARE(asset->compressedVideo, original.readAll());
+        QVERIFY(asset->residentBytes < quint64(asset->compressedVideo.size()) + 8192);
+        QVideoFrame first = asset->firstFrame.frame;
+        QCOMPARE(first.pixelFormat(), QVideoFrameFormat::Format_YUV420P);
         QVERIFY(!first.map(QVideoFrame::WriteOnly));
         QVERIFY(first.map(QVideoFrame::ReadOnly));
         QCOMPARE(first.planeCount(), 3);
@@ -230,13 +226,42 @@ private slots:
         QVERIFY(!first.toImage().isNull());
     }
 
+    void original1080VideoHasBoundedPreparationMemory() {
+        const QString path = QString::fromUtf8(TEST_SAMPLE_VIDEO_FILE);
+        if (!QFile::exists(path)) QSKIP("Optional repository sample is not installed");
+        quint64 peakBudget = 0, retained = 0;
+        MediaDecoder::DecodeCallbacks callbacks;
+        callbacks.reserve = [&](quint64 bytes) { peakBudget = std::max(peakBudget, bytes); return true; };
+        callbacks.allocated = [&](quint64 bytes) { retained = bytes; };
+        QString error;
+        const auto asset = MediaDecoder::decode(path, callbacks, &error);
+        QVERIFY2(asset, qPrintable(error));
+        QCOMPARE(asset->videoFrameCount, quint64(921));
+        QCOMPARE(asset->compressedVideo.size(), QFileInfo(path).size());
+        QVERIFY(asset->residentBytes < quint64(QFileInfo(path).size()) + 4 * 1024 * 1024);
+        QCOMPARE(retained, asset->residentBytes);
+        QVERIFY(peakBudget < quint64(QFileInfo(path).size()) + 128 * 1024 * 1024);
+        QVERIFY(peakBudget > retained);
+        const auto probe = MediaDecoder::probe(path);
+        QVERIFY(probe.estimatedBytes < 20 * 1024 * 1024);
+        qInfo() << "1080p retained bytes:" << retained << "preparation budget:" << peakBudget;
+        // Exact original bitstream, shared between independent occurrences.
+        ResidentVideoPlayer one, two;
+        one.setAsset(asset); two.setAsset(asset);
+        QCOMPARE(one.asset()->compressedVideo.constData(), two.asset()->compressedVideo.constData());
+        QCOMPARE(one.asset()->compressedVideo.constData(), asset->compressedVideo.constData());
+        one.play();
+        QTRY_VERIFY2_WITH_TIMEOUT(one.position() > 100, qPrintable(one.errorString()), 5000);
+        one.pause();
+    }
+
     void presentationCachesDoNotAccumulateOnResidentFrames() {
         QTemporaryDir directory;
         const QString path = directory.filePath("cache.mp4");
         QVERIFY(writeVideo(path));
         const auto asset = MediaDecoder::decode(path);
         QVERIFY(asset);
-        const QVideoFrame original = asset->frames.front().frame;
+        const QVideoFrame original = asset->firstFrame.frame;
         auto first = ResidentVideoPlayer::presentationFrame(original);
         auto second = ResidentVideoPlayer::presentationFrame(original);
         QVERIFY(first != original);
@@ -260,7 +285,7 @@ private slots:
         const QString path = directory.filePath("growth.mp4");
         QVERIFY(writeVideo(path));
         MediaDecoder::DecodeCallbacks callbacks;
-        callbacks.reserve = [](quint64 bytes) { return bytes <= 64ULL * 1024 * 1024 + 16000; };
+        callbacks.reserve = [](quint64 bytes) { return bytes <= 16ULL * 1024 * 1024; };
         QString error;
         QVERIFY(!MediaDecoder::decode(path, callbacks, &error));
         QCOMPARE(error, QStringLiteral("memory_unavailable"));
@@ -305,8 +330,8 @@ private slots:
         const auto asset = MediaDecoder::decode(path, {}, &error);
         QVERIFY2(asset, qPrintable(error));
         QCOMPARE(asset->displaySize, probe.displaySize);
-        QCOMPARE(asset->frames.front().frame.size(), QSize(128, 48));
-        QVERIFY(asset->frames.front().frame.rotation() != QtVideo::Rotation::None);
+        QCOMPARE(asset->firstFrame.frame.size(), QSize(128, 48));
+        QVERIFY(asset->firstFrame.frame.rotation() != QtVideo::Rotation::None);
     }
 
     void playbackSurvivesSourceRemovalAndRetainsEvictedCursor() {
@@ -327,9 +352,9 @@ private slots:
         first.setPosition(200);
         QCOMPARE(first.position(), qint64(200));
         QCOMPARE(second.position(), qint64(0));
-        QCOMPARE(sink.videoFrame().startTime(), qint64(200000));
+        QTRY_COMPARE_WITH_TIMEOUT(sink.videoFrame().startTime(), qint64(200000), 3000);
         first.play();
-        QTRY_VERIFY_WITH_TIMEOUT(first.position() > 230, 500);
+        QTRY_VERIFY_WITH_TIMEOUT(first.position() > 230, 2000);
         first.pause();
         const qint64 retained = first.position();
         first.clearAsset();
@@ -340,7 +365,7 @@ private slots:
         QCOMPARE(first.position(), retained);
         first.setPosition(first.duration() - 30);
         first.play();
-        QTRY_COMPARE_WITH_TIMEOUT(first.mediaStatus(), QMediaPlayer::EndOfMedia, 500);
+        QTRY_COMPARE_WITH_TIMEOUT(first.mediaStatus(), QMediaPlayer::EndOfMedia, 2000);
         QCOMPARE(first.playbackState(), QMediaPlayer::StoppedState);
         first.setPosition(0);
         first.setLoops(2);
@@ -359,18 +384,15 @@ private slots:
         QString error;
         const auto asset = MediaDecoder::decode(path, {}, &error);
         QVERIFY2(asset, qPrintable(error));
-        QCOMPARE(asset->frames.size(), size_t(12));
-        QCOMPARE(asset->frames[2].timestampUs, qint64(120000));
-        QCOMPARE(asset->frames[4].timestampUs, qint64(280000));
-        QCOMPARE(asset->frames.back().timestampUs, qint64(640000));
+        QCOMPARE(asset->videoFrameCount, quint64(12));
         ResidentVideoPlayer player;
         QVideoSink sink;
         player.setVideoSink(&sink);
         player.setAsset(asset);
         player.setPosition(200);
-        QCOMPARE(sink.videoFrame().startTime(), qint64(160000));
+        QTRY_COMPARE_WITH_TIMEOUT(sink.videoFrame().startTime(), qint64(160000), 3000);
         player.setPosition(281);
-        QCOMPARE(sink.videoFrame().startTime(), qint64(280000));
+        QTRY_COMPARE_WITH_TIMEOUT(sink.videoFrame().startTime(), qint64(280000), 3000);
     }
 
     void audioPresentationAfterSourceRemoval() {
@@ -387,8 +409,8 @@ private slots:
         player.setAudioOutput(&audio);
         player.setAsset(asset);
         player.play();
-        QTRY_VERIFY_WITH_TIMEOUT(player.position() > 50, 1500);
-        QTRY_COMPARE_WITH_TIMEOUT(player.mediaStatus(), QMediaPlayer::EndOfMedia, 2000);
+        QTRY_VERIFY2_WITH_TIMEOUT(player.position() > 50, qPrintable(player.errorString()), 3000);
+        QTRY_COMPARE_WITH_TIMEOUT(player.mediaStatus(), QMediaPlayer::EndOfMedia, 5000);
         QCOMPARE(player.error(), QMediaPlayer::NoError);
     }
 
@@ -407,7 +429,7 @@ private slots:
         asset.reset();
         QVERIFY(QFile::remove(path));
         player.play();
-        QTRY_VERIFY_WITH_TIMEOUT(player.position() > 50, 1500);
+        QTRY_VERIFY2_WITH_TIMEOUT(player.position() > 50, qPrintable(player.errorString()), 3000);
         player.setPosition(200);
         QCOMPARE(player.position(), qint64(200));
         QVERIFY(player.isPlaying());
@@ -434,7 +456,7 @@ private slots:
             if (pos >= 150 && repeats < 2) { ++repeats; player.setPosition(50); }
         });
         player.play();
-        QTRY_COMPARE_WITH_TIMEOUT(repeats, 2, 600);
+        QTRY_COMPARE_WITH_TIMEOUT(repeats, 2, 2000);
         QVERIFY(player.isPlaying());
         player.stop();
     }

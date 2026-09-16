@@ -1,18 +1,11 @@
 #include "backend/media/ResidentVideoPlayer.h"
 
 #include <QAbstractVideoBuffer>
-#include <QAudioDevice>
 #include <QAudioOutput>
-#include <QAudioSink>
-#include <QIODevice>
-#include <QMediaDevices>
+#include <QBuffer>
 #include <QVariant>
 #include <QVideoSink>
 #include <algorithm>
-#include <atomic>
-#include <cmath>
-#include <cstring>
-#include <limits>
 
 namespace {
 class PresentationFrameBuffer final : public QAbstractVideoBuffer {
@@ -41,193 +34,182 @@ private:
 };
 } // namespace
 
-// Pull-only PCM presentation. Resampling/channel conversion here operates on
-// already decoded float samples; this class never opens a file or a codec.
-class ResidentPcmDevice final : public QIODevice
-{
-public:
-    ResidentPcmDevice(std::shared_ptr<const ResidentMediaAsset> asset,
-                      QAudioFormat outputFormat, qint64 positionUs)
-        : m_asset(std::move(asset)), m_outputFormat(outputFormat), m_startUs(positionUs) {
-        open(QIODevice::ReadOnly);
-    }
-    bool isSequential() const override { return true; }
-    qint64 bytesAvailable() const override {
-        const qint64 frames = std::max<qint64>(0, (m_asset->durationUs - m_startUs)
-            * m_outputFormat.sampleRate() / 1000000 - m_outputFrames);
-        return frames * m_outputFormat.bytesPerFrame() + QIODevice::bytesAvailable();
-    }
-protected:
-    qint64 readData(char* data, qint64 maxSize) override {
-        const int frameBytes = m_outputFormat.bytesPerFrame();
-        if (!frameBytes) return 0;
-        const qint64 frames = std::min(maxSize / frameBytes, bytesAvailable() / frameBytes);
-        const int channels = m_outputFormat.channelCount();
-        const int sourceChannels = m_asset->audioFormat.channelCount();
-        const double sourceRate = m_asset->audioFormat.sampleRate();
-        const int sampleBytes = m_outputFormat.bytesPerSample();
-        for (qint64 f = 0; f < frames; ++f) {
-            const double timeUs = m_startUs + (m_outputFrames + f) * 1000000.0 / m_outputFormat.sampleRate();
-            while (m_chunkIndex < m_asset->audio.size()) {
-                const auto& chunk = m_asset->audio[m_chunkIndex];
-                if (timeUs < chunk.timestampUs + chunk.sampleFrames * 1000000.0 / sourceRate) break;
-                ++m_chunkIndex;
-            }
-            for (int channel = 0; channel < channels; ++channel) {
-                float value = 0;
-                if (m_chunkIndex < m_asset->audio.size()) {
-                    const auto& chunk = m_asset->audio[m_chunkIndex];
-                    if (timeUs >= chunk.timestampUs) {
-                        const double position = (timeUs - chunk.timestampUs) * sourceRate / 1000000.0;
-                        const qint64 index = std::clamp<qint64>(qint64(position), 0, chunk.sampleFrames - 1);
-                        const float fraction = float(position - std::floor(position));
-                        auto sample = [&](qint64 frame, int ch) -> float {
-                            const ResidentAudioChunk* current = &chunk;
-                            if (frame >= current->sampleFrames) {
-                                if (m_chunkIndex + 1 < m_asset->audio.size()) {
-                                    const auto& next = m_asset->audio[m_chunkIndex + 1];
-                                    const double endUs = chunk.timestampUs + chunk.sampleFrames * 1000000.0 / sourceRate;
-                                    if (std::abs(next.timestampUs - endUs) < 2000) { current = &next; frame = 0; }
-                                    else frame = chunk.sampleFrames - 1;
-                                } else frame = chunk.sampleFrames - 1;
-                            }
-                            float sampleValue = 0;
-                            const char* bytes = current->pcm.constData()
-                                + (frame * sourceChannels + ch) * sizeof(float);
-                            std::memcpy(&sampleValue, bytes, sizeof(sampleValue));
-                            return std::isfinite(sampleValue) ? sampleValue : 0;
-                        };
-                        auto interpolated = [&](int ch) {
-                            return sample(index, ch) * (1 - fraction) + sample(index + 1, ch) * fraction;
-                        };
-                        if (channels == sourceChannels) value = interpolated(channel);
-                        else if (sourceChannels == 1) value = interpolated(0);
-                        else if (channels == 1) {
-                            for (int ch = 0; ch < sourceChannels; ++ch) value += interpolated(ch) / sourceChannels;
-                        } else {
-                            value = channel < sourceChannels ? interpolated(channel) : 0;
-                            // A stereo-only output retains center/surround data.
-                            if (channels == 2 && sourceChannels > 2) {
-                                float extra = 0;
-                                for (int ch = 2; ch < sourceChannels; ++ch) extra += interpolated(ch);
-                                value = (value + extra / (sourceChannels - 2)) * 0.5f;
-                            }
-                        }
-                    }
-                }
-                char* destination = data + f * frameBytes + channel * sampleBytes;
-                value = std::clamp(value, -1.0f, 1.0f);
-                switch (m_outputFormat.sampleFormat()) {
-                case QAudioFormat::Float: std::memcpy(destination, &value, sizeof(value)); break;
-                case QAudioFormat::Int16: {
-                    const qint16 converted = qint16(std::lround(value * 32767.0f));
-                    std::memcpy(destination, &converted, sizeof(converted)); break;
-                }
-                case QAudioFormat::Int32: {
-                    const qint32 converted = qint32(std::llround(double(value) * 2147483647.0));
-                    std::memcpy(destination, &converted, sizeof(converted)); break;
-                }
-                case QAudioFormat::UInt8: *destination = char(std::clamp(int(std::lround((value + 1) * 127.5f)), 0, 255)); break;
-                default: std::memset(destination, 0, sampleBytes); break;
-                }
-            }
-        }
-        m_outputFrames += frames;
-        return frames * frameBytes;
-    }
-    qint64 writeData(const char*, qint64) override { return -1; }
-private:
-    std::shared_ptr<const ResidentMediaAsset> m_asset;
-    QAudioFormat m_outputFormat;
-    qint64 m_startUs;
-    std::atomic<qint64> m_outputFrames{0};
-    size_t m_chunkIndex = 0;
-};
 
 ResidentVideoPlayer::ResidentVideoPlayer(QObject* parent) : QObject(parent) {
-    m_timer.setTimerType(Qt::PreciseTimer);
-    m_timer.setInterval(5);
-    connect(&m_timer, &QTimer::timeout, this, &ResidentVideoPlayer::tick);
+    // Preserve marker/automation resolution independently of the platform's
+    // coarse positionChanged interval. The decoder/audio clock stays authoritative.
+    m_positionTimer.setTimerType(Qt::PreciseTimer);
+    m_positionTimer.setInterval(5);
+    connect(&m_positionTimer, &QTimer::timeout, this, [this] {
+        if (!m_player || m_loading || !isPlaying()) return;
+        const qint64 value = m_player->position();
+        if (m_positionMs != value) { m_positionMs = value; emit positionChanged(value); }
+    });
 }
-
-ResidentVideoPlayer::~ResidentVideoPlayer() {
-    m_timer.stop();
-    stopAudio();
-    if (m_videoSink) m_videoSink->setVideoFrame(QVideoFrame());
-}
+ResidentVideoPlayer::~ResidentVideoPlayer() { releasePlayer(); }
 
 QVideoFrame ResidentVideoPlayer::presentationFrame(const QVideoFrame& source) {
     if (!source.isValid()) return {};
-    QVideoFrame presentation(std::make_unique<PresentationFrameBuffer>(source));
-    presentation.setStartTime(source.startTime());
-    presentation.setEndTime(source.endTime());
-    presentation.setRotation(source.rotation());
-    presentation.setMirrored(source.mirrored());
-    return presentation;
+    QVideoFrame frame(std::make_unique<PresentationFrameBuffer>(source));
+    frame.setStartTime(source.startTime());
+    frame.setEndTime(source.endTime());
+    frame.setRotation(source.rotation());
+    frame.setMirrored(source.mirrored());
+    return frame;
+}
+
+void ResidentVideoPlayer::releasePlayer() {
+    // Join/destroy the decoder before releasing its QIODevice and the budget.
+    // An outstanding source load must never read a destroyed buffer.
+    if (m_player) disconnect(m_player.get(), nullptr, this, nullptr);
+    if (m_decodeSink) disconnect(m_decodeSink.get(), nullptr, this, nullptr);
+    m_player.reset();
+    m_decodeSink.reset();
+    m_source.reset();
+    m_loading = false;
+    m_positionTimer.stop();
+    m_frame = {};
+    if (m_videoSink) m_videoSink->setVideoFrame({});
+    if (m_playbackReserved && m_asset && m_asset->releasePlayback) m_asset->releasePlayback();
+    m_playbackReserved = false;
 }
 
 void ResidentVideoPlayer::setAsset(std::shared_ptr<const ResidentMediaAsset> asset) {
     if (m_asset == asset) return;
-    if (!asset || !asset->video || asset->frames.empty()) { clearAsset(); return; }
-    m_timer.stop();
-    stopAudio();
-    setState(QMediaPlayer::StoppedState);
+    if (!asset || !asset->video || asset->compressedVideo.isEmpty()
+        || !asset->firstFrame.frame.isValid()) { clearAsset(); return; }
+    releasePlayer();
     m_asset = std::move(asset);
-    m_positionUs = std::clamp<qint64>(m_positionUs, 0, m_asset->durationUs);
-    m_presentedIndex = -1;
-    m_completedLoops = 0;
+    m_positionMs = std::clamp<qint64>(m_positionMs, 0, duration());
+    m_requestedState = QMediaPlayer::StoppedState;
+    setState(m_requestedState);
     m_error = QMediaPlayer::NoError;
     m_errorString.clear();
     emit errorChanged();
     emit durationChanged(duration());
     emit seekableChanged(true);
-    presentFrame();
-    emit positionChanged(position());
+    presentPoster();
     setStatus(QMediaPlayer::LoadedMedia);
+    emit positionChanged(position());
+    if (m_positionMs > 0) prepare(m_positionMs);
 }
 
 void ResidentVideoPlayer::clearAsset() {
-    m_timer.stop();
-    stopAudio();
-    setState(QMediaPlayer::StoppedState);
-    if (m_videoSink) m_videoSink->setVideoFrame(QVideoFrame());
+    releasePlayer();
     m_asset.reset();
-    m_presentedIndex = -1;
+    m_requestedState = QMediaPlayer::StoppedState;
+    setState(m_requestedState);
     setStatus(QMediaPlayer::NoMedia);
     emit durationChanged(0);
     emit seekableChanged(false);
 }
 
+bool ResidentVideoPlayer::ensurePlayer() {
+    if (m_player) return true;
+    if (!m_asset) return false;
+    if (m_asset->reservePlayback && !m_asset->reservePlayback()) {
+        fail(QMediaPlayer::ResourceError, QStringLiteral("Insufficient available RAM for the video playback buffers"));
+        return false;
+    }
+    m_error = QMediaPlayer::NoError;
+    m_errorString.clear();
+    emit errorChanged();
+    m_playbackReserved = true;
+    m_loading = true;
+    m_source = std::make_unique<QBuffer>();
+    // QByteArray implicit sharing: one immutable MP4 allocation for every cursor.
+    m_source->setData(m_asset->compressedVideo);
+    m_source->open(QIODevice::ReadOnly);
+    m_decodeSink = std::make_unique<QVideoSink>();
+    m_player = std::make_unique<QMediaPlayer>();
+    m_player->setLoops(m_loops);
+    m_player->setAudioOutput(m_audioOutput);
+    m_player->setVideoSink(m_decodeSink.get());
+    connect(m_decodeSink.get(), &QVideoSink::videoFrameChanged, this, [this](const QVideoFrame& frame) {
+        if (!m_asset || !frame.isValid()) return;
+        m_frame = frame;
+        if (m_videoSink) m_videoSink->setVideoFrame(frame);
+        emit frameReady(frame.startTime() / 1000);
+    });
+    connect(m_player.get(), &QMediaPlayer::positionChanged, this, [this](qint64 value) {
+        if (m_loading || !m_asset || m_positionMs == value) return;
+        m_positionMs = value;
+        emit positionChanged(value);
+    });
+    connect(m_player.get(), &QMediaPlayer::playbackStateChanged, this, [this](auto state) {
+        if (!m_loading) setState(state);
+    });
+    connect(m_player.get(), &QMediaPlayer::errorOccurred, this, &ResidentVideoPlayer::fail);
+    connect(m_player.get(), &QMediaPlayer::mediaStatusChanged, this, [this](auto status) {
+        if (!m_asset) return;
+        if (status == QMediaPlayer::LoadedMedia && m_loading) {
+            const QPointer<QMediaPlayer> native = m_player.get();
+            // Qt is still completing source initialization while emitting this
+            // signal. Prime after that transition, preserving the requested seek
+            // across track-selection notifications and rejecting retired players.
+            QMetaObject::invokeMethod(this, [this, native] {
+                if (!native || native != m_player.get() || !m_asset || !m_loading) return;
+                const qint64 target = m_positionMs;
+                native->setActiveVideoTrack(m_asset->videoTrack);
+                native->setActiveAudioTrack(m_asset->audioTrack);
+                native->setActiveSubtitleTrack(-1);
+                m_loading = false;
+                if (m_requestedState == QMediaPlayer::PlayingState) {
+                    native->setPosition(target);
+                    native->play();
+                } else {
+                    native->pause();
+                    native->setPosition(target);
+                }
+                // AVFoundation stays LoadedMedia when primed while paused;
+                // it need not emit BufferedMedia. Publish completion so later
+                // cursor changes are not mistaken for pending source loads.
+                if (native && native == m_player.get() && m_asset)
+                    setStatus(native->mediaStatus());
+            }, Qt::QueuedConnection);
+            return;
+        }
+        if (status == QMediaPlayer::EndOfMedia) m_requestedState = QMediaPlayer::StoppedState;
+        setStatus(status);
+    });
+    // Synthetic type hint only; no file/network URL. Reads use the memory device.
+    m_player->setSourceDevice(m_source.get(), QUrl(QStringLiteral("resident:///video.mp4")));
+    return true;
+}
+
+bool ResidentVideoPlayer::preparedAt(qint64 positionMs) const {
+    const qint64 target = std::clamp<qint64>(positionMs, 0, std::max<qint64>(0, duration() - 1));
+    return m_player && !m_loading && m_error == QMediaPlayer::NoError && m_frame.isValid()
+        && m_frame.startTime() / 1000 <= target + 1
+        && (m_frame.endTime() < 0 ? m_frame.startTime() / 1000 >= target - 1
+                                 : m_frame.endTime() / 1000 > target);
+}
+void ResidentVideoPlayer::prepare(qint64 positionMs) {
+    if (!m_asset) return;
+    if (m_error != QMediaPlayer::NoError) releasePlayer();
+    m_requestedState = QMediaPlayer::PausedState;
+    setPosition(positionMs);
+    if (ensurePlayer() && !m_loading) m_player->pause();
+}
+void ResidentVideoPlayer::presentPoster() {
+    if (!m_asset || !m_videoSink) return;
+    if (m_frame.isValid()) m_videoSink->setVideoFrame(m_frame);
+    else if (m_positionMs == 0) m_videoSink->setVideoFrame(presentationFrame(m_asset->firstFrame.frame));
+}
 void ResidentVideoPlayer::setLoops(int loops) {
     if (loops != QMediaPlayer::Infinite && loops < 1) loops = 1;
     if (m_loops == loops) return;
     m_loops = loops;
-    m_completedLoops = 0;
+    if (m_player) m_player->setLoops(loops);
     emit loopsChanged();
 }
-
 QAudioOutput* ResidentVideoPlayer::audioOutput() const { return m_audioOutput; }
 QVideoSink* ResidentVideoPlayer::videoSink() const { return m_videoSink; }
-
 void ResidentVideoPlayer::setAudioOutput(QAudioOutput* output) {
-    if (m_audioOutput == output) return;
-    stopAudio();
-    if (m_audioOutput) disconnect(m_audioOutput, nullptr, this, nullptr);
     m_audioOutput = output;
-    if (output) {
-        connect(output, &QAudioOutput::volumeChanged, this, &ResidentVideoPlayer::updateAudioVolume);
-        connect(output, &QAudioOutput::mutedChanged, this, &ResidentVideoPlayer::updateAudioVolume);
-        connect(output, &QAudioOutput::deviceChanged, this, [this] {
-            stopAudio();
-            if (isPlaying()) startAudio();
-        });
-        connect(output, &QObject::destroyed, this, [this] { stopAudio(); });
-    }
-    if (isPlaying()) startAudio();
+    if (m_player) m_player->setAudioOutput(output);
 }
-
 void ResidentVideoPlayer::setVideoSink(QVideoSink* sink) { setVideoOutput(sink); }
-
 void ResidentVideoPlayer::setVideoOutput(QObject* output) {
     QVideoSink* sink = qobject_cast<QVideoSink*>(output);
     if (output && !sink) {
@@ -236,148 +218,62 @@ void ResidentVideoPlayer::setVideoOutput(QObject* output) {
         if (!sink) sink = qobject_cast<QVideoSink*>(candidate.value<QObject*>());
     }
     if (m_videoOutput == output && m_videoSink == sink) return;
-    if (m_videoSink && m_videoSink != sink) m_videoSink->setVideoFrame(QVideoFrame());
+    if (m_videoSink && m_videoSink != sink) m_videoSink->setVideoFrame({});
     m_videoOutput = output;
     m_videoSink = sink;
-    m_presentedIndex = -1;
-    presentFrame();
+    presentPoster();
     emit videoOutputChanged();
 }
-
 void ResidentVideoPlayer::setState(QMediaPlayer::PlaybackState state) {
     if (m_state == state) return;
     m_state = state;
+    if (state == QMediaPlayer::PlayingState) m_positionTimer.start();
+    else m_positionTimer.stop();
     emit playbackStateChanged(state);
 }
-
 void ResidentVideoPlayer::setStatus(QMediaPlayer::MediaStatus status) {
     if (m_status == status) return;
     m_status = status;
     emit mediaStatusChanged(status);
 }
-
-void ResidentVideoPlayer::play() {
-    if (!m_asset || isPlaying()) return;
-    if (m_positionUs >= m_asset->durationUs) {
-        m_completedLoops = 0;
-        setPosition(0);
-    }
-    m_clockOriginUs = m_positionUs;
-    m_clock.start();
-    setStatus(QMediaPlayer::BufferedMedia);
-    setState(QMediaPlayer::PlayingState);
-    if (!m_asset || !isPlaying()) return;
-    startAudio();
-    m_timer.start();
-    m_presentedIndex = -1;
-    presentFrame();
+void ResidentVideoPlayer::fail(QMediaPlayer::Error error, const QString& message) {
+    m_error = error;
+    m_errorString = message;
+    m_requestedState = QMediaPlayer::StoppedState;
+    setState(m_requestedState);
+    setStatus(QMediaPlayer::InvalidMedia);
+    emit errorChanged();
+    emit errorOccurred(error, message);
 }
-
+void ResidentVideoPlayer::play() {
+    if (!m_asset) return;
+    if (m_positionMs >= duration()) setPosition(0);
+    m_requestedState = QMediaPlayer::PlayingState;
+    if (!ensurePlayer()) return;
+    if (!m_loading) m_player->play();
+    setState(m_requestedState);
+}
 void ResidentVideoPlayer::pause() {
     if (!m_asset) return;
-    if (isPlaying()) tick();
-    m_timer.stop();
-    stopAudio();
-    setState(QMediaPlayer::PausedState);
+    m_requestedState = QMediaPlayer::PausedState;
+    if (m_player && !m_loading) m_player->pause();
+    setState(m_requestedState);
 }
-
 void ResidentVideoPlayer::stop() {
-    m_timer.stop();
-    stopAudio();
-    m_completedLoops = 0;
-    setState(QMediaPlayer::StoppedState);
+    m_requestedState = QMediaPlayer::StoppedState;
+    if (m_player && !m_loading) m_player->stop();
+    setState(m_requestedState);
     setPosition(0);
     if (m_asset) setStatus(QMediaPlayer::LoadedMedia);
 }
-
-void ResidentVideoPlayer::setPosition(qint64 positionMs) {
-    positionMs = std::clamp<qint64>(positionMs, 0, std::numeric_limits<qint64>::max() / 1000);
-    const qint64 nextUs = m_asset ? std::min(positionMs * 1000, m_asset->durationUs) : positionMs * 1000;
-    const qint64 previousMs = position();
-    m_positionUs = nextUs;
-    m_presentedIndex = -1;
-    m_clockOriginUs = nextUs;
-    m_clock.restart();
-    if (isPlaying()) { stopAudio(); startAudio(); }
-    if (m_asset && m_status == QMediaPlayer::EndOfMedia) setStatus(QMediaPlayer::LoadedMedia);
-    presentFrame();
-    if (previousMs != position()) emit positionChanged(position());
-}
-
-void ResidentVideoPlayer::tick() {
-    if (!m_asset || !isPlaying()) return;
-    const qint64 previousMs = position();
-    // The audio hardware is the clock when present, preventing cumulative
-    // A/V drift on long resident videos. Silent/video-only playback uses the
-    // monotonic clock, with the same cursor and remote seek semantics.
-    const bool audioClock = m_audioSink && m_audioSink->error() == QAudio::NoError
-        && (m_audioSink->state() == QAudio::ActiveState || m_audioSink->state() == QAudio::IdleState);
-    const qint64 clockUs = audioClock ? m_audioOriginUs + m_audioSink->processedUSecs()
-        : m_clockOriginUs + m_clock.nsecsElapsed() / 1000;
-    const bool audioFinished = audioClock && m_audioSink->state() == QAudio::IdleState
-        && m_pcm && m_pcm->bytesAvailable() == 0;
-    const qint64 next = audioFinished ? m_asset->durationUs : std::min(m_asset->durationUs, clockUs);
-    m_positionUs = next;
-    presentFrame();
-    if (previousMs != position()) emit positionChanged(position());
-    // Markers and scene synchronization can seek or stop synchronously above.
-    if (!m_asset || !isPlaying() || m_positionUs != next || m_positionUs < m_asset->durationUs) return;
-    ++m_completedLoops;
-    if (m_loops == QMediaPlayer::Infinite || m_completedLoops < m_loops) {
-        setPosition(0);
-        return;
+void ResidentVideoPlayer::setPosition(qint64 value) {
+    value = std::max<qint64>(0, value);
+    if (m_asset) value = std::min(value, duration());
+    const bool changed = value != m_positionMs;
+    m_positionMs = value;
+    if (m_asset && (m_player || value > 0)) {
+        if (ensurePlayer() && !m_loading && changed) m_player->setPosition(value);
     }
-    m_timer.stop();
-    stopAudio();
-    setState(QMediaPlayer::StoppedState);
-    if (m_asset && !isPlaying() && m_positionUs >= m_asset->durationUs)
-        setStatus(QMediaPlayer::EndOfMedia);
-}
-
-void ResidentVideoPlayer::presentFrame() {
-    if (!m_asset || !m_videoSink || m_asset->frames.empty()) return;
-    const auto found = std::upper_bound(m_asset->frames.begin(), m_asset->frames.end(), m_positionUs,
-        [](qint64 time, const ResidentVideoFrame& frame) { return time < frame.timestampUs; });
-    const qsizetype index = found == m_asset->frames.begin() ? 0 : std::distance(m_asset->frames.begin(), found) - 1;
-    if (index == m_presentedIndex) return;
-    m_presentedIndex = index;
-    m_videoSink->setVideoFrame(presentationFrame(m_asset->frames[size_t(index)].frame));
-}
-
-void ResidentVideoPlayer::startAudio() {
-    if (!m_asset || m_asset->audio.empty() || !m_audioOutput) return;
-    QAudioDevice device = m_audioOutput->device();
-    if (device.isNull()) device = QMediaDevices::defaultAudioOutput();
-    if (device.isNull()) return;
-    const QAudioFormat format = device.isFormatSupported(m_asset->audioFormat)
-        ? m_asset->audioFormat : device.preferredFormat();
-    if (!format.isValid()) { failAudio(QStringLiteral("The audio output has no usable PCM format")); return; }
-    m_audioOriginUs = m_positionUs;
-    m_pcm = std::make_unique<ResidentPcmDevice>(m_asset, format, m_positionUs);
-    m_audioSink = std::make_unique<QAudioSink>(device, format);
-    // Keep seeks and scene starts responsive without duplicating long PCM spans.
-    m_audioSink->setBufferSize(format.bytesForDuration(40000));
-    updateAudioVolume();
-    m_audioSink->start(m_pcm.get());
-    if (m_audioSink->error() != QAudio::NoError)
-        failAudio(QStringLiteral("Unable to start the resident audio output"));
-}
-
-void ResidentVideoPlayer::stopAudio() {
-    // stop() drains the device on some platforms. Seek, pause and eviction
-    // must discard queued PCM immediately and release the resident asset.
-    if (m_audioSink) m_audioSink->reset();
-    m_audioSink.reset();
-    m_pcm.reset();
-}
-
-void ResidentVideoPlayer::updateAudioVolume() {
-    if (m_audioSink) m_audioSink->setVolume(!m_audioOutput || m_audioOutput->isMuted() ? 0 : m_audioOutput->volume());
-}
-
-void ResidentVideoPlayer::failAudio(const QString& message) {
-    m_error = QMediaPlayer::ResourceError;
-    m_errorString = message;
-    emit errorChanged();
-    emit errorOccurred(m_error, m_errorString);
+    if (changed) emit positionChanged(m_positionMs);
+    if (!m_player) presentPoster();
 }

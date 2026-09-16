@@ -47,7 +47,7 @@
 
 
 namespace {
-constexpr int kLivePlaybackWarmupFrames = 0; // fully decoded CPU frames need no decoder warmup
+constexpr int kLivePlaybackWarmupFrames = 0; // the requested start frame is primed before scene readiness
 constexpr qint64 kMaxVideoPositionMs = 7LL * 24LL * 60LL * 60LL * 1000LL;
 constexpr int kMaxVideoSyncItems = 512;
 constexpr int kMaxRemoteScreens = 64;
@@ -481,7 +481,7 @@ void RemoteSceneController::onScenePrepareEnvelope(const QJsonObject& envelope)
             media.value(QStringLiteral("fileId")).toString());
         if (!MediaResidencyManager::instance().ready(memoryOwner)) {
             m_ws->sendScenePrepared(runId, false, {}, QStringLiteral("scene_memory_unavailable"),
-                QStringLiteral("Every media must be fully decoded in memory before preparation"));
+                QStringLiteral("Every media must be validated and resident in memory before preparation"));
             return;
         }
         referencedMedia.insert(mediaId);
@@ -3655,7 +3655,7 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
     } else if (item->type == "image") {
         item->loaded = item->spans.isEmpty();
     } else if (item->type == "video") {
-        // Present already decoded CPU frames to one shared source for all spans.
+        // Stream the resident MP4; all screen spans share this occurrence's output.
         item->player = new ResidentVideoPlayer(this);
         item->audio = new QAudioOutput(this);
         item->audio->setMuted(item->muted); 
@@ -3667,8 +3667,10 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
             if (!item) return;
             if (epoch != m_sceneEpoch) return;
             if (s == QMediaPlayer::LoadedMedia || s == QMediaPlayer::BufferedMedia) {
-                item->loaded = true;
-                seekToConfiguredStart(item);
+                if (!item->loaded) {
+                    item->loaded = true;
+                    seekToConfiguredStart(item);
+                }
                 evaluateItemReadiness(item);
             } else if (s == QMediaPlayer::EndOfMedia && item->player) {
                 // Let the backend finish its EOF transition before restarting.
@@ -3766,40 +3768,52 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
                 freezeVideoOutput(item);
             }
         });
-        QObject::connect(item->player, &ResidentVideoPlayer::errorOccurred, item->player, [this,epoch,weakItem](QMediaPlayer::Error e, const QString& err){ auto item = weakItem.lock(); if (!item) return; if (epoch != m_sceneEpoch) return; if (e != QMediaPlayer::NoError) qWarning() << "RemoteSceneController: player error" << int(e) << err << "for" << item->mediaId; });
+        QObject::connect(item->player, &ResidentVideoPlayer::errorOccurred, item->player,
+            [this, epoch, weakItem](QMediaPlayer::Error error, const QString& message) {
+                auto item = weakItem.lock();
+                if (!item || epoch != m_sceneEpoch || error == QMediaPlayer::NoError) return;
+                if (!m_sceneActivated) sendPrepareResult(false, message);
+                else qWarning() << "RemoteSceneController: player error" << message << item->mediaId;
+            });
+        QObject::connect(item->player, &ResidentVideoPlayer::frameReady, item->player,
+            [this, epoch, weakItem](qint64 timestamp) {
+                auto item = weakItem.lock();
+                if (!item || epoch != m_sceneEpoch || item->primedFirstFrame || !item->liveSink) return;
+                const auto frame = item->liveSink->videoFrame();
+                const qint64 desired = std::max<qint64>(0, targetDisplayTimestamp(item));
+                if (!frame.isValid() || timestamp > desired + 1
+                    || (frame.endTime() >= 0 && frame.endTime() / 1000 < desired)) return;
+                item->primedFrame = frame;
+                item->lastFrameImage = convertFrameToImage(frame);
+                if (item->lastFrameImage.isNull()) {
+                    sendPrepareResult(false, QStringLiteral("Resident video frame cannot be rendered"));
+                    return;
+                }
+                item->loaded = true;
+                item->primedFirstFrame = true;
+                item->primedFrameSticky = true;
+                item->awaitingStartFrame = false;
+                item->awaitingDecoderSync = false;
+                item->awaitingLivePlayback = false;
+                item->liveWarmupFramesRemaining = 0;
+                item->displayTimestampMs = timestamp;
+                item->hasDisplayTimestamp = true;
+                applyImageToSpans(item, item->lastFrameImage);
+                evaluateItemReadiness(item);
+            });
         const auto resident = MediaResidencyManager::instance().asset(item->residencyOwner);
-        if (!resident || !resident->video || resident->frames.empty()) {
+        if (!resident || !resident->video || resident->compressedVideo.isEmpty()) {
             sendPrepareResult(false, QStringLiteral("Resident video allocation is unavailable"));
             return;
         }
+        ensureVideoOutputsAttached(item);
         item->player->setAsset(resident);
         item->player->setLoops(QMediaPlayer::Once);
         item->repeatRemaining = item->repeatEnabled ? std::max(0, item->repeatCount) : 0;
-        const qint64 desired = std::max<qint64>(0, targetDisplayTimestamp(item));
-        const auto next = std::upper_bound(resident->frames.cbegin(), resident->frames.cend(),
-            desired * 1000, [](qint64 time, const ResidentVideoFrame& frame) {
-                return time < frame.timestampUs;
-            });
-        const auto selected = next == resident->frames.cbegin() ? next : std::prev(next);
-        item->primedFrame = ResidentVideoPlayer::presentationFrame(selected->frame);
-        item->lastFrameImage = convertFrameToImage(item->primedFrame);
-        if (item->lastFrameImage.isNull()) {
-            sendPrepareResult(false, QStringLiteral("Resident video frame cannot be rendered"));
-            return;
-        }
-        item->loaded = true;
-        item->primedFirstFrame = true;
-        item->primedFrameSticky = true;
-        item->awaitingStartFrame = false;
-        item->awaitingDecoderSync = false;
-        item->awaitingLivePlayback = false;
-        item->liveWarmupFramesRemaining = 0;
-        item->displayTimestampMs = selected->timestampUs / 1000;
-        item->hasDisplayTimestamp = true;
-        ensureVideoOutputsAttached(item);
-        item->player->setPosition(desired);
-        item->player->pause();
-        applyImageToSpans(item, item->lastFrameImage);
+        // Preparation completes only after the requested timestamp has actually
+        // decoded, including arbitrary configured starts (not merely the poster).
+        item->player->prepare(std::max<qint64>(0, targetDisplayTimestamp(item)));
+
     }
 
     // Display/play scheduling

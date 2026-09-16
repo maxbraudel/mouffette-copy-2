@@ -182,6 +182,10 @@ copy_qt_plugin iconengines libqsvgicon.dylib
     echo "Missing patched Darwin media plugin in $APP" >&2
     exit 1
 }
+[[ -f "$APP_PLUGIN_DIR/multimedia/libffmpegmediaplugin.dylib" ]] || {
+    echo "Missing resident-memory streaming FFmpeg plugin in $APP" >&2
+    exit 1
+}
 copy_qt_plugin networkinformation libqapplenetworkinformation.dylib
 for IMAGE_PLUGIN in libqgif.dylib libqwebp.dylib libqico.dylib libqmacheif.dylib \
     libqjpeg.dylib libqtiff.dylib libqsvg.dylib libqicns.dylib; do

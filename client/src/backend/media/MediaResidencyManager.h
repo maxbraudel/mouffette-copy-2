@@ -14,7 +14,7 @@
 
 class QFutureWatcherBase;
 
-// One process-wide authority for complete decoded assets. All methods and
+// One process-wide authority for validated resident assets. All methods and
 // signals are on the application thread; worker jobs only access job atomics.
 class MediaResidencyManager final : public QObject
 {
@@ -32,6 +32,9 @@ public:
     static MediaResidencyManager& instance();
     explicit MediaResidencyManager(QObject* parent = nullptr);
     ~MediaResidencyManager() override;
+
+    // Configure once at startup, before restoring or receiving media.
+    void setSafetyReserve(int percent, int minimumMiB);
 
     void acquire(const QString& ownerId, const QString& path,
                  const QString& expectedSha256 = {});
@@ -80,6 +83,9 @@ private:
     quint64 reserveBytes() const;
     quint64 headroomBytes() const;
     quint64 residentBytes() const;
+    quint64 playbackBudgetBytes() const;
+    quint64 reservedBudgetBytes() const;
+    bool admitsBudget(quint64 additional);
     static MemorySnapshot readSystemMemory();
     void setupPressureNotifications();
     void finishBackgroundWork(const QString& path);
@@ -89,12 +95,15 @@ private:
     QSet<QFutureWatcherBase*> m_jobs;
     QList<EntryPtr> m_entries;
     QHash<QString, QHash<QString, QVariantMap>> m_remoteStates;
-    QHash<QString, QSet<QString>> m_pins;
+    // Remote occurrences can share an owner ID, but still need separate players.
+    QHash<QString, QStringList> m_pins;
     QSet<QString> m_stopRequested;
     QTimer m_timer;
     QElapsedTimer m_clock;
     qint64 m_lastHealthySampleMs = -1000;
     MemorySnapshot m_memory;
+    int m_reservePercent = 20;
+    int m_reserveMinMiB = 2048;
     bool m_testMemory = false;
     bool m_scheduling = false;
     bool m_decoding = false;

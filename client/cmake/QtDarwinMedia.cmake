@@ -29,6 +29,42 @@ else()
     file(WRITE "${_player}" "${_source}")
 endif()
 
+# QIODevice playback also needs valid UTI metadata and completion of metadata-
+# only AVAsset requests. Upstream 6.11.2 leaves those requests pending forever.
+# Bound each response to the requested range instead of over-reading its tail.
+function(mouffette_patch_darwin old_text new_text)
+    string(FIND "${_source}" "${new_text}" _found)
+    if(NOT _found EQUAL -1)
+        return()
+    endif()
+    string(FIND "${_source}" "${old_text}" _found)
+    if(NOT _found EQUAL -1)
+        string(REPLACE "${old_text}" "${new_text}" _patched "${_source}")
+        set(_source "${_patched}" PARENT_SCOPE)
+    else()
+        string(FIND "${_source}" "${new_text}" _found)
+        if(_found EQUAL -1)
+            message(FATAL_ERROR "Qt Darwin memory stream source changed; review the resident stream patch.")
+        endif()
+    endif()
+endfunction()
+mouffette_patch_darwin("#include <QtCore/qmimedatabase.h>"
+    "#include <QtCore/qmimedatabase.h>\n#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>")
+mouffette_patch_darwin("device->seek(loadingRequest.dataRequest.requestedOffset);"
+    "if (loadingRequest.dataRequest) device->seek(loadingRequest.dataRequest.currentOffset);")
+mouffette_patch_darwin("loadingRequest.contentInformationRequest.contentType = m_mimeType;"
+    "loadingRequest.contentInformationRequest.contentType = [UTType typeWithFilenameExtension:m_mimeType].identifier;")
+mouffette_patch_darwin("NSInteger requestedLength = loadingRequest.dataRequest.requestedLength;"
+    "NSInteger requestedLength = loadingRequest.dataRequest.requestsAllDataToEndOfResource ? device->size() - device->pos() : loadingRequest.dataRequest.requestedOffset + loadingRequest.dataRequest.requestedLength - device->pos();")
+mouffette_patch_darwin("qint64 len = device->read(buffer.data(), maxBytes);"
+    "qint64 len = device->read(buffer.data(), qMin<qint64>(maxBytes, requestedLength - submitted));")
+mouffette_patch_darwin([=[            // Finish loading even if not all bytes submitted.
+            [loadingRequest finishLoading];
+        }]=] [=[        }
+        // Complete metadata-only requests as well as data requests.
+        [loadingRequest finishLoading];]=])
+file(WRITE "${_player}" "${_source}")
+
 # All sources in this pinned directory belong to the macOS plugin.
 file(GLOB_RECURSE _darwin_sources "${_darwin}/*.mm" "${_darwin}/*_p.h")
 add_library(MouffetteDarwinMedia MODULE ${_darwin_sources})
@@ -48,7 +84,8 @@ target_link_libraries(MouffetteDarwinMedia PRIVATE
     "-framework AudioToolbox" "-framework AVFoundation" "-framework CoreMedia"
     "-framework CoreVideo" "-framework Foundation" "-framework Metal"
     "-framework QuartzCore" "-framework AppKit" "-framework AudioUnit"
-    "-framework VideoToolbox" "-framework ApplicationServices")
+    "-framework VideoToolbox" "-framework ApplicationServices"
+    "-framework UniformTypeIdentifiers")
 add_dependencies(MouffetteClient MouffetteDarwinMedia)
 set_property(TARGET MouffetteClient APPEND PROPERTY LINK_DEPENDS
     "$<TARGET_FILE:MouffetteDarwinMedia>")

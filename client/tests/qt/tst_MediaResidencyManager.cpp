@@ -17,6 +17,22 @@ class MediaResidencyManagerTest : public QObject {
         return value.save(path) ? path : QString();
     }
 private slots:
+    void configuredReserveControlsAdmission() {
+        QTemporaryDir dir;
+        MediaResidencyManager manager;
+        manager.setMemorySnapshotForTesting(memory(7 * GiB));
+        manager.setSafetyReserve(50, 1024);
+        QCOMPARE(manager.summary().value("reserveBytes").toULongLong(), 4 * GiB);
+        manager.setSafetyReserve(25, 8192);
+        QCOMPARE(manager.summary().value("reserveBytes").toULongLong(), 8 * GiB);
+        manager.acquire("blocked", image(dir, "blocked.png", 8, qRgb(1, 2, 3)));
+        QTRY_COMPARE_WITH_TIMEOUT(manager.state("blocked"), QStringLiteral("capacity_insufficient"), 5000);
+        manager.release("blocked");
+        manager.setSafetyReserve(0, 0);
+        QCOMPARE(manager.summary().value("reserveBytes").toULongLong(), quint64(0));
+        manager.acquire("fits", image(dir, "fits.png", 8, qRgb(4, 5, 6)));
+        QTRY_VERIFY_WITH_TIMEOUT(manager.ready("fits"), 5000);
+    }
     void asynchronousCompleteAndDeduplicated() {
         QTemporaryDir dir;
         const auto a = image(dir, "a.png", 32, qRgb(10, 20, 30));
@@ -37,6 +53,52 @@ private slots:
         QVERIFY(manager.ready("second"));
         manager.release("second");
         QVERIFY(manager.assets().isEmpty());
+    }
+    void compressedVideoAccountingAndAtomicPlaybackAdmission() {
+        MediaResidencyManager manager;
+        manager.setMemorySnapshotForTesting(memory());
+        bool sawPreparation = false;
+        connect(&manager, &MediaResidencyManager::changed, &manager, [&] {
+            for (const auto& value : manager.assets()) {
+                const auto row = value.toMap();
+                if (row.value("state").toString() != QLatin1String("decoding")) continue;
+                sawPreparation = true;
+                // Actual retained bytes must not include the decoder scratch.
+                QVERIFY(row.value("residentBytes").toULongLong()
+                    <= row.value("estimatedBytes").toULongLong() + 65536);
+            }
+        });
+        manager.acquire("first", QString::fromUtf8(TEST_VIDEO_FILE));
+        manager.acquire("second", QString::fromUtf8(TEST_VIDEO_FILE));
+        QTRY_VERIFY_WITH_TIMEOUT(manager.ready("first") && manager.ready("second"), 10000);
+        QVERIFY(sawPreparation);
+        const auto asset = manager.asset("first");
+        QCOMPARE(asset, manager.asset("second"));
+        QVERIFY(!asset->compressedVideo.isEmpty());
+        QCOMPARE(manager.summary().value("mediaBytes").toULongLong(), asset->residentBytes);
+        QCOMPARE(manager.summary().value("reservedBytes").toULongLong(), quint64(0));
+        const quint64 budget = asset->playbackBudgetBytes;
+        manager.setMemorySnapshotForTesting(memory(2 * GiB + budget + 1));
+        QVERIFY(!manager.pinOwners({"first", "second"}, "too-many-players"));
+        QCOMPARE(manager.summary().value("playbackBudgetBytes").toULongLong(), quint64(0));
+        QVERIFY(!manager.pinOwners({"first", "first"}, "duplicate-remote-occurrences"));
+        QCOMPARE(manager.summary().value("playbackBudgetBytes").toULongLong(), quint64(0));
+        QVERIFY(manager.pinOwners({"first"}, "one-player"));
+        // A rejected replacement must preserve the original scene reservation.
+        QVERIFY(!manager.pinOwners({"first", "first"}, "one-player"));
+        QCOMPARE(manager.summary().value("playbackBudgetBytes").toULongLong(), budget);
+        QVERIFY(asset->reservePlayback()); // consumes the pre-admitted slot
+        QVERIFY(!asset->reservePlayback());
+        QCOMPARE(manager.summary().value("mediaBytes").toULongLong(), asset->residentBytes);
+        QCOMPARE(manager.summary().value("playbackBudgetBytes").toULongLong(), budget);
+        asset->releasePlayback();
+        manager.unpinGroup("one-player");
+        QCOMPARE(manager.summary().value("playbackBudgetBytes").toULongLong(), quint64(0));
+        manager.setMemorySnapshotForTesting(memory());
+        QVERIFY(manager.pinOwners({"first", "first"}, "duplicate-remote-occurrences"));
+        QCOMPARE(manager.summary().value("playbackBudgetBytes").toULongLong(), 2 * budget);
+        manager.release("first");
+        QCOMPARE(manager.summary().value("playbackBudgetBytes").toULongLong(), quint64(0));
     }
     void survivingDuplicateReloadsItsOwnSource()
     {
@@ -71,6 +133,10 @@ private slots:
         QVERIFY(!manager.ready("too-large"));
         QVERIFY(!manager.pinOwners({"too-large"}, "scene"));
         QCOMPARE(manager.state("too-large"), QStringLiteral("capacity_insufficient"));
+        // A text-only canvas creates no media allocations or decoder budgets.
+        manager.setMemorySnapshotForTesting({2 * GiB, GiB, 0, false, 0});
+        QVERIFY(manager.pinOwners({}, "text-only"));
+        manager.unpinGroup("text-only");
     }
     void cancelledOwnerCannotReappear() {
         QTemporaryDir dir;

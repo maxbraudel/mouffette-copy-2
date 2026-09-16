@@ -627,10 +627,12 @@ if(BUILD_TESTING)
 
     add_executable(tst_ResidentMedia tests/qt/tst_ResidentMedia.cpp)
     target_link_libraries(tst_ResidentMedia PRIVATE MouffetteResidentMedia Qt6::Test)
+    target_compile_definitions(tst_ResidentMedia PRIVATE TEST_SAMPLE_VIDEO_FILE="${CMAKE_SOURCE_DIR}/../video-1080p.mp4")
     add_test(NAME ResidentMedia COMMAND tst_ResidentMedia)
 
     add_executable(tst_MediaResidencyManager tests/qt/tst_MediaResidencyManager.cpp)
     target_link_libraries(tst_MediaResidencyManager PRIVATE MouffetteResidentMedia Qt6::Test)
+    target_compile_definitions(tst_MediaResidencyManager PRIVATE TEST_VIDEO_FILE="${CMAKE_SOURCE_DIR}/tests/fixtures/resident-timeline.mp4")
     add_test(NAME MediaResidencyManager COMMAND tst_MediaResidencyManager)
 
     add_executable(tst_DeviceIdentityStore
@@ -1039,20 +1041,28 @@ endif()
 
 if(APPLE)
     include(cmake/QtDarwinMedia.cmake)
+endif()
+if(APPLE OR WIN32)
+    include(cmake/QtFFmpegMedia.cmake)
     if(BUILD_TESTING)
         # Exercise Darwin explicitly even when the selected Qt also has FFmpeg.
-        add_test(NAME VideoPlaybackDarwinSeek COMMAND tst_VideoPlaybackBackend
-            seekBeforeFirstPlay seekAfterPauseAndSourceReload)
-        set_tests_properties(VideoPlaybackDarwinSeek PROPERTIES
-            RUN_SERIAL TRUE
-            ENVIRONMENT "QT_MEDIA_BACKEND=darwin;QT_QUICK_CONTROLS_STYLE=Basic")
+        if(APPLE)
+            add_test(NAME VideoPlaybackDarwinSeek COMMAND tst_VideoPlaybackBackend
+                seekBeforeFirstPlay seekAfterPauseAndSourceReload)
+            set_tests_properties(VideoPlaybackDarwinSeek PROPERTIES
+                RUN_SERIAL TRUE
+                ENVIRONMENT "QT_MEDIA_BACKEND=darwin;QT_QUICK_CONTROLS_STYLE=Basic")
+        endif()
         get_property(_tests DIRECTORY PROPERTY TESTS)
         set_property(TEST ${_tests} APPEND PROPERTY ENVIRONMENT_MODIFICATION
             "QT_PLUGIN_PATH=path_list_prepend:${CMAKE_CURRENT_BINARY_DIR}/plugins")
         get_property(_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
         foreach(_target IN LISTS _targets)
             if(_target MATCHES "^tst_")
-                add_dependencies(${_target} MouffetteDarwinMedia)
+                add_dependencies(${_target} MouffetteFFmpegMedia)
+                if(APPLE)
+                    add_dependencies(${_target} MouffetteDarwinMedia)
+                endif()
             endif()
         endforeach()
     endif()

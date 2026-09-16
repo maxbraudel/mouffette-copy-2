@@ -137,7 +137,10 @@ retries. Removed `remote_scene_*` message routes do not exist.
 ## Fully resident media (v5)
 
 Upload validation only confirms the durable file identity. The target then decodes
-all image pixels or all video frames and audio before reporting `media_residency`.
+all image pixels, or validates the entire video/audio while retaining the original
+compressed MP4 and one poster, before reporting `media_residency`. Video decoding
+continues from memory during playback using bounded queues. Preparation primes
+the configured start frames before a scene may launch.
 These reports contain a session generation, monotonically increasing `sequence`,
 and an `assets` array (`assetId`, `sha256`, `state`, `progress`, `error`). Only the
 current authenticated target can report; stale sequences and unknown assets fail.

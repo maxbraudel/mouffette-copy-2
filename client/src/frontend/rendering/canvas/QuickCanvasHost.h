@@ -6,6 +6,7 @@
 #include <QMetaObject>
 #include <QPointer>
 #include <QTimer>
+#include <functional>
 
 class CanvasDocument;
 class CanvasMedia;
@@ -84,6 +85,8 @@ private:
                                          bool* ready,
                                          QString* errorMessage) const;
     void reportLocalScenePrepared();
+    void prepareSceneVideos(std::function<void()> ready);
+    void rememberDraftState();
     void tryArmRemoteScene();
     void beginScenePresentation(bool remote);
     void stopScenePresentation();
@@ -123,6 +126,8 @@ private:
     QJsonArray m_localPrepareChecklist;
     QList<DraftMediaState> m_draftState;
     QObject* m_sceneContext = nullptr;
+    QPointer<QObject> m_videoPreparation;
+    bool m_localVideosPrepared = false;
     QTimer m_sceneTimeout;
     QTimer m_videoSnapshotTimer;
     QMetaObject::Connection m_frameConnection;

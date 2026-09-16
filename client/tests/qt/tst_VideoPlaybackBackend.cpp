@@ -264,7 +264,14 @@ private slots:
             QVERIFY(video->setPlaybackRange(start, -1));
             video->setPositionMs(2200);
             host->triggerTestSceneAction();
-            QCOMPARE(video->positionMs(), qMax<qint64>(0, start));
+            QTRY_COMPARE_WITH_TIMEOUT(video->positionMs(), qMax<qint64>(0, start), 5000);
+            // The first stop can cancel an in-flight source load. A subsequent
+            // scene must replace its queued preview seek and actually prime.
+            if (start >= 0) {
+                QTRY_VERIFY_WITH_TIMEOUT(video->player()->preparedAt(start), 5000);
+                QVERIFY(host->testSceneLaunched());
+                QCOMPARE(video->positionMs(), start);
+            }
             host->triggerTestSceneAction();
             QCOMPARE(video->positionMs(), 2200);
         }

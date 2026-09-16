@@ -24,7 +24,7 @@ struct SettingSpec {
     bool boolean;
 };
 
-constexpr std::array<SettingSpec, 59> kSpecs{{
+constexpr std::array<SettingSpec, 61> kSpecs{{
     {Key::ServerUrl, "MOUFFETTE_SERVER_URL", "server-url", "serverUrl", "ws://localhost:8080", false},
     {Key::RemoteSessionHiddenTimeoutMs, "MOUFFETTE_REMOTE_SESSION_HIDDEN_TIMEOUT_MS", "remote-session-hidden-timeout-ms", nullptr, "60000", false},
     {Key::ProjectHiddenRetentionMs, "MOUFFETTE_PROJECT_HIDDEN_RETENTION_MS", "project-hidden-retention-ms", nullptr, "300000", false},
@@ -77,6 +77,8 @@ constexpr std::array<SettingSpec, 59> kSpecs{{
     {Key::ToastWarningDurationMs, "MOUFFETTE_TOAST_WARNING_DURATION_MS", "toast-warning-duration-ms", nullptr, "3500", false},
     {Key::ToastErrorDurationMs, "MOUFFETTE_TOAST_ERROR_DURATION_MS", "toast-error-duration-ms", nullptr, "5000", false},
     {Key::ToastAnimationDurationMs, "MOUFFETTE_TOAST_ANIMATION_DURATION_MS", "toast-animation-duration-ms", nullptr, "300", false},
+    {Key::MediaRamReservePercent, "MOUFFETTE_MEDIA_RAM_RESERVE_PERCENT", "media-ram-reserve-percent", nullptr, "20", false},
+    {Key::MediaRamReserveMinMiB, "MOUFFETTE_MEDIA_RAM_RESERVE_MIN_MIB", "media-ram-reserve-min-mib", nullptr, "2048", false},
     {Key::UploadConcurrency, "MOUFFETTE_UPLOAD_CONCURRENCY", "upload-concurrency", nullptr, "2", false},
     {Key::AutoUploadImportedMedia, "MOUFFETTE_AUTO_UPLOAD_IMPORTED_MEDIA", "auto-upload-imported-media", "autoUploadImportedMedia", "false", true},
     {Key::QtMediaBackend, "QT_MEDIA_BACKEND", "media-backend", nullptr, "ffmpeg", false},
@@ -417,6 +419,8 @@ void AppConfig::resetToCompiledDefaults() {
     m_toastWarningDurationMs = 3500;
     m_toastErrorDurationMs = 5000;
     m_toastAnimationDurationMs = 300;
+    m_mediaRamReservePercent = 20;
+    m_mediaRamReserveMinMiB = 2048;
     m_uploadConcurrency = 2;
     m_autoUploadImportedMedia = false;
     m_qtMediaBackend = QStringLiteral("ffmpeg");
@@ -610,7 +614,11 @@ bool AppConfig::load(const LoadOptions& options, QString* errorMessage) {
         *destination = static_cast<int>(parsed);
         return true;
     };
-    if (!parseIntSetting(Key::ConnectionAttemptTimeoutMs, 250, 120000,
+    if (!parseIntSetting(Key::MediaRamReservePercent, 0, 100,
+                         &candidate.m_mediaRamReservePercent)
+        || !parseIntSetting(Key::MediaRamReserveMinMiB, 0, 2147483647,
+                            &candidate.m_mediaRamReserveMinMiB)
+        || !parseIntSetting(Key::ConnectionAttemptTimeoutMs, 250, 120000,
                          &candidate.m_connectionAttemptTimeoutMs)
         || !parseIntSetting(Key::ReconnectFastStepMs, 10, 10000,
                             &candidate.m_reconnectFastStepMs)

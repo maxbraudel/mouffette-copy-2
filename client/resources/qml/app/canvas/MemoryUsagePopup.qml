@@ -53,14 +53,15 @@ Popup {
         }
         Text {
             Layout.fillWidth: true
-            text: root.bytes(root.usage.mediaBytes) + " in media · "
+            text: root.bytes(root.usage.mediaBytes) + " retained in media · "
                   + root.bytes(root.usage.totalBytes) + " total RAM"
             color: root.secondaryText
             font.pixelSize: 13
         }
         Text {
             Layout.fillWidth: true
-            text: root.bytes(root.usage.reservedBytes) + " reserved for loading · "
+            text: root.bytes(root.usage.reservedBytes) + " additional preparation budget · "
+                  + root.bytes(root.usage.playbackBudgetBytes) + " playback budget (estimated) · "
                   + root.bytes(root.usage.reserveBytes) + " kept available for the system"
             color: root.secondaryText
             font.pixelSize: 11
@@ -150,14 +151,17 @@ Popup {
                         Text {
                             Layout.fillWidth: true
                             text: root.stateLabel(modelData) + " · "
-                                  + root.bytes(modelData.residentBytes) + " in RAM"
+                                  + root.bytes(modelData.residentBytes) + " retained"
                                   + (modelData.state !== "ready" && modelData.estimatedBytes > 0
-                                     ? " · " + root.bytes(modelData.estimatedBytes) + " required" : "")
+                                     ? " · " + root.bytes(modelData.estimatedBytes) + " to retain"
+                                       + " · " + root.bytes(modelData.preparationBudgetBytes) + " preparation budget" : "")
+                                  + (modelData.playbackBudgetBytes > 0
+                                     ? " · " + root.bytes(modelData.playbackBudgetBytes) + " playback budget (estimated)" : "")
                                   + (modelData.occurrences > 1 ? " · " + modelData.occurrences + " uses" : "")
                                   + (modelData.protected ? " · In scene" : "")
                             color: root.secondaryText
                             font.pixelSize: 11
-                            elide: Text.ElideRight
+                            wrapMode: Text.Wrap
                         }
                         Text {
                             Layout.fillWidth: true

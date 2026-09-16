@@ -11,6 +11,7 @@ public:
         QSize displaySize;
         quint64 estimatedBytes = 0;
         quint64 scratchBytes = 64ULL * 1024 * 1024;
+        quint64 playbackBudgetBytes = 0;
         qint64 durationUs = 0;
         QString error;
         bool accepted() const { return error.isEmpty() && displaySize.isValid(); }
@@ -20,6 +21,8 @@ public:
         // The TOTAL allocation owned by this job, including decoder scratch.
         // Called before growth; false aborts without publishing partial data.
         std::function<bool(quint64)> reserve;
+        // Retained allocations only, excluding projected growth and scratch.
+        std::function<void(quint64)> allocated;
         std::function<void(double)> progress;
     };
 

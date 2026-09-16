@@ -35,6 +35,7 @@ class AppConfigTest final : public QObject {
 
 private slots:
     void loadsEmbeddedDefaults();
+    void configuresMediaRamReserve();
     void compiledDefaultDisablesMultipleInstances();
     void appliesDocumentedPrecedence();
     void commandLineEnvFileReplacesProcessSelection();
@@ -87,6 +88,34 @@ void AppConfigTest::loadsEmbeddedDefaults() {
     QVERIFY(config.provenance(AppConfig::Key::ServerUrl).startsWith(QStringLiteral("embedded-env:")));
 }
 
+void AppConfigTest::configuresMediaRamReserve() {
+    QTemporaryDir directory;
+    const QString path = writeEnvFile(directory, "ram.env",
+        "MOUFFETTE_MEDIA_RAM_RESERVE_PERCENT=30\n"
+        "MOUFFETTE_MEDIA_RAM_RESERVE_MIN_MIB=4096\n");
+    QVERIFY(!path.isEmpty());
+    auto options = isolatedOptions(path);
+    AppConfig config;
+    QString error;
+    QVERIFY2(config.load(options, &error), qPrintable(error));
+    QCOMPARE(config.mediaRamReservePercent(), 30);
+    QCOMPARE(config.mediaRamReserveMinMiB(), 4096);
+    for (const auto& value : {QStringLiteral("-1"), QStringLiteral("101"), QStringLiteral("abc")}) {
+        options.processEnvironment.insert("MOUFFETTE_MEDIA_RAM_RESERVE_PERCENT", value);
+        QVERIFY(!config.load(options, &error));
+        QVERIFY(error.contains("MOUFFETTE_MEDIA_RAM_RESERVE_PERCENT"));
+        QCOMPARE(config.mediaRamReservePercent(), 30); // Failed reload is atomic.
+    }
+    options.processEnvironment.insert("MOUFFETTE_MEDIA_RAM_RESERVE_PERCENT", "0");
+    options.processEnvironment.insert("MOUFFETTE_MEDIA_RAM_RESERVE_MIN_MIB", "-1");
+    QVERIFY(!config.load(options, &error));
+    QVERIFY(error.contains("MOUFFETTE_MEDIA_RAM_RESERVE_MIN_MIB"));
+    options.processEnvironment.insert("MOUFFETTE_MEDIA_RAM_RESERVE_MIN_MIB", "0");
+    QVERIFY2(config.load(options, &error), qPrintable(error));
+    QCOMPARE(config.mediaRamReservePercent(), 0);
+    QCOMPARE(config.mediaRamReserveMinMiB(), 0);
+}
+
 void AppConfigTest::compiledDefaultDisablesMultipleInstances() {
     AppConfig config;
     AppConfig::LoadOptions options = isolatedOptions(QString());
@@ -94,6 +123,8 @@ void AppConfigTest::compiledDefaultDisablesMultipleInstances() {
     QString error;
     QVERIFY2(config.load(options, &error), qPrintable(error));
     QVERIFY(!config.allowMultipleInstances());
+    QCOMPARE(config.mediaRamReservePercent(), 20);
+    QCOMPARE(config.mediaRamReserveMinMiB(), 2048);
     QCOMPARE(config.provenance(AppConfig::Key::AllowMultipleInstances),
              QStringLiteral("compiled-default"));
 }

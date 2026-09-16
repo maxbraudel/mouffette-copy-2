@@ -10,6 +10,7 @@
 #include <cstdio>
 #include "AppBuildConfig.h"
 #include "backend/config/AppConfig.h"
+#include "backend/media/MediaResidencyManager.h"
 #include "backend/managers/system/SystemLifecycleMonitor.h"
 #include "backend/runtime/ApplicationInstanceManager.h"
 #include "backend/runtime/RuntimeProfile.h"
@@ -101,6 +102,9 @@ int main(int argc, char *argv[]) {
     }
     const RuntimeProfileContext runtimeProfile = instanceManager.profile();
     RuntimeProfile::configure(runtimeProfile);
+    MediaResidencyManager::instance().setSafetyReserve(
+        AppConfig::instance().mediaRamReservePercent(),
+        AppConfig::instance().mediaRamReserveMinMiB());
 
     logRuntimeDiagnostics();
 

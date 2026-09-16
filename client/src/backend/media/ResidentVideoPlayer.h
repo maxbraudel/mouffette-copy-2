@@ -1,7 +1,6 @@
 #pragma once
 
 #include "backend/media/ResidentMediaAsset.h"
-#include <QElapsedTimer>
 #include <QMediaPlayer>
 #include <QObject>
 #include <QPointer>
@@ -9,12 +8,12 @@
 #include <memory>
 
 class QAudioOutput;
-class QAudioSink;
+class QBuffer;
 class QVideoSink;
-class ResidentPcmDevice;
 
-// QMediaPlayer-shaped presentation layer. No source URL, codec, or file access:
-// only a completely decoded, immutable resident asset can be attached.
+
+// Streams the original resident MP4 through a read-only memory device. Qt owns
+// bounded decode queues, clocks and audio output; no file URL is supplied.
 class ResidentVideoPlayer final : public QObject
 {
     Q_OBJECT
@@ -30,12 +29,14 @@ public:
     explicit ResidentVideoPlayer(QObject* parent = nullptr);
     ~ResidentVideoPlayer() override;
     void setAsset(std::shared_ptr<const ResidentMediaAsset> asset);
+    bool preparedAt(qint64 positionMs) const;
+    void prepare(qint64 positionMs); // prime a paused native frame asynchronously
     void clearAsset(); // retain the occurrence's cursor for later re-residency
     // Fresh Qt presentation/cache identity, shared immutable CPU planes. Never
     // call toImage() on a long-lived asset frame: Qt caches that RGBA conversion.
     static QVideoFrame presentationFrame(const QVideoFrame& frame);
     std::shared_ptr<const ResidentMediaAsset> asset() const { return m_asset; }
-    qint64 position() const { return m_positionUs / 1000; }
+    qint64 position() const { return m_positionMs; }
     qint64 duration() const { return m_asset ? (m_asset->durationUs + 999) / 1000 : 0; }
     QMediaPlayer::PlaybackState playbackState() const { return m_state; }
     QMediaPlayer::MediaStatus mediaStatus() const { return m_status; }
@@ -68,31 +69,30 @@ signals:
     void seekableChanged(bool seekable);
     void loopsChanged();
     void videoOutputChanged();
+    void frameReady(qint64 timestampMs); // decoded frame, never the cached poster
 
 private:
-    void tick();
-    void presentFrame();
+    bool ensurePlayer();
+    void releasePlayer();
+    void presentPoster();
     void setState(QMediaPlayer::PlaybackState state);
     void setStatus(QMediaPlayer::MediaStatus status);
-    void startAudio();
-    void stopAudio();
-    void updateAudioVolume();
-    void failAudio(const QString& message);
+    void fail(QMediaPlayer::Error error, const QString& message);
 
     std::shared_ptr<const ResidentMediaAsset> m_asset;
     QPointer<QAudioOutput> m_audioOutput;
     QPointer<QVideoSink> m_videoSink;
     QPointer<QObject> m_videoOutput;
-    std::unique_ptr<ResidentPcmDevice> m_pcm;
-    std::unique_ptr<QAudioSink> m_audioSink;
-    QTimer m_timer;
-    QElapsedTimer m_clock;
-    qint64 m_clockOriginUs = 0;
-    qint64 m_audioOriginUs = 0;
-    qint64 m_positionUs = 0;
-    qsizetype m_presentedIndex = -1;
+    std::unique_ptr<QBuffer> m_source;
+    std::unique_ptr<QMediaPlayer> m_player;
+    std::unique_ptr<QVideoSink> m_decodeSink;
+    QVideoFrame m_frame;
+    QTimer m_positionTimer;
+    qint64 m_positionMs = 0;
     int m_loops = QMediaPlayer::Once;
-    int m_completedLoops = 0;
+    bool m_loading = false;
+    bool m_playbackReserved = false;
+    QMediaPlayer::PlaybackState m_requestedState = QMediaPlayer::StoppedState;
     QMediaPlayer::PlaybackState m_state = QMediaPlayer::StoppedState;
     QMediaPlayer::MediaStatus m_status = QMediaPlayer::NoMedia;
     QMediaPlayer::Error m_error = QMediaPlayer::NoError;

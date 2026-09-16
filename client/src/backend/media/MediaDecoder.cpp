@@ -72,6 +72,53 @@ FormatPtr openFormat(const QString& path, QString& error,
     return format;
 }
 
+// Seekable read-only AVIO over the exact MP4 allocation. Its lifetime encloses
+// AVFormatContext; neither validation nor later playback needs a source path.
+struct MemoryInput {
+    const QByteArray& data;
+    qint64 position = 0;
+    AVIOContext* io = nullptr;
+    explicit MemoryInput(const QByteArray& bytes) : data(bytes) {
+        auto* buffer = static_cast<unsigned char*>(av_malloc(32768));
+        if (buffer) io = avio_alloc_context(buffer, 32768, 0, this, read, nullptr, seek);
+        if (!io) av_free(buffer);
+    }
+    ~MemoryInput() { if (io) { av_freep(&io->buffer); avio_context_free(&io); } }
+    static int read(void* opaque, uint8_t* destination, int size) {
+        auto& self = *static_cast<MemoryInput*>(opaque);
+        const qint64 count = std::min<qint64>(size, self.data.size() - self.position);
+        if (count <= 0) return AVERROR_EOF;
+        std::memcpy(destination, self.data.constData() + self.position, size_t(count));
+        self.position += count;
+        return int(count);
+    }
+    static int64_t seek(void* opaque, int64_t offset, int whence) {
+        auto& self = *static_cast<MemoryInput*>(opaque);
+        if (whence == AVSEEK_SIZE) return self.data.size();
+        whence &= ~AVSEEK_FORCE;
+        const qint64 base = whence == SEEK_SET ? 0 : whence == SEEK_CUR ? self.position
+            : whence == SEEK_END ? self.data.size() : -1;
+        if (base < 0 || offset < -base || offset > self.data.size() - base) return AVERROR(EINVAL);
+        self.position = base + offset;
+        return self.position;
+    }
+    FormatPtr open(QString& error, const MediaDecoder::DecodeCallbacks& callbacks) {
+        if (!io) { error = QStringLiteral("memory_unavailable"); return {}; }
+        auto* context = avformat_alloc_context();
+        if (!context) { error = QStringLiteral("memory_unavailable"); return {}; }
+        context->pb = io;
+        context->flags |= AVFMT_FLAG_CUSTOM_IO;
+        context->interrupt_callback = {interrupted, const_cast<MediaDecoder::DecodeCallbacks*>(&callbacks)};
+        context->error_recognition = AV_EF_CRCCHECK | AV_EF_BITSTREAM | AV_EF_BUFFER | AV_EF_EXPLODE;
+        int result = avformat_open_input(&context, nullptr, nullptr, nullptr);
+        if (result < 0) { error = avError(result); return {}; }
+        FormatPtr format(context);
+        result = avformat_find_stream_info(context, nullptr);
+        if (result < 0) { error = avError(result); return {}; }
+        return format;
+    }
+};
+
 int rotationFor(const AVStream* stream) {
     const AVPacketSideData* matrix = av_packet_side_data_get(
         stream->codecpar->coded_side_data, stream->codecpar->nb_coded_side_data,
@@ -211,24 +258,14 @@ private:
 // by ResidentVideoPlayer's ephemeral frame wrappers.
 constexpr quint64 QtFrameBookkeepingBytes = 512;
 
-template<typename T> struct VectorGrowth {
-    size_t capacity;
-    quint64 peakBytes;
-    quint64 retainedBytes;
-};
-template<typename T> VectorGrowth<T> nextVectorGrowth(const std::vector<T>& values) {
-    if (values.size() < values.capacity()) return {values.capacity(), 0, 0};
-    const size_t next = values.capacity() == 0 ? 1
-        : values.capacity() > values.max_size() / 2 ? values.max_size() : values.capacity() * 2;
-    if (next <= values.size()) throw std::bad_alloc();
-    return {next, quint64(next) * sizeof(T), quint64(next - values.capacity()) * sizeof(T)};
-}
-
 struct DecoderJob {
     const MediaDecoder::DecodeCallbacks& callbacks;
     QString error;
-    quint64 scratch = 64 * MiB;
+    quint64 scratch = 16 * MiB;
     std::shared_ptr<ResidentMediaAsset> asset = std::make_shared<ResidentMediaAsset>();
+    qint64 lastVideoTimestampUs = 0;
+    qint64 lastVideoDurationUs = 0;
+    void publishAllocation() { if (callbacks.allocated) callbacks.allocated(asset->residentBytes); }
     bool check(quint64 additional = 0) {
         if (callbacks.cancelled && callbacks.cancelled()) { error = QStringLiteral("cancelled"); return false; }
         if (additional > std::numeric_limits<quint64>::max() - asset->residentBytes
@@ -244,6 +281,14 @@ bool storeFrame(DecoderJob& job, AVFormatContext* format, AVStream* stream, AVFr
                 qint64 originUs, qint64 fallbackDurationUs) {
     const QSize target = unrotatedDisplaySize(format, stream, source);
     if (!target.isValid()) { job.error = QStringLiteral("Invalid decoded video dimensions"); return false; }
+    const qint64 timestamp = source->best_effort_timestamp != AV_NOPTS_VALUE
+        ? av_rescale_q(source->best_effort_timestamp, stream->time_base, microseconds) - originUs
+        : job.asset->videoFrameCount ? job.lastVideoTimestampUs + job.lastVideoDurationUs : 0;
+    const qint64 duration = source->duration > 0
+        ? av_rescale_q(source->duration, stream->time_base, microseconds) : fallbackDurationUs;
+    job.lastVideoTimestampUs = std::max<qint64>(0, timestamp);
+    job.lastVideoDurationUs = std::max<qint64>(1, duration);
+    if (job.asset->videoFrameCount++ > 0) return job.check();
     AVPixelFormat pixel = static_cast<AVPixelFormat>(source->format);
     auto qtPixel = qtPixelFormat(pixel);
     const bool convert = qtPixel == QVideoFrameFormat::Format_Invalid
@@ -253,13 +298,7 @@ bool storeFrame(DecoderJob& job, AVFormatContext* format, AVStream* stream, AVFr
     const int size = av_image_get_buffer_size(pixel, target.width(), target.height(), 32);
     if (size <= 0) { job.error = QStringLiteral("Invalid decoded video allocation"); return false; }
     const quint64 bytes = quint64(size) + sizeof(CpuFrameBuffer) + QtFrameBookkeepingBytes;
-    const auto growth = nextVectorGrowth(job.asset->frames);
-    // A vector reallocation temporarily owns both old and new arrays.
-    if (!job.check(bytes + growth.peakBytes)) return false;
-    if (growth.retainedBytes) {
-        job.asset->frames.reserve(growth.capacity);
-        job.asset->residentBytes += growth.retainedBytes;
-    }
+    if (!job.check(bytes)) return false;
     QByteArray data(size, Qt::Uninitialized);
     uint8_t* planes[4]{};
     int strides[4]{};
@@ -294,16 +333,12 @@ bool storeFrame(DecoderJob& job, AVFormatContext* format, AVStream* stream, AVFr
     if (convertedToRgba) frameFormat.setColorRange(QVideoFrameFormat::ColorRange_Full);
     QVideoFrame frame(std::make_unique<CpuFrameBuffer>(std::move(data), frameFormat,
                                                      rowBytes, offsets, planeBytes, count));
-    const qint64 timestamp = source->best_effort_timestamp != AV_NOPTS_VALUE
-        ? av_rescale_q(source->best_effort_timestamp, stream->time_base, microseconds) - originUs
-        : job.asset->frames.empty() ? 0 : job.asset->frames.back().timestampUs + job.asset->frames.back().durationUs;
-    const qint64 duration = source->duration > 0
-        ? av_rescale_q(source->duration, stream->time_base, microseconds) : fallbackDurationUs;
-    frame.setStartTime(std::max<qint64>(0, timestamp));
-    frame.setEndTime(std::max<qint64>(0, timestamp) + std::max<qint64>(1, duration));
+    frame.setStartTime(job.lastVideoTimestampUs);
+    frame.setEndTime(job.lastVideoTimestampUs + job.lastVideoDurationUs);
     frame.setRotation(static_cast<QtVideo::Rotation>(rotationFor(stream)));
-    job.asset->frames.push_back({std::move(frame), std::max<qint64>(0, timestamp), std::max<qint64>(1, duration)});
+    job.asset->firstFrame = {std::move(frame), job.lastVideoTimestampUs, job.lastVideoDurationUs};
     job.asset->residentBytes += bytes;
+    job.publishAllocation();
     return true;
 }
 
@@ -347,32 +382,24 @@ MediaDecoder::Probe MediaDecoder::probe(const QString& path) {
     result.displaySize = displaySize(format.get(), stream);
     if (!result.displaySize.isValid()) { result.error = QStringLiteral("Invalid video dimensions"); return result; }
     result.durationUs = sourceDuration(format.get(), stream);
-    const AVRational rate = av_guess_frame_rate(format.get(), stream, nullptr);
-    const double fps = rate.num > 0 && rate.den > 0 ? av_q2d(rate) : 30.0;
-    const qint64 videoDurationUs = stream->duration > 0 && stream->duration != AV_NOPTS_VALUE
-        ? av_rescale_q(stream->duration, stream->time_base, microseconds) : result.durationUs;
-    const long double frames = stream->nb_frames > 0 ? stream->nb_frames
-        : std::ceil(videoDurationUs / 1e6L * fps);
     const QSize storedSize = unrotatedDisplaySize(format.get(), stream);
-    const AVPixelFormat advertisedPixel = static_cast<AVPixelFormat>(stream->codecpar->format);
-    const bool nativePixels = qtPixelFormat(advertisedPixel) != QVideoFrameFormat::Format_Invalid;
-    const int frameBytes = advertisedPixel != AV_PIX_FMT_NONE
-        ? av_image_get_buffer_size(nativePixels ? advertisedPixel : AV_PIX_FMT_RGBA,
+    const AVPixelFormat pixel = static_cast<AVPixelFormat>(stream->codecpar->format);
+    const int nativeFrameBytes = pixel != AV_PIX_FMT_NONE
+        ? av_image_get_buffer_size(pixel, stream->codecpar->width, stream->codecpar->height, 32) : -1;
+    const int posterBytes = pixel != AV_PIX_FMT_NONE
+        ? av_image_get_buffer_size(qtPixelFormat(pixel) == QVideoFrameFormat::Format_Invalid
+                                   ? AV_PIX_FMT_RGBA : pixel,
                                    storedSize.width(), storedSize.height(), 32) : -1;
-    const long double allocationPerFrame = frameBytes > 0 ? frameBytes
-        : storedSize.width() * static_cast<long double>(storedSize.height()) * 8;
-    long double bytes = std::max<long double>(1, frames)
-        * (allocationPerFrame + 2 * sizeof(ResidentVideoFrame) + sizeof(CpuFrameBuffer) + QtFrameBookkeepingBytes);
-    result.scratchBytes = std::max<quint64>(64 * MiB, saturatedBytes(
-        stream->codecpar->width * static_cast<long double>(stream->codecpar->height) * 8 * 24));
-    const int audioIndex = av_find_best_stream(format.get(), AVMEDIA_TYPE_AUDIO, -1, index, nullptr, 0);
-    if (audioIndex >= 0) {
-        const AVStream* audioStream = format->streams[audioIndex];
-        const AVCodecParameters* p = audioStream->codecpar;
-        const qint64 audioDurationUs = audioStream->duration > 0 && audioStream->duration != AV_NOPTS_VALUE
-            ? av_rescale_q(audioStream->duration, audioStream->time_base, microseconds) : result.durationUs;
-        bytes += audioDurationUs / 1e6L * p->sample_rate * p->ch_layout.nb_channels * sizeof(float);
-    }
+    const long double pixels = storedSize.width() * static_cast<long double>(storedSize.height());
+    const long double frameBytes = nativeFrameBytes > 0 ? nativeFrameBytes : pixels * 4;
+    const long double bytes = QFileInfo(path).size() + (posterBytes > 0 ? posterBytes : pixels * 4)
+        + sizeof(CpuFrameBuffer) + QtFrameBookkeepingBytes;
+    // Single-thread validation: bounded codec reference surfaces, conversion,
+    // packets and stream metadata. No multiplication by duration or frame count.
+    result.scratchBytes = saturatedBytes(16 * MiB + frameBytes * 18 + pixels * 4 * 2);
+    // Qt's streaming decoder has bounded frame/packet queues. Opaque codec/GPU
+    // allocations remain estimates; process RSS is measured separately.
+    result.playbackBudgetBytes = saturatedBytes(32 * MiB + frameBytes * 24 + pixels * 4 * 3);
     result.estimatedBytes = saturatedBytes(bytes);
     return result;
 }
@@ -409,16 +436,43 @@ std::shared_ptr<ResidentMediaAsset> MediaDecoder::decode(
             if (job.asset->image.isNull()) { job.error = QStringLiteral("Image conversion failed"); return fail(); }
             job.asset->displaySize = job.asset->image.size();
             job.asset->residentBytes = job.asset->image.sizeInBytes();
+            job.publishAllocation();
         } else {
-            auto format = openFormat(path, job.error, &callbacks);
+            job.scratch = metadata.scratchBytes;
+            job.asset->playbackBudgetBytes = metadata.playbackBudgetBytes;
+            if (sourceBytes <= 0 || quint64(sourceBytes) > quint64(std::numeric_limits<qsizetype>::max())
+                || !job.check(quint64(sourceBytes))) return fail();
+            QFile source(path);
+            if (!source.open(QIODevice::ReadOnly)) { job.error = source.errorString(); return fail(); }
+            job.asset->compressedVideo = QByteArray(qsizetype(sourceBytes), Qt::Uninitialized);
+            job.asset->residentBytes = job.asset->compressedVideo.capacity();
+            job.publishAllocation();
+            QCryptographicHash hash(QCryptographicHash::Sha256);
+            qint64 offset = 0;
+            while (offset < sourceBytes) {
+                if (!job.check()) return fail();
+                const qint64 count = source.read(job.asset->compressedVideo.data() + offset,
+                                                std::min<qint64>(MiB, sourceBytes - offset));
+                if (count <= 0) { job.error = QStringLiteral("Unable to read the complete video"); return fail(); }
+                hash.addData(QByteArrayView(job.asset->compressedVideo.constData() + offset, count));
+                offset += count;
+            }
+            source.close();
+            job.asset->sha256 = QString::fromLatin1(hash.result().toHex());
+            MemoryInput input(job.asset->compressedVideo);
+            auto format = input.open(job.error, callbacks);
             if (!format) return fail();
             const int videoIndex = av_find_best_stream(format.get(), AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
             const int audioIndex = av_find_best_stream(format.get(), AVMEDIA_TYPE_AUDIO, -1, videoIndex, nullptr, 0);
             if (videoIndex < 0) { job.error = QStringLiteral("No video stream"); return fail(); }
             AVStream* videoStream = format->streams[videoIndex];
-            // Codec references, conversion buffers, demux packets and reader buffers.
-            job.scratch = std::max<quint64>(64 * MiB, saturatedBytes(
-                videoStream->codecpar->width * static_cast<long double>(videoStream->codecpar->height) * 8 * 24));
+            int videoTrack = 0, audioTrack = 0;
+            for (unsigned i = 0; i < format->nb_streams; ++i) {
+                if (int(i) == videoIndex) job.asset->videoTrack = videoTrack;
+                if (int(i) == audioIndex) job.asset->audioTrack = audioTrack;
+                if (format->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) ++videoTrack;
+                if (format->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) ++audioTrack;
+            }
             if (!job.check()) return fail();
             auto video = openCodec(videoStream, job.error);
             if (!video) return fail();
@@ -472,12 +526,7 @@ std::shared_ptr<ResidentMediaAsset> MediaDecoder::decode(
                     job.error = QStringLiteral("Invalid audio sample count"); return false;
                 }
                 const quint64 allocation = quint64(capacity) * channels * sizeof(float);
-                const auto growth = nextVectorGrowth(job.asset->audio);
-                if (!job.check(allocation + growth.peakBytes)) return false;
-                if (growth.retainedBytes) {
-                    job.asset->audio.reserve(growth.capacity);
-                    job.asset->residentBytes += growth.retainedBytes;
-                }
+                if (!job.check(allocation)) return false;
                 QByteArray pcm(qsizetype(allocation), Qt::Uninitialized);
                 uint8_t* destination = reinterpret_cast<uint8_t*>(pcm.data());
                 const int count = swr_convert(resampler.get(), &destination, capacity,
@@ -491,8 +540,9 @@ std::shared_ptr<ResidentMediaAsset> MediaDecoder::decode(
                 }
                 haveAudioCursor = true;
                 pcm.resize(qsizetype(count) * channels * sizeof(float));
-                job.asset->residentBytes += pcm.capacity();
-                job.asset->audio.push_back({std::move(pcm), audioCursorUs, count});
+                // Validate every sample, including resampler drain, then release
+                // it. Playback decodes compressed audio into its short queue.
+                job.asset->audioSampleCount += count;
                 audioCursorUs += av_rescale_q(count, AVRational{1, rate}, microseconds);
                 return true;
             };
@@ -511,9 +561,9 @@ std::shared_ptr<ResidentMediaAsset> MediaDecoder::decode(
                         : storeAudio(frame.get());
                     av_frame_unref(frame.get());
                     if (!stored) return false;
-                    if (callbacks.progress && metadata.durationUs > 0 && !job.asset->frames.empty()) {
+                    if (callbacks.progress && metadata.durationUs > 0 && job.asset->videoFrameCount > 0) {
                         const double progress = std::min(0.99,
-                            double(job.asset->frames.back().timestampUs) / metadata.durationUs);
+                            double(job.lastVideoTimestampUs) / metadata.durationUs);
                         // Long clips must not enqueue one UI update per frame.
                         if (progress - publishedProgress >= 0.005) {
                             publishedProgress = progress;
@@ -555,29 +605,26 @@ std::shared_ptr<ResidentMediaAsset> MediaDecoder::decode(
             }
             if (resampler) {
                 while (swr_get_delay(resampler.get(), job.asset->audioFormat.sampleRate()) > 0) {
-                    const auto countBefore = job.asset->audio.size();
+                    const auto countBefore = job.asset->audioSampleCount;
                     if (!storeAudio(nullptr)) return fail();
-                    if (job.asset->audio.size() == countBefore) break;
+                    if (job.asset->audioSampleCount == countBefore) break;
                 }
             }
-            if (job.asset->frames.empty()) { job.error = QStringLiteral("The video decoded no frames"); return fail(); }
-            if (audio && job.asset->audio.empty()) { job.error = QStringLiteral("The audio track decoded no samples"); return fail(); }
-            std::stable_sort(job.asset->frames.begin(), job.asset->frames.end(),
-                [](const auto& a, const auto& b) { return a.timestampUs < b.timestampUs; });
-            const auto& last = job.asset->frames.back();
-            job.asset->durationUs = std::max(last.timestampUs + last.durationUs, audioCursorUs);
+            if (!job.asset->videoFrameCount) { job.error = QStringLiteral("The video decoded no frames"); return fail(); }
+            if (audio && !job.asset->audioSampleCount) { job.error = QStringLiteral("The audio track decoded no samples"); return fail(); }
+            job.asset->durationUs = std::max(job.lastVideoTimestampUs + job.lastVideoDurationUs, audioCursorUs);
             // Demuxers can report clean EOF for truncated indexed streams.
             // MP4 edit lists intentionally mark preroll/trimmed samples as
             // discard: they must be decoded for codec state but need not
             // produce a displayed frame. Do not reject a valid trimmed clip.
             const quint64 expectedFrames = videoStream->nb_frames > 0
                 ? quint64(videoStream->nb_frames) - std::min(quint64(videoStream->nb_frames), discardedVideoPackets) : 0;
-            if (expectedFrames > job.asset->frames.size()) {
+            if (expectedFrames > job.asset->videoFrameCount) {
                 job.error = QStringLiteral("The video ended before every indexed frame was decoded (%1 of %2)")
-                    .arg(job.asset->frames.size()).arg(expectedFrames); return fail();
+                    .arg(job.asset->videoFrameCount).arg(expectedFrames); return fail();
             }
         }
-        if (!hashSource(path, job)) return fail();
+        if (!job.asset->video && !hashSource(path, job)) return fail();
         const QFileInfo after(path);
         if (!after.exists() || after.size() != sourceBytes || after.lastModified() != sourceModified) {
             job.error = QStringLiteral("The source file changed while it was being decoded"); return fail();

@@ -489,15 +489,15 @@ QStringList QuickCanvasHost::residencyOwners() const
 QString QuickCanvasHost::mediaReadinessReason(bool remote) const
 {
     if (m_document->hasPendingImports())
-        return QStringLiteral("Wait until every imported media has been analyzed and fully decoded in memory");
+        return QStringLiteral("Wait until every imported media has been analyzed, validated and loaded into memory");
     const auto& manager = MediaResidencyManager::instance();
     for (const auto* media : m_document->media()) {
         if (!media || media->isText()) continue;
         if (!manager.ready(media->residencyOwnerId()))
-            return QStringLiteral("Wait until every media is fully decoded in memory (%1)").arg(media->displayName());
+            return QStringLiteral("Wait until every media is validated and resident in memory (%1)").arg(media->displayName());
         if (remote && (!m_uploadManager || !m_uploadManager->remoteMediaReady(
                 m_targetClientId, manager.sha256(media->residencyOwnerId()))))
-            return QStringLiteral("Wait until every media is fully decoded on the remote computer (%1)").arg(media->displayName());
+            return QStringLiteral("Wait until every media is validated and resident on the remote computer (%1)").arg(media->displayName());
     }
     return {};
 }
@@ -593,7 +593,7 @@ QJsonArray QuickCanvasHost::localPreparationChecklist(
             if (!media) {
                 failure = QStringLiteral("Scene media %1 is no longer available").arg(mediaId);
             } else if (!media->isText() && !MediaResidencyManager::instance().ready(media->residencyOwnerId())) {
-                failure = QStringLiteral("Media %1 is not fully decoded in memory").arg(media->displayName());
+                failure = QStringLiteral("Media %1 is not validated and resident in memory").arg(media->displayName());
             } else if (stage == QLatin1String("file_validated") && !media->isText()) {
                 const QFileInfo source(media->sourcePath());
                 if (!source.exists() || !source.isFile() || source.isSymLink()
@@ -605,9 +605,6 @@ QJsonArray QuickCanvasHost::localPreparationChecklist(
                 if (!media->player()) {
                     failure = QStringLiteral("The video player for \"%1\" is not initialized")
                         .arg(media->displayName());
-                } else if (media->player()->error() != QMediaPlayer::NoError) {
-                    failure = QStringLiteral("Could not prepare video \"%1\": %2")
-                        .arg(media->displayName(), media->player()->errorString());
                 }
             }
         }
@@ -625,10 +622,81 @@ QJsonArray QuickCanvasHost::localPreparationChecklist(
     return checklist;
 }
 
+void QuickCanvasHost::rememberDraftState()
+{
+    if (!m_draftState.isEmpty()) return;
+    for (CanvasMedia* media : m_document->media()) {
+        DraftMediaState draft;
+        draft.media = media;
+        draft.visible = media->contentVisible();
+        if (media->isVideo()) {
+            draft.muted = media->muted();
+            draft.playing = media->isPlaying();
+            draft.positionMs = media->positionMs();
+        }
+        m_draftState.append(draft);
+    }
+}
+
+void QuickCanvasHost::prepareSceneVideos(std::function<void()> ready)
+{
+    if (m_videoPreparation) return;
+    rememberDraftState();
+    m_document->setEditsLocked(true);
+    const QPointer<QObject> context = new QObject(this);
+    m_videoPreparation = context;
+    auto finish = [this, context, ready]() {
+        if (!context || m_videoPreparation != context) return;
+        for (CanvasMedia* media : m_document->media()) {
+            if (!media->isText() && !MediaResidencyManager::instance().ready(media->residencyOwnerId())) {
+                failScene(QStringLiteral("Media memory availability changed during preparation"), m_sceneAccepted);
+                return;
+            }
+            if (media->isVideo() && (!media->player()
+                || !media->player()->preparedAt(media->playbackStartMs()))) return;
+        }
+        m_videoPreparation = nullptr;
+        context->deleteLater();
+        m_localVideosPrepared = true;
+        ready();
+    };
+    for (CanvasMedia* media : m_document->media()) {
+        if (!media->isVideo() || !media->player()) continue;
+        connect(media->player(), &ResidentVideoPlayer::frameReady, context, finish);
+        connect(media->player(), &ResidentVideoPlayer::errorOccurred, context,
+                [this, context](QMediaPlayer::Error error, const QString& message) {
+            if (context && m_videoPreparation == context && error != QMediaPlayer::NoError)
+                failScene(message, m_sceneAccepted);
+        });
+    }
+    const int timeout = m_webSocket
+        ? m_webSocket->serverPolicy().value(QStringLiteral("scenePrepareTimeoutMs")).toInt(5000) : 5000;
+    QTimer::singleShot(timeout, context, [this, context]() {
+        if (context && m_videoPreparation == context)
+            failScene(QStringLiteral("Video start frames did not finish preparing in time"), m_sceneAccepted);
+    });
+    for (CanvasMedia* media : m_document->media()) {
+        if (!context || m_videoPreparation != context) return;
+        if (media->isVideo() && media->player()) {
+            media->player()->pause();
+            // Replace any preview seek queued while this player's source was
+            // loading. Its LoadedMedia handler must not restore the draft
+            // cursor over the scene's prepared start frame.
+            media->setPositionMs(media->playbackStartMs());
+            media->player()->prepare(media->playbackStartMs());
+        }
+    }
+    finish();
+}
+
 void QuickCanvasHost::reportLocalScenePrepared()
 {
     if (!m_webSocket || !m_sceneLaunching || !m_sceneAccepted
         || m_localPreparedReported || m_localPrepareChecklist.isEmpty()) {
+        return;
+    }
+    if (!m_localVideosPrepared) {
+        prepareSceneVideos([this] { reportLocalScenePrepared(); });
         return;
     }
     m_localPreparedReported = true;
@@ -723,7 +791,7 @@ void QuickCanvasHost::triggerRemoteSceneAction()
     m_residencyGroup = QStringLiteral("canvas-scene:%1").arg(QUuid::createUuid().toString(QUuid::WithoutBraces));
     if (!MediaResidencyManager::instance().pinOwners(residencyOwners(), m_residencyGroup)) {
         m_residencyGroup.clear();
-        sceneToast(NotificationSeverity::Error, QStringLiteral("Scene media memory readiness changed; try again"));
+        sceneToast(NotificationSeverity::Error, QStringLiteral("Scene media changed or insufficient RAM remains for playback buffers; try again"));
         return;
     }
     m_sceneLaunching = true;
@@ -768,11 +836,15 @@ void QuickCanvasHost::triggerTestSceneAction()
         m_residencyGroup = QStringLiteral("canvas-test:%1").arg(QUuid::createUuid().toString(QUuid::WithoutBraces));
         if (!MediaResidencyManager::instance().pinOwners(residencyOwners(), m_residencyGroup)) {
             m_residencyGroup.clear();
+            sceneToast(NotificationSeverity::Error, QStringLiteral("Insufficient RAM remains for scene playback buffers"));
             publishActionState();
             return;
         }
-        beginScenePresentation(false);
-        m_testSceneLaunched = true;
+        m_testSceneLaunched = true; // Stop is available while frames are priming.
+        prepareSceneVideos([this] {
+            if (m_testSceneLaunched) beginScenePresentation(false);
+            publishActionState();
+        });
     }
     publishActionState();
 }
@@ -782,18 +854,9 @@ void QuickCanvasHost::beginScenePresentation(bool remote)
     if (m_sceneContext) return;
     m_document->setEditsLocked(true);
     m_sceneContext = new QObject(this);
-    m_draftState.clear();
+    rememberDraftState();
     for (CanvasMedia* media : m_document->media()) {
-        DraftMediaState draft;
-        draft.media = media;
-        draft.visible = media->contentVisible();
-        if (media->isVideo()) {
-            draft.muted = media->muted();
-            draft.playing = media->isPlaying();
-            draft.positionMs = media->positionMs();
-            media->beginScenePlayback();
-        }
-        m_draftState.append(draft);
+        if (media->isVideo()) media->beginScenePlayback();
         media->setContentVisible(false);
         media->setAnimatedDisplayOpacity(0.0);
         const MediaSettingsState settings = media->settings();
@@ -822,6 +885,9 @@ void QuickCanvasHost::beginScenePresentation(bool remote)
 
 void QuickCanvasHost::stopScenePresentation()
 {
+    if (m_videoPreparation) delete m_videoPreparation.data();
+    m_videoPreparation = nullptr;
+    m_localVideosPrepared = false;
     m_videoSnapshotTimer.stop();
     if (m_sceneContext) {
         delete m_sceneContext;
@@ -889,6 +955,7 @@ bool QuickCanvasHost::matchesScene(const QJsonObject& envelope) const
 
 void QuickCanvasHost::failScene(const QString& message, bool notifyServer)
 {
+    m_testSceneLaunched = false;
     const QString runId = m_sceneRunId;
     if (notifyServer && m_webSocket && !runId.isEmpty()) {
         m_webSocket->sendSceneStop(runId, QStringLiteral("client_scene_failure"));

@@ -50,6 +50,14 @@ if (-not (Test-Path $windeployqt)) { throw "windeployqt6 not found: $windeployqt
     --dir (Split-Path -Parent $clientExe) $clientExe | Out-Host
 if ($LASTEXITCODE -ne 0) { throw 'windeployqt QML deployment failed.' }
 
+# Deploy our version-pinned seek-correct streaming plugin after windeployqt,
+# which otherwise selects the unpatched plugin from the Qt installation.
+$customStreamingPlugin = Join-Path $buildDir 'plugins\multimedia\ffmpegmediaplugin.dll'
+if (-not (Test-Path $customStreamingPlugin)) { throw "Missing streaming plugin: $customStreamingPlugin" }
+$multimediaStage = Join-Path (Split-Path -Parent $clientExe) 'multimedia'
+New-Item -ItemType Directory -Path $multimediaStage -Force | Out-Null
+Copy-Item $customStreamingPlugin $multimediaStage -Force
+
 # Qt deployment does not own direct libav* dependencies. Walk PE imports from
 # the complete clean stage and copy the matching UCRT64 runtime recursively.
 $runtimeBin = Join-Path $msysRoot 'ucrt64\bin'
@@ -84,6 +92,11 @@ foreach ($library in @('avformat', 'avcodec', 'avutil', 'swscale', 'swresample')
     if (-not (Get-ChildItem $stagedBin -Filter "$library-*.dll")) {
         throw "Packaged application is missing the resident decoder dependency $library"
     }
+}
+
+$streamingPlugin = Join-Path $stagedBin 'multimedia\ffmpegmediaplugin.dll'
+if (-not (Test-Path $streamingPlugin)) {
+    throw "Packaged application is missing the memory streaming FFmpeg plugin: $streamingPlugin"
 }
 
 $webpPlugin = Join-Path (Split-Path -Parent $clientExe) 'imageformats\qwebp.dll'
