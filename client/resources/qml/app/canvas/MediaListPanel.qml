@@ -94,6 +94,8 @@ Rectangle {
                         required property var modelData
                         readonly property bool textMedia: mediaType === "text"
                         readonly property bool uploadedAndCached: uploadState === "uploaded" && !!modelData.remoteCached
+                        readonly property bool awaitingRemoteCache: uploadState === "uploaded" && !uploadedAndCached
+                        readonly property bool showProgress: uploadState === "uploading" || awaitingRemoteCache
                         readonly property string statusText: uploadedAndCached ? "Uploaded and Cached"
                             : uploadState === "uploaded" ? "Uploaded" : "Not uploaded"
                         readonly property bool selected: !!modelData.selected
@@ -116,7 +118,8 @@ Rectangle {
                             if (!root.sceneLocked) root.session.selectMedia(mediaId, false)
                         }
                         Accessible.name: displayName
-                        Accessible.description: (textMedia ? "" : (uploadState === "uploading" ? "Uploading" : statusText) + ", ") + detailsText
+                        Accessible.description: (textMedia ? "" : (uploadState === "uploading" ? "Uploading"
+                            : awaitingRemoteCache ? "Uploaded, preparing remote cache" : statusText) + ", ") + detailsText
                         background: Rectangle {
                             color: root.sceneLocked ? Qt.rgba(1, 1, 1, 0.03)
                                  : row.selected ? Qt.rgba(1, 1, 1, 0.10)
@@ -156,7 +159,7 @@ Rectangle {
                                     objectName: "mediaStatus_" + row.index
                                     anchors.fill: parent
                                     text: row.statusText
-                                    visible: row.uploadState !== "uploading"
+                                    visible: !row.showProgress
                                     color: row.uploadedAndCached ? Theme.mediaUploaded : Theme.mediaNotUploaded
                                     font.pixelSize: 14
                                     font.weight: Font.Medium
@@ -168,13 +171,22 @@ Rectangle {
                                     anchors.verticalCenter: parent.verticalCenter
                                     width: parent.width
                                     height: 10
-                                    visible: row.uploadState === "uploading"
+                                    visible: row.showProgress
                                     color: Theme.mediaProgressBackground
                                     Rectangle {
+                                        id: progressFill
                                         objectName: "mediaProgressFill_" + row.index
                                         height: parent.height
-                                        width: parent.width * Math.max(0, Math.min(100, row.modelData.uploadProgress || 0)) / 100
+                                        width: row.awaitingRemoteCache ? parent.width
+                                            : parent.width * Math.max(0, Math.min(100, row.modelData.uploadProgress || 0)) / 100
                                         color: Theme.mediaProgress
+                                        SequentialAnimation on opacity {
+                                            running: row.awaitingRemoteCache && progressFill.visible
+                                            loops: Animation.Infinite
+                                            onRunningChanged: if (!running) progressFill.opacity = 1
+                                            NumberAnimation { from: 1; to: 0.45; duration: 700; easing.type: Easing.InOutSine }
+                                            NumberAnimation { from: 0.45; to: 1; duration: 700; easing.type: Easing.InOutSine }
+                                        }
                                     }
                                 }
                             }

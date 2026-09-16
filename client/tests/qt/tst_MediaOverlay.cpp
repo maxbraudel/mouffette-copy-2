@@ -571,7 +571,13 @@ void MediaOverlayTest::mediaPanelVisibilityAnchorInteractionAndScroll()
         rows[0] = cachedRow;
         model.updateFromList(rows);
         auto* status = findVisualItem(panel, QStringLiteral("mediaStatus_0"));
-        QVERIFY(status);
+        auto* progress = findVisualItem(panel, QStringLiteral("mediaProgress_0"));
+        auto* fill = findVisualItem(panel, QStringLiteral("mediaProgressFill_0"));
+        QVERIFY(status && progress && fill);
+        QTRY_COMPARE(status->isVisible(), cached);
+        QCOMPARE(progress->isVisible(), !cached);
+        if (!cached) QCOMPARE(fill->width(), progress->width());
+        else QCOMPARE(fill->opacity(), 1.0);
         QTRY_COMPARE(status->property("text").toString(), cached
             ? QStringLiteral("Uploaded and Cached") : QStringLiteral("Uploaded"));
         QCOMPARE(status->property("color").value<QColor>(),
@@ -867,10 +873,13 @@ void MediaOverlayTest::mediaRowsAndProgress()
         QVERIFY(frame.save(QDir(artifactDir).filePath(QStringLiteral("media-overlay-uploading.png"))));
     }
     photo->setUploadUploaded();
-    QTRY_VERIFY(status->isVisible());
-    QVERIFY(!progress->isVisible());
-    QCOMPARE(status->property("text").toString(), QStringLiteral("Uploaded"));
-    QCOMPARE(status->property("color").value<QColor>(), QColor("#f39c12"));
+    QTRY_COMPARE(fill->width(), progress->width());
+    QVERIFY(progress->isVisible());
+    QVERIFY(!status->isVisible());
+    QTRY_VERIFY_WITH_TIMEOUT(fill->opacity() < 0.6, 1000);
+    if (!artifactDir.isEmpty())
+        QVERIFY(window.grabWindow().save(QDir(artifactDir).filePath(QStringLiteral("media-overlay-caching.png"))));
+    QTRY_VERIFY_WITH_TIMEOUT(fill->opacity() > 0.95, 1200);
     QCOMPARE(row->height(), originalHeight);
     host->document()->select(photo->mediaId());
     QTRY_VERIFY(row->property("selected").toBool());
