@@ -1081,7 +1081,6 @@ Rectangle {
             SelectionChrome {
                 id: selectionChrome
                 objectName: "canvasSelectionChrome"
-                presentationController: root
                 anchors.fill: parent
                 contentItem: viewport.contentRootItem
                 viewportItem: viewport

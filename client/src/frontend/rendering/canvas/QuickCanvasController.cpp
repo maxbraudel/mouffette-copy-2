@@ -1373,9 +1373,9 @@ void QuickCanvasController::handleMediaResizeRequested(
 {
     if (!editingEnabled()) return;
     CanvasMedia* media = m_document ? m_document->mediaById(mediaId) : nullptr;
-    if (!media || !media->residencyReady() || editsLocked()) return;
-    for (CanvasMedia* selected : m_document->media())
-        if (selected && selected->selected() && !selected->residencyReady()) return;
+    // Geometry edits do not depend on decoded content. Loading media shares
+    // the same transform transaction as every other selected occurrence.
+    if (!media || editsLocked()) return;
     if (m_resizeMediaId != mediaId) {
         captureTransformSelection(media);
         m_resizeMediaId = mediaId;

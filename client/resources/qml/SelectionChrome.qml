@@ -6,7 +6,6 @@ Item {
     id: root
 
     property var interactionController: null
-    property var presentationController: null
     readonly property bool editingEnabled: !interactionController || interactionController.editingEnabled
 
     property var inputCoordinator: null
@@ -97,15 +96,6 @@ Item {
         return null
     }
 
-    function mediaPresentationReady(entry) {
-        if (!entry)
-            return !presentationController
-        if (entry.residencyReady === false)
-            return false
-        return !presentationController
-                || presentationController.mediaOverlaysReady(entry.mediaId, entry)
-    }
-
     function resolveEntryGeometry(entry) {
         var mediaId = entry ? (entry.mediaId || "") : ""
         var transform = interactionController && interactionController.liveTransforms
@@ -185,7 +175,7 @@ Item {
         var radius = Math.max(handleSize, handleHitboxSize) * 0.5
         for (var entryIndex = selectionModel.length - 1; entryIndex >= 0; --entryIndex) {
             var entry = selectionModel[entryIndex]
-            if (!entry || !mediaPresentationReady(root.mediaEntryById(entry.mediaId)))
+            if (!entry)
                 continue
 
             var geom = resolveEntryGeometry(entry)
@@ -401,8 +391,9 @@ Item {
                 ? (interactionController.liveSnapDragY - sceneY) * _viewScale
                 : root.dragOffsetViewY
 
-            readonly property var mediaEntry: entry ? root.mediaEntryById(entry.mediaId) : null
-            enabled: !!entry && root.mediaPresentationReady(mediaEntry)
+            // Selection geometry belongs to the media shell, including while
+            // its content is loading or waiting for memory.
+            enabled: !!entry
             visible: enabled
             z: 98500
 

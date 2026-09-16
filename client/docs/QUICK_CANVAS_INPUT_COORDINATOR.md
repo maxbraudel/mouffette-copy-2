@@ -35,6 +35,12 @@ projection supplies content, selection chrome and overlays with the same
 provisional geometry. Release commits the whole selection to `CanvasDocument`.
 Text fit mode changes only when a free resize commits.
 
+Images and videos keep this same selectable, movable and resizable shell while
+their content is loading or waiting for memory. Uniform and Alt resize, including
+group transforms, operate on geometry independently of media residency. Loading
+reveals the content inside the existing delegate without resetting edited geometry;
+content controls and settings still wait for media readiness.
+
 `editingEnabled` combines project permission with the document's scene lock.
 Both QML input and C++ commands enforce it. Test-scene startup and remote prepare
 lock synchronously, discard provisional transforms, end native edit ownership,

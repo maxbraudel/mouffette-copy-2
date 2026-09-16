@@ -3,6 +3,7 @@
 #include <QDir>
 #include <QJsonArray>
 #include <QMimeData>
+#include <QMouseEvent>
 #include "backend/files/FileManager.h"
 #include "backend/media/MediaResidencyManager.h"
 #include "backend/runtime/RuntimeProfile.h"
@@ -1578,8 +1579,20 @@ private slots:
         QVERIFY(imported->residencyReady());
     }
 
-    void coldMediaHasOnlyTitleAndSupportsMoveAndDelete()
+    void coldMediaKeepsEditableShell_data()
     {
+        QTest::addColumn<bool>("video");
+        QTest::addColumn<bool>("alt");
+        QTest::newRow("image-resize") << false << false;
+        QTest::newRow("image-alt-resize") << false << true;
+        QTest::newRow("video-resize") << true << false;
+        QTest::newRow("video-alt-resize") << true << true;
+    }
+
+    void coldMediaKeepsEditableShell()
+    {
+        QFETCH(bool, video);
+        QFETCH(bool, alt);
         auto& memory = MediaResidencyManager::instance();
         struct ResetMemory { ~ResetMemory() { MediaResidencyManager::instance().clearMemorySnapshotForTesting(); } } reset;
         memory.setMemorySnapshotForTesting({8ULL << 30, 0, 512ULL << 20, false, 0});
@@ -1587,13 +1600,22 @@ private slots:
         QVERIFY(fixture.initialize());
         fixture.view.show();
         QVERIFY(QTest::qWaitForWindowExposed(&fixture.view));
+#ifdef Q_OS_MACOS
+        MacWindowManager::activateApplicationWindow(&fixture.view);
+#else
+        fixture.view.requestActivate();
+#endif
+        QVERIFY(QTest::qWaitForWindowActive(&fixture.view));
         QTemporaryDir directory;
-        const QString path = directory.filePath(QStringLiteral("cold.png"));
+        const QString path = video ? QString::fromUtf8(TEST_VIDEO_FILE)
+                                   : directory.filePath(QStringLiteral("cold.png"));
         QImage image(160, 90, QImage::Format_ARGB32_Premultiplied);
         image.fill(Qt::cyan);
-        QVERIFY(image.save(path));
-        auto* media = fixture.document.addPreparedFile(path, image.size(), false, {100, 100});
+        if (!video) QVERIFY(image.save(path));
+        QVERIFY(QFile::exists(path));
+        auto* media = fixture.document.addPreparedFile(path, image.size(), video, {100, 100});
         QVERIFY(media && !media->residencyReady());
+        media->setScale(2.0);
         QTRY_VERIFY(!media->residencyState().isEmpty());
         MediaSettingsViewModel settings;
         settings.setController(&fixture.controller);
@@ -1602,26 +1624,62 @@ private slots:
         QVERIFY(top);
         QVERIFY(!top->property("actionsAvailable").toBool());
         auto* chrome = findQuickItemWithProperty(fixture.view.rootObject(), "objectName", "selectionChromeVisual");
-        QVERIFY(chrome && !chrome->isVisible());
+        QVERIFY(chrome && chrome->isVisible());
+        QCOMPARE(chrome->size(), QSizeF(320, 180));
         auto* skeleton = findQuickItemWithProperty(fixture.view.rootObject(), "objectName", "mediaLoadingSkeleton");
         QVERIFY(skeleton && skeleton->isVisible());
         QCOMPARE(skeleton->size(), QSizeF(160, 90));
         const QString artifactDir = qEnvironmentVariable("MOUFFETTE_OVERLAY_ARTIFACT_DIR");
         if (!artifactDir.isEmpty()) {
             QVERIFY(QDir().mkpath(artifactDir));
-            QVERIFY(fixture.view.grabWindow().save(QDir(artifactDir).filePath("media-skeleton.png")));
+            QVERIFY(fixture.view.grabWindow().save(QDir(artifactDir).filePath(
+                QStringLiteral("media-skeleton-%1.png").arg(QString::fromLatin1(QTest::currentDataTag())))));
         }
         QSignalSpy persistentChanges(&fixture.document, &CanvasDocument::documentChanged);
         memory.sampleNow();
         QCOMPARE(persistentChanges.size(), 0);
-        const QSize original = media->baseSize();
-        fixture.controller.handleMediaResizeRequested(media->mediaId(), "right-mid", 500, 100, false, false);
-        fixture.controller.handleMediaResizeEnded(media->mediaId());
-        QCOMPARE(media->baseSize(), original);
+        // Drive the actual handle with native events so both QML hit testing
+        // and the backend transaction must accept the loading media.
+        auto* root = fixture.view.rootObject();
+        QPointer<QQuickItem> delegate = findQuickItemWithProperty(root, "currentMediaId", media->mediaId());
+        QVERIFY(delegate);
+        const QPoint start = chrome->mapToScene({chrome->width(), chrome->height()}).toPoint();
+        const QPoint delta(160, alt ? 50 : 90);
+        const auto modifiers = alt ? Qt::AltModifier : Qt::NoModifier;
+        QSignalSpy resizeRequested(root, SIGNAL(mediaResizeRequested(QString,QString,double,double,bool,bool)));
+        QTest::mousePress(&fixture.view, Qt::LeftButton, modifiers, start);
+        for (int step = 1; step <= 4; ++step) {
+            const QPoint point = start + delta * step / 4;
+            QMouseEvent move(QEvent::MouseMove, QPointF(point), QPointF(point),
+                QPointF(fixture.view.mapToGlobal(point)), Qt::NoButton, Qt::LeftButton, modifiers);
+            QCoreApplication::sendEvent(&fixture.view, &move);
+            QTest::qWait(10);
+        }
+        QVERIFY(!resizeRequested.isEmpty());
+        QCOMPARE(resizeRequested.last().at(5).toBool(), alt);
+        QTest::mouseRelease(&fixture.view, Qt::LeftButton, modifiers, start + delta);
+        QCOMPARE(media->scale(), alt ? 2.0 : 3.0);
+        QCOMPARE(media->baseSize(), alt ? QSize(240, 115) : QSize(160, 90));
+        QCOMPARE(media->position(), QPointF(100, 100));
+        QTRY_COMPARE(skeleton->size(), QSizeF(media->baseSize()));
+        QVERIFY(skeleton->isVisible());
+        QVERIFY(!settings.available());
+        top = findQuickItemWithProperty(root, "objectName", "mediaTopOverlay");
+        QVERIFY(top);
+        QVERIFY(!top->property("actionsAvailable").toBool());
         fixture.controller.handleMediaMoveStarted(media->mediaId(), 100, 100, false);
         fixture.controller.handleMediaMoveUpdated(media->mediaId(), 130, 120, false);
         fixture.controller.handleMediaMoveEnded(media->mediaId(), 130, 120, false);
         QCOMPARE(media->position(), QPointF(130, 120));
+        const QRectF editedRect = media->sceneRect();
+        // Loading only replaces the skeleton content; user geometry survives.
+        memory.setMemorySnapshotForTesting({8ULL << 30, 6ULL << 30, 512ULL << 20, false, 0});
+        memory.sampleNow();
+        memory.sampleNow();
+        QTRY_VERIFY_WITH_TIMEOUT(media->residencyReady(), 5000);
+        QTRY_VERIFY(!skeleton->isVisible());
+        QCOMPARE(media->sceneRect(), editedRect);
+        QCOMPARE(findQuickItemWithProperty(root, "currentMediaId", media->mediaId()), delegate.data());
         fixture.controller.deleteSelectedMedia();
         QVERIFY(fixture.document.media().isEmpty());
     }
@@ -1690,7 +1748,7 @@ private slots:
         auto* skeleton = findQuickItemWithProperty(fixture.view.rootObject(), "objectName", "mediaLoadingSkeleton");
         QVERIFY(top && chrome && skeleton);
         QVERIFY(!top->property("actionsAvailable").toBool());
-        QVERIFY(!chrome->isVisible());
+        QVERIFY(chrome->isVisible());
         QVERIFY(skeleton->isVisible());
 
         fixture.view.show();
