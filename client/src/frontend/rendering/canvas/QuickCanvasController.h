@@ -39,6 +39,7 @@ class QuickCanvasController final : public QObject
     Q_PROPERTY(qreal viewScale READ viewScale NOTIFY presentationChanged)
     Q_PROPERTY(qreal panX READ panX NOTIFY presentationChanged)
     Q_PROPERTY(qreal panY READ panY NOTIFY presentationChanged)
+    Q_PROPERTY(int remoteCursorDiameter READ remoteCursorDiameter CONSTANT)
     Q_PROPERTY(bool remoteCursorVisible READ remoteCursorVisible NOTIFY remoteCursorChanged)
     Q_PROPERTY(qreal remoteCursorX READ remoteCursorX NOTIFY remoteCursorChanged)
     Q_PROPERTY(qreal remoteCursorY READ remoteCursorY NOTIFY remoteCursorChanged)
@@ -85,6 +86,7 @@ public:
     qreal viewScale() const { return m_viewScale; }
     qreal panX() const { return m_panX; }
     qreal panY() const { return m_panY; }
+    int remoteCursorDiameter() const;
     bool remoteCursorVisible() const { return m_remoteCursorVisible; }
     qreal remoteCursorX() const { return m_remoteCursorX; }
     qreal remoteCursorY() const { return m_remoteCursorY; }

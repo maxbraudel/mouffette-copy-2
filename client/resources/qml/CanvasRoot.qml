@@ -87,7 +87,8 @@ Rectangle {
                                  ? canvasController.remoteCursorX : 0
     property real remoteCursorY: canvasController
                                  ? canvasController.remoteCursorY : 0
-    property int remoteCursorDiameter: 30
+    property int remoteCursorDiameter: canvasController
+                                       ? canvasController.remoteCursorDiameter : 30
     property color remoteCursorFill: AppStyle.Theme.remoteCursorFill
     property color remoteCursorBorder: AppStyle.Theme.remoteCursorBorder
     property real remoteCursorBorderWidth: 2

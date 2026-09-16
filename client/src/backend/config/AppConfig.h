@@ -71,6 +71,7 @@ public:
         UiInputWatchdogIntervalMs,
         UiSnapFreezeCleanupDelayMs,
         CanvasTextInitialHeightPercent,
+        RemoteCursorDiameterPx,
         ToastDefaultDurationMs,
         ToastInfoDurationMs,
         ToastWarningDurationMs,
@@ -183,6 +184,7 @@ public:
     int uiScrollbarHideDelayMs() const { return m_uiScrollbarHideDelayMs; }
     int uiInputWatchdogIntervalMs() const { return m_uiInputWatchdogIntervalMs; }
     int uiSnapFreezeCleanupDelayMs() const { return m_uiSnapFreezeCleanupDelayMs; }
+    int remoteCursorDiameterPx() const { return m_remoteCursorDiameterPx; }
     int canvasTextInitialHeightPercent() const { return m_canvasTextInitialHeightPercent; }
     int toastDefaultDurationMs() const { return m_toastDefaultDurationMs; }
     int toastInfoDurationMs() const { return m_toastInfoDurationMs; }
@@ -259,6 +261,7 @@ private:
     int m_toastErrorDurationMs = 5000;
     int m_toastAnimationDurationMs = 300;
     int m_canvasTextInitialHeightPercent = 8;
+    int m_remoteCursorDiameterPx = 30;
     int m_mediaRamReservePercent = 0;
     int m_mediaRamReserveMinMiB = 548;
     int m_uploadConcurrency = 2;

@@ -398,6 +398,11 @@ void QuickCanvasController::publishScreens()
     emit presentationChanged();
 }
 
+int QuickCanvasController::remoteCursorDiameter() const
+{
+    return AppConfig::instance().remoteCursorDiameterPx();
+}
+
 void QuickCanvasController::publishRemoteCursor()
 {
     if (!m_document) return;

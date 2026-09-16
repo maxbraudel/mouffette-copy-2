@@ -1,8 +1,14 @@
 # Remote cursor
 
 The canvas displays the mouse of its connected target, including during scene
-playback when editing is locked. The marker is 30 logical view pixels across;
+playback when editing is locked. The marker defaults to 30 logical view pixels across;
 its center follows the canvas camera but its size does not shrink with zoom.
+
+Configure its diameter in `client/.env` with
+`MOUFFETTE_REMOTE_CURSOR_DIAMETER_PX=30` (integer 4..256). This is a local
+display setting on the viewing client. Rebuild after changing the embedded
+`.env`, or restart with `--env-file /absolute/path/to/client/.env` to load it
+from disk without rebuilding. The setting is read at startup.
 
 ## Regression and restored path
 
