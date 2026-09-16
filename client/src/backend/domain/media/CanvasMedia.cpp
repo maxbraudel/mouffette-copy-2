@@ -1,5 +1,7 @@
 #include "backend/domain/media/CanvasMedia.h"
 #include "backend/domain/media/TextRenderState.h"
+#include "backend/media/MediaResidencyManager.h"
+#include "shared/rendering/MediaFrameSource.h"
 
 #include <QAudioOutput>
 #include <QFileInfo>
@@ -29,11 +31,30 @@ CanvasMedia::CanvasMedia(Type type, const QSize& baseSize, QObject* parent)
     , m_mediaId(QUuid::createUuid().toString(QUuid::WithoutBraces))
     , m_baseSize(baseSize.expandedTo(QSize(1, 1)))
 {
+    m_residencyOwnerId = QStringLiteral("canvas:") + QUuid::createUuid().toString(QUuid::WithoutBraces);
+    if (!isText()) {
+        m_residentFrameSource = new RemoteVideoFrameSource(this);
+        connect(&MediaResidencyManager::instance(), &MediaResidencyManager::ownerChanged,
+                this, [this](const QString& owner) {
+            if (owner == m_residencyOwnerId) refreshResidency();
+        });
+    }
 }
 
 CanvasMedia::~CanvasMedia()
 {
     if (m_player) m_player->stop();
+    retireResidency();
+}
+
+void CanvasMedia::retireResidency()
+{
+    if (isText() || m_residencyRetired) return;
+    m_residencyRetired = true;
+    if (m_player) m_player->clearAsset();
+    if (m_residentFrameSource) m_residentFrameSource->clear();
+    if (m_residencyAcquired) MediaResidencyManager::instance().release(m_residencyOwnerId);
+    m_residencyAcquired = false;
 }
 
 QString CanvasMedia::typeName() const
@@ -63,15 +84,92 @@ void CanvasMedia::setFileId(const QString& id)
     notifyChanged();
 }
 
-void CanvasMedia::setSourcePath(const QString& path)
+void CanvasMedia::setSourcePath(const QString& path, const QString& expectedSha256)
 {
-    if (m_sourcePath == path) return;
+    if (m_sourcePath == path && m_expectedSha256 == expectedSha256) return;
     m_sourcePath = path;
+    m_expectedSha256 = expectedSha256;
+    m_identityPublished = false;
+    m_sourceInvalidationReported = false;
+    m_fileId = expectedSha256;
     m_pendingPositionMs = -1;
     const QFileInfo source(path);
     m_sourceSizeBytes = source.isFile() ? source.size() : -1;
-    if (m_player) m_player->setSource(QUrl::fromLocalFile(path));
+    if (!isText()) {
+        if (m_residencyAcquired) MediaResidencyManager::instance().release(m_residencyOwnerId);
+        m_residencyAcquired = false;
+        if (!path.isEmpty()) requestResidency();
+        refreshResidency();
+    }
     notifyChanged();
+}
+
+void CanvasMedia::requestResidency()
+{
+    const QString path = m_sourcePath;
+    const QString expected = m_expectedSha256;
+    // Defer even a shared-cache hit until the document has adopted the node
+    // and installed identity/invalidation observers.
+    QMetaObject::invokeMethod(this, [this, path, expected]() {
+        if (m_residencyRetired || m_sourcePath != path || m_expectedSha256 != expected) return;
+        m_residencyAcquired = true;
+        MediaResidencyManager::instance().acquire(m_residencyOwnerId, path, expected);
+        refreshResidency();
+    }, Qt::QueuedConnection);
+}
+
+bool CanvasMedia::residencyReady() const
+{
+    return isText() || MediaResidencyManager::instance().ready(m_residencyOwnerId);
+}
+
+QString CanvasMedia::residencyState() const
+{
+    return isText() ? QStringLiteral("ready") : MediaResidencyManager::instance().state(m_residencyOwnerId);
+}
+
+double CanvasMedia::residencyProgress() const
+{
+    return isText() ? 1.0 : MediaResidencyManager::instance().progress(m_residencyOwnerId);
+}
+
+QString CanvasMedia::residencyError() const
+{
+    return isText() ? QString() : MediaResidencyManager::instance().errorString(m_residencyOwnerId);
+}
+
+void CanvasMedia::refreshResidency()
+{
+    if (isText() || m_residencyRetired) return;
+    auto& manager = MediaResidencyManager::instance();
+    const QString digest = manager.sha256(m_residencyOwnerId);
+    const bool mismatched = !m_expectedSha256.isEmpty() && !digest.isEmpty()
+        && digest != m_expectedSha256;
+    if (mismatched && !m_sourceInvalidationReported) {
+        m_sourceInvalidationReported = true;
+        emit sourceInvalidated(manager.errorString(m_residencyOwnerId));
+    }
+    if (!digest.isEmpty() && !mismatched && !m_identityPublished) {
+        m_identityPublished = true;
+        if (digest != m_fileId) setFileId(digest);
+        emit identityReady(digest);
+    }
+    const auto asset = manager.asset(m_residencyOwnerId);
+    if (manager.ready(m_residencyOwnerId) && asset) {
+        if (isVideo()) {
+            initializeVideoRuntime();
+            if (m_player->asset() != asset) m_player->setAsset(asset);
+        } else if (m_residentFrameSource) {
+            m_residentFrameSource->setFrame(asset->image);
+        }
+    } else {
+        if (m_player && m_player->asset()) m_player->clearAsset();
+        if (m_residentFrameSource) m_residentFrameSource->clear();
+        m_hasRenderedFrame = false;
+        m_firstFramePrimed = false;
+    }
+    emit residencyChanged();
+    emit runtimeStateChanged();
 }
 
 QString CanvasMedia::displayName() const
@@ -410,7 +508,7 @@ void CanvasMedia::setVerticalAlignment(const QString& alignment)
 void CanvasMedia::initializeVideoRuntime()
 {
     if (!isVideo() || m_player) return;
-    m_player = new QMediaPlayer(this);
+    m_player = new ResidentVideoPlayer(this);
     m_videoSink = new QVideoSink(this);
     m_audioOutput = new QAudioOutput(this);
     m_player->setAudioOutput(m_audioOutput);
@@ -422,16 +520,15 @@ void CanvasMedia::initializeVideoRuntime()
             m_hasRenderedFrame = true;
             m_firstFramePrimed = true;
             emit runtimeStateChanged();
-            notifyChanged();
         }
     });
-    connect(m_player, &QMediaPlayer::playbackStateChanged,
+    connect(m_player, &ResidentVideoPlayer::playbackStateChanged,
             this, &CanvasMedia::runtimeStateChanged);
-    connect(m_player, &QMediaPlayer::positionChanged,
+    connect(m_player, &ResidentVideoPlayer::positionChanged,
             this, &CanvasMedia::runtimeStateChanged);
-    connect(m_player, &QMediaPlayer::positionChanged, this,
+    connect(m_player, &ResidentVideoPlayer::positionChanged, this,
             [this](qint64 position) { enforcePlaybackEnd(position); });
-    connect(m_player, &QMediaPlayer::mediaStatusChanged, this,
+    connect(m_player, &ResidentVideoPlayer::mediaStatusChanged, this,
             [this](QMediaPlayer::MediaStatus status) {
         if ((status == QMediaPlayer::LoadedMedia || status == QMediaPlayer::BufferedMedia)
             && m_pendingPositionMs >= 0) {
@@ -449,14 +546,13 @@ void CanvasMedia::initializeVideoRuntime()
             }, Qt::QueuedConnection);
         }
     });
-    connect(m_player, &QMediaPlayer::durationChanged,
+    connect(m_player, &ResidentVideoPlayer::durationChanged,
             this, &CanvasMedia::runtimeStateChanged);
-    connect(m_player, &QMediaPlayer::errorChanged,
+    connect(m_player, &ResidentVideoPlayer::errorChanged,
             this, &CanvasMedia::runtimeStateChanged);
     updateVideoLoops();
-    if (!m_sourcePath.isEmpty()) {
-        m_player->setSource(QUrl::fromLocalFile(m_sourcePath));
-    }
+    const auto asset = MediaResidencyManager::instance().asset(m_residencyOwnerId);
+    if (residencyReady() && asset) m_player->setAsset(asset);
 }
 
 bool CanvasMedia::isPlaying() const
@@ -575,7 +671,8 @@ void CanvasMedia::enforcePlaybackEnd(qint64 position, bool atEnd)
 {
     if (!m_player || m_handlingPlaybackEnd || (!isPlaying() && !atEnd)) return;
     const qint64 end = playbackEndMs();
-    if (end <= 0 || position < end || (atEnd && positionMs() < end)) return;
+    if (end <= 0 || position < end
+        || (atEnd && m_player->mediaStatus() != QMediaPlayer::EndOfMedia)) return;
     if (m_repeatEnabled && m_startMarkerMs < 0 && m_endMarkerMs < 0) return;
     // Natural EOF has its own deferred status handler. Seeking during the last
     // position notification would let the backend stop our newly started loop.
@@ -645,6 +742,7 @@ QVariantMap CanvasMedia::toModelMap(qreal unit) const
     const qreal safeUnit = unit > 0.0001 ? unit : 1.0;
     QVariantMap map{
         {QStringLiteral("mediaId"), m_mediaId},
+        {QStringLiteral("canvasMedia"), true},
         {QStringLiteral("mediaType"), typeName()},
         {QStringLiteral("x"), m_position.x() * safeUnit},
         {QStringLiteral("y"), m_position.y() * safeUnit},
@@ -653,6 +751,11 @@ QVariantMap CanvasMedia::toModelMap(qreal unit) const
         {QStringLiteral("scale"), m_scale},
         {QStringLiteral("z"), m_z},
         {QStringLiteral("selected"), m_selected},
+        {QStringLiteral("residencyReady"), residencyReady()},
+        {QStringLiteral("residencyState"), residencyState()},
+        {QStringLiteral("residencyProgress"), residencyProgress()},
+        {QStringLiteral("residencyError"), residencyError()},
+        {QStringLiteral("residentFrameSource"), QVariant::fromValue<QObject*>(m_residentFrameSource)},
         {QStringLiteral("sourceSizeBytes"), m_sourceSizeBytes},
         {QStringLiteral("sourcePath"), m_sourcePath},
         {QStringLiteral("sourceUrl"), m_sourcePath.isEmpty()
@@ -688,7 +791,6 @@ QVariantMap CanvasMedia::toModelMap(qreal unit) const
         map.insert(QStringLiteral("videoSinkPtr"),
                    QVariant::fromValue<QObject*>(m_videoSink));
         map.insert(QStringLiteral("videoHasRenderedFrame"), m_hasRenderedFrame);
-        map.insert(QStringLiteral("videoHasPosterFrame"), false);
         map.insert(QStringLiteral("videoFirstFramePrimed"), m_firstFramePrimed);
         map.insert(QStringLiteral("videoPlaybackErrorCode"),
                    m_player ? static_cast<int>(m_player->error()) : 0);

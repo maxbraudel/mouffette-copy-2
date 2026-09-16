@@ -59,6 +59,7 @@ public:
     bool testSceneLaunched() const override { return m_testSceneLaunched; }
     bool remoteSceneActionEnabled() const override;
     bool testSceneActionEnabled() const override;
+    QString mediaReadinessReason(bool remote) const;
     void triggerRemoteSceneAction() override;
     void triggerTestSceneAction() override;
 
@@ -94,6 +95,8 @@ private:
     void connectWebSocketSignals();
     void sendVideoSnapshot();
 
+    QStringList residencyOwners() const;
+    QString m_residencyGroup;
     CanvasDocument* m_document = nullptr;
     QuickCanvasController* m_controller = nullptr;
     QPointer<WebSocketClient> m_webSocket;

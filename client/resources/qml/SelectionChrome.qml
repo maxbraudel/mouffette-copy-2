@@ -6,6 +6,7 @@ Item {
     id: root
 
     property var interactionController: null
+    property var presentationController: null
     readonly property bool editingEnabled: !interactionController || interactionController.editingEnabled
 
     property var inputCoordinator: null
@@ -96,6 +97,15 @@ Item {
         return null
     }
 
+    function mediaPresentationReady(entry) {
+        if (!entry)
+            return !presentationController
+        if (entry.residencyReady === false)
+            return false
+        return !presentationController
+                || presentationController.mediaOverlaysReady(entry.mediaId, entry)
+    }
+
     function resolveEntryGeometry(entry) {
         var mediaId = entry ? (entry.mediaId || "") : ""
         var transform = interactionController && interactionController.liveTransforms
@@ -175,7 +185,7 @@ Item {
         var radius = Math.max(handleSize, handleHitboxSize) * 0.5
         for (var entryIndex = selectionModel.length - 1; entryIndex >= 0; --entryIndex) {
             var entry = selectionModel[entryIndex]
-            if (!entry)
+            if (!entry || !mediaPresentationReady(root.mediaEntryById(entry.mediaId)))
                 continue
 
             var geom = resolveEntryGeometry(entry)
@@ -391,12 +401,9 @@ Item {
                 ? (interactionController.liveSnapDragY - sceneY) * _viewScale
                 : root.dragOffsetViewY
 
-            enabled: !!entry
-            visible: !!entry
-            // Delegates are deliberately reparented to contentRoot, so this z
-            // is compared directly with mediaDropPreview.z (98000). Selection
-            // borders and handles must remain the topmost scene-space visual
-            // during the preview-to-media handoff.
+            readonly property var mediaEntry: entry ? root.mediaEntryById(entry.mediaId) : null
+            enabled: !!entry && root.mediaPresentationReady(mediaEntry)
+            visible: enabled
             z: 98500
 
             // Apply offset when dragging OR when the snap freeze is active.

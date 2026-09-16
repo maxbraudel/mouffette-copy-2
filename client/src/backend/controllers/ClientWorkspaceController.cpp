@@ -1,3 +1,4 @@
+#include "backend/handlers/UploadEventHandler.h"
 #include "ClientWorkspaceController.h"
 #include "backend/config/AppConfig.h"
 #include "backend/runtime/ApplicationRuntime.h"
@@ -147,8 +148,25 @@ void ClientWorkspaceController::configureWorkspace(ClientWorkspace* workspace) {
                         projectAutosaveTimer->start();
                     });
         }
+        auto* autoUploadTimer = new QTimer(workspace->canvas);
+        autoUploadTimer->setSingleShot(true);
+        autoUploadTimer->setInterval(350);
+        connect(autoUploadTimer, &QTimer::timeout, m_runtime,
+                [this, autoUploadTimer, targetEndpointId=workspace->targetEndpointId]() {
+            if (!m_runtime->getAutoUploadImportedMedia() || !m_runtime->getUploadManager()
+                || !m_runtime->m_uploadEventHandler) return;
+            auto* current = findWorkspace(targetEndpointId);
+            if (!current || !current->canvas || !current->canvas->overlayActionsEnabled()) return;
+            auto* manager = m_runtime->getUploadManager();
+            const QString selected = manager->targetClientId();
+            manager->setTargetClientId(targetEndpointId);
+            const bool busy = manager->isBusy();
+            manager->setTargetClientId(selected);
+            if (busy) { autoUploadTimer->start(); return; }
+            m_runtime->m_uploadEventHandler->uploadWorkspace(targetEndpointId, true);
+        });
         connect(workspace->canvas, &ICanvasHost::mediaItemAdded, m_runtime,
-                [this, targetEndpointId=workspace->targetEndpointId](CanvasMedia* mediaItem) {
+                [this, autoUploadTimer, targetEndpointId=workspace->targetEndpointId](CanvasMedia* mediaItem) {
                     if (m_runtime->getFileWatcher() && mediaItem && !mediaItem->sourcePath().isEmpty()) {
                         m_runtime->getFileWatcher()->watchMediaItem(mediaItem);
                         qDebug() << "ClientWorkspaceController: source watch added for mediaId"
@@ -163,9 +181,15 @@ void ClientWorkspaceController::configureWorkspace(ClientWorkspace* workspace) {
                     if (m_runtime->getUploadManager()) {
                         emit m_runtime->getUploadManager()->uiStateChanged();
                     }
-                    if (m_runtime->getAutoUploadImportedMedia() && m_runtime->getUploadManager() && 
-                        !m_runtime->getUploadManager()->isUploading() && !m_runtime->getUploadManager()->isCancelling()) {
-                        QTimer::singleShot(0, m_runtime, [this]() { m_runtime->onUploadButtonClicked(); });
+                    if (mediaItem && !mediaItem->isText()) {
+                        connect(mediaItem, &CanvasMedia::identityReady, autoUploadTimer,
+                                [this, autoUploadTimer](const QString&) {
+                            if (m_runtime->getUploadManager())
+                                emit m_runtime->getUploadManager()->uiStateChanged();
+                            if (m_runtime->getAutoUploadImportedMedia()) autoUploadTimer->start();
+                        });
+                        if (!mediaItem->fileId().isEmpty()
+                            && m_runtime->getAutoUploadImportedMedia()) autoUploadTimer->start();
                     }
                 });
         

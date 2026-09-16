@@ -2,19 +2,19 @@
   "assets": [
     {
       "file": "mixed_media_scene.snapshot.json",
-      "sha256": "55fe7445eec71e5e99039cb7975f8b2ed496af1e6be16c14f2c26ff52acb6d2b"
+      "sha256": "b9f43e4a6a3954d52c7a7ad6fb2ecd1388e10e421131cf2c5887375575d4875e"
     },
     {
       "file": "reconnect_upload_active_scene.snapshot.json",
-      "sha256": "183fbac5284f9c25ccd4a9bae3a26737a0c4f7b1d37f0645f54613935206e03e"
+      "sha256": "28bdb7342f9b4cf6f26f0007ddff486373cd54e8a266e00efbb7cb7ead6dc017"
     },
     {
       "file": "selection_snap_stress_scene.snapshot.json",
-      "sha256": "edd3d4d4211e1eadaf8312460c654685683b145f9e368434935dae012cc9ad2d"
+      "sha256": "c30baf63e6c61af5bebb4753fcfd78923577e48ed2ffab411972e4c52d2661c8"
     },
     {
       "file": "text_heavy_zoom_scene.snapshot.json",
-      "sha256": "67789b9b6ce1dd54d473805f5eb2c5b9b94e619de6af597e474d5734fc019418"
+      "sha256": "cde692f630b36edeb24fb3ae019ef61cb9eac1b51678f28ba8f4f899027d1985"
     }
   ]
 }

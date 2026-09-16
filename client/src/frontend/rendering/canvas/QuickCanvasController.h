@@ -34,8 +34,6 @@ class QuickCanvasController final : public QObject
     Q_PROPERTY(QVariantList uiZonesModel READ uiZonesModel NOTIFY presentationChanged)
     Q_PROPERTY(QVariantList snapGuidesModel READ snapGuidesModel NOTIFY presentationChanged)
     Q_PROPERTY(QVariantMap videoStateModel READ videoStateModel NOTIFY presentationChanged)
-    Q_PROPERTY(QVariantMap dropPreviewModel READ dropPreviewModel NOTIFY presentationChanged)
-    Q_PROPERTY(QObject* dropPreviewFrameSource READ dropPreviewFrameSource CONSTANT)
     Q_PROPERTY(bool remoteActive READ remoteActive NOTIFY presentationChanged)
     Q_PROPERTY(bool textToolActive READ textToolActive NOTIFY presentationChanged)
     Q_PROPERTY(qreal viewScale READ viewScale NOTIFY presentationChanged)
@@ -78,8 +76,6 @@ public:
     QVariantList uiZonesModel() const { return m_uiZonesModel; }
     QVariantList snapGuidesModel() const { return m_snapGuidesModel; }
     QVariantMap videoStateModel() const { return m_videoStateModel; }
-    QVariantMap dropPreviewModel() const { return m_dropPreviewModel; }
-    QObject* dropPreviewFrameSource() const;
     bool remoteActive() const { return m_shellActive; }
     bool projectEditingEnabled() const { return m_projectEditingEnabled; }
     bool editingEnabled() const { return m_projectEditingEnabled && !editsLocked(); }
@@ -199,7 +195,6 @@ public slots:
                                       const QString& alignment);
     void handleOverlayVerticalAlign(const QString& mediaId,
                                     const QString& alignment);
-    void handleDropPreviewContentReady(const QString& mediaId);
 
 private:
     void publishAll();
@@ -209,7 +204,6 @@ private:
     void publishScreens();
     void publishRemoteCursor();
     void publishVideoState();
-    void publishDropPreview(bool visible, const QString& handoffId = {});
     void publishSnapGuides(const QVariantList& guides);
     QPointF mapViewPointToScene(const QPointF& viewPoint) const;
     QPointF snappedPosition(CanvasMedia* media, const QPointF& proposed,
@@ -243,7 +237,6 @@ private:
     QPointer<CanvasDocument> m_document;
     QPointer<QQuickWindow> m_renderWindow;
     MediaListModel* m_mediaListModel = nullptr;
-    RemoteVideoFrameSource* m_dropFrameSource = nullptr;
     QTimer* m_videoStateTimer = nullptr;
     bool m_textToolActive = false;
     bool m_shellActive = false;
@@ -276,18 +269,12 @@ private:
     bool m_resizeSnapYActive = false;
     qreal m_resizeSnapY = 0.0;
     QString m_dropPath;
-    QSize m_dropNativeSize;
-    bool m_dropVideo = false;
-    QPointF m_dropCenter;
-    QImage m_dropFrame;
-    QHash<QString, QPointer<RemoteVideoFrameSource>> m_videoPosterSources;
     QVariantList m_mediaSnapshot;
     QVariantList m_selectionChromeModel;
     QVariantList m_screensModel;
     QVariantList m_uiZonesModel;
     QVariantList m_snapGuidesModel;
     QVariantMap m_videoStateModel;
-    QVariantMap m_dropPreviewModel{{QStringLiteral("visible"), false}};
     qreal m_viewScale = 1.0;
     qreal m_panX = 0.0;
     qreal m_panY = 0.0;

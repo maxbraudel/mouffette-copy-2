@@ -15,6 +15,7 @@ function socket() {
         bufferedAmount: 0,
         messages: [],
         send(encoded) { this.messages.push(JSON.parse(encoded)); },
+        close() { this.readyState = WebSocket.CLOSED; },
     };
 }
 
@@ -40,7 +41,7 @@ function messages(ws, type) {
 
 function envelope(session, extra = {}) {
     return {
-        protocolVersion: 4,
+        protocolVersion: 5,
         serverBootId: session.serverBootId,
         messageId: crypto.randomUUID(),
         remoteSessionId: session.remoteSessionId,
@@ -77,6 +78,7 @@ const scene = Object.freeze({
 const checklist = Object.freeze([
     { itemId: 'screen_1', stage: 'screen_render_graph_ready', ready: true },
     { itemId: 'media-1_file', stage: 'file_validated', ready: true },
+    { itemId: 'media-1_memory', stage: 'media_memory_ready', ready: true },
     { itemId: 'media-1_decode', stage: 'image_decoded', ready: true },
     { itemId: 'media-1_texture', stage: 'image_texture_ready', ready: true },
 ]);
@@ -351,6 +353,8 @@ const checklist = Object.freeze([
         ownerConnectionGeneration: 1, targetConnectionGeneration: 1,
     }).session;
     session.serverBootId = server.serverBootId;
+    session.mediaResidency = { generation: session.generation, sequence: 1,
+        assets: [{ assetId: asset.assetId, sha256: asset.sha256, state: 'ready', progress: 1, error: '' }] };
     server.sessionAssets.set(session.remoteSessionId, new Map([[
         asset.assetId,
         { ...asset, remoteSessionId: session.remoteSessionId,
@@ -414,6 +418,8 @@ for (const invalidCase of [
         ownerConnectionGeneration: 1, targetConnectionGeneration: 1,
     }).session;
     session.serverBootId = server.serverBootId;
+    session.mediaResidency = { generation: session.generation, sequence: 1,
+        assets: [{ assetId: asset.assetId, sha256: asset.sha256, state: 'ready', progress: 1, error: '' }] };
     server.sessionAssets.set(session.remoteSessionId, new Map([[
         asset.assetId,
         { ...asset, remoteSessionId: session.remoteSessionId,
@@ -488,6 +494,8 @@ for (const invalidCase of [
         ownerConnectionGeneration: 1, targetConnectionGeneration: 1,
     }).session;
     session.serverBootId = server.serverBootId;
+    session.mediaResidency = { generation: session.generation, sequence: 1,
+        assets: [{ assetId: asset.assetId, sha256: asset.sha256, state: 'ready', progress: 1, error: '' }] };
     server.sessionAssets.set(session.remoteSessionId, new Map([[
         asset.assetId,
         { ...asset, remoteSessionId: session.remoteSessionId,
@@ -560,6 +568,8 @@ for (const invalidCase of [
         ownerConnectionGeneration: 1, targetConnectionGeneration: 1,
     }).session;
     session.serverBootId = server.serverBootId;
+    session.mediaResidency = { generation: session.generation, sequence: 1,
+        assets: [{ assetId: asset.assetId, sha256: asset.sha256, state: 'ready', progress: 1, error: '' }] };
     server.sessionAssets.set(session.remoteSessionId, new Map([[
         asset.assetId,
         { ...asset, remoteSessionId: session.remoteSessionId, generation: session.generation,
@@ -685,7 +695,7 @@ for (const invalidCase of [
     assert.equal(messages(owner, 'stopped').at(-1).success, true);
 
     server.handleMessage('owner-connection', {
-        protocolVersion: 4, serverBootId: server.serverBootId,
+        protocolVersion: 5, serverBootId: server.serverBootId,
         messageId: crypto.randomUUID(),
         type: 'remote_scene_start',
     });
@@ -703,6 +713,8 @@ for (const invalidCase of [
         ownerConnectionGeneration: 1, targetConnectionGeneration: 1,
     }).session;
     session.serverBootId = server.serverBootId;
+    session.mediaResidency = { generation: session.generation, sequence: 1,
+        assets: [{ assetId: asset.assetId, sha256: asset.sha256, state: 'ready', progress: 1, error: '' }] };
     server.sessionAssets.set(session.remoteSessionId, new Map([[
         asset.assetId,
         { ...asset, remoteSessionId: session.remoteSessionId, generation: 99,
@@ -738,6 +750,8 @@ for (const invalidCase of [
         ownerConnectionGeneration: 1, targetConnectionGeneration: 1,
     }).session;
     session.serverBootId = server.serverBootId;
+    session.mediaResidency = { generation: session.generation, sequence: 1,
+        assets: [{ assetId: asset.assetId, sha256: asset.sha256, state: 'ready', progress: 1, error: '' }] };
     server.sessionAssets.set(session.remoteSessionId, new Map([[
         asset.assetId,
         { ...asset, remoteSessionId: session.remoteSessionId,
@@ -785,6 +799,8 @@ for (const [endPositionMs, accepted] of [
         ...(endPositionMs === undefined ? {} : { endPositionMs }),
     };
     const rangedScene = { ...scene, media: [video] };
+    session.mediaResidency = { generation: session.generation, sequence: 1,
+        assets: [{ assetId: asset.assetId, sha256: asset.sha256, state: 'ready', progress: 1, error: '' }] };
     server.sessionAssets.set(session.remoteSessionId, new Map([[
         videoAsset.assetId, { ...videoAsset, remoteSessionId: session.remoteSessionId,
             generation: session.generation, ownerEndpointId: 'A', targetEndpointId: 'B',
@@ -805,4 +821,77 @@ for (const [endPositionMs, accepted] of [
     }
 }
 
-console.log('scene protocol v4 tests passed');
+console.log('scene protocol v5 tests passed');
+
+// Residency is a separate, authenticated barrier; upload completion never implies it.
+{
+    const server = new MouffetteServer({ port: 0, metricLogger: () => {} });
+    const owner = addClient(server, 'memory-owner', 'A');
+    const target = addClient(server, 'memory-target', 'B');
+    const session = server.remoteSessions.open({
+        ownerEndpointId: 'A', targetEndpointId: 'B',
+        ownerRuntimeId: 'runtime-A', targetRuntimeId: 'runtime-B',
+        ownerConnectionGeneration: 1, targetConnectionGeneration: 1,
+    }).session;
+    session.serverBootId = server.serverBootId;
+    server.sessionAssets.set(session.remoteSessionId, new Map([[
+        asset.assetId, { ...asset, remoteSessionId: session.remoteSessionId,
+            generation: session.generation, ownerEndpointId: 'A', targetEndpointId: 'B',
+            uploadId: 'memory-upload' },
+    ]]));
+    const prepare = { type: 'scene_prepare', sceneRunId: 'memory-run', revision: 1,
+        digest: computeSceneDigest(1, [asset], scene), manifest: [asset], scene };
+    server.handleMessage('memory-owner', envelope(session, prepare));
+    assert.equal(messages(owner, 'error').at(-1).code, 'scene_memory_unavailable');
+    assert.equal(messages(target, 'scene_prepare').length, 0);
+    const ready = { type: 'media_residency', sequence: 1,
+        assets: [{ assetId: asset.assetId, sha256: asset.sha256,
+            state: 'ready', progress: 1, error: '' }] };
+    server.handleMessage('memory-owner', envelope(session, ready));
+    assert.equal(messages(owner, 'error').at(-1).code, 'not_session_target');
+    assert.equal(session.mediaResidency, undefined);
+    server.handleMessage('memory-target', envelope(session, ready));
+    assert.equal(messages(owner, 'media_residency').length, 1);
+    server.handleMessage('memory-target', envelope(session, ready));
+    assert.equal(messages(target, 'error').at(-1).code, 'invalid_media_residency');
+    server.handleMessage('memory-target', envelope(session, { ...ready, sequence: 2,
+        generation: session.generation + 1 }));
+    assert.equal(messages(owner, 'media_residency').length, 1);
+    server.handleMessage('memory-target', envelope(session, { ...ready, sequence: 2,
+        assets: [{ ...ready.assets[0], sha256: 'b'.repeat(64) }] }));
+    assert.equal(messages(target, 'error').at(-1).code, 'invalid_media_residency');
+    server.handleMessage('memory-owner', envelope(session, prepare));
+    assert.equal(messages(target, 'scene_prepare').length, 1);
+    server.handleMessage('memory-target', envelope(session, { ...ready, sequence: 2,
+        assets: [{ ...ready.assets[0], state: 'waiting_for_memory', progress: 0 }] }));
+    assert.equal(server.sceneRuns.get('memory-run').phase, SCENE_PHASES.STOPPING);
+    assert.equal(messages(owner, 'stop').at(-1).reason, 'scene_memory_unavailable');
+    server.handleMessage('memory-target', envelope(session, { ...ready, sequence: 3,
+        protocolVersion: 4 }));
+    assert.equal(messages(target, 'error').at(-1).code, 'protocol_version_mismatch');
+}
+
+// Offscreen media still belongs to the scene and requires residency, with no render spans.
+{
+    const server = new MouffetteServer({ port: 0, metricLogger: () => {} });
+    const offscreen = { ...scene, media: [{ ...scene.media[0], spans: [] }] };
+    const required = server.requiredSceneChecklist({ manifest: [asset], scene: offscreen });
+    assert.ok(required.some(item => item.stage === 'media_memory_ready'));
+    const owner = addClient(server, 'offscreen-owner', 'A');
+    const target = addClient(server, 'offscreen-target', 'B');
+    const session = server.remoteSessions.open({ ownerEndpointId: 'A', targetEndpointId: 'B',
+        ownerRuntimeId: 'runtime-A', targetRuntimeId: 'runtime-B',
+        ownerConnectionGeneration: 1, targetConnectionGeneration: 1 }).session;
+    session.serverBootId = server.serverBootId;
+    server.sessionAssets.set(session.remoteSessionId, new Map([[asset.assetId,
+        { ...asset, remoteSessionId: session.remoteSessionId, generation: session.generation,
+            ownerEndpointId: 'A', targetEndpointId: 'B', uploadId: 'offscreen-upload' }]]));
+    const request = { type: 'scene_prepare', sceneRunId: 'offscreen-run', revision: 1,
+        digest: computeSceneDigest(1, [asset], offscreen), manifest: [asset], scene: offscreen };
+    server.handleMessage('offscreen-owner', envelope(session, request));
+    assert.equal(messages(owner, 'error').at(-1).code, 'scene_memory_unavailable');
+    server.handleMessage('offscreen-target', envelope(session, { type: 'media_residency', sequence: 1,
+        assets: [{ assetId: asset.assetId, sha256: asset.sha256, state: 'ready', progress: 1, error: '' }] }));
+    server.handleMessage('offscreen-owner', envelope(session, request));
+    assert.equal(messages(target, 'scene_prepare').length, 1);
+}

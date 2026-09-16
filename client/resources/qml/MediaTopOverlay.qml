@@ -5,10 +5,12 @@ import QtQuick
 // Container width is driven by the buttons row.
 Item {
     id: root
+    objectName: "mediaTopOverlay"
 
     property string mediaId: ""
     property string displayName: ""
     property bool contentVisible: true
+    property bool actionsAvailable: true
 
     signal visibilityToggleRequested(string mediaId, bool visible)
     signal bringForwardRequested(string mediaId)
@@ -27,7 +29,8 @@ Item {
     // Width = buttons row natural width (no outer padding).
     // Height = name pill (if present) + gap + buttons row.
     implicitWidth:  btnRow.implicitWidth
-    implicitHeight: (displayName.length > 0 ? namePillHeight + itemSpacing : 0) + btnSize
+    implicitHeight: (displayName.length > 0 ? namePillHeight : 0)
+                    + (actionsAvailable ? itemSpacing + btnSize : 0)
 
     // Row 1: media name in a styled pill.
     // Stretches to the full container width (= buttons row width).
@@ -52,6 +55,8 @@ Item {
     // Row 2: action buttons — defines the container width
     Row {
         id: btnRow
+        visible: root.actionsAvailable
+        enabled: root.actionsAvailable
         x: 0
         y: (root.displayName.length > 0 ? root.namePillHeight + root.itemSpacing : 0)
         spacing: root.itemSpacing

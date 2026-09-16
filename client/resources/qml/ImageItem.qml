@@ -1,47 +1,23 @@
 import QtQuick
 import Mouffette.Canvas
+
 BaseMediaItem {
     id: root
-    property string imageSource: ""
-    property bool handoffCovered: false
-    property var handoffFrameSource: null
-    readonly property bool handoffContentReady: image.status === Image.Ready
-    contentReady: image.status === Image.Ready
+    property var residentFrameSource: null
+    property bool residencyReady: false
+    property bool requireInitialSkeleton: true
+    contentReady: root.residencyReady && image.hasFrame
+    initialFramePresented: !requireInitialSkeleton || surface.firstFramePresented
 
     MediaSurface {
+        id: surface
         anchors.fill: parent
-        contentReady: handoffPoster.hasFrame || image.status === Image.Ready
-        revealImmediately: root.handoffCovered
-
-        // The exact drag pixels become part of the final item during handoff.
-        // This closes the scene-graph gap between Image.Ready and the first
-        // texture presentation; the full-resolution Image simply covers it.
+        requireInitialSkeleton: root.requireInitialSkeleton
+        contentReady: root.residencyReady && image.hasFrame
         RemoteVideoFrameItem {
-            id: handoffPoster
-            anchors.fill: parent
-            z: 0
-            frameSource: root.handoffFrameSource
-        }
-
-        Image {
             id: image
             anchors.fill: parent
-            z: 1
-            source: root.imageSource
-            fillMode: Image.Stretch
-            smooth: true
-            asynchronous: true
-            // mipmap is beneficial for downscaling only; at high zoom (upscaling) it wastes
-            // GPU memory on a full mip chain and can cause allocation failures → black render.
-            mipmap: false
-
-            onStatusChanged: {
-                if (status === Image.Error) {
-                    console.warn("[QuickCanvas][ImageItem] load failed",
-                                 "mediaId=", root.mediaId,
-                                 "source=", root.imageSource)
-                }
-            }
+            frameSource: root.residentFrameSource
         }
     }
 }

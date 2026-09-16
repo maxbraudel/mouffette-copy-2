@@ -152,6 +152,26 @@ set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTOUIC OFF)
 set(CMAKE_AUTORCC ON)
 
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET
+    libavformat>=61 libavcodec>=61 libavutil libswscale libswresample)
+add_library(MouffetteResidentMedia STATIC
+    src/backend/media/ResidentMediaAsset.h
+    src/backend/media/MediaDecoder.h
+    src/backend/media/MediaDecoder.cpp
+    src/backend/media/ResidentVideoPlayer.h
+    src/backend/media/ResidentVideoPlayer.cpp
+    src/backend/media/MediaResidencyManager.h
+    src/backend/media/MediaResidencyManager.cpp
+    src/backend/domain/media/MediaFilePolicy.cpp)
+target_include_directories(MouffetteResidentMedia PUBLIC src)
+target_link_libraries(MouffetteResidentMedia PUBLIC
+    Qt6::Core Qt6::Gui Qt6::Multimedia Qt6::Concurrent PkgConfig::FFMPEG)
+if(WIN32)
+    target_link_libraries(MouffetteResidentMedia PRIVATE Psapi)
+endif()
+
+
 # Source files - Frontend/Backend Architecture
 set(SOURCES
     # ═══════════════════════════════════════════════════════
@@ -190,6 +210,7 @@ set(SOURCES
     # Rendering - Remote
     src/frontend/rendering/remote/RemoteSceneController.cpp
     src/frontend/rendering/remote/RemoteVideoFrameItem.cpp
+    src/shared/rendering/MediaFrameSource.cpp
 
     # Protocol v4 scene lifecycle
     src/backend/network/RemoteSessionCoordinator.cpp
@@ -239,7 +260,6 @@ set(SOURCES
     src/backend/domain/canvas/CanvasDocument.cpp
     src/backend/domain/media/CanvasMedia.cpp
     src/backend/domain/media/MediaSettingsState.cpp
-    src/backend/domain/media/MediaFilePolicy.cpp
     src/backend/domain/media/TextRenderState.cpp
     
     # Network
@@ -280,7 +300,6 @@ set(SOURCES
 # Platform-specific sources
 if(APPLE)
     list(APPEND SOURCES 
-        src/backend/platform/macos/MacVideoThumbnailer.mm 
         src/backend/platform/macos/MacWindowManager.mm
         src/backend/managers/system/SystemLifecycleMonitor_mac.mm
     )
@@ -288,7 +307,6 @@ endif()
 
 if(WIN32)
     list(APPEND SOURCES
-        src/backend/platform/windows/WindowsVideoThumbnailer.cpp
         src/backend/managers/system/SystemLifecycleMonitor_windows.cpp
     )
 elseif(UNIX AND NOT APPLE AND TARGET Qt6::DBus)
@@ -426,13 +444,11 @@ set(HEADERS
 # Platform-specific headers
 if(APPLE)
     list(APPEND HEADERS
-        src/backend/platform/macos/MacVideoThumbnailer.h
         src/backend/platform/macos/MacWindowManager.h
     )
 endif()
 
 if(WIN32)
-    list(APPEND HEADERS src/backend/platform/windows/WindowsVideoThumbnailer.h)
 endif()
 
 # Resource files
@@ -470,6 +486,7 @@ qt_add_qml_module(MouffetteClient
         resources/qml/app/pages/CanvasPage.qml
         resources/qml/app/pages/HistoryPage.qml
         resources/qml/app/canvas/CanvasToolbar.qml
+        resources/qml/app/canvas/MemoryUsagePopup.qml
         resources/qml/app/canvas/MediaListPanel.qml
         resources/qml/app/canvas/OverlayActionButton.qml
         resources/qml/app/canvas/SceneElementPanel.qml
@@ -480,7 +497,6 @@ qt_add_qml_module(MouffetteClient
         resources/qml/CanvasViewport.qml
         resources/qml/ImageItem.qml
         resources/qml/InputLayer.qml
-        resources/qml/MediaDropPreview.qml
         resources/qml/MediaInteractionHandlers.qml
         resources/qml/MediaLayer.qml
         resources/qml/MediaNamePill.qml
@@ -514,6 +530,7 @@ endif()
 
 # Link Qt libraries
 target_link_libraries(MouffetteClient PRIVATE
+    MouffetteResidentMedia
     Qt6::Core 
     Qt6::Widgets 
     Qt6::Network 
@@ -573,7 +590,6 @@ if(APPLE)
     target_link_libraries(MouffetteClient PRIVATE "-framework AppKit" "-framework AVFoundation" "-framework CoreMedia" "-framework CoreGraphics" "-framework Security")
     
     # Set Objective-C++ properties for .mm files (updated paths for backend/platform)
-    set_source_files_properties(src/backend/platform/macos/MacVideoThumbnailer.mm PROPERTIES COMPILE_FLAGS "-x objective-c++")
     set_source_files_properties(src/backend/platform/macos/MacWindowManager.mm PROPERTIES COMPILE_FLAGS "-x objective-c++")
     set_source_files_properties(src/backend/managers/system/SystemLifecycleMonitor_mac.mm PROPERTIES COMPILE_FLAGS "-x objective-c++")
 endif()
@@ -608,6 +624,14 @@ endif()
 include(CTest)
 if(BUILD_TESTING)
     find_package(Qt6 REQUIRED COMPONENTS Test)
+
+    add_executable(tst_ResidentMedia tests/qt/tst_ResidentMedia.cpp)
+    target_link_libraries(tst_ResidentMedia PRIVATE MouffetteResidentMedia Qt6::Test)
+    add_test(NAME ResidentMedia COMMAND tst_ResidentMedia)
+
+    add_executable(tst_MediaResidencyManager tests/qt/tst_MediaResidencyManager.cpp)
+    target_link_libraries(tst_MediaResidencyManager PRIVATE MouffetteResidentMedia Qt6::Test)
+    add_test(NAME MediaResidencyManager COMMAND tst_MediaResidencyManager)
 
     add_executable(tst_DeviceIdentityStore
         tests/qt/tst_DeviceIdentityStore.cpp
@@ -785,13 +809,14 @@ if(BUILD_TESTING)
         src/frontend/rendering/canvas/TextOutlineItem.cpp
         src/frontend/rendering/canvas/TextEditHelper.cpp
         src/frontend/rendering/remote/RemoteVideoFrameItem.cpp
+    src/shared/rendering/MediaFrameSource.cpp
         src/backend/config/AppConfig.cpp
         src/backend/runtime/RuntimeProfile.cpp
         resources/resources.qrc
     )
     target_include_directories(tst_CanvasInteraction PRIVATE src)
     target_compile_definitions(tst_CanvasInteraction PRIVATE TEST_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
-    target_link_libraries(tst_CanvasInteraction PRIVATE Qt6::QuickPrivate Qt6::GuiPrivate Qt6::Qml Qt6::Multimedia Qt6::Test)
+    target_link_libraries(tst_CanvasInteraction PRIVATE MouffetteResidentMedia Qt6::QuickPrivate Qt6::GuiPrivate Qt6::Qml Qt6::Multimedia Qt6::Test)
     add_test(NAME CanvasInteraction COMMAND tst_CanvasInteraction)
     add_test(NAME CanvasInteractionScaled COMMAND tst_CanvasInteraction)
     set_tests_properties(CanvasInteractionScaled PROPERTIES ENVIRONMENT "QT_SCALE_FACTOR=2")
@@ -808,7 +833,7 @@ if(BUILD_TESTING)
         "$<TARGET_PROPERTY:MouffetteClient,INCLUDE_DIRECTORIES>")
     target_compile_definitions(tst_CanvasSelectionBackend PRIVATE
         "$<TARGET_PROPERTY:MouffetteClient,COMPILE_DEFINITIONS>"
-        TEST_VIDEO_FILE="${CMAKE_SOURCE_DIR}/../video-1080p.mp4"
+        TEST_VIDEO_FILE="${CMAKE_SOURCE_DIR}/tests/fixtures/resident-timeline.mp4"
         TEST_WEBP_FILE="${CMAKE_SOURCE_DIR}/../image-1920.webp")
     target_link_libraries(tst_CanvasSelectionBackend PRIVATE
         "$<TARGET_PROPERTY:MouffetteClient,LINK_LIBRARIES>" Qt6::Test)
@@ -822,7 +847,7 @@ if(BUILD_TESTING)
         "$<TARGET_PROPERTY:MouffetteClient,INCLUDE_DIRECTORIES>")
     target_compile_definitions(tst_VideoPlaybackBackend PRIVATE
         "$<TARGET_PROPERTY:MouffetteClient,COMPILE_DEFINITIONS>"
-        TEST_VIDEO_FILE="${CMAKE_SOURCE_DIR}/../video-1080p.mp4")
+        TEST_VIDEO_FILE="${CMAKE_SOURCE_DIR}/tests/fixtures/resident-timeline.mp4")
     target_link_libraries(tst_VideoPlaybackBackend PRIVATE
         "$<TARGET_PROPERTY:MouffetteClient,LINK_LIBRARIES>" Qt6::Test)
     add_test(NAME VideoPlaybackBackend COMMAND tst_VideoPlaybackBackend)
@@ -848,7 +873,7 @@ if(BUILD_TESTING)
         "$<TARGET_PROPERTY:MouffetteClient,INCLUDE_DIRECTORIES>")
     target_compile_definitions(tst_RemoteSceneControllerLifecycle PRIVATE
         "$<TARGET_PROPERTY:MouffetteClient,COMPILE_DEFINITIONS>"
-        TEST_VIDEO_FILE="${CMAKE_SOURCE_DIR}/../video-1080p.mp4")
+        TEST_VIDEO_FILE="${CMAKE_SOURCE_DIR}/tests/fixtures/resident-timeline.mp4")
     target_link_libraries(tst_RemoteSceneControllerLifecycle PRIVATE
         "$<TARGET_PROPERTY:MouffetteClient,LINK_LIBRARIES>" Qt6::Test)
     add_test(NAME RemoteSceneControllerLifecycle COMMAND tst_RemoteSceneControllerLifecycle)
@@ -861,7 +886,7 @@ if(BUILD_TESTING)
         "$<TARGET_PROPERTY:MouffetteClient,INCLUDE_DIRECTORIES>")
     target_compile_definitions(tst_RemoteSceneLifecycle PRIVATE
         "$<TARGET_PROPERTY:MouffetteClient,COMPILE_DEFINITIONS>"
-        TEST_VIDEO_FILE="${CMAKE_SOURCE_DIR}/../video-1080p.mp4")
+        TEST_VIDEO_FILE="${CMAKE_SOURCE_DIR}/tests/fixtures/resident-timeline.mp4")
     target_link_libraries(tst_RemoteSceneLifecycle PRIVATE
         "$<TARGET_PROPERTY:MouffetteClient,LINK_LIBRARIES>" Qt6::Test)
     add_test(NAME RemoteSceneLifecycle COMMAND tst_RemoteSceneLifecycle)
@@ -913,9 +938,9 @@ if(BUILD_TESTING)
     )
     target_include_directories(tst_MediaFilePolicy PRIVATE src)
     target_compile_definitions(tst_MediaFilePolicy PRIVATE
-        TEST_VIDEO_FILE="${CMAKE_SOURCE_DIR}/../video-1080p.mp4"
+        TEST_VIDEO_FILE="${CMAKE_SOURCE_DIR}/tests/fixtures/resident-timeline.mp4"
         TEST_WEBP_FILE="${CMAKE_SOURCE_DIR}/../image-1920.webp")
-    target_link_libraries(tst_MediaFilePolicy PRIVATE
+    target_link_libraries(tst_MediaFilePolicy PRIVATE PkgConfig::FFMPEG
         Qt6::Core Qt6::Gui Qt6::Multimedia Qt6::Test)
     add_test(NAME MediaFilePolicy COMMAND tst_MediaFilePolicy)
     set(MOUFFETTE_MEDIA_POLICY_TEST_ENV

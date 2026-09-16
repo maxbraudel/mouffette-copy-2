@@ -44,6 +44,7 @@ struct ProjectMediaReference {
     QString sourceIdentity;
     QString sha256;
     QString mediaType;
+    bool pendingImport = false; // optional, identity is completed asynchronously
 
     QJsonObject toJson() const;
     static bool fromJson(const QJsonObject& json, ProjectMediaReference* reference, QString* error = nullptr);

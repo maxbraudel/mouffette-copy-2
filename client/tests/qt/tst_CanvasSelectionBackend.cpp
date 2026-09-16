@@ -1,8 +1,10 @@
 #include <QApplication>
 #include <QClipboard>
+#include <QDir>
 #include <QJsonArray>
 #include <QMimeData>
 #include "backend/files/FileManager.h"
+#include "backend/media/MediaResidencyManager.h"
 #include "backend/runtime/RuntimeProfile.h"
 #include "frontend/ui/notifications/ToastNotificationSystem.h"
 #include <QFile>
@@ -24,6 +26,7 @@
 #include "frontend/rendering/canvas/QuickCanvasController.h"
 #include "frontend/rendering/canvas/QuickCanvasHost.h"
 #include "frontend/qml/ClientWorkspaceViewModel.h"
+#include "frontend/qml/MediaSettingsViewModel.h"
 #ifdef Q_OS_MACOS
 #include "backend/platform/macos/MacWindowManager.h"
 #endif
@@ -116,6 +119,17 @@ class CanvasSelectionBackendTest final : public QObject
     Q_OBJECT
 
 private slots:
+    void init()
+    {
+        MediaResidencyManager::instance().setMemorySnapshotForTesting(
+            {8ULL << 30, 6ULL << 30, 512ULL << 20, false, 0});
+    }
+
+    void cleanup()
+    {
+        MediaResidencyManager::instance().clearMemorySnapshotForTesting();
+    }
+
     void initTestCase()
     {
         // The complete page must use the same controls as production main().
@@ -625,6 +639,7 @@ private slots:
             : document.addPreparedFile(QString::fromUtf8(type == "video" ? TEST_VIDEO_FILE : TEST_WEBP_FILE),
                                        {320, 180}, type == "video", {40, 80});
         QVERIFY(original);
+        QTRY_VERIFY_WITH_TIMEOUT(original->residencyReady(), 30000);
         if (original->isText()) {
             original->setFitToTextEnabled(false);
             original->setFontWeightOverrideEnabled(true);
@@ -701,6 +716,7 @@ private slots:
         controller.setProjectEditingEnabled(true);
         auto* first = document.addPreparedFile(QString::fromUtf8(TEST_WEBP_FILE), {320,180}, false, {});
         auto* second = document.addText({500,300}, "Group");
+        QTRY_VERIFY_WITH_TIMEOUT(first->residencyReady(), 10000);
         const QString fileId = first->fileId();
         QVERIFY(!fileId.isEmpty());
         document.select(first->mediaId(), true);
@@ -708,7 +724,7 @@ private slots:
         controller.pasteMedia();
         QCOMPARE(document.media().size(), 4);
         QCOMPARE(document.selectedMediaIds().size(), 2);
-        QCOMPARE(files.getMediaIdsForFile(fileId).size(), 2);
+        QTRY_COMPARE(files.getMediaIdsForFile(fileId).size(), 2);
         controller.deleteSelectedMedia();
         QCOMPARE(document.media().size(), 2);
         QCOMPARE(files.getMediaIdsForFile(fileId), QList<QString>{first->mediaId()});
@@ -1408,14 +1424,14 @@ private slots:
         QVERIFY(fixture.controller.beginLocalFileDrag(
             {QUrl::fromLocalFile(imagePath)}, 500, 300));
         QVERIFY(fixture.controller.commitLocalFileDrop(520, 320));
-        QCOMPARE(fixture.document.media().size(), before + 1);
+        QTRY_COMPARE(fixture.document.media().size(), before + 1);
         CanvasMedia* imported = fixture.document.selectedMedia();
         QVERIFY(imported && !imported->isText());
         QCOMPARE(imported->baseSize(), QSize(80, 60));
         QCOMPARE(imported->sceneRect().center(), QPointF(520, 320));
     }
 
-    void imageDropPreviewIsRetiredBeforeTheMediaMoves()
+    void imageDropDoesNotCreateMediaUntilDropAndRemainsMovable()
     {
         Fixture fixture;
         QVERIFY(fixture.initialize());
@@ -1424,22 +1440,19 @@ private slots:
 
         QTemporaryDir directory;
         QVERIFY(directory.isValid());
-        const QString imagePath = directory.filePath(QStringLiteral("handoff.png"));
+        const QString imagePath = directory.filePath(QStringLiteral("resident.png"));
         QImage image(160, 90, QImage::Format_ARGB32_Premultiplied);
         image.fill(QColor("#27a8e0"));
         QVERIFY(image.save(imagePath));
 
         QVERIFY(fixture.controller.beginLocalFileDrag(
             {QUrl::fromLocalFile(imagePath)}, 500, 300));
-        QVERIFY(fixture.controller.dropPreviewModel()
-                    .value(QStringLiteral("visible")).toBool());
+        QVERIFY(fixture.document.media().isEmpty());
         QVERIFY(fixture.controller.commitLocalFileDrop(500, 300));
+        QTRY_COMPARE(fixture.document.media().size(), 1);
         CanvasMedia* imported = fixture.document.selectedMedia();
         QVERIFY(imported && !imported->isVideo() && !imported->isText());
-        QTRY_VERIFY_WITH_TIMEOUT(
-            !fixture.controller.dropPreviewModel()
-                 .value(QStringLiteral("visible")).toBool(),
-            5000);
+        QTRY_VERIFY_WITH_TIMEOUT(imported->residencyReady(), 5000);
 
         const QPointF originalPosition = imported->position();
         fixture.controller.handleMediaMoveStarted(
@@ -1451,8 +1464,154 @@ private slots:
             imported->mediaId(), originalPosition.x() + 50,
             originalPosition.y() + 25, false);
         QCOMPARE(imported->position(), originalPosition + QPointF(50, 25));
-        QVERIFY(!fixture.controller.dropPreviewModel()
-                     .value(QStringLiteral("visible")).toBool());
+        QVERIFY(imported->residencyReady());
+    }
+
+    void coldMediaHasOnlyTitleAndSupportsMoveAndDelete()
+    {
+        auto& memory = MediaResidencyManager::instance();
+        struct ResetMemory { ~ResetMemory() { MediaResidencyManager::instance().clearMemorySnapshotForTesting(); } } reset;
+        memory.setMemorySnapshotForTesting({8ULL << 30, 0, 512ULL << 20, false, 0});
+        Fixture fixture;
+        QVERIFY(fixture.initialize());
+        fixture.view.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&fixture.view));
+        QTemporaryDir directory;
+        const QString path = directory.filePath(QStringLiteral("cold.png"));
+        QImage image(160, 90, QImage::Format_ARGB32_Premultiplied);
+        image.fill(Qt::cyan);
+        QVERIFY(image.save(path));
+        auto* media = fixture.document.addPreparedFile(path, image.size(), false, {100, 100});
+        QVERIFY(media && !media->residencyReady());
+        QTRY_VERIFY(!media->residencyState().isEmpty());
+        MediaSettingsViewModel settings;
+        settings.setController(&fixture.controller);
+        QVERIFY(!settings.available());
+        auto* top = findQuickItemWithProperty(fixture.view.rootObject(), "objectName", "mediaTopOverlay");
+        QVERIFY(top);
+        QVERIFY(!top->property("actionsAvailable").toBool());
+        auto* chrome = findQuickItemWithProperty(fixture.view.rootObject(), "objectName", "selectionChromeVisual");
+        QVERIFY(chrome && !chrome->isVisible());
+        auto* skeleton = findQuickItemWithProperty(fixture.view.rootObject(), "objectName", "mediaLoadingSkeleton");
+        QVERIFY(skeleton && skeleton->isVisible());
+        QCOMPARE(skeleton->size(), QSizeF(160, 90));
+        const QString artifactDir = qEnvironmentVariable("MOUFFETTE_OVERLAY_ARTIFACT_DIR");
+        if (!artifactDir.isEmpty()) {
+            QVERIFY(QDir().mkpath(artifactDir));
+            QVERIFY(fixture.view.grabWindow().save(QDir(artifactDir).filePath("media-skeleton.png")));
+        }
+        QSignalSpy persistentChanges(&fixture.document, &CanvasDocument::documentChanged);
+        memory.sampleNow();
+        QCOMPARE(persistentChanges.size(), 0);
+        const QSize original = media->baseSize();
+        fixture.controller.handleMediaResizeRequested(media->mediaId(), "right-mid", 500, 100, false, false);
+        fixture.controller.handleMediaResizeEnded(media->mediaId());
+        QCOMPARE(media->baseSize(), original);
+        fixture.controller.handleMediaMoveStarted(media->mediaId(), 100, 100, false);
+        fixture.controller.handleMediaMoveUpdated(media->mediaId(), 130, 120, false);
+        fixture.controller.handleMediaMoveEnded(media->mediaId(), 130, 120, false);
+        QCOMPARE(media->position(), QPointF(130, 120));
+        fixture.controller.deleteSelectedMedia();
+        QVERIFY(fixture.document.media().isEmpty());
+    }
+
+    void restoredDocumentsKeepIndependentResidencyLeases_data()
+    {
+        QTest::addColumn<bool>("closeOriginal");
+        QTest::newRow("close-original") << true;
+        QTest::newRow("close-restored") << false;
+    }
+
+    void restoredDocumentsKeepIndependentResidencyLeases()
+    {
+        QFETCH(bool, closeOriginal);
+        QTemporaryDir directory;
+        const QString path = directory.filePath(QStringLiteral("shared.png"));
+        QImage image(160, 90, QImage::Format_ARGB32_Premultiplied);
+        image.fill(Qt::cyan);
+        QVERIFY(image.save(path));
+        CanvasDocument original;
+        auto* first = original.addPreparedFile(path, image.size(), false, {});
+        QTRY_VERIFY_WITH_TIMEOUT(first->residencyReady(), 5000);
+        CanvasDocument restored;
+        QVERIFY(restored.restoreProjectState(original.serializeProjectState(), {{first->mediaId(), path}}));
+        auto* second = restored.mediaById(first->mediaId());
+        QVERIFY(second);
+        QCOMPARE(first->mediaId(), second->mediaId());
+        QVERIFY(first->residencyOwnerId() != second->residencyOwnerId());
+        QTRY_VERIFY_WITH_TIMEOUT(second->residencyReady(), 5000);
+        auto& memory = MediaResidencyManager::instance();
+        QCOMPARE(memory.asset(first->residencyOwnerId()), memory.asset(second->residencyOwnerId()));
+        const auto occurrences = [&memory](const QString& owner) {
+            for (const QVariant& value : memory.assets()) {
+                const auto entry = value.toMap();
+                if (entry.value("owners").toStringList().contains(owner))
+                    return entry.value("occurrences").toInt();
+            }
+            return 0;
+        };
+        QCOMPARE(occurrences(first->residencyOwnerId()), 2);
+        auto* survivor = closeOriginal ? second : first;
+        (closeOriginal ? original : restored).clear();
+        QVERIFY(survivor->residencyReady());
+        QCOMPARE(occurrences(survivor->residencyOwnerId()), 1);
+        QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+        QVERIFY(survivor->residencyReady());
+    }
+
+    void cachedMediaWaitsForInitialSkeletonBeforeShowingControls()
+    {
+        QTemporaryDir directory;
+        const QString path = directory.filePath(QStringLiteral("cached.png"));
+        QImage image(160, 90, QImage::Format_ARGB32_Premultiplied);
+        image.fill(Qt::cyan);
+        QVERIFY(image.save(path));
+        CanvasDocument warmDocument;
+        auto* warm = warmDocument.addPreparedFile(path, image.size(), false, {});
+        QTRY_VERIFY_WITH_TIMEOUT(warm->residencyReady(), 5000);
+
+        Fixture fixture;
+        QVERIFY(fixture.initialize());
+        auto* media = fixture.document.addPreparedFile(path, image.size(), false, {100, 100});
+        QTRY_VERIFY_WITH_TIMEOUT(media->residencyReady(), 5000);
+        auto* top = findQuickItemWithProperty(fixture.view.rootObject(), "objectName", "mediaTopOverlay");
+        auto* chrome = findQuickItemWithProperty(fixture.view.rootObject(), "objectName", "selectionChromeVisual");
+        auto* skeleton = findQuickItemWithProperty(fixture.view.rootObject(), "objectName", "mediaLoadingSkeleton");
+        QVERIFY(top && chrome && skeleton);
+        QVERIFY(!top->property("actionsAvailable").toBool());
+        QVERIFY(!chrome->isVisible());
+        QVERIFY(skeleton->isVisible());
+
+        fixture.view.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&fixture.view));
+        QTRY_VERIFY(top->property("actionsAvailable").toBool());
+        QTRY_VERIFY(chrome->isVisible());
+        QTRY_VERIFY(!skeleton->isVisible());
+    }
+
+    void testSceneRequiresEveryCanvasMediaResident()
+    {
+        auto& memory = MediaResidencyManager::instance();
+        struct ResetMemory { ~ResetMemory() { MediaResidencyManager::instance().clearMemorySnapshotForTesting(); } } reset;
+        memory.setMemorySnapshotForTesting({8ULL << 30, 0, 512ULL << 20, false, 0});
+        QString error;
+        std::unique_ptr<QuickCanvasHost> host(QuickCanvasHost::create(&error));
+        QVERIFY2(host, qPrintable(error));
+        host->setProjectEditingEnabled(true);
+        host->document()->addText({100, 100}, "Ready text");
+        QVERIFY(host->testSceneActionEnabled());
+        QTemporaryDir directory;
+        const QString path = directory.filePath("cold.png");
+        QImage image(80, 60, QImage::Format_RGB32);
+        image.fill(Qt::cyan);
+        QVERIFY(image.save(path));
+        auto* cold = host->document()->addPreparedFile(path, image.size(), false, {100, 100});
+        QVERIFY(cold && !cold->residencyReady());
+        QVERIFY(!host->testSceneActionEnabled());
+        host->triggerTestSceneAction();
+        QVERIFY(!host->testSceneLaunched());
+        QVERIFY(host->document()->removeMedia(cold->mediaId()));
+        QVERIFY(host->testSceneActionEnabled());
     }
 
     void realMouseDragMovesProductionMedia_data()
@@ -1638,8 +1797,8 @@ private slots:
             }
             QVERIFY(session.beginFileDrag({QUrl::fromLocalFile(path)}, 480, 300));
             QVERIFY(session.commitFileDrop(480, 300));
-            QTRY_VERIFY_WITH_TIMEOUT(!host->controller()->dropPreviewModel()
-                .value(QStringLiteral("visible")).toBool(), 5000);
+            QTRY_VERIFY_WITH_TIMEOUT(host->document()->selectedMedia(), 5000);
+            QTRY_VERIFY_WITH_TIMEOUT(host->document()->selectedMedia()->residencyReady(), 30000);
         }
         CanvasMedia* media = host->document()->selectedMedia();
         QVERIFY(media);

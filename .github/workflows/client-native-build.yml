@@ -38,7 +38,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install toolchain
-        run: brew install qt openssl@3 cmake ninja
+        run: brew install qt openssl@3 cmake ninja ffmpeg pkg-config
 
       - name: Build
         working-directory: client
@@ -100,7 +100,10 @@ jobs:
             mingw-w64-ucrt-x86_64-qt6-websockets
             mingw-w64-ucrt-x86_64-qt6-declarative
             mingw-w64-ucrt-x86_64-qt6-multimedia
+            mingw-w64-ucrt-x86_64-qt6-imageformats
             mingw-w64-ucrt-x86_64-qt6-svg
+            mingw-w64-ucrt-x86_64-ffmpeg
+            mingw-w64-ucrt-x86_64-pkgconf
             mingw-w64-ucrt-x86_64-openssl
 
       - name: Build

@@ -1,26 +1,28 @@
 #include "backend/domain/media/MediaFilePolicy.h"
-#include "backend/config/AppConfig.h"
 #include "MediaFormatContract.h"
 
-#include <QAbstractEventDispatcher>
-#include <QCoreApplication>
 #include <QCryptographicHash>
-#include <QEventLoop>
+#include <QElapsedTimer>
+#include <QScopeGuard>
+#include <QTransform>
 #include <QFile>
 #include <QFileInfo>
 #include <QImageReader>
 #include <QMediaFormat>
-#include <QMediaPlayer>
 #include <QMimeDatabase>
 #include <QSet>
-#include <QThread>
-#include <QTimer>
-#include <QUrl>
 #include <QVideoFrame>
-#include <QVideoSink>
 #include <QtEndian>
 #include <limits>
 #include <optional>
+#include <cmath>
+
+extern "C" {
+#include <libavcodec/avcodec.h>
+#include <libavformat/avformat.h>
+#include <libavutil/display.h>
+#include <libswscale/swscale.h>
+}
 
 namespace MediaFilePolicy {
 namespace {
@@ -65,83 +67,87 @@ struct VideoFrameProbe {
     QImage firstFrame;
 };
 
-// QMediaFormat only reports advertised codec capability.  It cannot prove
-// that this concrete sample table and mdat payload can be consumed.  Use the
-// same Qt Multimedia pipeline as rendering (QT_MEDIA_BACKEND=ffmpeg in the
-// application configuration) and require a real decoded frame.  Every QObject
-// is stack-owned, the source is detached before returning, and the nested loop
-// has a hard deadline so corrupt media cannot leave a decoder or file handle
-// alive indefinitely.
+// Legacy file validation still needs one decoded frame. This bounded worker-
+// safe probe uses the same public decoder as resident loading, without a Qt
+// player, event loop, or application configuration singleton. Readiness is
+// exclusively decided by MediaDecoder's separate complete decode.
 VideoFrameProbe decodeFirstMp4Frame(const QString& path)
 {
-    if (!QCoreApplication::instance()
-        || !QAbstractEventDispatcher::instance(QThread::currentThread())) {
-        return {};
-    }
-
-    bool decoded = false;
-    bool failed = false;
-    bool timedOut = false;
-    QSize frameSize;
-    QImage firstFrame;
-    QEventLoop eventLoop;
-    QTimer deadline;
-    deadline.setSingleShot(true);
-
-    // Destruction is deliberately ordered: the player releases its backend
-    // and source before the sink goes away.
-    QVideoSink sink;
-    QMediaPlayer player;
-    QObject::connect(&sink, &QVideoSink::videoFrameChanged, &eventLoop,
-                     [&](const QVideoFrame& frame) {
-        if (!frame.isValid()) return;
-        firstFrame = frame.toImage();
-        frameSize = firstFrame.isNull() ? frame.size() : firstFrame.size();
-        decoded = true;
-        eventLoop.quit();
+    QElapsedTimer deadline;
+    deadline.start();
+    AVFormatContext* format = avformat_alloc_context();
+    AVCodecContext* codec = nullptr;
+    AVPacket* packet = av_packet_alloc();
+    AVFrame* frame = av_frame_alloc();
+    SwsContext* scaler = nullptr;
+    const auto cleanup = qScopeGuard([&] {
+        sws_freeContext(scaler);
+        av_frame_free(&frame);
+        av_packet_free(&packet);
+        avcodec_free_context(&codec);
+        avformat_close_input(&format);
     });
-    QObject::connect(&player, &QMediaPlayer::errorOccurred, &eventLoop,
-                     [&](QMediaPlayer::Error error, const QString&) {
-        if (error == QMediaPlayer::NoError) return;
-        failed = true;
-        eventLoop.quit();
-    });
-    QObject::connect(&player, &QMediaPlayer::mediaStatusChanged, &eventLoop,
-                     [&](QMediaPlayer::MediaStatus status) {
-        if (status == QMediaPlayer::InvalidMedia) {
-            failed = true;
-            eventLoop.quit();
-        } else if (status == QMediaPlayer::EndOfMedia && !decoded) {
-            // Let an already queued final videoFrameChanged win before
-            // declaring a one-frame stream undecodable.
-            QTimer::singleShot(0, &eventLoop, [&] {
-                if (!decoded) failed = true;
-                eventLoop.quit();
-            });
+    auto failure = [&]() {
+        return VideoFrameProbe{deadline.hasExpired(5000) ? VideoFrameProbeResult::TimedOut
+                                                         : VideoFrameProbeResult::Failed, {}, {}};
+    };
+    if (!format || !packet || !frame) return failure();
+    format->interrupt_callback = {[](void* opaque) {
+        return static_cast<QElapsedTimer*>(opaque)->hasExpired(5000) ? 1 : 0;
+    }, &deadline};
+    const QByteArray filename = QFile::encodeName(path);
+    if (avformat_open_input(&format, filename.constData(), nullptr, nullptr) < 0
+        || avformat_find_stream_info(format, nullptr) < 0) return failure();
+    const int index = av_find_best_stream(format, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
+    if (index < 0) return failure();
+    AVStream* stream = format->streams[index];
+    const AVCodec* decoder = avcodec_find_decoder(stream->codecpar->codec_id);
+    if (!decoder || !(codec = avcodec_alloc_context3(decoder))) return failure();
+    if (avcodec_parameters_to_context(codec, stream->codecpar) < 0) return failure();
+    codec->thread_count = 1;
+    codec->err_recognition = AV_EF_CRCCHECK | AV_EF_BITSTREAM | AV_EF_BUFFER | AV_EF_EXPLODE;
+    if (avcodec_open2(codec, decoder, nullptr) < 0) return failure();
+    bool drained = false;
+    while (!deadline.hasExpired(5000)) {
+        int result = avcodec_receive_frame(codec, frame);
+        if (result >= 0) {
+            if (frame->decode_error_flags || (frame->flags & AV_FRAME_FLAG_CORRUPT)) return failure();
+            const AVRational sar = av_guess_sample_aspect_ratio(format, stream, frame);
+            const double scaledWidth = sar.num > 0 && sar.den > 0 ? frame->width * av_q2d(sar) : frame->width;
+            if (scaledWidth <= 0 || !std::isfinite(scaledWidth)
+                || scaledWidth > std::numeric_limits<int>::max() || frame->height <= 0) return failure();
+            QImage image(QSize(std::max(1, qRound(scaledWidth)), frame->height), QImage::Format_RGBA8888);
+            if (image.isNull()) return failure();
+            scaler = sws_getContext(frame->width, frame->height, AVPixelFormat(frame->format),
+                                   image.width(), image.height(), AV_PIX_FMT_RGBA,
+                                   SWS_BILINEAR, nullptr, nullptr, nullptr);
+            if (!scaler) return failure();
+            uint8_t* pixels[4] = {image.bits(), nullptr, nullptr, nullptr};
+            int strides[4] = {int(image.bytesPerLine()), 0, 0, 0};
+            if (sws_scale(scaler, frame->data, frame->linesize, 0, frame->height, pixels, strides)
+                != image.height()) return failure();
+            const AVPacketSideData* rotation = av_packet_side_data_get(
+                stream->codecpar->coded_side_data, stream->codecpar->nb_coded_side_data,
+                AV_PKT_DATA_DISPLAYMATRIX);
+            if (rotation && rotation->size >= 9 * sizeof(int32_t)) {
+                const double angle = -av_display_rotation_get(reinterpret_cast<const int32_t*>(rotation->data));
+                if (std::isfinite(angle)) image = image.transformed(QTransform().rotate(angle));
+            }
+            return {VideoFrameProbeResult::Decoded, image.size(), image};
         }
-    });
-    QObject::connect(&deadline, &QTimer::timeout, &eventLoop, [&] {
-        timedOut = true;
-        eventLoop.quit();
-    });
-
-    deadline.start(AppConfig::instance().mediaProbeTimeoutMs());
-    player.setVideoOutput(&sink);
-    player.setSource(QUrl::fromLocalFile(path));
-    player.play();
-    if (!decoded && !failed && !timedOut) {
-        eventLoop.exec(QEventLoop::ExcludeUserInputEvents);
+        if (result != AVERROR(EAGAIN) || drained) return failure();
+        do {
+            av_packet_unref(packet);
+            result = av_read_frame(format, packet);
+        } while (result >= 0 && packet->stream_index != index && !deadline.hasExpired(5000));
+        if (deadline.hasExpired(5000)) return failure();
+        if (result == AVERROR_EOF) {
+            drained = true;
+            if (avcodec_send_packet(codec, nullptr) < 0) return failure();
+        } else if (result < 0 || (packet->flags & AV_PKT_FLAG_CORRUPT)
+                   || avcodec_send_packet(codec, packet) < 0) return failure();
     }
-
-    deadline.stop();
-    player.stop();
-    player.setVideoOutput(nullptr);
-    player.setSource(QUrl());
-    if (decoded) {
-        return {VideoFrameProbeResult::Decoded, frameSize, firstFrame};
-    }
-    return {timedOut ? VideoFrameProbeResult::TimedOut
-                     : VideoFrameProbeResult::Failed, {}, {}};
+    return failure();
 }
 
 bool readExactly(QFile& file, quint64 offset, qsizetype size, QByteArray& bytes) {
@@ -717,7 +723,7 @@ bool isKnownVideoExtension(const QString& extension) {
     return extensions.contains(normalizedExtension(extension));
 }
 
-ValidationResult validateLocalFile(const QString& path, quint64 preparedImageBytes) {
+static ValidationResult validateLocalFileImpl(const QString& path, bool metadataOnly) {
     ValidationResult result;
     const QFileInfo info(path);
     if (!info.exists() || !info.isFile() || !info.isReadable()) {
@@ -735,6 +741,11 @@ ValidationResult validateLocalFile(const QString& path, quint64 preparedImageByt
         }
         if (mp4Status != VideoTrackValidation::Supported) {
             result.errorCode = QStringLiteral("invalid_mp4_video");
+            return result;
+        }
+
+        if (metadataOnly) {
+            result.kind = Kind::Mp4Video;
             return result;
         }
 
@@ -791,16 +802,17 @@ ValidationResult validateLocalFile(const QString& path, quint64 preparedImageByt
     }
 
     const quint64 decodedRgbaBytes = width * height * 4ULL;
-    if (decodedRgbaBytes > MaximumPreparedImageBytes
-        || preparedImageBytes > MaximumPreparedImageBytes
-        || decodedRgbaBytes > MaximumPreparedImageBytes - preparedImageBytes) {
-        result.errorCode = QStringLiteral("decoded_rgba_budget_exceeded");
-        return result;
-    }
 
     const int imageCount = reader.imageCount();
     if (imageCount > 1) {
         result.errorCode = QStringLiteral("animated_image_not_supported");
+        return result;
+    }
+
+    if (metadataOnly) {
+        result.kind = Kind::Image;
+        result.imageSize = size;
+        result.decodedRgbaBytes = decodedRgbaBytes;
         return result;
     }
 
@@ -823,6 +835,15 @@ ValidationResult validateLocalFile(const QString& path, quint64 preparedImageByt
     result.imageSize = size;
     result.decodedRgbaBytes = decodedRgbaBytes;
     return result;
+}
+
+ValidationResult validateLocalFileMetadata(const QString& path) {
+    return validateLocalFileImpl(path, true);
+}
+
+ValidationResult validateLocalFile(const QString& path, quint64 preparedImageBytes) {
+    Q_UNUSED(preparedImageBytes);
+    return validateLocalFileImpl(path, false);
 }
 
 QString validationErrorDescription(const ValidationResult& validation)
@@ -881,10 +902,6 @@ PreparationValidationResult validatePreparationAssets(
 {
     PreparationValidationResult result;
     result.totalDecodedRgbaBytes = preparedImageBytes;
-    if (preparedImageBytes > MaximumPreparedImageBytes) {
-        result.errorCode = QStringLiteral("decoded_rgba_budget_exceeded");
-        return result;
-    }
 
     for (const PreparationAsset& asset : assets) {
         if (asset.expectedKind != Kind::Image
@@ -909,8 +926,11 @@ PreparationValidationResult validatePreparationAssets(
             return result;
         }
         if (validation.kind == Kind::Image) {
-            // validateLocalFile() has already performed the subtraction-based
-            // overflow check against MaximumPreparedImageBytes.
+            if (validation.decodedRgbaBytes > std::numeric_limits<quint64>::max()
+                    - result.totalDecodedRgbaBytes) {
+                result.errorCode = QStringLiteral("decoded_size_overflow");
+                return result;
+            }
             result.totalDecodedRgbaBytes += validation.decodedRgbaBytes;
         }
     }

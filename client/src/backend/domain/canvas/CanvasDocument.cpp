@@ -62,6 +62,29 @@ void CanvasDocument::adoptMedia(CanvasMedia* media)
         emit mediaChanged(media->mediaId());
         emit documentChanged();
     });
+    connect(media, &CanvasMedia::residencyChanged, this, [this, media]() {
+        emit mediaChanged(media->mediaId());
+    });
+    connect(media, &CanvasMedia::identityReady, this, [this, media](const QString& fileId) {
+        if (m_fileManager) {
+            m_fileManager->registerVerifiedLocalFile(fileId, media->sourcePath());
+            m_fileManager->associateMediaWithFile(media->mediaId(), fileId);
+            if (!m_projectId.isEmpty())
+                m_fileManager->associateFileWithProject(fileId, m_projectId);
+        }
+        emit documentChanged();
+    });
+    connect(media, &CanvasMedia::sourceInvalidated, this, [this, media](const QString& reason) {
+        const QString id = media->mediaId();
+        emit mediaSourceInvalidated(id, reason);
+        QMetaObject::invokeMethod(this, [this, id] { removeMedia(id); }, Qt::QueuedConnection);
+    });
+    if (m_fileManager && media->residencyReady() && !media->fileId().isEmpty()) {
+        m_fileManager->registerVerifiedLocalFile(media->fileId(), media->sourcePath());
+        m_fileManager->associateMediaWithFile(media->mediaId(), media->fileId());
+        if (!m_projectId.isEmpty())
+            m_fileManager->associateFileWithProject(media->fileId(), m_projectId);
+    }
     emit mediaAdded(media);
     emit documentChanged();
 }
@@ -92,16 +115,6 @@ CanvasMedia* CanvasDocument::addPreparedFile(
     media->setSourcePath(sourcePath);
     media->setPosition(position);
     media->setZ(nextZ());
-    if (m_fileManager) {
-        const QString fileId = m_fileManager->getOrCreateFileId(sourcePath);
-        media->setFileId(fileId);
-        if (!fileId.isEmpty()) {
-            m_fileManager->associateMediaWithFile(media->mediaId(), fileId);
-            if (!m_projectId.isEmpty()) {
-                m_fileManager->associateFileWithProject(fileId, m_projectId);
-            }
-        }
-    }
     if (video) media->initializeVideoRuntime();
     adoptMedia(media);
     select(media->mediaId());
@@ -120,6 +133,7 @@ bool CanvasDocument::removeMedia(const QString& mediaId)
         if (m_fileManager && !media->isText()) {
             m_fileManager->removeMediaAssociation(mediaId);
         }
+        media->retireResidency();
         media->deleteLater();
         emit mediaRemoved(mediaId);
         if (selected) emit selectionChanged();
@@ -131,6 +145,7 @@ bool CanvasDocument::removeMedia(const QString& mediaId)
 
 void CanvasDocument::clear()
 {
+    ++m_importGeneration;
     const QList<CanvasMedia*> previous = m_media;
     m_media.clear();
     for (CanvasMedia* media : previous) {
@@ -140,6 +155,7 @@ void CanvasDocument::clear()
         if (m_fileManager && !media->isText()) {
             m_fileManager->removeMediaAssociation(media->mediaId());
         }
+        media->retireResidency();
         media->deleteLater();
     }
     emit selectionChanged();
@@ -385,7 +401,7 @@ QJsonObject CanvasDocument::serializeSceneState() const
             const QJsonObject span = spanForIntersection(it.key(), it.value(), bounds);
             if (!span.isEmpty()) spans.append(span);
         }
-        if (!spans.isEmpty()) item.insert(QStringLiteral("spans"), spans);
+        item.insert(QStringLiteral("spans"), spans);
 
         if (media->isText()) {
             item.insert(QStringLiteral("text"), media->text());
@@ -654,10 +670,8 @@ QStringList CanvasDocument::insertProjectMedia(
             media = new CanvasMedia(type == QLatin1String("video")
                                         ? CanvasMedia::Type::Video
                                         : CanvasMedia::Type::Image, base);
-            media->setSourcePath(path);
-            if (m_fileManager) {
-                media->setFileId(m_fileManager->getOrCreateFileId(path));
-            }
+            if (!freshIds) media->restoreMediaId(id);
+            media->setSourcePath(path, source.value(QStringLiteral("fileId")).toString());
             if (media->isVideo()) media->initializeVideoRuntime();
         }
         if (!freshIds) media->restoreMediaId(id);

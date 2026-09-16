@@ -11,6 +11,7 @@ Rectangle {
     required property var session
     property real maximumHeight: 620
     property int activeTab: 0
+    property bool presentationReady: true
     readonly property var settings: session ? session.mediaSettings : null
     readonly property string selectedMediaId: settings && settings.available
                                                ? settings.mediaId : ""
@@ -22,7 +23,8 @@ Rectangle {
 
     objectName: "sceneElementPanel"
     visible: !!session && session.settingsVisible
-             && !!settings && settings.available
+             && !!settings && settings.available && presentationReady
+    enabled: presentationReady
     width: 221
     height: visible ? Math.max(1, Math.min(maximumHeight, desiredHeight)) : 0
     radius: Theme.overlayRadius

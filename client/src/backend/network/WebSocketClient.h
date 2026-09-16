@@ -48,7 +48,7 @@ public:
     void closeUploadChannel();  // closes m_uploadSocket if open
     bool isUploadChannelConnected() const;
     // Pins one already-connected transport shared by the admitted outgoing
-    // transfers. Calls are reference-counted, allowing protocol v4's two
+    // transfers. Calls are reference-counted, allowing protocol v5's two
     // concurrent RemoteSession uploads without reordering either stream. This never
     // spins a nested event loop: if the dedicated channel is not ready yet, the
     // authenticated control channel is selected immediately and the dedicated
@@ -64,7 +64,7 @@ public:
     // Client registration
     void registerClient(const QString& machineName, const QString& platform, const QList<ScreenInfo>& screens, int volumePercent);
 
-    // Protocol-v4 uploads. Authenticated socket identity supplies the peer;
+    // Protocol-v5 uploads. Authenticated socket identity supplies the peer;
     // every command is correlated solely by RemoteSession + generation.
     bool sendUploadStart(const QString& remoteSessionId,
                          quint64 generation,
@@ -98,6 +98,8 @@ public:
                           const QString& reason = QStringLiteral("source_removed"));
     // Target-side upload_ready/progress/finished/rejected/abort_ack response.
     bool sendUploadProtocolResponse(const QJsonObject& response);
+    bool sendMediaResidency(const QString& remoteSessionId, quint64 generation,
+                            quint64 sequence, const QJsonArray& assets);
     
     // RemoteSession lifecycle. Tokens remain memory-only and are never
     // exposed in generic logs or durable project state.
@@ -141,7 +143,7 @@ public:
                                           const QString& errorCode = QString(),
                                           qint64 quarantinedBytes = 0);
 
-    // Protocol-v4 immutable SceneRun lifecycle. The coordinator resolves the
+    // Protocol-v5 immutable SceneRun lifecycle. The coordinator resolves the
     // active RemoteSession for a peer and supplies session generation/digest
     // correlation to every message.
     SceneRunCoordinator* sceneRunCoordinator() const { return m_sceneRuns.get(); }
@@ -220,8 +222,9 @@ signals:
     void registrationConfirmed(const ClientInfo& clientInfo);
     void messageReceived(const QJsonObject& message);
 
-    // Canonical protocol v4 upload envelope for both sender and target roles.
+    // Canonical protocol v5 upload envelope for both sender and target roles.
     void uploadMessageReceived(const QJsonObject& envelope);
+    void mediaResidencyReceived(const QJsonObject& envelope);
     void uploadTransportBytesWritten(qint64 bytes);
     void uploadTransportLost(const QString& reason);
     void remoteSessionOpened(const QJsonObject& envelope);
@@ -235,7 +238,7 @@ signals:
     // Business/protocol rejection for a RemoteSession command. This must not
     // be interpreted as a transport failure by ConnectionManager.
     void remoteSessionError(const QJsonObject& envelope);
-    // Full correlated protocol v4 scene envelopes. Keeping these as objects
+    // Full correlated protocol v5 scene envelopes. Keeping these as objects
     // makes new checklist fields additive without weakening validation.
     void scenePrepareReceived(const QJsonObject& envelope);
     void scenePrepareProgressReceived(const QJsonObject& envelope);

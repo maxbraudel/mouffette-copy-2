@@ -1,6 +1,7 @@
 #pragma once
 
 #include "backend/domain/media/MediaSettingsState.h"
+#include "backend/media/ResidentVideoPlayer.h"
 
 #include <QColor>
 #include <QMediaPlayer>
@@ -12,6 +13,7 @@
 
 class QAudioOutput;
 class QVideoSink;
+class RemoteVideoFrameSource;
 
 // Renderer-independent media node. QML receives immutable projections of this
 // object; all mutations go through CanvasDocument or a typed view model.
@@ -37,12 +39,18 @@ public:
     QString typeName() const;
 
     QString mediaId() const { return m_mediaId; }
+    QString residencyOwnerId() const { return m_residencyOwnerId; }
     void restoreMediaId(const QString& id);
     QString fileId() const { return m_fileId; }
     void setFileId(const QString& id);
     QString sourcePath() const { return m_sourcePath; }
-    void setSourcePath(const QString& path);
+    void setSourcePath(const QString& path, const QString& expectedSha256 = {});
     QString displayName() const;
+    bool residencyReady() const;
+    QString residencyState() const;
+    double residencyProgress() const;
+    QString residencyError() const;
+    void retireResidency();
 
     QSize baseSize() const { return m_baseSize; }
     void setBaseSize(const QSize& size);
@@ -117,7 +125,7 @@ public:
     void setVerticalAlignment(const QString& alignment);
 
     void initializeVideoRuntime();
-    QMediaPlayer* player() const { return m_player; }
+    ResidentVideoPlayer* player() const { return m_player; }
     QVideoSink* videoSink() const { return m_videoSink; }
     QAudioOutput* audioOutput() const { return m_audioOutput; }
     bool isPlaying() const;
@@ -152,6 +160,9 @@ signals:
     void uploadStateChanged();
     void runtimeStateChanged();
     void audioStateChanged();
+    void residencyChanged();
+    void identityReady(const QString& fileId);
+    void sourceInvalidated(const QString& reason);
 
 private:
     void notifyChanged();
@@ -159,11 +170,19 @@ private:
     void notifyTextMetricsChanged();
     void updateVideoLoops();
     void enforcePlaybackEnd(qint64 position, bool atEnd = false);
+    void refreshResidency();
+    void requestResidency();
 
     Type m_type;
     QString m_mediaId;
     QString m_fileId;
     QString m_sourcePath;
+    QString m_expectedSha256;
+    bool m_identityPublished = false;
+    bool m_sourceInvalidationReported = false;
+    bool m_residencyRetired = false;
+    bool m_residencyAcquired = false;
+    QString m_residencyOwnerId;
     qint64 m_sourceSizeBytes = -1;
     QSize m_baseSize;
     QPointF m_position;
@@ -197,7 +216,8 @@ private:
     QString m_horizontalAlignment = QStringLiteral("center");
     QString m_verticalAlignment = QStringLiteral("center");
 
-    QMediaPlayer* m_player = nullptr;
+    ResidentVideoPlayer* m_player = nullptr;
+    RemoteVideoFrameSource* m_residentFrameSource = nullptr;
     QVideoSink* m_videoSink = nullptr;
     QAudioOutput* m_audioOutput = nullptr;
     qint64 m_pendingPositionMs = -1;

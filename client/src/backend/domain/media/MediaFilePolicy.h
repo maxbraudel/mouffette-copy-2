@@ -44,7 +44,10 @@ struct PreparationValidationResult {
 };
 
 inline constexpr quint64 MaximumImagePixels = 64ULL * 1000ULL * 1000ULL;
-inline constexpr quint64 MaximumPreparedImageBytes = 1024ULL * 1024ULL * 1024ULL;
+
+// Structural/header validation. Does not decode pixels or create a player;
+// suitable for the asynchronous import probe and the resident decoder.
+ValidationResult validateLocalFileMetadata(const QString& path);
 
 // Classifies an existing local file from both its extension and its contents.
 // Video support is deliberately strict: only an ISO-BMFF/MP4 file whose final
@@ -54,9 +57,8 @@ inline constexpr quint64 MaximumPreparedImageBytes = 1024ULL * 1024ULL * 1024ULL
 // video format restriction instead of treating it as an unrelated unknown file.
 Kind classifyLocalFile(const QString& path);
 
-// preparedImageBytes is the decoded-RGBA total already reserved by the scene
-// being prepared. Supplying it lets both peers enforce the immutable 1 GiB
-// preparation budget while validating each manifest entry.
+// The legacy size argument is retained for source compatibility. Actual RAM
+// admission belongs to MediaResidencyManager, including videos and scratch.
 ValidationResult validateLocalFile(const QString& path,
                                    quint64 preparedImageBytes = 0);
 
@@ -64,12 +66,8 @@ ValidationResult validateLocalFile(const QString& path,
 // this instead of inventing UI messages from the extension or media kind.
 QString validationErrorDescription(const ValidationResult& validation);
 
-// Validates an entire immutable scene revision in order and reserves decoded
-// RGBA bytes cumulatively. The receiving renderer uses this function before
-// constructing a render graph, so the 1 GiB budget cannot be bypassed by
-// splitting images across several manifest entries. The sender relies on the
-// upload validation receipt plus the immutable SHA-256 identity instead of
-// decoding every asset again for each launch.
+// Validates asset formats and computes decoded image bytes with checked
+// arithmetic. Dynamic residency admission is a separate, shared authority.
 PreparationValidationResult validatePreparationAssets(
     const QList<PreparationAsset>& assets,
     quint64 preparedImageBytes = 0);

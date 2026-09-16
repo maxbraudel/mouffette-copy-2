@@ -15,7 +15,7 @@ const CURSOR_DEBUG = DEFAULT_CONFIG.cursorDebug;
 const CANONICAL_UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const OPAQUE_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
-// Protocol v4 is a hard cut-over. Obsolete names are rejected at the envelope
+// Protocol v5 is a hard cut-over. Obsolete names are rejected at the envelope
 // boundary and are never translated.
 const REMOVED_MESSAGE_TYPES = new Set([
     'register', 'device_register',
@@ -184,7 +184,7 @@ function isCanonicalSceneMedia(item, screenIds) {
         || !isFiniteInRange(item.fadeInSeconds, 0, 3600)
         || !isFiniteInRange(item.fadeOutSeconds, 0, 3600)
         || !isFiniteInRange(item.contentOpacity, 0, 1)
-        || !Array.isArray(item.spans) || item.spans.length < 1
+        || !Array.isArray(item.spans)
         || item.spans.length > 64) {
         return false;
     }
@@ -276,10 +276,10 @@ function isCanonicalScene(scene, maximumScreens, maximumMedia) {
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// MOUFFETTE SERVER - PROTOCOL V4 IDENTITY BOUNDARY
+// MOUFFETTE SERVER - PROTOCOL V5 IDENTITY BOUNDARY
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 //
-// Protocol v4 authenticates one installation key, derives one addressable
+// Protocol v5 authenticates one installation key, derives one addressable
 // endpoint per application instance, and keeps transport runtime identity
 // separate. Removed wire identifiers are never accepted as aliases.
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -303,7 +303,7 @@ class MouffetteServer {
         this.clients = new Map(); // transport key -> authenticated endpoint state
         this.connectionGenerationByEndpoint = new Map();
         this.wss = null;
-        this.uploads = new Map(); // uploadId -> protocol-v4 endpoint/session state
+        this.uploads = new Map(); // uploadId -> protocol-v5 endpoint/session state
         this.uploadTombstones = new Map(); // uploadId -> bounded terminal result
         this.pendingAssetRemovals = new Map(); // removalId -> immutable session-scoped removal
         this.assetRemovalTombstones = new Map(); // removalId -> bounded committed/error result
@@ -1002,6 +1002,11 @@ class MouffetteServer {
             return reject('scene_asset_not_validated',
                 'At least one media file in this scene has not been uploaded to the remote client. Upload all media before launching the scene.');
         }
+        if (!this.sceneMemoryReady(session, manifest)) {
+            this.countScenePreparationFailure(message);
+            return reject('scene_memory_unavailable',
+                'Every scene asset must be fully decoded in target memory before preparation');
+        }
         const prepared = this.sceneRuns.prepare({
             remoteSessionId: session.remoteSessionId,
             generation: session.generation,
@@ -1090,6 +1095,8 @@ class MouffetteServer {
                 this.safeChecklistId(`${base}_${suffix}`, base), stage);
             if (media.type !== 'text'
                 && !appendStage('file', 'file_validated')) return null;
+            if (media.type !== 'text'
+                && !appendStage('memory', 'media_memory_ready')) return null;
             if (media.type === 'text') {
                 if (!appendStage('glyphs', 'text_glyphs_ready')
                     || !appendStage('layout', 'text_layout_ready')) return null;
@@ -1386,21 +1393,21 @@ class MouffetteServer {
             return;
         }
         if (!this.isValidOpaqueId(message.type)) {
-            this.sendError(clientId, 'Invalid protocol v4 message type',
+            this.sendError(clientId, 'Invalid protocol v5 message type',
                 'invalid_message_type');
             return;
         }
         if (REMOVED_MESSAGE_TYPES.has(message.type)
             || (typeof message.type === 'string' && message.type.startsWith('remote_scene_'))) {
             this.sendError(clientId,
-                `Obsolete message type is not supported by protocol v4: ${message.type}`,
+                `Obsolete message type is not supported by protocol v5: ${message.type}`,
                 'removed_message_type');
             return;
         }
         const removedField = findRemovedWireField(message);
         if (removedField) {
             this.sendError(clientId,
-                `Obsolete field is not supported by protocol v4: ${removedField}`,
+                `Obsolete field is not supported by protocol v5: ${removedField}`,
                 'removed_protocol_field');
             return;
         }
@@ -1545,6 +1552,9 @@ class MouffetteServer {
             case 'remote_session_accept':
                 this.handleRemoteSessionAccept(clientId, message);
                 break;
+            case 'media_residency':
+                this.handleMediaResidency(clientId, message);
+                break;
             case 'remote_session_snapshot':
                 this.handleRemoteSessionSnapshot(clientId, message);
                 break;
@@ -1558,7 +1568,7 @@ class MouffetteServer {
                 this.handleRemoteSessionTeardownAck(clientId, message);
                 break;
             default:
-                this.sendError(clientId, 'Unknown protocol v4 message type', 'unknown_message_type');
+                this.sendError(clientId, 'Unknown protocol v5 message type', 'unknown_message_type');
         }
     }
 
@@ -2001,6 +2011,60 @@ class MouffetteServer {
         payload.snapshot = snapshot;
         this.sendToEndpoint(accepted.session.ownerEndpointId, payload);
         this.sendToEndpoint(accepted.session.targetEndpointId, payload);
+    }
+
+    handleMediaResidency(targetId, message) {
+        const validated = this.validateSessionMessage(targetId, message);
+        if (!validated.ok || validated.role !== 'target') {
+            return this.sendRemoteSessionError(targetId,
+                'Only the current target may publish media memory state',
+                validated.ok ? 'not_session_target' : validated.error, message);
+        }
+        const { session } = validated;
+        const previous = session.mediaResidency;
+        const inventory = this.sessionAssets.get(session.remoteSessionId) || new Map();
+        const states = new Set(['analysing', 'queued', 'decoding', 'ready',
+            'waiting_for_memory', 'capacity_insufficient', 'error']);
+        if (!Number.isSafeInteger(message.sequence) || message.sequence < 1
+            || (previous && previous.generation === session.generation
+                && message.sequence <= previous.sequence)
+            || !Array.isArray(message.assets) || message.assets.length > this.MAX_UPLOAD_FILES
+            || !this.serializedJsonWithinLimit(message.assets, this.MAX_REMOTE_SCENE_BYTES)) {
+            return this.sendRemoteSessionError(targetId, 'Invalid or stale memory snapshot',
+                'invalid_media_residency', message);
+        }
+        const seen = new Set();
+        for (const asset of message.assets) {
+            const stored = isPlainObject(asset) && inventory.get(asset.assetId);
+            if (!stored || seen.has(asset.assetId) || asset.sha256 !== stored.sha256
+                || !states.has(asset.state) || !Number.isFinite(asset.progress)
+                || asset.progress < 0 || asset.progress > 1
+                || typeof asset.error !== 'string' || asset.error.length > 1024) {
+                return this.sendRemoteSessionError(targetId, 'Invalid memory asset identity or state',
+                    'invalid_media_residency', message);
+            }
+            seen.add(asset.assetId);
+        }
+        session.mediaResidency = { generation: session.generation,
+            sequence: message.sequence, assets: message.assets };
+        this.sendToEndpoint(session.ownerEndpointId, {
+            ...this.remoteSessionPayload(session, 'media_residency'),
+            sequence: message.sequence, assets: message.assets,
+        });
+        const run = session.sceneRunId && this.sceneRuns.get(session.sceneRunId);
+        if (run && ![SCENE_PHASES.STOPPED, SCENE_PHASES.FAILED, SCENE_PHASES.STOPPING].includes(run.phase)
+            && !this.sceneMemoryReady(session, run.manifest)) {
+            this.initiateSceneStop(run, 'scene_memory_unavailable', true);
+        }
+    }
+
+    sceneMemoryReady(session, manifest) {
+        if (manifest.length === 0) return true;
+        const snapshot = session.mediaResidency;
+        if (!snapshot || snapshot.generation !== session.generation) return false;
+        return manifest.every(asset => snapshot.assets.some(state =>
+            state.assetId === asset.assetId && state.sha256 === asset.sha256
+            && state.state === 'ready'));
     }
 
     handleRemoteSessionSnapshot(targetId, message) {
@@ -2863,7 +2927,7 @@ class MouffetteServer {
         }
     }
 
-    // Protocol v4 upload state. A transfer is immutable and belongs to one
+    // Protocol v5 upload state. A transfer is immutable and belongs to one
     // RemoteSession generation; authenticated socket identity supplies both
     // parties, so client-provided sender/target aliases are never consulted.
     uploadPayload(upload, type, extra = {}) {

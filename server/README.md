@@ -1,6 +1,6 @@
 # Mouffette Server
 
-Node.js WebSocket coordinator for Mouffette protocol v4.
+Node.js WebSocket coordinator for Mouffette protocol v5.
 
 ## Run and test
 
@@ -16,7 +16,7 @@ override it. Invalid critical values fail startup.
 ## Protocol envelope
 
 The server sends `auth_challenge` first. The client signs
-`mouffette-v4\n<serverBootId>\n<nonce>\n<runtimeId>\n<instanceId>` with its
+`mouffette-v5\n<serverBootId>\n<nonce>\n<runtimeId>\n<instanceId>` with its
 Ed25519 installation key and returns the SPKI public key and signature as
 base64url. The SHA-256 of the SPKI key is the stable `installationId`; the
 server domain-separates and hashes `installationId + instanceId` to derive and
@@ -133,3 +133,19 @@ The remaining v4 scene messages are `prepare_progress`, `state_snapshot`, `stop`
 `stopped`. The server derives both endpoints from the session, bounds payloads,
 rejects stale generations, and preserves terminal tombstones for idempotent
 retries. Removed `remote_scene_*` message routes do not exist.
+
+## Fully resident media (v5)
+
+Upload validation only confirms the durable file identity. The target then decodes
+all image pixels or all video frames and audio before reporting `media_residency`.
+These reports contain a session generation, monotonically increasing `sequence`,
+and an `assets` array (`assetId`, `sha256`, `state`, `progress`, `error`). Only the
+current authenticated target can report; stale sequences and unknown assets fail.
+States are `analysing`, `queued`, `decoding`, `ready`, `waiting_for_memory`,
+`capacity_insufficient`, or `error`; progress ranges from 0 to 1.
+
+`scene_prepare` requires a current `ready` report for every manifest asset, and
+both endpoints must acknowledge the `media_memory_ready` checklist stage. A new
+report that invalidates a preparing or running scene stops that scene. Transfers
+and memory reports remain independent so completion does not wait for RAM space.
+Version 4 clients are rejected; deploy the client and server version together.

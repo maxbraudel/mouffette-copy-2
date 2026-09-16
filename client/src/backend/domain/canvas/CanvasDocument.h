@@ -25,7 +25,8 @@ public:
 
     void setFileManager(FileManager* manager) { m_fileManager = manager; }
     FileManager* fileManager() const { return m_fileManager; }
-    void setClientWorkspaceId(const QString& id) { m_projectId = id; }
+    void setClientWorkspaceId(const QString& id) { if (m_projectId != id) ++m_importGeneration; m_projectId = id; }
+    quint64 importGeneration() const { return m_importGeneration; }
     QString projectId() const { return m_projectId; }
 
     QList<CanvasMedia*> media() const { return m_media; }
@@ -91,6 +92,7 @@ signals:
     void mediaAboutToBeRemoved(CanvasMedia* media);
     void mediaRemoved(const QString& mediaId);
     void mediaChanged(const QString& mediaId);
+    void mediaSourceInvalidated(const QString& mediaId, const QString& reason);
     void selectionChanged();
     void screensChanged();
     void cameraChanged();
@@ -107,6 +109,7 @@ private:
     void rebuildScreenRects();
     qreal nextZ() const;
 
+    quint64 m_importGeneration = 0;
     QList<CanvasMedia*> m_media;
     QList<ScreenInfo> m_screens;
     QHash<int, QRectF> m_screenRects;

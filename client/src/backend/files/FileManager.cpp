@@ -26,6 +26,10 @@ FileManager::FileManager()
     m_cache = &FileMemoryCache::instance();
 }
 
+void FileManager::registerVerifiedLocalFile(const QString& fileId, const QString& filePath) {
+    m_repository->registerVerifiedLocalFile(fileId, filePath);
+}
+
 QString FileManager::getOrCreateFileId(const QString& filePath)
 {
     return m_repository->getOrCreateFileId(filePath);

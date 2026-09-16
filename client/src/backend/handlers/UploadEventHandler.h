@@ -30,6 +30,7 @@ public slots:
      * and coordinates with UploadManager for file transfer
      */
     void onUploadButtonClicked();
+    void uploadWorkspace(const QString& targetEndpointId, bool automatic = false);
     
     /**
      * @brief Update individual file progress from server reports

@@ -1,3 +1,6 @@
+#include "backend/media/MediaResidencyManager.h"
+#include "backend/media/ResidentVideoPlayer.h"
+#include "backend/network/UploadManager.h"
 #include "frontend/rendering/remote/RemoteSceneController.h"
 #include "backend/config/AppConfig.h"
 #include "backend/network/SceneRunCoordinator.h"
@@ -40,10 +43,11 @@
 #include <limits>
 #include <memory>
 #include <QVideoFrameFormat>
+#include <QTransform>
 
 
 namespace {
-constexpr int kLivePlaybackWarmupFrames = 2;
+constexpr int kLivePlaybackWarmupFrames = 0; // fully decoded CPU frames need no decoder warmup
 constexpr qint64 kMaxVideoPositionMs = 7LL * 24LL * 60LL * 60LL * 1000LL;
 constexpr int kMaxVideoSyncItems = 512;
 constexpr int kMaxRemoteScreens = 64;
@@ -179,12 +183,19 @@ QImage convertFrameToImage(const QVideoFrame& frame) {
         return {};
     }
 
+    const auto orient = [&frame](QImage image) {
+        if (image.isNull()) return image;
+        const int rotation = static_cast<int>(frame.rotation());
+        if (rotation) image = image.transformed(QTransform().rotate(rotation));
+        if (frame.mirrored()) image = image.flipped(Qt::Horizontal);
+        return image;
+    };
     QImage direct = frame.toImage();
     if (!direct.isNull()) {
         if (direct.format() != QImage::Format_RGBA8888 && direct.format() != QImage::Format_ARGB32_Premultiplied) {
             direct = direct.convertToFormat(QImage::Format_RGBA8888);
         }
-        return direct;
+        return orient(direct);
     }
 
     QVideoFrame copy(frame);
@@ -212,7 +223,7 @@ QImage convertFrameToImage(const QVideoFrame& frame) {
         mapped = mapped.convertToFormat(QImage::Format_RGBA8888);
     }
 
-    return mapped;
+    return orient(mapped);
 }
 
 } // namespace
@@ -221,6 +232,26 @@ RemoteSceneController::RemoteSceneController(FileManager* fileManager, WebSocket
     : QObject(parent)
     , m_fileManager(fileManager)
     , m_ws(ws) {
+    connect(&MediaResidencyManager::instance(), &MediaResidencyManager::ownerChanged,
+            this, [this](const QString& owner) {
+        if (m_teardownInProgress || m_pendingSceneInstanceId.isEmpty()) return;
+        for (const auto& item : m_mediaItems) {
+            if (item->residencyOwner != owner || MediaResidencyManager::instance().ready(owner)) continue;
+            const QString sender = m_pendingSenderClientId;
+            const QString run = m_pendingSceneInstanceId;
+            if (m_ws) m_ws->sendSceneStop(run, QStringLiteral("scene_memory_unavailable"));
+            onRemoteSceneStop(sender, run);
+            return;
+        }
+    });
+    connect(&MediaResidencyManager::instance(), &MediaResidencyManager::sceneStopRequested,
+            this, [this](const QString& group) {
+        if (group.isEmpty() || group != m_residencyGroup) return;
+        const QString sender = m_pendingSenderClientId;
+        const QString run = m_pendingSceneInstanceId;
+        if (m_ws) m_ws->sendSceneStop(run, QStringLiteral("memory_pressure"));
+        onRemoteSceneStop(sender, run);
+    });
     if (m_ws) {
         connect(m_ws, &WebSocketClient::scenePrepareReceived,
                 this, &RemoteSceneController::onScenePrepareEnvelope);
@@ -445,6 +476,14 @@ void RemoteSceneController::onScenePrepareEnvelope(const QJsonObject& envelope)
                                     QStringLiteral("Scene media does not match its validated asset"));
             return;
         }
+        const QString memoryOwner = UploadManager::residencyOwnerId(
+            envelope.value(QStringLiteral("remoteSessionId")).toString(), generation,
+            media.value(QStringLiteral("fileId")).toString());
+        if (!MediaResidencyManager::instance().ready(memoryOwner)) {
+            m_ws->sendScenePrepared(runId, false, {}, QStringLiteral("scene_memory_unavailable"),
+                QStringLiteral("Every media must be fully decoded in memory before preparation"));
+            return;
+        }
         referencedMedia.insert(mediaId);
     }
     for (auto iterator = declaredFileByMedia.cbegin();
@@ -544,6 +583,14 @@ void RemoteSceneController::onScenePreparedEnvelope(const QJsonObject& envelope)
 void RemoteSceneController::onSceneCommitEnvelope(const QJsonObject& envelope)
 {
     if (!matchesSceneEnvelope(envelope) || !m_sceneArmedReported || !m_ws) return;
+    for (const auto& item : m_mediaItems) {
+        if (item->type != QLatin1String("text")
+            && !MediaResidencyManager::instance().ready(item->residencyOwner)) {
+            m_ws->sendSceneStop(m_pendingSceneInstanceId, QStringLiteral("scene_memory_unavailable"));
+            clearScene();
+            return;
+        }
+    }
 	qint64 startServerMonotonicMs = -1;
 	qint64 maximum = -1;
 	qint64 startEpochMs = -1;
@@ -1606,7 +1653,7 @@ void RemoteSceneController::onRemoteSceneStart(const QString& senderClientId, co
             return;
         }
         const QJsonArray spans = spansValue.toArray();
-        if (spans.isEmpty() || spans.size() > kMaxRemoteSpansPerMedia
+        if (spans.size() > kMaxRemoteSpansPerMedia
             || totalSpanCount > kMaxRemoteTotalSpans - spans.size()) {
             failWithMessage(QStringLiteral("Invalid span count for media %1").arg(mediaId));
             return;
@@ -1739,29 +1786,17 @@ void RemoteSceneController::onRemoteSceneStart(const QString& senderClientId, co
         return;
     }
 
-    const MediaFilePolicy::PreparationValidationResult preparation =
-        MediaFilePolicy::validatePreparationAssets(preparationAssets);
-    if (!preparation.accepted) {
-        if (preparation.errorCode == QLatin1String("decoded_rgba_budget_exceeded")) {
-            failWithMessage(QStringLiteral(
-                "Scene preparation exceeds the 1 GiB decoded RGBA image budget"));
+    QStringList memoryOwners;
+    for (const auto& value : media) {
+        const auto entry = value.toObject();
+        if (entry.value(QStringLiteral("type")).toString() == QLatin1String("text")) continue;
+        const QString owner = UploadManager::residencyOwnerId(m_pendingRemoteSessionId,
+            m_pendingSessionGeneration, entry.value(QStringLiteral("fileId")).toString());
+        if (!MediaResidencyManager::instance().ready(owner)) {
+            failWithMessage(QStringLiteral("Scene media is not fully resident in memory"));
             return;
         }
-
-        const QString fileName = preparationFileNames
-            .value(preparation.failedAssetId, preparation.failedAssetId);
-        if (preparationTypes.value(preparation.failedAssetId)
-            == QLatin1String("video")) {
-            failWithMessage(QStringLiteral(
-                "Unsupported video format or codec (MP4 required): %1").arg(fileName));
-        } else {
-            failWithMessage(QStringLiteral("Invalid image asset %1 (%2)")
-                                .arg(fileName,
-                                     preparation.errorCode.isEmpty()
-                                         ? QStringLiteral("media_validation_failed")
-                                         : preparation.errorCode));
-        }
-        return;
+        memoryOwners.append(owner);
     }
 
     qDebug() << "RemoteSceneController: validation successful, preparing scene from" << senderClientId;
@@ -1784,6 +1819,12 @@ void RemoteSceneController::onRemoteSceneStart(const QString& senderClientId, co
         return;
     }
 
+    m_residencyGroup = QStringLiteral("remote-scene:%1").arg(sceneInstanceId);
+    if (!MediaResidencyManager::instance().pinOwners(memoryOwners, m_residencyGroup)) {
+        m_residencyGroup.clear();
+        failWithMessage(QStringLiteral("Media memory availability changed during preparation"));
+        return;
+    }
     m_pendingSenderClientId = senderClientId;
     m_pendingSceneInstanceId = sceneInstanceId;
     m_totalMediaToPrime = media.size();
@@ -2399,6 +2440,8 @@ void RemoteSceneController::completeTeardownBarrier(quint64 barrierEpoch)
     m_teardownSessionWaiters.clear();
     m_teardownGraphRemoteSessionId.clear();
     m_teardownInProgress = false;
+    MediaResidencyManager::instance().unpinGroup(m_residencyGroup);
+    m_residencyGroup.clear();
 
     if (sessionWaiters.isEmpty()) {
         emit teardownSettled(QString(), true);
@@ -2484,14 +2527,14 @@ void RemoteSceneController::teardownMediaItem(const std::shared_ptr<RemoteMediaI
     item->muteEndTriggered = false;
 
     if (item->player) {
-        QMediaPlayer* player = item->player;
+        ResidentVideoPlayer* player = item->player;
         QObject::disconnect(player, nullptr, nullptr, nullptr);
         if (player->playbackState() != QMediaPlayer::StoppedState) {
             player->stop();
         }
         player->setVideoSink(nullptr);
         player->setAudioOutput(nullptr);
-        player->setSource(QUrl());
+        player->clearAsset();
     }
 
     // Both sinks are QObject children of the player. Disconnect them and let
@@ -2690,7 +2733,7 @@ void RemoteSceneController::triggerAutoPlayNow(const std::shared_ptr<RemoteMedia
 
     QObject::disconnect(item->deferredStartConn);
     std::weak_ptr<RemoteMediaItem> weakItem = item;
-    item->deferredStartConn = QObject::connect(item->player, &QMediaPlayer::mediaStatusChanged, item->player, [this, epoch, weakItem](QMediaPlayer::MediaStatus s) {
+    item->deferredStartConn = QObject::connect(item->player, &ResidentVideoPlayer::mediaStatusChanged, item->player, [this, epoch, weakItem](QMediaPlayer::MediaStatus s) {
         auto item = weakItem.lock();
         if (!item) return;
         if (epoch != m_sceneEpoch || !item->playAuthorized) return;
@@ -3306,8 +3349,10 @@ void RemoteSceneController::publishMediaSpan(const std::shared_ptr<RemoteMediaIt
     media.insert(QStringLiteral("renderOpacity"), item->renderOpacity);
 
     if (item->type == QLatin1String("image")) {
-        const QString path = receivedFilePath(item->fileId);
-        media.insert(QStringLiteral("sourceUrl"), path.isEmpty() ? QString() : QUrl::fromLocalFile(path).toString());
+        media.insert(QStringLiteral("residentFrameSource"),
+            QVariant::fromValue(static_cast<QObject*>(item->frameSource.data())));
+        media.insert(QStringLiteral("residencyReady"),
+            MediaResidencyManager::instance().ready(item->residencyOwner));
     } else if (item->type == QLatin1String("video")) {
         media.insert(QStringLiteral("remoteFrameSource"),
                      QVariant::fromValue(static_cast<QObject*>(item->frameSource.data())));
@@ -3434,7 +3479,7 @@ void RemoteSceneController::setRemoteMediaVisualState(const std::shared_ptr<Remo
 }
 
 bool RemoteSceneController::allSpansReady(const std::shared_ptr<RemoteMediaItem>& item) const {
-    if (!item || item->spans.isEmpty()) return false;
+    if (!item) return false;
     return std::all_of(item->spans.cbegin(), item->spans.cend(), [](const RemoteMediaItem::Span& span) {
         return span.qmlReady;
     });
@@ -3464,6 +3509,13 @@ void RemoteSceneController::buildMedia(const QJsonArray& mediaArray) {
     item->fileId = m.value("fileId").toString();
     item->type = m.value("type").toString();
     item->fileName = m.value("fileName").toString();
+    item->residencyOwner = UploadManager::residencyOwnerId(m_pendingRemoteSessionId,
+        m_pendingSessionGeneration, item->fileId);
+    if (item->type == QLatin1String("image")) {
+        item->frameSource = new RemoteVideoFrameSource(this);
+        const auto resident = MediaResidencyManager::instance().asset(item->residencyOwner);
+        if (resident) item->frameSource->setFrame(resident->image);
+    }
     item->sceneEpoch = m_sceneEpoch;
     item->z = m.value("z").toDouble();
     item->contentVisible = m.value("visible").toBool();
@@ -3569,15 +3621,7 @@ void RemoteSceneController::buildMedia(const QJsonArray& mediaArray) {
             item->awaitingStartFrame = item->hasDisplayTimestamp
                 || (item->hasStartPosition && item->startPositionMs > 0);
             item->frameSource = new RemoteVideoFrameSource(this);
-            // QMediaPlayer streams MP4 from the validated local path. Ensure a
-            // previous cache user cannot leave a whole video resident in RAM.
-            const RemoteCacheStore::Scope scope = receivedFileScope();
-            if (scope.senderEndpointId.isEmpty() || scope.remoteSessionId.isEmpty()
-                || scope.generation == 0) {
-                if (!m_ws) m_fileManager->releaseFileMemory(item->fileId);
-            } else {
-                m_fileManager->releaseReceivedFileMemory(scope, item->fileId);
-            }
+
         }
         m_mediaItems.append(item);
         scheduleMedia(item);
@@ -3588,15 +3632,10 @@ void RemoteSceneController::buildMedia(const QJsonArray& mediaArray) {
 
 void RemoteSceneController::scheduleMedia(const std::shared_ptr<RemoteMediaItem>& item) {
     if (!item) return;
-    if (item->spans.isEmpty()) {
-        qWarning() << "RemoteSceneController: ignoring media with no spans" << item->mediaId << item->type;
-        return;
-    }
     scheduleMediaMulti(item);
 }
 
 void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMediaItem>& item) {
-    if (item->spans.isEmpty()) return;
     const quint64 epoch = item->sceneEpoch;
     item->hiding = false;
     if (item->hideTimer) {
@@ -3611,21 +3650,19 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
     std::weak_ptr<RemoteMediaItem> weakItem = item;
 
     if (item->type == "text") {
-        // QML reports readiness once the shared text delegate has been created.
-        item->loaded = false;
+        // Offscreen media has no visual delegate but remains in the scene inventory.
+        item->loaded = item->spans.isEmpty();
     } else if (item->type == "image") {
-        // Image.Ready is reported by ImageItem through RemoteSceneRoot.
-        item->loaded = false;
+        item->loaded = item->spans.isEmpty();
     } else if (item->type == "video") {
-        // The existing decoder remains authoritative; its QVideoSink feeds one
-        // shared frame source rendered by every passive QML span.
-        item->player = new QMediaPlayer(this);
+        // Present already decoded CPU frames to one shared source for all spans.
+        item->player = new ResidentVideoPlayer(this);
         item->audio = new QAudioOutput(this);
         item->audio->setMuted(item->muted); 
         item->audio->setVolume(std::clamp(item->volume, 0.0, 1.0));
         item->player->setAudioOutput(item->audio);
         item->videoOutputsAttached = false;
-        QObject::connect(item->player, &QMediaPlayer::mediaStatusChanged, item->player, [this,epoch,weakItem](QMediaPlayer::MediaStatus s){
+        QObject::connect(item->player, &ResidentVideoPlayer::mediaStatusChanged, item->player, [this,epoch,weakItem](QMediaPlayer::MediaStatus s){
             auto item = weakItem.lock();
             if (!item) return;
             if (epoch != m_sceneEpoch) return;
@@ -3661,7 +3698,7 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
                 }, Qt::QueuedConnection);
             }
         });
-        QObject::connect(item->player, &QMediaPlayer::positionChanged, item->player, [this,epoch,weakItem](qint64 pos){
+        QObject::connect(item->player, &ResidentVideoPlayer::positionChanged, item->player, [this,epoch,weakItem](qint64 pos){
             auto item = weakItem.lock();
             if (!item) return;
             if (epoch != m_sceneEpoch) return;
@@ -3729,222 +3766,40 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
                 freezeVideoOutput(item);
             }
         });
-        QObject::connect(item->player, &QMediaPlayer::errorOccurred, item->player, [this,epoch,weakItem](QMediaPlayer::Error e, const QString& err){ auto item = weakItem.lock(); if (!item) return; if (epoch != m_sceneEpoch) return; if (e != QMediaPlayer::NoError) qWarning() << "RemoteSceneController: player error" << int(e) << err << "for" << item->mediaId; });
-    auto attemptLoadVid = [this, epoch, weakItem]() {
-            auto item = weakItem.lock();
-            if (!item) return false;
-            if (epoch != m_sceneEpoch) return false;
-            QString path = receivedFilePath(item->fileId);
-            if (!path.isEmpty() && QFileInfo::exists(path)) {
-                item->pausedAtEnd = false;
-                item->player->setSource(QUrl::fromLocalFile(path));
-
-                item->player->setLoops(QMediaPlayer::Once);
-                item->repeatRemaining = (item->repeatEnabled && item->repeatCount > 0)
-                                             ? item->repeatCount
-                                             : 0;
-
-                // Prime the first frame if not already done
-                if (!item->primedFirstFrame) {
-                    if (!item->primingSink) {
-                        item->primingSink = new QVideoSink(item->player);
-                    }
-                    QVideoSink* sink = item->primingSink;
-                    if (item->player && sink) {
-                        item->player->setVideoSink(sink);
-                        item->videoOutputsAttached = false;
-                    }
-                    if (sink) {
-                        qDebug() << "RemoteSceneController: start priming(multi)" << item->mediaId
-                                 << "startMs" << (item->hasStartPosition ? item->startPositionMs : qint64(-1))
-                                 << "displayTs" << (item->hasDisplayTimestamp ? item->displayTimestampMs : qint64(-1))
-                                 << "awaitingStart" << item->awaitingStartFrame;
-                        item->primingConn = QObject::connect(sink, &QVideoSink::videoFrameChanged, sink, [this,epoch,weakItem](const QVideoFrame& frame){
-                            if (!frame.isValid()) {
-                                return;
-                            }
-                            auto item = weakItem.lock();
-                            if (!item) return;
-                            if (epoch != m_sceneEpoch) return;
-                            // Safety check: verify priming sink still exists
-                            if (!item->primingSink) return;
-                            // Safety check: verify player still exists
-                            if (!item->player) return;
-                            const qint64 desired = targetDisplayTimestamp(item);
-                            const qint64 frameTime = frameTimestampMs(frame);
-                            const bool hasFrameTimestamp = frameTime >= 0;
-                            const qint64 playerPos = item->player ? item->player->position() : -1;
-                            const qint64 reference = hasFrameTimestamp ? frameTime : playerPos;
-
-                            auto logDecision = [&](const QString& stage, const QString& reason, bool accepted) {
-                                qDebug() << "RemoteSceneController: priming(multi)" << stage
-                                         << "media" << item->mediaId
-                                         << "reason" << reason
-                                         << "desired" << desired
-                                         << "frameTs" << (hasFrameTimestamp ? frameTime : qint64(-1))
-                                         << "playerPos" << playerPos
-                                         << "delta" << ((desired >= 0 && (hasFrameTimestamp || playerPos >= 0)) ? ((hasFrameTimestamp ? frameTime : playerPos) - desired) : qint64(0))
-                                         << "displayTs" << (item->hasDisplayTimestamp ? item->displayTimestampMs : qint64(-1))
-                                         << "startMs" << (item->hasStartPosition ? item->startPositionMs : qint64(-1))
-                                         << "awaiting" << item->awaitingStartFrame
-                                         << "accepted" << accepted;
-                            };
-
-                            if (!item->primedFirstFrame) {
-                                bool frameReady = true;
-                                bool overshoot = false;
-                                if (item->awaitingStartFrame && desired >= 0) {
-                                    if (reference >= 0) {
-                                        const qint64 tolerance = hasFrameTimestamp
-                                            ? AppConfig::instance()
-                                                  .sceneStartFrameToleranceMs()
-                                            : AppConfig::instance()
-                                                  .sceneSeekPositionToleranceMs();
-                                        if (reference < desired - tolerance) {
-                                            frameReady = false;
-                                        } else if (reference > desired + tolerance) {
-                                            frameReady = false;
-                                            overshoot = true;
-                                        }
-                                    }
-                                    if (!frameReady) {
-                                        logDecision(QStringLiteral("reject"), overshoot ? QStringLiteral("overshoot") : QStringLiteral("pre-start"), false);
-                                        if (item->player) {
-                                            if (overshoot) {
-                                                item->player->pause();
-                                                item->player->setPosition(desired);
-                                            }
-                                            if (item->player->playbackState() != QMediaPlayer::PlayingState) {
-                                                item->player->play();
-                                            }
-                                        }
-                                        item->primedFrame = QVideoFrame();
-                                        item->primedFrameSticky = false;
-                                        clearRenderedFrames(item);
-                                        return;
-                                    }
-                                }
-
-                                const QImage convertedFrame = convertFrameToImage(frame);
-                                if (convertedFrame.isNull()) {
-                                    qWarning() << "RemoteSceneController: first video frame is not renderable"
-                                               << item->mediaId;
-                                    const QString owner = m_pendingSenderClientId;
-                                    const QString failedSceneInstanceId = m_pendingSceneInstanceId;
-                                    if (m_ws && !owner.isEmpty() && !failedSceneInstanceId.isEmpty()) {
-                                        m_ws->sendScenePrepared(
-                                            failedSceneInstanceId,
-                                            false,
-                                            m_prepareChecklist,
-                                            QStringLiteral("video_frame_unrenderable"),
-                                            QStringLiteral("Video decoder produced a frame that cannot be rendered"));
-                                    }
-                                    const quint64 failureEpoch = ++m_sceneEpoch;
-                                    QMetaObject::invokeMethod(this, [this, failureEpoch]() {
-                                        if (failureEpoch == m_sceneEpoch) clearScene();
-                                    }, Qt::QueuedConnection);
-                                    return;
-                                }
-
-                                logDecision(QStringLiteral("accept"), QStringLiteral("frame within tolerance"), true);
-
-                                item->awaitingStartFrame = false;
-                                item->primedFirstFrame = true;
-                                item->primedFrame = frame;
-                                item->primedFrameSticky = true;
-                                item->lastFrameImage = convertedFrame;
-                                if (hasFrameTimestamp) {
-                                    item->displayTimestampMs = frameTime;
-                                    item->hasDisplayTimestamp = true;
-                                }
-                                item->decoderSyncTargetMs = desired;
-                                item->livePlaybackStarted = false;
-                                item->lastLiveFrameTimestampMs = -1;
-                                if (item->autoPlay) {
-                                    item->awaitingLivePlayback = true;
-                                    item->liveWarmupFramesRemaining = kLivePlaybackWarmupFrames;
-                                } else {
-                                    item->awaitingLivePlayback = false;
-                                    item->liveWarmupFramesRemaining = 0;
-                                }
-                                if (item->player) {
-                                    item->player->pause();
-                                    if (item->player->position() != desired) {
-                                        item->player->setPosition(desired >= 0 ? desired : 0);
-                                    }
-                                }
-                                applyImageToSpans(item, convertedFrame);
-                                evaluateItemReadiness(item);
-                                // Allow display even if awaiting live playback, so autoDisplay works immediately
-                                if (item->autoDisplay && item->displayReady && !item->displayStarted && !autoDisplayDelayActive(item)) {
-                                    fadeIn(item);
-                                }
-                                return;
-                            }
-
-                            if (!item->awaitingDecoderSync) {
-                                return;
-                            }
-
-                            const qint64 target = (item->decoderSyncTargetMs >= 0) ? item->decoderSyncTargetMs : desired;
-                            if (target < 0) {
-                                return;
-                            }
-                            const qint64 gateReference = reference;
-                            if (gateReference >= 0
-                                && gateReference >= target
-                                    - AppConfig::instance()
-                                          .sceneDecoderSyncToleranceMs()) {
-                                qDebug() << "RemoteSceneController: decoder sync reached" << item->mediaId
-                                         << "target" << target
-                                         << "frameTs" << (hasFrameTimestamp ? frameTime : qint64(-1))
-                                         << "playerPos" << playerPos;
-                                item->awaitingDecoderSync = false;
-                                item->decoderSyncTargetMs = -1;
-                                if (hasFrameTimestamp) {
-                                    item->displayTimestampMs = frameTime;
-                                    item->hasDisplayTimestamp = true;
-                                }
-                                item->primedFrame = frame;
-                                item->primedFrameSticky = false;
-                                QObject::disconnect(item->primingConn);
-                                item->primingConn = {};
-                                if (item->primingSink) {
-                                    QObject::disconnect(item->primingSink, nullptr, nullptr, nullptr);
-                                    auto* sinkToDelete = item->primingSink;
-                                    item->primingSink = nullptr;
-                                    sinkToDelete->deleteLater();
-                                }
-                                if (item->liveWarmupFramesRemaining <= 0) {
-                                    item->liveWarmupFramesRemaining = kLivePlaybackWarmupFrames;
-                                }
-                                ensureVideoOutputsAttached(item);
-                                if (item->player && item->player->playbackState() != QMediaPlayer::PlayingState) {
-                                    item->player->play();
-                                }
-                                startPendingPauseTimerIfEligible(item);
-                            }
-                        });
-                    } else {
-                        qWarning() << "RemoteSceneController: primary video sink unavailable for priming" << item->mediaId;
-                    }
-                    if (item->audio) applyAudioMuteState(item, true, true);
-                    item->pausedAtEnd = false;
-                    if (item->player && item->player->playbackState() != QMediaPlayer::PlayingState) {
-                        item->player->play();
-                    }
-                }
-                return true;
-            }
-            return false;
-        };
-        if (!attemptLoadVid()) {
-			// Upload inventory is already committed before PREPARE. Do not run a
-			// client-side retry schedule that can outlive or second-guess the
-			// server's preparation deadline; the policy timeout fails this graph.
-			qWarning() << "RemoteSceneController: video source unavailable during preparation"
-					   << item->mediaId;
+        QObject::connect(item->player, &ResidentVideoPlayer::errorOccurred, item->player, [this,epoch,weakItem](QMediaPlayer::Error e, const QString& err){ auto item = weakItem.lock(); if (!item) return; if (epoch != m_sceneEpoch) return; if (e != QMediaPlayer::NoError) qWarning() << "RemoteSceneController: player error" << int(e) << err << "for" << item->mediaId; });
+        const auto resident = MediaResidencyManager::instance().asset(item->residencyOwner);
+        if (!resident || !resident->video || resident->frames.empty()) {
+            sendPrepareResult(false, QStringLiteral("Resident video allocation is unavailable"));
+            return;
         }
+        item->player->setAsset(resident);
+        item->player->setLoops(QMediaPlayer::Once);
+        item->repeatRemaining = item->repeatEnabled ? std::max(0, item->repeatCount) : 0;
+        const qint64 desired = std::max<qint64>(0, targetDisplayTimestamp(item));
+        const auto next = std::upper_bound(resident->frames.cbegin(), resident->frames.cend(),
+            desired * 1000, [](qint64 time, const ResidentVideoFrame& frame) {
+                return time < frame.timestampUs;
+            });
+        const auto selected = next == resident->frames.cbegin() ? next : std::prev(next);
+        item->primedFrame = ResidentVideoPlayer::presentationFrame(selected->frame);
+        item->lastFrameImage = convertFrameToImage(item->primedFrame);
+        if (item->lastFrameImage.isNull()) {
+            sendPrepareResult(false, QStringLiteral("Resident video frame cannot be rendered"));
+            return;
+        }
+        item->loaded = true;
+        item->primedFirstFrame = true;
+        item->primedFrameSticky = true;
+        item->awaitingStartFrame = false;
+        item->awaitingDecoderSync = false;
+        item->awaitingLivePlayback = false;
+        item->liveWarmupFramesRemaining = 0;
+        item->displayTimestampMs = selected->timestampUs / 1000;
+        item->hasDisplayTimestamp = true;
+        ensureVideoOutputsAttached(item);
+        item->player->setPosition(desired);
+        item->player->pause();
+        applyImageToSpans(item, item->lastFrameImage);
     }
 
     // Display/play scheduling

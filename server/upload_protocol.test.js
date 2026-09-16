@@ -49,7 +49,7 @@ function setup() {
 
 function envelope(session, extra = {}) {
     return {
-        protocolVersion: 4,
+        protocolVersion: 5,
         serverBootId: session.serverBootId,
         messageId: crypto.randomUUID(),
         remoteSessionId: session.remoteSessionId,
@@ -548,4 +548,4 @@ const uploadId = 'upload-1';
         'the recipient generation must not overwrite the upload owner/source generation');
 }
 
-console.log('upload protocol v4 tests passed');
+console.log('upload protocol v5 tests passed');

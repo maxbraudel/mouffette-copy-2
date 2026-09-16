@@ -575,6 +575,7 @@ QJsonArray SceneRunCoordinator::createLocalChecklist(
             });
         };
         if (type != QLatin1String("text")) appendStage(QStringLiteral("file"), QStringLiteral("file_validated"));
+        if (type != QLatin1String("text")) appendStage(QStringLiteral("memory"), QStringLiteral("media_memory_ready"));
         if (type == QLatin1String("text")) {
             appendStage(QStringLiteral("glyphs"), QStringLiteral("text_glyphs_ready"));
             appendStage(QStringLiteral("layout"), QStringLiteral("text_layout_ready"));

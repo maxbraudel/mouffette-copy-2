@@ -34,7 +34,7 @@ CanvasMedia* MediaSettingsViewModel::media() const
 bool MediaSettingsViewModel::available() const
 {
     return m_controller && m_controller->editingEnabled()
-        && media() != nullptr;
+        && media() != nullptr && media()->residencyReady();
 }
 QString MediaSettingsViewModel::mediaId() const { return media() ? media()->mediaId() : QString(); }
 QString MediaSettingsViewModel::mediaName() const { return media() ? media()->displayName() : QString(); }
@@ -212,7 +212,7 @@ void MediaSettingsViewModel::updateSettings(
 {
     CanvasMedia* item = media();
     if (!item || !m_controller || !m_controller->projectEditingEnabled()
-        || m_controller->editsLocked()) return;
+        || !item->residencyReady() || m_controller->editsLocked()) return;
     update(item);
     m_controller->refreshMediaProjection();
     emit changed();
@@ -226,6 +226,8 @@ void MediaSettingsViewModel::refresh()
         m_observedMedia = next;
         if (m_observedMedia) {
             connect(m_observedMedia, &CanvasMedia::changed,
+                    this, &MediaSettingsViewModel::changed);
+            connect(m_observedMedia, &CanvasMedia::residencyChanged,
                     this, &MediaSettingsViewModel::changed);
             connect(m_observedMedia, &CanvasMedia::runtimeStateChanged,
                     this, &MediaSettingsViewModel::videoRangeChanged);

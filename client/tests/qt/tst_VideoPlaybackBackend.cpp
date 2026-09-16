@@ -14,11 +14,8 @@
 #include "backend/domain/media/CanvasMedia.h"
 #include "frontend/rendering/canvas/QuickCanvasController.h"
 #include "frontend/rendering/remote/RemoteVideoFrameItem.h"
-#ifdef Q_OS_MACOS
-#include "backend/platform/macos/MacVideoThumbnailer.h"
-#elif defined(Q_OS_WIN)
-#include "backend/platform/windows/WindowsVideoThumbnailer.h"
-#endif
+#include "backend/media/MediaDecoder.h"
+#include "backend/media/MediaResidencyManager.h"
 
 namespace {
 QString videoFixture()
@@ -33,6 +30,17 @@ class VideoPlaybackBackendTest final : public QObject
     Q_OBJECT
 
 private slots:
+    void init()
+    {
+        MediaResidencyManager::instance().setMemorySnapshotForTesting(
+            {8ULL << 30, 6ULL << 30, 512ULL << 20, false, 0});
+    }
+
+    void cleanup()
+    {
+        MediaResidencyManager::instance().clearMemorySnapshotForTesting();
+    }
+
     void seekBeforeFirstPlay_data()
     {
         QTest::addColumn<bool>("whileLoading");
@@ -47,7 +55,7 @@ private slots:
         auto* video = document.addPreparedFile(videoFixture(), QSize(160, 90), true, {});
         QVERIFY(video);
         auto* player = video->player();
-        QSignalSpy states(player, &QMediaPlayer::playbackStateChanged);
+        QSignalSpy states(player, &ResidentVideoPlayer::playbackStateChanged);
         if (!whileLoading)
             QTRY_VERIFY(player->duration() > 3000 && player->isSeekable());
         for (qint64 target : {qint64(1234), qint64(2678), qint64(789), qint64(0)}) {
@@ -195,7 +203,7 @@ private slots:
         QCOMPARE(video->positionMs(), 1000);
         int wraps = 0;
         qint64 previous = 1000;
-        connect(video->player(), &QMediaPlayer::positionChanged, &document,
+        connect(video->player(), &ResidentVideoPlayer::positionChanged, &document,
                 [&](qint64 pos) {
             if (previous > 1400 && pos == 1000) ++wraps;
             previous = pos;
@@ -262,23 +270,6 @@ private slots:
         }
     }
 
-    void nativePreparationReadsDisplaySizeAndFirstFrame()
-    {
-        const QString fixture = videoFixture();
-        if (!QFile::exists(fixture)) QSKIP("Optional real-video fixture is missing");
-#ifdef Q_OS_MACOS
-        const QSize dimensions = MacVideoThumbnailer::videoDimensions(fixture);
-        QVERIFY(!dimensions.isEmpty());
-        QCOMPARE(MacVideoThumbnailer::firstFrame(fixture).size(), dimensions);
-#elif defined(Q_OS_WIN)
-        const QSize dimensions = WindowsVideoThumbnailer::videoDimensions(fixture);
-        QVERIFY(!dimensions.isEmpty());
-        QCOMPARE(WindowsVideoThumbnailer::firstFrame(fixture).size(), dimensions);
-#else
-        QSKIP("Native first-frame preparation is implemented on macOS and Windows");
-#endif
-    }
-
     void qmlVideoOutputUsesDocumentRuntimeAndPreservesAudioState()
     {
         const QString fixture = videoFixture();
@@ -288,14 +279,7 @@ private slots:
         QuickCanvasController controller(&document);
         QString error;
         QVERIFY2(controller.initialize(&error), qPrintable(error));
-        const QSize nativeSize =
-#ifdef Q_OS_MACOS
-            MacVideoThumbnailer::videoDimensions(fixture);
-#elif defined(Q_OS_WIN)
-            WindowsVideoThumbnailer::videoDimensions(fixture);
-#else
-            QSize(1920, 1080);
-#endif
+        const QSize nativeSize = MediaDecoder::probe(fixture).displaySize;
         QVERIFY(!nativeSize.isEmpty());
         CanvasMedia* video = document.addPreparedFile(
             fixture, nativeSize, true, QPointF(0, 0));
@@ -315,7 +299,7 @@ private slots:
         view.show();
         QVERIFY(QTest::qWaitForWindowExposed(&view));
 
-        QMediaPlayer* player = video->player();
+        ResidentVideoPlayer* player = video->player();
         QAudioOutput* audio = video->audioOutput();
         QVERIFY(player && audio && video->videoSink());
         QTRY_VERIFY_WITH_TIMEOUT(player->videoSink() != nullptr, 8000);
@@ -350,22 +334,13 @@ private slots:
                 == player);
     }
 
-    void dragPreviewHandoffAndPlaybackRemainStable()
+    void droppedVideoFullyLoadsBeforePlayback()
     {
         const QString fixture = videoFixture();
         if (!QFile::exists(fixture)) QSKIP("Optional real-video fixture is missing");
 
-        const QSize nativeSize =
-#ifdef Q_OS_MACOS
-            MacVideoThumbnailer::videoDimensions(fixture);
-#elif defined(Q_OS_WIN)
-            WindowsVideoThumbnailer::videoDimensions(fixture);
-#else
-            QSize();
-#endif
-        if (nativeSize.isEmpty()) {
-            QSKIP("Native video preview is unavailable on this platform");
-        }
+        const QSize nativeSize = MediaDecoder::probe(fixture).displaySize;
+        QVERIFY(nativeSize.isValid());
 
         CanvasDocument document;
         QuickCanvasController controller(&document);
@@ -388,16 +363,10 @@ private slots:
 
         QVERIFY(controller.beginLocalFileDrag(
             {QUrl::fromLocalFile(fixture)}, 480, 300));
-        const QVariantMap preview = controller.dropPreviewModel();
-        QCOMPARE(preview.value(QStringLiteral("width")).toInt(), nativeSize.width());
-        QCOMPARE(preview.value(QStringLiteral("height")).toInt(), nativeSize.height());
-        QVERIFY(preview.value(QStringLiteral("frameReady")).toBool());
-        auto* frameSource = qobject_cast<RemoteVideoFrameSource*>(
-            controller.dropPreviewFrameSource());
-        QVERIFY(frameSource && frameSource->hasFrame());
-        QCOMPARE(frameSource->frame().size(), nativeSize);
+        QVERIFY(document.media().isEmpty());
 
         QVERIFY(controller.commitLocalFileDrop(480, 300));
+        QTRY_COMPARE(document.media().size(), 1);
         CanvasMedia* video = document.selectedMedia();
         QVERIFY(video && video->isVideo() && video->player());
         QCOMPARE(video->baseSize(), nativeSize);
@@ -406,24 +375,8 @@ private slots:
                                  || video->player()->mediaStatus()
                                      == QMediaPlayer::BufferedMedia,
                                  8000);
-        QTRY_VERIFY_WITH_TIMEOUT(
-            !controller.dropPreviewModel()
-                 .value(QStringLiteral("visible")).toBool(),
-            5000);
+        QTRY_VERIFY_WITH_TIMEOUT(video->residencyReady(), 30000);
         QVERIFY(!video->isPlaying());
-
-        RemoteVideoFrameSource* posterSource = nullptr;
-        for (const QVariant& value : controller.mediaSnapshot()) {
-            const QVariantMap media = value.toMap();
-            if (media.value(QStringLiteral("mediaId")).toString()
-                == video->mediaId()) {
-                posterSource = qobject_cast<RemoteVideoFrameSource*>(
-                    media.value(QStringLiteral("videoPosterFrameSource"))
-                        .value<QObject*>());
-                break;
-            }
-        }
-        QVERIFY(posterSource && posterSource->hasFrame());
 
         const QPointF originalPosition = video->position();
         controller.handleMediaMoveStarted(video->mediaId(),
@@ -436,13 +389,11 @@ private slots:
                                         originalPosition.x() + 80,
                                         originalPosition.y() + 40, false);
         QCOMPARE(video->position(), originalPosition + QPointF(80, 40));
-        QVERIFY(!controller.dropPreviewModel()
-                     .value(QStringLiteral("visible")).toBool());
+        QVERIFY(video->residencyReady());
 
         video->togglePlayPause();
         QTRY_VERIFY_WITH_TIMEOUT(video->isPlaying(), 5000);
         QTRY_VERIFY_WITH_TIMEOUT(video->positionMs() > 100, 5000);
-        QTRY_VERIFY_WITH_TIMEOUT(!posterSource->hasFrame(), 5000);
         video->togglePlayPause();
         QTRY_VERIFY_WITH_TIMEOUT(!video->isPlaying(), 3000);
     }

@@ -899,6 +899,20 @@ bool WebSocketClient::sendUploadRemove(const QString& remoteSessionId,
     return sendControlMessage(message);
 }
 
+bool WebSocketClient::sendMediaResidency(const QString& sessionId, quint64 generation,
+                                        quint64 sequence, const QJsonArray& assets)
+{
+    if (!isConnected() || !m_sceneRuns || sequence == 0) return false;
+    const auto binding = m_sceneRuns->sessionById(sessionId);
+    if (!binding.active || binding.generation != generation
+        || binding.targetEndpointId != m_endpointId) return false;
+    return sendControlMessage({{QStringLiteral("type"), QStringLiteral("media_residency")},
+        {QStringLiteral("remoteSessionId"), sessionId},
+        {QStringLiteral("generation"), static_cast<double>(generation)},
+        {QStringLiteral("sequence"), static_cast<double>(sequence)},
+        {QStringLiteral("assets"), assets}});
+}
+
 bool WebSocketClient::sendUploadProtocolResponse(const QJsonObject& response) {
     static const QSet<QString> allowedTypes = {
         QStringLiteral("upload_ready"), QStringLiteral("upload_progress"),
@@ -1711,7 +1725,7 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
         return;
     }
     if (!isCanonicalUuid(message.value(QStringLiteral("messageId")).toString())) {
-        qWarning() << "Rejected protocol v4 message without a canonical messageId";
+        qWarning() << "Rejected protocol v5 message without a canonical messageId";
         return;
     }
     if (isRemovedWireType(type) || containsRemovedWireField(message)) {
@@ -1760,7 +1774,7 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
             // bound instead of merely a rounded RTT statistic.
             qint64 uncertainty = (rtt + 1) / 2 + 1;
 
-            // Protocol-v4 servers include both their receive and transmit
+            // Protocol-v5 servers include both their receive and transmit
             // timestamps. Removing server-side processing time from the RTT is
             // the standard four-timestamp/NTP estimate and prevents a busy
             // relay from looking like network/clock uncertainty. Keep the
@@ -1968,7 +1982,7 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
             && message.value(QStringLiteral("targetEndpointId")).toString()
                 == binding.targetEndpointId;
         if (!isUploadOpaqueId(uploadId) || (!correlated && !unboundStartRejection)) {
-            qWarning() << "Rejected stale or malformed protocol v4 upload envelope";
+            qWarning() << "Rejected stale or malformed protocol v5 upload envelope";
             return;
         }
         emit uploadMessageReceived(message);
@@ -1989,6 +2003,15 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
         if (!acceptRemoteSessionOffer(message)) {
             qWarning() << "Could not accept RemoteSession offer with a fresh snapshot";
         }
+    }
+    else if (type == "media_residency") {
+        const auto binding = m_sceneRuns->sessionById(
+            message.value(QStringLiteral("remoteSessionId")).toString());
+        if (!binding.active || binding.ownerEndpointId != m_endpointId
+            || binding.generation != message.value(QStringLiteral("generation")).toInteger()
+            || binding.targetEndpointId != message.value(QStringLiteral("targetEndpointId")).toString()
+            || binding.ownerEndpointId != message.value(QStringLiteral("ownerEndpointId")).toString()) return;
+        emit mediaResidencyReceived(message);
     }
     else if (type == "remote_session_snapshot") {
         RemoteSessionCoordinator* sessions = remoteSessionCoordinator();
@@ -2081,7 +2104,7 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
              || type == "stop" || type == "stopped") {
         QString validationError;
         if (!m_sceneRuns || !m_sceneRuns->acceptInboundEnvelope(message, &validationError)) {
-            qWarning() << "Rejected protocol v4 scene message:" << validationError;
+            qWarning() << "Rejected protocol v5 scene message:" << validationError;
             return;
         }
         if (type == "scene_prepare") emit scenePrepareReceived(message);
@@ -2132,7 +2155,7 @@ bool WebSocketClient::sendControlMessage(const QJsonObject& message) {
         return false;
     }
     if (containsRemovedWireField(message)) {
-        qWarning() << "Refusing protocol v4 message containing a removed wire field";
+        qWarning() << "Refusing protocol v5 message containing a removed wire field";
         return false;
     }
 

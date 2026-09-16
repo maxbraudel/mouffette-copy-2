@@ -188,6 +188,8 @@ QString ClientWorkspaceViewModel::remoteSceneUnavailableReason() const
     if (m_uploadManager && m_uploadManager->isBusy()) {
         return QStringLiteral("A media transfer is in progress");
     }
+    if (const auto* host = qobject_cast<const QuickCanvasHost*>(m_canvas.data()))
+        return host->mediaReadinessReason(true);
     return {};
 }
 
@@ -225,6 +227,8 @@ QString ClientWorkspaceViewModel::testSceneUnavailableReason() const
         return QStringLiteral("Add media to the project first");
     }
     if (m_canvas->remoteSceneLaunched()) return QStringLiteral("Stop the remote scene first");
+    if (const auto* host = qobject_cast<const QuickCanvasHost*>(m_canvas.data()))
+        return host->mediaReadinessReason(false);
     return {};
 }
 

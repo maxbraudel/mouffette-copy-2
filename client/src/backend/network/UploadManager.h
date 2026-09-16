@@ -16,6 +16,8 @@
 #include <QTimer>
 #include <QUuid>
 #include <functional>
+#include <atomic>
+#include <memory>
 
 class WebSocketClient;
 class FileManager;
@@ -51,6 +53,11 @@ struct IncomingUploadSession {
     qint64 lastProgressBytesReported = 0;
     int totalFiles = 0;
     bool suspendedForResume = false;
+    std::shared_ptr<std::atomic_bool> validationCancelled;
+    quint64 completionValidationEpoch = 0;
+    bool completionValidationPending = false;
+    bool completionValidationDone = false;
+    QHash<QString, QString> verifiedDigestsByPath;
     QTimer* stallTimer = nullptr;
 };
 
@@ -97,6 +104,10 @@ public:
     void setWebSocketClient(WebSocketClient* client);
     void setTargetClientId(const QString& id);
     QString targetClientId() const { return m_targetClientId; }
+    bool remoteMediaReady(const QString& targetEndpointId, const QString& sha256) const;
+    static QString residencyOwnerId(const QString& sessionId, quint64 generation,
+                                   const QString& sha256);
+
     QString activeUploadTargetClientId() const;
     void setActiveWorkspaceEndpointId(const QString& identity) { m_activeWorkspaceEndpointId = identity; }
     QString activeWorkspaceEndpointId() const { return m_activeWorkspaceEndpointId; }
@@ -157,6 +168,9 @@ public:
     void beginTerminalIncomingCleanup(
         const QString& reasonCode,
         const QSet<QString>& remoteSessionIds = {});
+    // Cancels background readers before a renderer-settled cache transaction.
+    void beginIncomingFileReaderTeardown(const QSet<QString>& remoteSessionIds = {});
+    bool incomingFileReadersSettled(const QSet<QString>& remoteSessionIds = {}) const;
     BulkTeardownResult completeTerminalIncomingCleanup(
         const QString& reasonCode,
         const QSet<QString>& remoteSessionIds = {});
@@ -179,6 +193,7 @@ public:
     int lastTeardownRemovedFileCount() const { return m_lastTeardownRemovedFileCount; }
 
 signals:
+    void incomingFileReadersChanged();
     void uiStateChanged(); // generic signal to refresh button text/state
     void uploadProgress(int percent, int filesCompleted, int totalFiles); // forwarded from server
     // Carries the immutable transfer identity so terminal UI/history events
@@ -228,7 +243,7 @@ public slots:
 
 private:
     struct OutgoingAsset {
-        QString assetId;       // content SHA-256 used by protocol v4
+        QString assetId;       // content SHA-256 used by protocol v5
         QString sha256;
         QString path;
         QString name;
@@ -306,6 +321,11 @@ private:
     };
 
     void startUpload(const QVector<UploadFileInfo>& files);
+    void startVerifiedUpload(const QVector<UploadFileInfo>& files, const QString& uploadId);
+    QHash<QString, quint64> m_pendingUploadVerification;
+    QHash<QString, std::shared_ptr<std::atomic_bool>> m_uploadVerificationCancellation;
+    QHash<QString, QString> m_verifyingUploadIds;
+    quint64 m_uploadVerificationGeneration = 0;
     ParallelOutgoingTransfer* parallelForUpload(const QString& uploadId) const;
     ParallelOutgoingTransfer* parallelForSession(const QString& remoteSessionId) const;
     ParallelOutgoingTransfer* parallelForTarget(const QString& targetEndpointId) const;
@@ -419,6 +439,27 @@ private:
                                     bool requireDerivedFields = true) const;
     void handleIncomingAssetRemoval(const QJsonObject& message);
     void handleAssetRemovalResult(const QJsonObject& message);
+
+    struct ResidentIncomingAsset {
+        QString sessionId;
+        quint64 generation = 0;
+        QString assetId;
+        QString sha256;
+        QString path;
+    };
+    QHash<QString, ResidentIncomingAsset> m_residentIncoming;
+    QHash<QString, quint64> m_residencySequences;
+    QHash<QString, QJsonObject> m_remoteResidency;
+    void publishResidency(const QString& sessionId);
+    void receiveResidency(const QJsonObject& envelope);
+    void releaseResidency(const QString& sessionId, const QString& sha256 = {});
+    void settleIncomingFileReaders();
+    QHash<QString, QSet<QString>> m_retiringResidencyPaths;
+    QHash<QString, int> m_validationReadersBySession;
+    QHash<QString, int> m_validationReadersByUpload;
+    QHash<QString, bool> m_deferredIncomingDiscards;
+    QHash<QString, QJsonObject> m_deferredIncomingAborts;
+    QHash<QString, QJsonObject> m_deferredIncomingRemovals;
 
     QPointer<WebSocketClient> m_ws;
     QString m_targetClientId;

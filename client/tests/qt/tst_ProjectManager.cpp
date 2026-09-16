@@ -67,6 +67,48 @@ private slots:
         qRegisterMetaType<ProjectLifecycleState>();
     }
 
+    void pendingImportSurvivesCheckpointWithoutInventingContentIdentity()
+    {
+        QTemporaryDir directory;
+        ProjectStore store(directory.filePath(QStringLiteral("pending.json")));
+        ProjectManager writer(&store);
+        writer.stopAutomaticTimersForTesting();
+        QVERIFY(!createProject(writer, target(QStringLiteral("device-pending"), QStringLiteral("Studio")),
+                               ProjectLifecycleState::Visible, 1000).isEmpty());
+        ProjectMediaReference source;
+        source.mediaId = QStringLiteral("pending-image");
+        source.canonicalSourcePath = directory.filePath(QStringLiteral("image.png"));
+        source.sourceIdentity = QStringLiteral("size:mtime");
+        source.mediaType = QStringLiteral("image");
+        source.pendingImport = true;
+        QJsonObject canvas{{QStringLiteral("renderSchemaVersion"), 2},
+            {QStringLiteral("media"), QJsonArray{QJsonObject{
+                {QStringLiteral("mediaId"), source.mediaId}, {QStringLiteral("type"), source.mediaType},
+                {QStringLiteral("fileId"), QString()}, {QStringLiteral("baseWidth"), 640},
+                {QStringLiteral("baseHeight"), 480}}}}};
+        QVERIFY(writer.updateCanvasState(QStringLiteral("device-pending"), canvas, {source}, {}, 1001));
+        writer.checkpointVisibleProjects(1002);
+        QVERIFY(writer.flush());
+        ProjectManager reader(&store);
+        reader.stopAutomaticTimersForTesting();
+        reader.setNowProviderForTesting([] { return qint64(1003); });
+        QVERIFY(reader.load());
+        const auto* restored = reader.projectForTarget(QStringLiteral("device-pending"));
+        QVERIFY(restored);
+        QCOMPARE(restored->mediaReferences.size(), 1);
+        const auto& reference = restored->mediaReferences.first();
+        QVERIFY(reference.pendingImport);
+        QVERIFY(reference.sha256.isEmpty());
+        QVERIFY(reference.assetId.isEmpty());
+        QCOMPARE(reference.canonicalSourcePath, source.canonicalSourcePath);
+        QCOMPARE(restored->canvasStateForRestore().value(QStringLiteral("media")).toArray().size(), 1);
+        auto legacy = source.toJson();
+        legacy.remove(QStringLiteral("pendingImport"));
+        ProjectMediaReference legacyReference;
+        QVERIFY(ProjectMediaReference::fromJson(legacy, &legacyReference));
+        QVERIFY(!legacyReference.pendingImport);
+    }
+
     void roundTripUsesCheckpointAndStripsTransientState()
     {
         QTemporaryDir temporary;
@@ -84,6 +126,9 @@ private slots:
             {QStringLiteral("type"), QStringLiteral("video")},
             {QStringLiteral("mediaId"), QStringLiteral("media-1")},
             {QStringLiteral("playing"), true},
+            {QStringLiteral("residencyReady"), true},
+            {QStringLiteral("residencyState"), QStringLiteral("ready")},
+            {QStringLiteral("residencyProgress"), 1.0},
             {QStringLiteral("playbackState"), QStringLiteral("playing")},
             {QStringLiteral("uploadStatus"), QStringLiteral("uploaded")},
             {QStringLiteral("remoteSessionId"), QStringLiteral("secret-session")},
@@ -142,6 +187,9 @@ private slots:
         const QJsonObject durableVideo = durable.first().canvasState.value(QStringLiteral("media"))
                                              .toArray().first().toObject();
         QVERIFY(!durableVideo.contains(QStringLiteral("playing")));
+        QVERIFY(!durableVideo.contains(QStringLiteral("residencyReady")));
+        QVERIFY(!durableVideo.contains(QStringLiteral("residencyState")));
+        QVERIFY(!durableVideo.contains(QStringLiteral("residencyProgress")));
         QVERIFY(!durableVideo.contains(QStringLiteral("uploadStatus")));
         QVERIFY(!durableVideo.contains(QStringLiteral("remoteSessionId")));
         QVERIFY(!durableVideo.contains(QStringLiteral("resumeToken")));

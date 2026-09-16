@@ -1,3 +1,6 @@
+#include "backend/media/MediaResidencyManager.h"
+#include "backend/media/ResidentVideoPlayer.h"
+#include <QUuid>
 #include "frontend/rendering/canvas/QuickCanvasHost.h"
 
 #include "backend/config/AppConfig.h"
@@ -49,12 +52,34 @@ QuickCanvasHost::QuickCanvasHost(CanvasDocument* document,
     , m_document(document)
     , m_controller(controller)
 {
+    connect(&MediaResidencyManager::instance(), &MediaResidencyManager::ownerChanged,
+            this, [this](const QString& owner) {
+        const auto items = m_document->media();
+        if (std::none_of(items.cbegin(), items.cend(),
+                [&owner](const CanvasMedia* media) {
+                    return media && media->residencyOwnerId() == owner;
+                })) return;
+        if ((m_sceneLaunching || m_sceneLaunched || m_testSceneLaunched)
+            && !MediaResidencyManager::instance().ready(owner)) {
+            m_testSceneLaunched = false;
+            failScene(QStringLiteral("A scene media is no longer fully resident in memory"), true);
+        }
+        publishActionState();
+    });
+    connect(&MediaResidencyManager::instance(), &MediaResidencyManager::sceneStopRequested,
+            this, [this](const QString& group) {
+        if (group != m_residencyGroup || group.isEmpty()) return;
+        m_testSceneLaunched = false;
+        failScene(QStringLiteral("Scene stopped to release memory under system pressure"), true);
+    });
     Q_ASSERT(m_document);
     Q_ASSERT(m_controller);
     m_document->setParent(this);
     m_controller->setParent(this);
     connect(m_controller, &QuickCanvasController::textToolActiveChanged,
             this, &QuickCanvasHost::toolChanged);
+    connect(m_document, &CanvasDocument::mediaSourceInvalidated, this,
+            [this](const QString&, const QString&) { stopScenesForSourceInvalidation(); });
     connect(m_document, &CanvasDocument::mediaAdded,
             this, &QuickCanvasHost::mediaItemAdded);
     connect(m_document, &CanvasDocument::mediaAboutToBeRemoved,
@@ -216,6 +241,8 @@ void QuickCanvasHost::connectWebSocketSignals()
             if (!m_sceneLaunching || !m_sceneCommitScheduled
                 || m_sceneRunId != scheduledRunId
                 || m_sceneDigest != scheduledDigest) return;
+            const QString reason = mediaReadinessReason(true);
+            if (!reason.isEmpty()) { failScene(reason, true); return; }
             beginScenePresentation(true);
             startPresentationBarrier();
         });
@@ -434,7 +461,8 @@ bool QuickCanvasHost::remoteSceneActionEnabled() const
     return m_projectEditingEnabled && m_actionsEnabled && m_contentAvailable && m_webSocket
         && m_webSocket->isConnected() && !m_targetClientId.isEmpty()
         && m_document->hasActiveScreens() && !m_document->media().isEmpty()
-        && (!m_uploadManager || !m_uploadManager->isBusy());
+        && (!m_uploadManager || !m_uploadManager->isBusy())
+        && mediaReadinessReason(true).isEmpty();
 }
 
 bool QuickCanvasHost::testSceneActionEnabled() const
@@ -442,7 +470,29 @@ bool QuickCanvasHost::testSceneActionEnabled() const
     if (m_sceneLaunching || m_sceneStopping || m_sceneLaunched) return false;
     if (m_testSceneLaunched) return true;
     return m_projectEditingEnabled && !m_sceneContext
-        && !m_document->media().isEmpty();
+        && !m_document->media().isEmpty() && mediaReadinessReason(false).isEmpty();
+}
+
+QStringList QuickCanvasHost::residencyOwners() const
+{
+    QStringList owners;
+    for (const auto* media : m_document->media())
+        if (media && !media->isText()) owners.append(media->residencyOwnerId());
+    return owners;
+}
+
+QString QuickCanvasHost::mediaReadinessReason(bool remote) const
+{
+    const auto& manager = MediaResidencyManager::instance();
+    for (const auto* media : m_document->media()) {
+        if (!media || media->isText()) continue;
+        if (!manager.ready(media->residencyOwnerId()))
+            return QStringLiteral("Wait until every media is fully decoded in memory (%1)").arg(media->displayName());
+        if (remote && (!m_uploadManager || !m_uploadManager->remoteMediaReady(
+                m_targetClientId, manager.sha256(media->residencyOwnerId()))))
+            return QStringLiteral("Wait until every media is fully decoded on the remote computer (%1)").arg(media->displayName());
+    }
+    return {};
 }
 
 QJsonArray QuickCanvasHost::buildSceneManifest(const QJsonObject& scene,
@@ -451,7 +501,6 @@ QJsonArray QuickCanvasHost::buildSceneManifest(const QJsonObject& scene,
     static const QRegularExpression sha256(QStringLiteral("^[a-f0-9]{64}$"));
     QMap<QString, QJsonObject> assets;
     QMap<QString, QString> missingUploads;
-    QMap<QString, QString> paths;
     for (const QJsonValue& value : scene.value(QStringLiteral("media")).toArray()) {
         const QJsonObject item = value.toObject();
         const QString type = item.value(QStringLiteral("type")).toString();
@@ -482,7 +531,6 @@ QJsonArray QuickCanvasHost::buildSceneManifest(const QJsonObject& scene,
                  {QStringLiteral("extension"), info.suffix().toLower()},
                  {QStringLiteral("mediaIds"), ids}};
         assets.insert(fileId, asset);
-        paths.insert(fileId, path);
     }
     if (!missingUploads.isEmpty()) {
         QStringList names;
@@ -510,13 +558,6 @@ QJsonArray QuickCanvasHost::buildSceneManifest(const QJsonObject& scene,
         }
         return {};
     }
-    for (auto it = paths.cbegin(); it != paths.cend(); ++it) {
-        if (!MediaFilePolicy::matchesSha256(it.value(), it.key())) {
-            if (errorMessage) *errorMessage = QStringLiteral(
-                "A source asset changed after upload; upload it again before launching");
-            return {};
-        }
-    }
     QJsonArray manifest;
     for (const QJsonObject& asset : assets) manifest.append(asset);
     return SceneRunCoordinator::normalizeManifest(manifest, errorMessage);
@@ -543,6 +584,8 @@ QJsonArray QuickCanvasHost::localPreparationChecklist(
             CanvasMedia* media = m_document->mediaById(mediaId);
             if (!media) {
                 failure = QStringLiteral("Scene media %1 is no longer available").arg(mediaId);
+            } else if (!media->isText() && !MediaResidencyManager::instance().ready(media->residencyOwnerId())) {
+                failure = QStringLiteral("Media %1 is not fully decoded in memory").arg(media->displayName());
             } else if (stage == QLatin1String("file_validated") && !media->isText()) {
                 const QFileInfo source(media->sourcePath());
                 if (!source.exists() || !source.isFile() || source.isSymLink()
@@ -664,6 +707,12 @@ void QuickCanvasHost::triggerRemoteSceneAction()
                    {}, AppConfig::instance().toastErrorDurationMs());
         return;
     }
+    m_residencyGroup = QStringLiteral("canvas-scene:%1").arg(QUuid::createUuid().toString(QUuid::WithoutBraces));
+    if (!MediaResidencyManager::instance().pinOwners(residencyOwners(), m_residencyGroup)) {
+        m_residencyGroup.clear();
+        sceneToast(NotificationSeverity::Error, QStringLiteral("Scene media memory readiness changed; try again"));
+        return;
+    }
     m_sceneLaunching = true;
     m_sceneAccepted = false;
     m_localPreparedReported = false;
@@ -678,7 +727,7 @@ void QuickCanvasHost::triggerRemoteSceneAction()
     // owner cannot diverge from the target while either side is preparing.
     m_document->setEditsLocked(true);
     publishActionState();
-    // Overlap the bounded clock-probe burst with scene validation/decoding so
+    // Overlap the bounded clock-probe burst with renderer preparation so
     // the PREPARED barrier normally has a fresh sample ready immediately.
     m_webSocket->requestSceneClockSynchronization();
     if (!m_webSocket->sendScenePrepare(m_targetClientId, ++m_sceneRevision,
@@ -703,6 +752,12 @@ void QuickCanvasHost::triggerTestSceneAction()
         stopScenePresentation();
         m_testSceneLaunched = false;
     } else if (testSceneActionEnabled()) {
+        m_residencyGroup = QStringLiteral("canvas-test:%1").arg(QUuid::createUuid().toString(QUuid::WithoutBraces));
+        if (!MediaResidencyManager::instance().pinOwners(residencyOwners(), m_residencyGroup)) {
+            m_residencyGroup.clear();
+            publishActionState();
+            return;
+        }
         beginScenePresentation(false);
         m_testSceneLaunched = true;
     }
@@ -773,6 +828,8 @@ void QuickCanvasHost::stopScenePresentation()
         }
     }
     m_draftState.clear();
+    MediaResidencyManager::instance().unpinGroup(m_residencyGroup);
+    m_residencyGroup.clear();
     m_document->setEditsLocked(false);
     cancelPresentationBarrier();
 }

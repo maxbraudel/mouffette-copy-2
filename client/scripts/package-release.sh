@@ -230,6 +230,15 @@ if [[ -n "${BUNDLE_SEARCH_DIR:-}" ]]; then
     cmake -E rm -rf "$BUNDLE_SEARCH_DIR"
 fi
 
+# The resident decoder links these libraries directly, independently of the
+# Qt multimedia plugin. Fail packaging if any of them was not deployed.
+for MEDIA_LIBRARY in avformat avcodec avutil swscale swresample; do
+    if ! compgen -G "$APP/Contents/Frameworks/lib${MEDIA_LIBRARY}*.dylib" >/dev/null; then
+        echo "Missing resident decoder runtime library: $MEDIA_LIBRARY" >&2
+        exit 1
+    fi
+done
+
 # macdeployqt does not rewrite every transitive Homebrew install name (notably
 # those first discovered through a QML plugin). Normalize those references to
 # the copy already placed in Contents/Frameworks.

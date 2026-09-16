@@ -1,3 +1,5 @@
+#include "backend/media/MediaResidencyManager.h"
+#include <QScopeGuard>
 #include "UploadEventHandler.h"
 #include "backend/config/AppConfig.h"
 #include "backend/runtime/ApplicationRuntime.h"
@@ -21,12 +23,23 @@ UploadEventHandler::UploadEventHandler(ApplicationRuntime* mainWindow, QObject* 
 
 void UploadEventHandler::onUploadButtonClicked()
 {
+    uploadWorkspace(m_mainWindow->activeWorkspaceEndpointId());
+}
+
+void UploadEventHandler::uploadWorkspace(const QString& workspaceEndpointId, bool automatic)
+{
     UploadManager* uploadManager = m_mainWindow->getUploadManager();
     if (!uploadManager) return;
 
-    ApplicationRuntime::ClientWorkspace* session = m_mainWindow->findWorkspace(m_mainWindow->activeWorkspaceEndpointId());
+    ApplicationRuntime::ClientWorkspace* session = m_mainWindow->findWorkspace(workspaceEndpointId);
     if (!session || !session->canvas) return;
 
+    const QString previousTarget = uploadManager->targetClientId();
+    uploadManager->setTargetClientId(workspaceEndpointId);
+    const auto restoreTarget = qScopeGuard([uploadManager, previousTarget]() {
+        uploadManager->setTargetClientId(previousTarget);
+    });
+    if (automatic && uploadManager->isBusy()) return;
     ICanvasHost* canvas = session->canvas;
     auto& upload = session->upload;
 
@@ -44,6 +57,15 @@ void UploadEventHandler::onUploadButtonClicked()
         return;
     }
 
+    // Identity is published after the background metadata/SHA-256 pass. Never
+    // turn an incomplete import into an accidental Unload action.
+    for (const CanvasMedia* media : session->canvas->enumerateMediaItems()) {
+        if (!media || media->isText()) continue;
+        if (media->fileId().isEmpty() || MediaResidencyManager::instance().sha256(media->residencyOwnerId()).isEmpty()) {
+            if (!automatic) TOAST_INFO("Media identity is still being analyzed; try again shortly");
+            return;
+        }
+    }
     const QString targetClientId = session->targetEndpointId;
     if (targetClientId.isEmpty()) {
         TOAST_ERROR("No remote client selected for upload");
@@ -97,33 +119,12 @@ void UploadEventHandler::onUploadButtonClicked()
             continue;
         }
 
-        const MediaFilePolicy::ValidationResult validation =
-            MediaFilePolicy::validateLocalFile(fi.absoluteFilePath());
-        const MediaFilePolicy::Kind mediaKind = validation.kind;
-        const bool accepted = media->isVideo()
-            ? mediaKind == MediaFilePolicy::Kind::Mp4Video
-            : mediaKind == MediaFilePolicy::Kind::Image;
-        if (!accepted) {
-            rejectedMedia.append(QStringLiteral("%1 — %2")
-                                     .arg(fi.fileName(),
-                                          MediaFilePolicy::validationErrorDescription(
-                                              validation)));
+        const QString fileId = media->fileId();
+        if (fileId.isEmpty() || fileId != MediaResidencyManager::instance().sha256(media->residencyOwnerId())) {
+            rejectedMedia.append(QStringLiteral("%1 — media identity is not ready").arg(fi.fileName()));
             continue;
         }
-
-        // Refresh the identity at the upload boundary. A video can be
-        // re-encoded/replaced at the same path after it was placed on canvas;
-        // reusing the old path-derived ID would incorrectly skip the upload
-        // and leave stale bytes on the remote client.
-        const QString fileId = fileManager->getOrCreateFileId(fi.absoluteFilePath());
-        if (fileId.isEmpty()) {
-            qWarning() << "ApplicationRuntime: Media item has no fileId, skipping:" << media->mediaId();
-            continue;
-        }
-        if (media->fileId() != fileId) {
-            media->setFileId(fileId);
-            fileManager->associateMediaWithFile(media->mediaId(), fileId);
-        }
+        fileManager->associateMediaWithFile(media->mediaId(), fileId);
 
         currentFileIds.insert(fileId);
         fileManager->associateFileWithProject(fileId, session->projectId);
@@ -171,8 +172,9 @@ void UploadEventHandler::onUploadButtonClicked()
     m_mainWindow->reconcileRemoteFilesForWorkspace(*session, currentFileIds);
 
     if (files.isEmpty()) {
+        if (automatic) return;
         if (hasRemoteFiles) {
-            // This is the Unload half of the button state machine. Protocol v4
+            // This is the Unload half of the button state machine. Protocol v5
             // has no unscoped remove-all command, so remove
             // the session's exact validated assets through their authenticated
             // inventory tuples and wait for each target acknowledgement.

@@ -51,6 +51,11 @@ QJsonValue sanitizeDurableValue(const QJsonValue& value)
         QStringLiteral("token"),
         QStringLiteral("playing"),
         QStringLiteral("isplaying"),
+        QStringLiteral("residencyready"),
+        QStringLiteral("residencystate"),
+        QStringLiteral("residencyprogress"),
+        QStringLiteral("residencyerror"),
+        QStringLiteral("residentframesource"),
         QStringLiteral("playbackstate")
     };
 
@@ -209,7 +214,8 @@ QJsonObject ProjectMediaReference::toJson() const
         {QStringLiteral("canonicalSourcePath"), canonicalSourcePath},
         {QStringLiteral("sourceIdentity"), sourceIdentity},
         {QStringLiteral("sha256"), sha256},
-        {QStringLiteral("mediaType"), mediaType}
+        {QStringLiteral("mediaType"), mediaType},
+        {QStringLiteral("pendingImport"), pendingImport}
     };
 }
 
@@ -228,6 +234,7 @@ bool ProjectMediaReference::fromJson(const QJsonObject& json,
     parsed.sourceIdentity = json.value(QStringLiteral("sourceIdentity")).toString();
     parsed.sha256 = json.value(QStringLiteral("sha256")).toString();
     parsed.mediaType = json.value(QStringLiteral("mediaType")).toString();
+    parsed.pendingImport = json.value(QStringLiteral("pendingImport")).toBool(false);
     if (parsed.mediaId.isEmpty()) {
         setError(error, QStringLiteral("Project media reference is missing mediaId"));
         return false;

@@ -9,7 +9,7 @@
 
 #include "backend/network/RemoteSessionCoordinator.h"
 
-// Protocol-v4 scene state which is deliberately independent from a canvas.
+// Protocol-v5 scene state which is deliberately independent from a canvas.
 // Remote sessions own transport/cache lifetime; a SceneRun only owns one
 // immutable render revision inside such a session.
 class SceneRunCoordinator final : public QObject

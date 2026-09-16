@@ -24,6 +24,7 @@ public:
     
     // Get or create fileId for a given file path
     QString getOrCreateFileId(const QString& filePath);
+    void registerVerifiedLocalFile(const QString& fileId, const QString& filePath);
     
     // Get file path for a fileId
     QString getFilePathForId(const QString& fileId) const;
@@ -55,9 +56,16 @@ private:
     LocalFileRepository(const LocalFileRepository&) = delete;
     LocalFileRepository& operator=(const LocalFileRepository&) = delete;
     
-    // Generate the protocol v4 content identity. Returns empty on read failure.
+    // Generate the content identity. Returns empty on read failure.
     QString generateFileId(const QString& filePath) const;
     
+    void registerPath(const QString& fileId, const QString& canonicalPath,
+                      const QString& verifiedSignature);
+    void refreshPreferredPath(const QString& fileId);
+    static QString fileSignature(const QString& canonicalPath);
+    bool isUnchangedPath(const QString& path, const QString& fileId) const;
+
+    QHash<QString, QString> m_pathSignatures; // path → cheap stat signature at verification
     QHash<QString, QString> m_fileIdToPath;  // fileId → absolute file path
     QHash<QString, QString> m_pathToFileId;  // absolute file path → fileId
 };

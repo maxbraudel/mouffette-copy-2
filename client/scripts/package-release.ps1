@@ -50,6 +50,42 @@ if (-not (Test-Path $windeployqt)) { throw "windeployqt6 not found: $windeployqt
     --dir (Split-Path -Parent $clientExe) $clientExe | Out-Host
 if ($LASTEXITCODE -ne 0) { throw 'windeployqt QML deployment failed.' }
 
+# Qt deployment does not own direct libav* dependencies. Walk PE imports from
+# the complete clean stage and copy the matching UCRT64 runtime recursively.
+$runtimeBin = Join-Path $msysRoot 'ucrt64\bin'
+$objdump = Join-Path $runtimeBin 'objdump.exe'
+if (-not (Test-Path $objdump)) { throw "objdump is required for runtime deployment: $objdump" }
+$stagedBin = Split-Path -Parent $clientExe
+$pending = [System.Collections.Generic.Queue[string]]::new()
+$visited = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+Get-ChildItem $stageDir -Recurse -File | Where-Object { $_.Extension -in '.dll', '.exe' } |
+    ForEach-Object { $pending.Enqueue($_.FullName) }
+while ($pending.Count -gt 0) {
+    $binary = $pending.Dequeue()
+    if (-not $visited.Add($binary)) { continue }
+    $imports = & $objdump -p $binary 2>&1
+    if ($LASTEXITCODE -ne 0) { throw "Cannot inspect runtime dependencies of $binary" }
+    foreach ($line in $imports) {
+        if ($line -notmatch 'DLL Name:\s*(\S+)') { continue }
+        $name = $Matches[1]
+        $destination = Join-Path $stagedBin $name
+        $source = Join-Path $runtimeBin $name
+        if (Test-Path $destination) { $pending.Enqueue($destination); continue }
+        if (Test-Path $source) {
+            Copy-Item $source $destination
+            $pending.Enqueue($destination)
+            continue
+        }
+        if ($name -match '^(api-ms-|ext-ms-)' -or (Test-Path (Join-Path $env:SystemRoot "System32\$name"))) { continue }
+        throw "Unresolved runtime dependency $name imported by $binary"
+    }
+}
+foreach ($library in @('avformat', 'avcodec', 'avutil', 'swscale', 'swresample')) {
+    if (-not (Get-ChildItem $stagedBin -Filter "$library-*.dll")) {
+        throw "Packaged application is missing the resident decoder dependency $library"
+    }
+}
+
 $webpPlugin = Join-Path (Split-Path -Parent $clientExe) 'imageformats\qwebp.dll'
 if (-not (Test-Path $webpPlugin)) {
     throw "Packaged application is missing the required Qt WebP plugin: $webpPlugin"

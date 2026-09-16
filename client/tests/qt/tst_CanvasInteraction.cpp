@@ -107,7 +107,7 @@ public:
             {"x", x}, {"y", y}, {"width", 280}, {"height", 170}, {"scale", 1.0}, {"z", 1},
             {"contentVisible", true}, {"contentOpacity", 1.0},
             {"animatedDisplayOpacity", 1.0}, {"displayName", id},
-            {"sourceUrl", ""},
+            {"sourceUrl", ""}, {"residencyReady", true},
             {"textContent", "Canvas text"}, {"textFontPixelSize", 40},
             {"textFontFamily", "Impact"}, {"textFontWeight", 400},
             {"textItalic", false}, {"textUnderline", false},

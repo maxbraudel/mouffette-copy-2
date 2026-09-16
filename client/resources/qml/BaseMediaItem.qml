@@ -12,6 +12,7 @@ Item {
     property string mediaId: ""
     // Passive renderers use this to report when the visual can be revealed.
     property bool contentReady: true
+    property bool initialFramePresented: true
 
     property bool pointerEnabled: true
     property bool doubleClickEnabled: false

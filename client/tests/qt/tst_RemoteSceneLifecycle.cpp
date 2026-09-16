@@ -1,3 +1,5 @@
+#include "backend/network/UploadManager.h"
+#include "backend/media/MediaResidencyManager.h"
 #include <QApplication>
 #include <QFile>
 #include <QJsonArray>
@@ -23,6 +25,15 @@ class RemoteSceneLifecycleTest final : public QObject
     Q_OBJECT
 
 private slots:
+    void initTestCase()
+    {
+        MediaResidencyManager::instance().setMemorySnapshotForTesting(
+            {8ULL << 30, 6ULL << 30, 128ULL << 20, false, 0});
+    }
+    void cleanupTestCase()
+    {
+        MediaResidencyManager::instance().clearMemorySnapshotForTesting();
+    }
     void remoteLaunchPreparesLocalMedia_data()
     {
         QTest::addColumn<bool>("includeImage");
@@ -30,16 +41,19 @@ private slots:
         QTest::addColumn<bool>("uploaded");
         QTest::addColumn<bool>("expectLaunch");
         QTest::addColumn<bool>("serverRejectsInventory");
+        QTest::addColumn<bool>("memoryReady");
         QTest::newRow("text-only")
-            << false << false << false << true << false;
+            << false << false << false << true << false << true;
         QTest::newRow("text-and-uploaded-image")
-            << true << false << true << true << false;
+            << true << false << true << true << false << true;
         QTest::newRow("text-and-unuploaded-image")
-            << true << false << false << false << false;
+            << true << false << false << false << false << false;
         QTest::newRow("missing-local-image-source")
-            << true << true << true << false << false;
+            << true << true << true << false << false << true;
         QTest::newRow("stale-upload-marker")
-            << true << false << true << false << true;
+            << true << false << true << false << true << true;
+        QTest::newRow("uploaded-awaiting-target-memory")
+            << true << false << true << false << false << false;
     }
 
     void remoteLaunchPreparesLocalMedia()
@@ -49,6 +63,7 @@ private slots:
         QFETCH(bool, uploaded);
         QFETCH(bool, expectLaunch);
         QFETCH(bool, serverRejectsInventory);
+        QFETCH(bool, memoryReady);
         QTemporaryDir directory;
         QVERIFY(directory.isValid());
         QWebSocketServer server(QStringLiteral("scene-preparation-test"),
@@ -57,6 +72,7 @@ private slots:
         const QString bootId = QUuid::createUuid().toString(QUuid::WithoutBraces);
         const QString targetId(43, QLatin1Char('B'));
         QString ownerId;
+        QPointer<QWebSocket> serverPeer;
         QJsonObject scenePrepare;
         QJsonObject prepared;
         QJsonObject progress;
@@ -64,7 +80,7 @@ private slots:
         int progressCount = 0;
         int stopCount = 0;
         auto send = [&](QWebSocket* peer, QJsonObject message) {
-            message.insert(QStringLiteral("protocolVersion"), 4);
+            message.insert(QStringLiteral("protocolVersion"), 5);
             message.insert(QStringLiteral("serverBootId"), bootId);
             message.insert(QStringLiteral("messageId"),
                            QUuid::createUuid().toString(QUuid::WithoutBraces));
@@ -74,6 +90,7 @@ private slots:
         connect(&server, &QWebSocketServer::newConnection, this, [&]() {
             QWebSocket* peer = server.nextPendingConnection();
             QVERIFY(peer);
+            serverPeer = peer;
             peer->setParent(&server);
             send(peer, {{"type", "auth_challenge"}, {"issuedAt", 1},
                         {"nonce", QString::fromLatin1(QByteArray(32, 'n').toBase64(
@@ -176,6 +193,9 @@ private slots:
         QTRY_COMPARE_WITH_TIMEOUT(sessionOpened.count(), 1, 3000);
 
         FileManager files;
+        UploadManager uploads(&files);
+        uploads.setWebSocketClient(&client);
+        uploads.setTargetClientId(targetId);
         // RemoteFileTracker is process-global; keep data rows isolated even
         // when two fixtures have identical content-addressed file IDs.
         files.unmarkAllForClient(targetId);
@@ -185,6 +205,7 @@ private slots:
         host->controller()->registerWindow(&window);
         host->setFileManager(&files);
         host->setWebSocketClient(&client);
+        host->setUploadManager(&uploads);
         host->setRemoteSceneTarget(targetId, QStringLiteral("Client B"));
         host->setScreens({ScreenInfo(0, 1920, 1080, 0, 0, true)});
         host->setProjectEditingEnabled(true);
@@ -198,15 +219,27 @@ private slots:
             CanvasMedia* media = host->document()->addPreparedFile(
                 path, image.size(), false, QPointF(4, 5));
             QVERIFY(media);
+            QVERIFY(!host->remoteSceneActionEnabled());
+            QVERIFY(!host->testSceneActionEnabled());
+            QTRY_VERIFY_WITH_TIMEOUT(media->residencyReady(), 5000);
             if (uploaded) {
                 files.markFileUploadedToClient(media->fileId(), targetId);
+                if (memoryReady) {
+                    send(serverPeer, {{"type", "media_residency"},
+                        {"remoteSessionId", "preparation-session"}, {"generation", 1},
+                        {"ownerEndpointId", ownerId}, {"targetEndpointId", targetId},
+                        {"sequence", 1}, {"assets", QJsonArray{QJsonObject{
+                            {"assetId", media->fileId()}, {"sha256", media->fileId()},
+                            {"state", "ready"}, {"progress", 1}, {"error", ""}}}}});
+                    QTRY_VERIFY_WITH_TIMEOUT(uploads.remoteMediaReady(targetId, media->fileId()), 2000);
+                }
             }
             if (missingSource) {
                 // The uploaded asset is valid, but the canvas runtime lost its source.
                 media->setSourcePath(directory.filePath(QStringLiteral("missing.png")));
             }
         }
-        QVERIFY(host->remoteSceneActionEnabled());
+        QCOMPARE(host->remoteSceneActionEnabled(), !includeImage || (uploaded && memoryReady && !missingSource));
         host->triggerRemoteSceneAction();
 
         if (serverRejectsInventory) {
@@ -250,7 +283,7 @@ private slots:
         QVERIFY(host->document()->editsLocked());
 
         const QJsonArray checklist = prepared.value("checklist").toArray();
-        QCOMPARE(checklist.size(), includeImage ? 6 : 3);
+        QCOMPARE(checklist.size(), includeImage ? 7 : 3);
         int readyCount = 0;
         for (const QJsonValue& value : checklist) {
             const QJsonObject item = value.toObject();
@@ -282,7 +315,7 @@ private slots:
         const QString targetId(43, QLatin1Char('B'));
         int scenePrepareCount = 0;
         auto send = [&](QWebSocket* peer, QJsonObject message) {
-            message.insert(QStringLiteral("protocolVersion"), 4);
+            message.insert(QStringLiteral("protocolVersion"), 5);
             message.insert(QStringLiteral("serverBootId"), bootId);
             message.insert(QStringLiteral("messageId"),
                            QUuid::createUuid().toString(QUuid::WithoutBraces));
@@ -425,7 +458,7 @@ private slots:
         int armedCount = 0;
         int stopCount = 0;
         auto send = [&](QWebSocket* peer, QJsonObject message) {
-            message.insert(QStringLiteral("protocolVersion"), 4);
+            message.insert(QStringLiteral("protocolVersion"), 5);
             message.insert(QStringLiteral("serverBootId"), bootId);
             message.insert(QStringLiteral("messageId"),
                            QUuid::createUuid().toString(QUuid::WithoutBraces));
@@ -567,7 +600,7 @@ private slots:
         int failedPreparedCount = 0;
         int stoppedCount = 0;
         auto send = [&](QWebSocket* socket, QJsonObject message) {
-            message.insert(QStringLiteral("protocolVersion"), 4);
+            message.insert(QStringLiteral("protocolVersion"), 5);
             message.insert(QStringLiteral("serverBootId"), bootId);
             message.insert(QStringLiteral("messageId"),
                            QUuid::createUuid().toString(QUuid::WithoutBraces));
@@ -886,9 +919,12 @@ private slots:
         QVERIFY(volumeHost);
         volumeHost->setProjectEditingEnabled(true);
         CanvasMedia* controlledVideo = volumeHost->document()->addPreparedFile(
-            volumeDirectory.filePath(QStringLiteral("volume-setting-test.mp4")),
+            QString::fromUtf8(TEST_VIDEO_FILE),
             QSize(320, 180), true, QPointF());
         QVERIFY(controlledVideo);
+        volumeHost->controller()->handleOverlayVolumeChange(controlledVideo->mediaId(), 0.42);
+        QVERIFY(!controlledVideo->settings().volumeOverrideEnabled);
+        QTRY_VERIFY_WITH_TIMEOUT(controlledVideo->residencyReady(), 60000);
         volumeHost->controller()->handleOverlayVolumeChange(
             controlledVideo->mediaId(), 0.42);
         QVERIFY(controlledVideo->settings().volumeOverrideEnabled);

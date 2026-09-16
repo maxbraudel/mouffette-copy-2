@@ -84,7 +84,7 @@ public:
                 QJsonObject message)
     {
         if (!socket) return false;
-        message.insert(QStringLiteral("protocolVersion"), 4);
+        message.insert(QStringLiteral("protocolVersion"), 5);
         message.insert(QStringLiteral("serverBootId"), socketBootId);
         if (message.value(QStringLiteral("messageId")).toString().isEmpty()) {
             message.insert(
@@ -671,7 +671,7 @@ private slots:
         QList<QJsonObject> closeCommands;
         auto sendServerMessage = [&](QJsonObject message) {
             QVERIFY2(peer, "The fake server has no authenticated peer");
-            message.insert(QStringLiteral("protocolVersion"), 4);
+            message.insert(QStringLiteral("protocolVersion"), 5);
             message.insert(QStringLiteral("serverBootId"), bootId);
             if (message.value(QStringLiteral("messageId")).toString().isEmpty()) {
                 message.insert(
@@ -2455,7 +2455,7 @@ private slots:
 
         auto sendServerMessage = [&](QJsonObject message) {
             QVERIFY2(peer, "The fake server has no authenticated peer");
-            message.insert(QStringLiteral("protocolVersion"), 4);
+            message.insert(QStringLiteral("protocolVersion"), 5);
             message.insert(QStringLiteral("serverBootId"), bootId);
             if (message.value(QStringLiteral("messageId")).toString().isEmpty()) {
                 message.insert(

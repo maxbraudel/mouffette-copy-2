@@ -19,7 +19,6 @@ Rectangle {
     signal textCommitRequested(string mediaId, string text)
     signal textLiveUpdateRequested(string mediaId, string text)
     signal textCreateRequested(real viewX, real viewY)
-    signal dropPreviewContentReady(string mediaId)
 
     // Overlay action signals (forwarded to C++)
     signal overlayVisibilityToggleRequested(string mediaId, bool visible)
@@ -63,9 +62,6 @@ Rectangle {
     // Presentation view model supplied by CanvasPage. It owns validation and
     // document commands; the QML surface only supplies local pointer geometry.
     property var sessionViewModel: null
-    property var dropPreviewModel: ({ "visible": false })
-    property var dropPreviewFrameSource: canvasController
-                                         ? canvasController.dropPreviewFrameSource : null
     property var selectionChromeModel: canvasController
                                        ? canvasController.selectionChromeModel : []
     property var snapGuidesModel: []
@@ -213,7 +209,6 @@ Rectangle {
         viewScale = canvasController.viewScale
         panX = canvasController.panX
         panY = canvasController.panY
-        dropPreviewModel = canvasController.dropPreviewModel
         snapGuidesModel = canvasController.snapGuidesModel
         liveSnapDragMediaId = canvasController.liveSnapDragMediaId
         liveSnapDragX = canvasController.liveSnapDragX
@@ -347,7 +342,6 @@ Rectangle {
     onTextCommitRequested: (mediaId, text) => canvasController?.handleTextCommitRequested(mediaId, text)
     onTextLiveUpdateRequested: (mediaId, text) => canvasController?.handleTextLiveUpdateRequested(mediaId, text)
     onTextCreateRequested: (x, y) => canvasController?.handleTextCreateRequested(x, y)
-    onDropPreviewContentReady: mediaId => canvasController?.handleDropPreviewContentReady(mediaId)
     onOverlayVisibilityToggleRequested: (mediaId, visible) => canvasController?.handleOverlayVisibilityToggle(mediaId, visible)
     onOverlayBringForwardRequested: mediaId => canvasController?.handleOverlayBringForward(mediaId)
     onOverlayBringBackwardRequested: mediaId => canvasController?.handleOverlayBringBackward(mediaId)
@@ -454,6 +448,15 @@ Rectangle {
                 return candidate
         }
         return null
+    }
+
+    function mediaOverlaysReady(mediaId, entry) {
+        if (!entry || entry.residencyReady !== true)
+            return false
+        if (entry.canvasMedia !== true)
+            return true
+        var delegate = mediaDelegateById(mediaId)
+        return !!delegate && delegate.initialFramePresented
     }
 
     function finishActiveMoveInteraction(reason) {
@@ -842,6 +845,7 @@ Rectangle {
                     delegate: Item {
                     id: mediaDelegate
                     property var media: modelData
+                    readonly property bool initialFramePresented: mediaContentLoader.initialFramePresented
 
                     // Local position/scale — tracks model when idle, free during drag
                     property real localX: media ? media.x : 0.0
@@ -849,7 +853,6 @@ Rectangle {
                     property real localScale: media ? (media.scale || 1.0) : 1.0
                     property bool localDragging: false
                     property bool overlayHovered: false
-                    property bool dropHandoffReadyReported: false
                     function beginTextEditing() {
                         var editor = mediaContentLoader.visualItem
                         if (editor && editor.textEditable && textEditSession.begin(editor))
@@ -884,7 +887,6 @@ Rectangle {
                     }
 
                     onMediaChanged: {
-                        dropHandoffReadyReported = false
                         if (!localDragging && media) {
                             // Always sync local position to the committed model value.
                             // Safe because localDragging=false means no active drag is
@@ -983,16 +985,6 @@ Rectangle {
                         id: mediaContentLoader
                         media: mediaDelegate.media
                         selected: mediaDelegate.isSelected
-                        // Keep the final surface's own content fade disabled
-                        // until the covering preview has completed its handoff.
-                        // The preview id deliberately survives its 80 ms fade.
-                        handoffCovered: {
-                            var preview = root.dropPreviewModel
-                            return !!preview && !!preview.handoffMediaId
-                                    && preview.handoffMediaId === mediaDelegate.currentMediaId
-                        }
-                        handoffFrameSource: handoffCovered
-                                            ? root.dropPreviewFrameSource : null
                         readonly property real liveWidth: mediaDelegate.width
                         readonly property real liveHeight: mediaDelegate.height
                         anchors.fill: parent
@@ -1000,31 +992,6 @@ Rectangle {
                         textEditable: root.editingEnabled
                         editingSession: textEditSession
                     }
-
-                    function reportDropHandoffReady() {
-                        if (dropHandoffReadyReported
-                                || !mediaContentLoader.handoffContentReady)
-                            return
-                        var preview = root.dropPreviewModel
-                        if (!preview || !preview.handoffMediaId
-                                || preview.handoffMediaId !== currentMediaId)
-                            return
-                        dropHandoffReadyReported = true
-                        root.dropPreviewContentReady(currentMediaId)
-                    }
-
-                    Connections {
-                        target: mediaContentLoader
-                        function onHandoffContentReadyChanged() {
-                            mediaDelegate.reportDropHandoffReady()
-                        }
-                        function onHandoffCoveredChanged() {
-                            if (mediaContentLoader.handoffCovered)
-                                Qt.callLater(mediaDelegate.reportDropHandoffReady)
-                        }
-                    }
-
-                    Component.onCompleted: Qt.callLater(reportDropHandoffReady)
 
                     Binding {
                         target: mediaContentLoader.visualItem
@@ -1071,12 +1038,6 @@ Rectangle {
 
             }
 
-            MediaDropPreview {
-                id: mediaDropPreview
-                preview: root.dropPreviewModel
-                frameSource: root.dropPreviewFrameSource
-            }
-
             RemoteCursor {
                 cursorVisible: root.remoteCursorVisible
                 cursorX: root.remoteCursorX
@@ -1120,6 +1081,7 @@ Rectangle {
             SelectionChrome {
                 id: selectionChrome
                 objectName: "canvasSelectionChrome"
+                presentationController: root
                 anchors.fill: parent
                 contentItem: viewport.contentRootItem
                 viewportItem: viewport
@@ -1596,44 +1558,6 @@ Rectangle {
         anchors.fill: parent
         z: 99000
 
-        Item {
-            id: dropPreviewTitle
-            objectName: "dropPreviewTitle"
-            readonly property var preview: root.dropPreviewModel
-            readonly property bool shown: !!preview && preview.visible === true
-            readonly property real sceneLeft: preview && preview.x !== undefined ? preview.x : 0
-            readonly property real sceneTop: preview && preview.y !== undefined ? preview.y : 0
-            readonly property real sceneWidth: preview && preview.width !== undefined ? preview.width : 0
-            readonly property real screenCenterX: (sceneLeft + sceneWidth * 0.5) * root.viewScale + root.panX
-
-            x: screenCenterX - width * 0.5
-            y: sceneTop * root.viewScale + root.panY - 76 - 8
-            width: 156
-            height: 36
-            z: -1
-            opacity: shown ? 1.0 : 0.0
-            visible: opacity > 0.001 && preview && (preview.displayName || "").length > 0
-            enabled: false
-
-            Behavior on opacity {
-                // Match the media preview: on a successful drop the final name
-                // pill is already present, so fading this duplicate would only
-                // create a visible blink.
-                enabled: !(dropPreviewTitle.preview
-                           && dropPreviewTitle.preview.handoffMediaId)
-                NumberAnimation {
-                    duration: UiTiming.contentFadeDurationMs
-                    easing.type: Easing.OutCubic
-                }
-            }
-
-            MediaNamePill {
-                anchors.fill: parent
-                displayName: dropPreviewTitle.preview
-                             ? (dropPreviewTitle.preview.displayName || "") : ""
-            }
-        }
-
         Repeater {
             // One overlay pair per selected item — selectionChromeModel
             // is the authoritative source for selected-item geometry.
@@ -1731,6 +1655,7 @@ Rectangle {
                     id: topOverlay
                     mediaId: overlayDelegate.mid
                     displayName: overlayDelegate.mediaEntry ? (overlayDelegate.mediaEntry.displayName || "") : ""
+                    actionsAvailable: root.mediaOverlaysReady(overlayDelegate.mid, overlayDelegate.mediaEntry)
                     contentVisible: overlayDelegate.mediaEntry ? (overlayDelegate.mediaEntry.contentVisible !== false) : true
                     visible: true
 
@@ -1748,7 +1673,7 @@ Rectangle {
                 MediaVideoOverlay {
                     id: bottomOverlay
                     mediaId: overlayDelegate.mid
-                    visible: overlayDelegate.mediaEntry
+                    visible: root.mediaOverlaysReady(overlayDelegate.mid, overlayDelegate.mediaEntry)
                              && overlayDelegate.mediaEntry.mediaType === "video"
 
                     isPlaying: overlayDelegate.videoState ? !!overlayDelegate.videoState.isPlaying : false

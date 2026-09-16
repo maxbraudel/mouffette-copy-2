@@ -24,6 +24,7 @@
 #include "frontend/qml/MediaSettingsViewModel.h"
 #include "backend/domain/canvas/CanvasDocument.h"
 #include "backend/domain/media/CanvasMedia.h"
+#include "backend/media/MediaResidencyManager.h"
 #include "backend/files/FileManager.h"
 #include "backend/network/UploadManager.h"
 #ifdef Q_OS_MACOS
@@ -35,6 +36,15 @@ class MediaOverlayTest final : public QObject
     Q_OBJECT
 
 private slots:
+    void init()
+    {
+        MediaResidencyManager::instance().setMemorySnapshotForTesting(
+            {8ULL << 30, 6ULL << 30, 512ULL << 20, false, 0});
+    }
+    void cleanup()
+    {
+        MediaResidencyManager::instance().clearMemorySnapshotForTesting();
+    }
     void initTestCase();
     void segmentedStatusFillReachesBothEdges_data();
     void segmentedStatusFillReachesBothEdges();
@@ -1029,17 +1039,28 @@ void MediaOverlayTest::mainWindowPointerActivity()
 
 void MediaOverlayTest::canvasToolbarUsesOverlaySwitchAndSegmentedTools()
 {
+    QTemporaryDir directory;
+    const QString mediaPath = directory.filePath(QStringLiteral("memory-example.png"));
+    QImage image(640, 360, QImage::Format_ARGB32_Premultiplied);
+    image.fill(Qt::cyan);
+    QVERIFY(image.save(mediaPath));
+    CanvasDocument document;
+    auto* media = document.addPreparedFile(mediaPath, image.size(), false, {});
+    QTRY_VERIFY_WITH_TIMEOUT(media->residencyReady(), 5000);
     QQmlEngine engine;
     QQuickWindow window;
-    window.resize(240, 100);
+    window.resize(900, 650);
     QString error;
     std::unique_ptr<QQuickItem> harness(
         createCanvasToolbarHarness(engine, window, &error));
     QVERIFY2(harness, qPrintable(error));
     auto* settings = findVisualItem(harness.get(), QStringLiteral("canvasSettingsButton"));
+    auto* memory = findVisualItem(harness.get(), QStringLiteral("canvasMemoryButton"));
     auto* selection = findVisualItem(harness.get(), QStringLiteral("canvasSelectionToolButton"));
     auto* text = findVisualItem(harness.get(), QStringLiteral("canvasTextToolButton"));
     QVERIFY(settings);
+    QVERIFY(memory && memory->isEnabled());
+    QCOMPARE(memory->x(), settings->x() + settings->width() + 8);
     QVERIFY(selection);
     QVERIFY(text);
 
@@ -1055,6 +1076,7 @@ void MediaOverlayTest::canvasToolbarUsesOverlaySwitchAndSegmentedTools()
     harness->setProperty("fakeSessionHasProject", false);
     QTRY_VERIFY(!text->isVisible());
     QTRY_VERIFY(!selection->isVisible());
+    QVERIFY(memory->isVisible() && memory->isEnabled());
     QVERIFY(selection->property("toggled").toBool());
 
     harness->setProperty("fakeSessionHasProject", true);
@@ -1068,6 +1090,26 @@ void MediaOverlayTest::canvasToolbarUsesOverlaySwitchAndSegmentedTools()
     QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier, textCenter);
     QTRY_VERIFY(text->property("toggled").toBool());
     QVERIFY(!selection->property("toggled").toBool());
+    const QPoint memoryCenter = memory->mapToScene({memory->width() / 2, memory->height() / 2}).toPoint();
+    QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier, memoryCenter);
+    QTRY_VERIFY(memory->property("toggled").toBool());
+    auto* bar = findVisualItem(window.contentItem(), QStringLiteral("memoryDistributionBar"));
+    QVERIFY(bar && bar->isVisible() && bar->width() > 400);
+    auto* assets = findVisualItem(window.contentItem(), QStringLiteral("memoryAssetList"));
+    QVERIFY(assets && assets->property("count").toInt() >= 1);
+    const QString artifactDir = qEnvironmentVariable("MOUFFETTE_OVERLAY_ARTIFACT_DIR");
+    if (!artifactDir.isEmpty()) {
+        QVERIFY(QDir().mkpath(artifactDir));
+        QSignalSpy frames(&window, &QQuickWindow::frameSwapped);
+        window.update();
+        QTRY_VERIFY(frames.size() > 0);
+        const QString scale = qEnvironmentVariable("QT_SCALE_FACTOR");
+        const QString name = scale.isEmpty() ? "memory-usage-popup.png"
+            : "memory-usage-popup-scale-" + scale + ".png";
+        QVERIFY(window.grabWindow().save(QDir(artifactDir).filePath(name)));
+    }
+    QTest::keyClick(&window, Qt::Key_Escape);
+    QTRY_VERIFY(!memory->property("toggled").toBool());
 }
 
 void MediaOverlayTest::mediaSettingsPanelRestoresTabsAndBindings()
@@ -1113,6 +1155,10 @@ void MediaOverlayTest::mediaSettingsPanelRestoresTabsAndBindings()
         QPointF(100, 100), QStringLiteral("Settings test"));
     QVERIFY(media);
     QTRY_VERIFY(panel->isVisible());
+    panel->setProperty("presentationReady", false);
+    QVERIFY(!panel->isVisible() && !panel->isEnabled());
+    panel->setProperty("presentationReady", true);
+    QTRY_VERIFY(panel->isVisible() && panel->isEnabled());
     QCOMPARE(panel->width(), 221.0);
     QCOMPARE(panel->x(), 10.0);
     QCOMPARE(panel->y(), 52.0);
@@ -1304,7 +1350,9 @@ void MediaOverlayTest::mediaSettingsPanelRestoresTabsAndBindings()
 
 void MediaOverlayTest::videoVolumeAndMuteStayIndependentAndSyncWithSettings()
 {
-    const QString videoPath = QFINDTESTDATA("../../../video-1080p.mp4");
+    const QString overridePath = qEnvironmentVariable("MOUFFETTE_TEST_VIDEO_FILE");
+    const QString videoPath = overridePath.isEmpty()
+        ? QFINDTESTDATA("../fixtures/resident-timeline.mp4") : overridePath;
     QVERIFY(!videoPath.isEmpty());
     QString error;
     std::unique_ptr<QuickCanvasHost> host(QuickCanvasHost::create(&error));
@@ -1330,6 +1378,8 @@ void MediaOverlayTest::videoVolumeAndMuteStayIndependentAndSyncWithSettings()
     QVERIFY2(page, qPrintable(component.errorString()));
     page->setParentItem(window.contentItem());
     page->setSize(window.size());
+    connect(&window, &QWindow::widthChanged, page, [&window, page] { page->setSize(window.size()); });
+    connect(&window, &QWindow::heightChanged, page, [&window, page] { page->setSize(window.size()); });
     window.show();
     QVERIFY(QTest::qWaitForWindowExposed(&window));
     // Cocoa can constrain the requested size on scaled displays. Keep both
@@ -1344,6 +1394,8 @@ void MediaOverlayTest::videoVolumeAndMuteStayIndependentAndSyncWithSettings()
     CanvasMedia* video = host->document()->addPreparedFile(
         videoPath, QSize(160, 90), true, QPointF(window.width() / 2, 30));
     QVERIFY(video);
+    QTRY_VERIFY2_WITH_TIMEOUT(video->residencyReady(),
+        qPrintable(video->residencyState() + ": " + video->residencyError()), 30000);
     auto* panel = findVisualItem(page, QStringLiteral("canvasSceneElementPanel"));
     QVERIFY(panel);
     panel->setProperty("activeTab", 1);
@@ -1361,7 +1413,17 @@ void MediaOverlayTest::videoVolumeAndMuteStayIndependentAndSyncWithSettings()
 
     // Editing the numeric field changes the actual audio and overlay slider.
     QTRY_VERIFY(field->isVisible());
+    QTRY_VERIFY(panel->isEnabled());
     QTest::qWait(50); // Polish the newly selected settings tab before hit testing.
+    const QString artifactDir = qEnvironmentVariable("MOUFFETTE_OVERLAY_ARTIFACT_DIR");
+    const auto capture = [&](const QString& name) {
+        if (artifactDir.isEmpty()) return;
+        QDir().mkpath(artifactDir);
+        const QString scale = qEnvironmentVariable("QT_SCALE_FACTOR");
+        window.grabWindow().save(QDir(artifactDir).filePath(name
+            + (scale.isEmpty() ? QString() : "-scale-" + scale) + ".png"));
+    };
+    capture("video-volume-before-edit");
     click(field);
     QTRY_VERIFY(field->hasActiveFocus());
     QTest::keyClick(&window, Qt::Key_7);
@@ -1371,6 +1433,7 @@ void MediaOverlayTest::videoVolumeAndMuteStayIndependentAndSyncWithSettings()
     QTRY_VERIFY(qAbs(video->volume() - 0.7) < 0.001);
     QTRY_VERIFY(qAbs(slider->property("progress").toReal() - 0.7) < 0.001);
     click(mute);
+    capture("video-volume-after-mute");
     QTRY_VERIFY(video->muted());
     QTRY_VERIFY(!check->property("checked").toBool());
     QCOMPARE(field->property("draftText").toString(), QStringLiteral("70"));

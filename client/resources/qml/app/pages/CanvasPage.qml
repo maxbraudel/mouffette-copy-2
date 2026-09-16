@@ -64,6 +64,11 @@ AppPanel {
         z: 100001
         maximumHeight: Math.max(0, root.height - y - 10)
         session: root.session
+        presentationReady: {
+            var canvas = canvasLoader.item
+            var media = canvas ? canvas.mediaDelegateById(sceneElementPanel.selectedMediaId) : null
+            return !!media && media.initialFramePresented
+        }
     }
 
     MediaListPanel {

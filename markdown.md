@@ -118,3 +118,4 @@ probleme hie hwne video ends
 
 probleme not over the top
 
+autre changement que je veux; nDans l'ovelray parametres, on a des input boxesp oru entrer les vlauers c'est usper... Mais ya un soucis si on écrit dednasu n nombre grand il 'étend pash orizontalement. Le texteà. l'itnérieur overflow. Je vuex pas ça les box input devrianet s'adapterh orizontalement au contenu dnasl al imite de l'espace disp

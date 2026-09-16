@@ -65,7 +65,7 @@ function setup() {
 
 function envelope(context, extra = {}) {
     return {
-        protocolVersion: 4,
+        protocolVersion: 5,
         serverBootId: context.server.serverBootId,
         messageId: crypto.randomUUID(),
         remoteSessionId: context.session.remoteSessionId,
@@ -370,4 +370,4 @@ function messages(ws, type) {
     assert.equal(messages(context.target, 'remote_session_terminating').length, 1);
 }
 
-console.log('asset removal protocol v4 tests passed');
+console.log('asset removal protocol v5 tests passed');

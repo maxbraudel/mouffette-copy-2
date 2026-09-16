@@ -158,6 +158,9 @@ public:
     bool hasUnuploadedFilesForTarget(const QString& targetClientId) const;
     void setApplicationSuspended(bool suspended);
 
+protected:
+    bool eventFilter(QObject* watched, QEvent* event) override;
+
 public slots:
     void handleApplicationStateChanged(Qt::ApplicationState state);
     void handleNativeSystemSuspendedChanged(bool suspended);
@@ -372,6 +375,7 @@ private:
         bool rendererTeardownStarted = false;
     };
     QHash<QString, PendingRendererTeardown> m_pendingRendererTeardowns;
+    QSet<QString> m_readerTeardownPendingSessionIds;
     // RemoteSceneController owns one target-wide renderer graph. This shared
     // FIFO serializes protocol teardown, transport-terminal cleanup, and clean
     // shutdown instead of letting those independent callers race admission.
@@ -387,6 +391,7 @@ private:
     bool m_cleanShutdownIncomingCacheTeardownStarted = false;
     bool m_cleanShutdownPrepared = false;
     bool m_cleanShutdownFinished = false;
+    bool m_quitDeferredForReaders = false;
 };
 
 #endif // APPLICATIONRUNTIME_H

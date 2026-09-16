@@ -1,6 +1,6 @@
 import QtQuick
 // Reused by the selected-media overlay and by the pre-drop preview so the
-// filename does not move or restyle during the handoff.
+// filename uses the same presentation for every selected media item.
 Rectangle {
     id: root
 

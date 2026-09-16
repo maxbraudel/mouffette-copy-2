@@ -4,16 +4,10 @@
 #include "backend/domain/canvas/CanvasDocument.h"
 #include "backend/domain/media/CanvasMedia.h"
 #include "backend/domain/media/MediaFilePolicy.h"
+#include "backend/media/MediaResidencyManager.h"
 #include "frontend/rendering/canvas/CanvasQmlTypes.h"
 #include "frontend/rendering/canvas/MediaListModel.h"
-#include "frontend/rendering/remote/RemoteVideoFrameItem.h"
 #include "frontend/ui/notifications/ToastNotificationSystem.h"
-
-#ifdef Q_OS_MACOS
-#include "backend/platform/macos/MacVideoThumbnailer.h"
-#elif defined(Q_OS_WIN)
-#include "backend/platform/windows/WindowsVideoThumbnailer.h"
-#endif
 
 #include <QClipboard>
 #include <QGuiApplication>
@@ -21,7 +15,9 @@
 #include <QJsonDocument>
 #include <QMimeData>
 #include <QFileInfo>
-#include <QImageReader>
+#include <QFutureWatcher>
+#include <QtConcurrent/QtConcurrentRun>
+#include "backend/media/MediaDecoder.h"
 #include <QMetaObject>
 #include <QQuickWindow>
 #include <QTimer>
@@ -30,6 +26,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <utility>
 
 namespace {
 constexpr auto kCanvasClipboardMime = "application/x-mouffette-media-v1";
@@ -37,41 +34,6 @@ constexpr qreal kSnapDistancePx = 10.0;
 constexpr qreal kCornerSnapDistancePx = 20.0;
 constexpr qreal kSnapReleaseFactor = 1.4;
 constexpr qreal kSnapEpsilon = 1e-5;
-
-QImage limitedPreviewImage(QImage image)
-{
-    constexpr int maximumEdge = 2048;
-    if (image.isNull()
-        || (image.width() <= maximumEdge && image.height() <= maximumEdge)) {
-        return image;
-    }
-    return image.scaled(QSize(maximumEdge, maximumEdge),
-                        Qt::KeepAspectRatio, Qt::SmoothTransformation);
-}
-
-QSize nativeVideoDimensions(const QString& path)
-{
-#ifdef Q_OS_MACOS
-    return MacVideoThumbnailer::videoDimensions(path);
-#elif defined(Q_OS_WIN)
-    return WindowsVideoThumbnailer::videoDimensions(path);
-#else
-    Q_UNUSED(path);
-    return {};
-#endif
-}
-
-QImage nativeVideoFirstFrame(const QString& path)
-{
-#ifdef Q_OS_MACOS
-    return limitedPreviewImage(MacVideoThumbnailer::firstFrame(path));
-#elif defined(Q_OS_WIN)
-    return limitedPreviewImage(WindowsVideoThumbnailer::firstFrame(path));
-#else
-    Q_UNUSED(path);
-    return {};
-#endif
-}
 
 QVariantMap guide(qreal x1, qreal y1, qreal x2, qreal y2)
 {
@@ -227,16 +189,31 @@ QuickCanvasController::QuickCanvasController(CanvasDocument* document,
     : QObject(parent)
     , m_document(document)
     , m_mediaListModel(new MediaListModel(this))
-    , m_dropFrameSource(new RemoteVideoFrameSource(this))
     , m_videoStateTimer(new QTimer(this))
 {
     Q_ASSERT(document);
+    connect(&MediaResidencyManager::instance(), &MediaResidencyManager::errorOccurred,
+            this, [this](const QString& owner, const QString& message) {
+        if (!m_document) return;
+        for (CanvasMedia* media : m_document->media()) {
+            if (media && media->residencyOwnerId() == owner) {
+                TOAST_ERROR(QStringLiteral("Could not load %1: %2").arg(media->displayName(), message));
+                return;
+            }
+        }
+    });
     connect(document, &CanvasDocument::mediaAdded,
             this, &QuickCanvasController::publishMedia);
     connect(document, &CanvasDocument::mediaRemoved,
             this, &QuickCanvasController::publishMedia);
     connect(document, &CanvasDocument::mediaChanged,
-            this, &QuickCanvasController::publishMedia);
+            this, [this](const QString& id) {
+        publishMedia();
+        if (m_document->selectedMedia() && m_document->selectedMedia()->mediaId() == id)
+            emit selectedMediaChanged();
+    });
+    connect(document, &CanvasDocument::mediaSourceInvalidated, this,
+            [](const QString&, const QString& reason) { TOAST_WARNING(reason); });
     connect(document, &CanvasDocument::selectionChanged,
             this, [this]() {
         const QString id = m_document && m_document->selectedMedia()
@@ -301,11 +278,6 @@ QObject* QuickCanvasController::mediaModel() const
     return m_mediaListModel;
 }
 
-QObject* QuickCanvasController::dropPreviewFrameSource() const
-{
-    return m_dropFrameSource;
-}
-
 bool QuickCanvasController::editsLocked() const
 {
     return !m_document || m_document->editsLocked();
@@ -319,14 +291,12 @@ void QuickCanvasController::publishAll()
     publishSelection();
     publishRemoteCursor();
     publishVideoState();
-    publishDropPreview(false);
     emit presentationChanged();
 }
 
 void QuickCanvasController::publishMedia()
 {
     QVariantList list;
-    QSet<QString> activeMediaIds;
     if (m_document) {
         QList<CanvasMedia*> media = m_document->media();
         std::sort(media.begin(), media.end(), [](CanvasMedia* a, CanvasMedia* b) {
@@ -334,28 +304,10 @@ void QuickCanvasController::publishMedia()
         });
         for (CanvasMedia* item : media) {
             if (!item) continue;
-            activeMediaIds.insert(item->mediaId());
             QVariantMap projection = item->toModelMap();
             projection.insert(QStringLiteral("rowKey"), item->mediaId());
-            if (item->isVideo()) {
-                const auto poster = m_videoPosterSources.constFind(item->mediaId());
-                if (poster != m_videoPosterSources.cend() && *poster) {
-                    projection.insert(
-                        QStringLiteral("videoPosterFrameSource"),
-                        QVariant::fromValue<QObject*>(poster->data()));
-                }
-            }
             list.append(projection);
         }
-    }
-    for (auto poster = m_videoPosterSources.begin();
-         poster != m_videoPosterSources.end();) {
-        if (activeMediaIds.contains(poster.key())) {
-            ++poster;
-            continue;
-        }
-        if (poster.value()) poster.value()->deleteLater();
-        poster = m_videoPosterSources.erase(poster);
     }
     m_mediaListModel->updateFromList(list);
     // Move/snap, camera and video ticks must not invalidate the document and
@@ -1419,7 +1371,9 @@ void QuickCanvasController::handleMediaResizeRequested(
 {
     if (!editingEnabled()) return;
     CanvasMedia* media = m_document ? m_document->mediaById(mediaId) : nullptr;
-    if (!media || editsLocked()) return;
+    if (!media || !media->residencyReady() || editsLocked()) return;
+    for (CanvasMedia* selected : m_document->media())
+        if (selected && selected->selected() && !selected->residencyReady()) return;
     if (m_resizeMediaId != mediaId) {
         captureTransformSelection(media);
         m_resizeMediaId = mediaId;
@@ -1610,7 +1564,7 @@ void QuickCanvasController::handleVideoStartToggle(const QString& id)
 {
     if (!editingEnabled() || !m_document) return;
     CanvasMedia* media = m_document->mediaById(id);
-    if (!media || !media->isVideo()) return;
+    if (!media || !media->isVideo() || !media->residencyReady()) return;
     if (media->startMarkerMs() >= 0) {
         media->setPlaybackRange(-1, media->endMarkerMs());
     } else if (!media->player() || media->player()->duration() <= 0) {
@@ -1629,7 +1583,7 @@ void QuickCanvasController::handleVideoEndToggle(const QString& id)
 {
     if (!editingEnabled() || !m_document) return;
     CanvasMedia* media = m_document->mediaById(id);
-    if (!media || !media->isVideo()) return;
+    if (!media || !media->isVideo() || !media->residencyReady()) return;
     if (media->endMarkerMs() >= 0) {
         media->setPlaybackRange(media->startMarkerMs(), -1);
     } else if (!media->player() || media->player()->duration() <= 0) {
@@ -1655,7 +1609,7 @@ void QuickCanvasController::handleOverlayPlayPause(const QString& id)
 {
     if (!editingEnabled()) return;
     if (CanvasMedia* media = m_document ? m_document->mediaById(id) : nullptr;
-        media && media->isVideo() && !editsLocked()) media->togglePlayPause();
+        media && media->isVideo() && media->residencyReady() && !editsLocked()) media->togglePlayPause();
     emit mediaPlayPauseRequested(id);
 }
 
@@ -1663,7 +1617,7 @@ void QuickCanvasController::handleOverlayStop(const QString& id)
 {
     if (!editingEnabled()) return;
     if (CanvasMedia* media = m_document ? m_document->mediaById(id) : nullptr;
-        media && media->isVideo() && !editsLocked()) media->stopToBeginning();
+        media && media->isVideo() && media->residencyReady() && !editsLocked()) media->stopToBeginning();
     emit mediaStopRequested(id);
 }
 
@@ -1671,7 +1625,7 @@ void QuickCanvasController::handleOverlayRepeatToggle(const QString& id)
 {
     if (!editingEnabled()) return;
     if (CanvasMedia* media = m_document ? m_document->mediaById(id) : nullptr;
-        media && media->isVideo() && !editsLocked()) {
+        media && media->isVideo() && media->residencyReady() && !editsLocked()) {
         media->setRepeatEnabled(!media->repeatEnabled());
     }
     emit mediaRepeatToggleRequested(id);
@@ -1681,7 +1635,7 @@ void QuickCanvasController::handleOverlayMuteToggle(const QString& id)
 {
     if (!editingEnabled()) return;
     if (CanvasMedia* media = m_document ? m_document->mediaById(id) : nullptr;
-        media && media->isVideo() && !editsLocked()) media->setMuted(!media->muted());
+        media && media->isVideo() && media->residencyReady() && !editsLocked()) media->setMuted(!media->muted());
     emit mediaMuteToggleRequested(id);
 }
 
@@ -1689,7 +1643,7 @@ void QuickCanvasController::handleOverlayVolumeChange(const QString& id, qreal v
 {
     if (!editingEnabled()) return;
     if (CanvasMedia* media = m_document ? m_document->mediaById(id) : nullptr;
-        media && media->isVideo() && !editsLocked()) {
+        media && media->isVideo() && media->residencyReady() && !editsLocked()) {
         const int percent = qRound(std::clamp<qreal>(value, 0.0, 1.0) * 100.0);
         MediaSettingsState settings = media->settings();
         settings.volumeOverrideEnabled = true;
@@ -1712,7 +1666,7 @@ void QuickCanvasController::handleOverlaySeekUpdate(const QString& id, qreal rat
 {
     if (!editingEnabled()) return;
     if (CanvasMedia* media = m_document ? m_document->mediaById(id) : nullptr;
-        media && media->isVideo() && !editsLocked()) media->seekToRatio(ratio);
+        media && media->isVideo() && media->residencyReady() && !editsLocked()) media->seekToRatio(ratio);
 }
 
 void QuickCanvasController::handleOverlaySeekEnd(const QString& id, qreal ratio)
@@ -1757,112 +1711,58 @@ void QuickCanvasController::handleOverlayVerticalAlign(
 bool QuickCanvasController::beginLocalFileDrag(const QVariantList& urls,
                                                qreal viewX, qreal viewY)
 {
+    Q_UNUSED(viewX);
+    Q_UNUSED(viewY);
     cancelLocalFileDrag();
     if (!m_projectEditingEnabled || editsLocked() || urls.size() != 1) return false;
     const QUrl url = urls.first().canConvert<QUrl>()
         ? urls.first().toUrl() : QUrl(urls.first().toString());
     if (!url.isLocalFile()) return false;
     const QFileInfo info(url.toLocalFile());
-    const QString path = info.canonicalFilePath().isEmpty()
-        ? info.absoluteFilePath() : info.canonicalFilePath();
-    const auto validation = MediaFilePolicy::validateLocalFile(path);
-    if (!validation.accepted()) {
-        TOAST_WARNING(QStringLiteral("Import refused: %1 — %2")
-            .arg(info.fileName(), MediaFilePolicy::validationErrorDescription(validation)));
-        return false;
-    }
-    m_dropPath = path;
-    m_dropVideo = validation.kind == MediaFilePolicy::Kind::Mp4Video;
-    m_dropCenter = mapViewPointToScene({viewX, viewY});
-    if (m_dropVideo) {
-        // Validation has already decoded one frame with the same Qt/FFmpeg
-        // backend used for playback. Reuse it: immediately opening the file a
-        // second time through Media Foundation is timing-dependent on Windows.
-        m_dropNativeSize = validation.videoSize;
-        m_dropFrame = limitedPreviewImage(validation.videoFirstFrame);
-        if (m_dropNativeSize.isEmpty() || m_dropFrame.isNull()) {
-            m_dropNativeSize = nativeVideoDimensions(path);
-            m_dropFrame = nativeVideoFirstFrame(path);
-        }
-    } else {
-        QImageReader reader(path);
-        reader.setAutoTransform(true);
-        m_dropFrame = reader.read();
-        m_dropNativeSize = validation.imageSize.isEmpty()
-            ? m_dropFrame.size() : validation.imageSize;
-    }
-    if (m_dropNativeSize.isEmpty() || m_dropFrame.isNull()) {
-        cancelLocalFileDrag();
-        return false;
-    }
-    m_dropFrameSource->setFrame(m_dropFrame);
-    publishDropPreview(true);
+    if (!info.isFile() || info.isSymLink()) return false;
+    // Drag acceptance does not read, decode, hash or allocate media content.
+    m_dropPath = info.absoluteFilePath();
     return true;
 }
 
 bool QuickCanvasController::updateLocalFileDrag(qreal viewX, qreal viewY)
 {
-    if (!m_projectEditingEnabled || m_dropPath.isEmpty() || editsLocked()) return false;
-    m_dropCenter = mapViewPointToScene({viewX, viewY});
-    publishDropPreview(true);
-    return true;
+    Q_UNUSED(viewX);
+    Q_UNUSED(viewY);
+    return m_projectEditingEnabled && !m_dropPath.isEmpty() && !editsLocked();
 }
 
 bool QuickCanvasController::commitLocalFileDrop(qreal viewX, qreal viewY)
 {
     if (!m_projectEditingEnabled || m_dropPath.isEmpty()
         || !m_document || editsLocked()) return false;
-    m_dropCenter = mapViewPointToScene({viewX, viewY});
-    const QPointF topLeft = m_dropCenter
-        - QPointF(m_dropNativeSize.width() / 2.0,
-                  m_dropNativeSize.height() / 2.0);
-    CanvasMedia* media = m_document->addPreparedFile(
-        m_dropPath, m_dropNativeSize, m_dropVideo, topLeft);
-    if (!media) return false;
-    if (m_dropVideo && !m_dropFrame.isNull()) {
-        auto* poster = new RemoteVideoFrameSource(this);
-        poster->setFrame(m_dropFrame);
-        m_videoPosterSources.insert(media->mediaId(), poster);
-        // addPreparedFile() publishes before its new id is available here.
-        // Republish once to attach the poster owned by the final media.
-        publishMedia();
-    }
-    publishDropPreview(true, media->mediaId());
+    const QString path = std::exchange(m_dropPath, {});
+    const QPointF center = mapViewPointToScene({viewX, viewY});
+    const QPointer<CanvasDocument> document = m_document;
+    const quint64 generation = document->importGeneration();
+    auto* watcher = new QFutureWatcher<MediaDecoder::Probe>(this);
+    connect(watcher, &QFutureWatcher<MediaDecoder::Probe>::finished, this,
+            [this, watcher, document, generation, path, center]() {
+        const auto probe = watcher->result();
+        watcher->deleteLater();
+        if (!document || document != m_document || !m_projectEditingEnabled
+            || document->editsLocked() || document->importGeneration() != generation) return;
+        if (!probe.accepted()) {
+            TOAST_WARNING(QStringLiteral("Import refused: %1 — %2")
+                              .arg(QFileInfo(path).fileName(), probe.error));
+            return;
+        }
+        const QPointF topLeft = center - QPointF(probe.displaySize.width() / 2.0,
+                                                 probe.displaySize.height() / 2.0);
+        document->addPreparedFile(path, probe.displaySize, probe.video, topLeft);
+    });
+    watcher->setFuture(QtConcurrent::run([path] { return MediaDecoder::probe(path); }));
     return true;
 }
 
 void QuickCanvasController::cancelLocalFileDrag()
 {
     m_dropPath.clear();
-    m_dropNativeSize = {};
-    m_dropVideo = false;
-    m_dropFrame = {};
-    m_dropFrameSource->clear();
-    publishDropPreview(false);
-}
-
-void QuickCanvasController::publishDropPreview(bool visible,
-                                               const QString& handoffId)
-{
-    const QPointF topLeft = m_dropCenter
-        - QPointF(m_dropNativeSize.width() / 2.0,
-                  m_dropNativeSize.height() / 2.0);
-    m_dropPreviewModel = QVariantMap{
-        {QStringLiteral("visible"), visible},
-        {QStringLiteral("frameReady"), !m_dropFrame.isNull()},
-        {QStringLiteral("x"), topLeft.x()}, {QStringLiteral("y"), topLeft.y()},
-        {QStringLiteral("width"), m_dropNativeSize.width()},
-        {QStringLiteral("height"), m_dropNativeSize.height()},
-        {QStringLiteral("handoffMediaId"), handoffId},
-        {QStringLiteral("displayName"), QFileInfo(m_dropPath).fileName()}};
-    emit presentationChanged();
-}
-
-void QuickCanvasController::handleDropPreviewContentReady(const QString& mediaId)
-{
-    if (m_dropPreviewModel.value(QStringLiteral("handoffMediaId")).toString()
-        != mediaId) return;
-    cancelLocalFileDrag();
 }
 
 void QuickCanvasController::publishSnapGuides(const QVariantList& guides)

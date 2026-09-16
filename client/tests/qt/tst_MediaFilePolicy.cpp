@@ -636,60 +636,27 @@ private slots:
         QCOMPARE(validation.decodedRgbaBytes, quint64(32 * 24 * 4));
     }
 
-    void enforcesCumulativeDecodedRgbaBudgetWithoutOverflow() {
+    void dynamicAdmissionReplacesLegacyImageCap() {
         QTemporaryDir temporary;
-        QVERIFY(temporary.isValid());
-        const QString imagePath = temporary.filePath(QStringLiteral("budget.png"));
+        const QString path = temporary.filePath(QStringLiteral("budget.png"));
         QImage image(32, 24, QImage::Format_ARGB32_Premultiplied);
         image.fill(Qt::black);
-        QVERIFY(image.save(imagePath));
-        constexpr quint64 decodedBytes = 32ULL * 24ULL * 4ULL;
-
-        const auto exactBoundary = MediaFilePolicy::validateLocalFile(
-            imagePath, MediaFilePolicy::MaximumPreparedImageBytes - decodedBytes);
-        QCOMPARE(exactBoundary.kind, MediaFilePolicy::Kind::Image);
-
-        const auto oneByteOver = MediaFilePolicy::validateLocalFile(
-            imagePath, MediaFilePolicy::MaximumPreparedImageBytes - decodedBytes + 1);
-        QCOMPARE(oneByteOver.kind, MediaFilePolicy::Kind::Unsupported);
-        QCOMPARE(oneByteOver.errorCode, QStringLiteral("decoded_rgba_budget_exceeded"));
-
-        const auto overflowAttempt = MediaFilePolicy::validateLocalFile(
-            imagePath, std::numeric_limits<quint64>::max());
-        QCOMPARE(overflowAttempt.kind, MediaFilePolicy::Kind::Unsupported);
-        QCOMPARE(overflowAttempt.errorCode, QStringLiteral("decoded_rgba_budget_exceeded"));
+        QVERIFY(image.save(path));
+        const auto metadata = MediaFilePolicy::validateLocalFileMetadata(path);
+        QVERIFY(metadata.accepted());
+        QCOMPARE(metadata.imageSize, QSize(32, 24));
+        const auto validation = MediaFilePolicy::validateLocalFile(path, 2ULL * 1024 * 1024 * 1024);
+        QVERIFY(validation.accepted());
+        const QList<MediaFilePolicy::PreparationAsset> assets{
+            {QStringLiteral("image"), path, MediaFilePolicy::Kind::Image}};
+        const auto preparation = MediaFilePolicy::validatePreparationAssets(assets, 2ULL * 1024 * 1024 * 1024);
+        QVERIFY(preparation.accepted);
+        QCOMPARE(preparation.totalDecodedRgbaBytes, 2ULL * 1024 * 1024 * 1024 + 32 * 24 * 4);
+        const auto overflow = MediaFilePolicy::validatePreparationAssets(assets, std::numeric_limits<quint64>::max());
+        QVERIFY(!overflow.accepted);
+        QCOMPARE(overflow.errorCode, QStringLiteral("decoded_size_overflow"));
     }
 
-    void scenePreparationFailsClosedAtCumulativeBoundaryWithoutLargeAllocation() {
-        QTemporaryDir temporary;
-        QVERIFY(temporary.isValid());
-        const QString imagePath = temporary.filePath(QStringLiteral("tiny.png"));
-        QImage image(2, 2, QImage::Format_ARGB32_Premultiplied);
-        image.fill(Qt::black);
-        QVERIFY(image.save(imagePath));
-        constexpr quint64 decodedBytes = 2ULL * 2ULL * 4ULL;
-
-        const QList<MediaFilePolicy::PreparationAsset> sceneAssets{
-            {QStringLiteral("image-local"), imagePath, MediaFilePolicy::Kind::Image},
-            {QStringLiteral("image-remote"), imagePath, MediaFilePolicy::Kind::Image}
-        };
-
-        const auto exactBoundary = MediaFilePolicy::validatePreparationAssets(
-            sceneAssets,
-            MediaFilePolicy::MaximumPreparedImageBytes - (2ULL * decodedBytes));
-        QVERIFY(exactBoundary.accepted);
-        QCOMPARE(exactBoundary.totalDecodedRgbaBytes,
-                 MediaFilePolicy::MaximumPreparedImageBytes);
-
-        const auto oneByteOver = MediaFilePolicy::validatePreparationAssets(
-            sceneAssets,
-            MediaFilePolicy::MaximumPreparedImageBytes - (2ULL * decodedBytes) + 1ULL);
-        QVERIFY(!oneByteOver.accepted);
-        QCOMPARE(oneByteOver.failedAssetId, QStringLiteral("image-remote"));
-        QCOMPARE(oneByteOver.errorCode, QStringLiteral("decoded_rgba_budget_exceeded"));
-        QVERIFY(oneByteOver.totalDecodedRgbaBytes
-                <= MediaFilePolicy::MaximumPreparedImageBytes);
-    }
 };
 
 // QMediaPlayer uses the same GUI-capable application context as Mouffette. The

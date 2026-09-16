@@ -1,3 +1,6 @@
+#include "backend/media/MediaResidencyManager.h"
+#include "backend/media/ResidentVideoPlayer.h"
+#include "backend/network/UploadManager.h"
 #include <QApplication>
 #include <QAudioOutput>
 #include <QDateTime>
@@ -187,6 +190,15 @@ class RemoteSceneControllerLifecycleTest final : public QObject {
     Q_OBJECT
 
 private slots:
+    void initTestCase()
+    {
+        MediaResidencyManager::instance().setMemorySnapshotForTesting(
+            {8ULL << 30, 6ULL << 30, 128ULL << 20, false, 0});
+    }
+    void cleanupTestCase()
+    {
+        MediaResidencyManager::instance().clearMemorySnapshotForTesting();
+    }
     void incompleteSceneSchemaIsRejectedBeforeRendererMutation()
     {
         RemoteSceneController controller(nullptr, nullptr);
@@ -288,6 +300,10 @@ private slots:
         const QString fileId(64, QLatin1Char('c'));
         FileManager files;
         files.registerReceivedFilePath(fileId, fixture);
+        const QString residentOwner = UploadManager::residencyOwnerId({}, 0, fileId);
+        auto& residency = MediaResidencyManager::instance();
+        residency.acquire(residentOwner, fixture);
+        QTRY_VERIFY_WITH_TIMEOUT(residency.ready(residentOwner), 60000);
         RemoteSceneController controller(&files, nullptr);
         auto scene = videoScene(fileId);
         auto entries = scene.value("media").toArray();
@@ -300,11 +316,11 @@ private slots:
         scene["media"] = entries;
         QVERIFY(QMetaObject::invokeMethod(&controller, "onRemoteSceneStart", Qt::DirectConnection,
             Q_ARG(QString, QStringLiteral("range-owner")), Q_ARG(QJsonObject, scene)));
-        auto* player = controller.findChild<QMediaPlayer*>();
+        auto* player = controller.findChild<ResidentVideoPlayer*>();
         QVERIFY(player);
         int wraps = 0;
         qint64 previous = 0;
-        connect(player, &QMediaPlayer::positionChanged, &controller, [&](qint64 pos) {
+        connect(player, &ResidentVideoPlayer::positionChanged, &controller, [&](qint64 pos) {
             if (previous >= 1500 && pos == 1000) ++wraps;
             previous = pos;
         });
@@ -336,6 +352,7 @@ private slots:
             Q_ARG(QString, QStringLiteral("range-owner")),
             Q_ARG(QString, QStringLiteral("video-lifecycle-test-run"))));
         files.removeReceivedFileMapping(fileId);
+        residency.release(residentOwner);
     }
 
     void activeVideoDecoderStopsWithoutNestedEventProcessing()
@@ -348,6 +365,10 @@ private slots:
         const QString fileId(64, QLatin1Char('a'));
         FileManager files;
         files.registerReceivedFilePath(fileId, fixture);
+        const QString residentOwner = UploadManager::residencyOwnerId({}, 0, fileId);
+        auto& residency = MediaResidencyManager::instance();
+        residency.acquire(residentOwner, fixture);
+        QTRY_VERIFY_WITH_TIMEOUT(residency.ready(residentOwner), 60000);
         RemoteSceneController controller(&files, nullptr);
         QSignalSpy teardownSpy(&controller, &RemoteSceneController::teardownSettled);
         const QJsonObject scene = videoScene(fileId);
@@ -358,9 +379,10 @@ private slots:
             Q_ARG(QString, QStringLiteral("sender-video")),
             Q_ARG(QJsonObject, scene)));
 
-        QPointer<QMediaPlayer> player = controller.findChild<QMediaPlayer*>();
+        QPointer<ResidentVideoPlayer> player = controller.findChild<ResidentVideoPlayer*>();
         if (!player) {
             files.removeReceivedFileMapping(fileId);
+        residency.release(residentOwner);
             QSKIP("The installed multimedia backend cannot decode the optional MP4 fixture");
         }
         const QList<QVideoSink*> sinks =
@@ -392,6 +414,7 @@ private slots:
         QTRY_COMPARE_WITH_TIMEOUT(teardownSpy.count(), 1, 2000);
         QVERIFY(unrelatedQueuedCallbackRan);
         files.removeReceivedFileMapping(fileId);
+        residency.release(residentOwner);
     }
 
     void emptySessionTeardownIsAsynchronousAndIdempotent()
@@ -569,16 +592,21 @@ private slots:
         const QString fileId(64, QLatin1Char('b'));
         FileManager files;
         files.registerReceivedFilePath(fileId, fixture);
+        const QString residentOwner = UploadManager::residencyOwnerId({}, 0, fileId);
+        auto& residency = MediaResidencyManager::instance();
+        residency.acquire(residentOwner, fixture);
+        QTRY_VERIFY_WITH_TIMEOUT(residency.ready(residentOwner), 60000);
         RemoteSceneController controller(&files, nullptr);
         QJsonObject scene = videoScene(fileId);
         QVERIFY(QMetaObject::invokeMethod(
             &controller, "onRemoteSceneStart", Qt::DirectConnection,
             Q_ARG(QString, QStringLiteral("video-snapshot-owner")),
             Q_ARG(QJsonObject, scene)));
-        QMediaPlayer* player = controller.findChild<QMediaPlayer*>();
+        ResidentVideoPlayer* player = controller.findChild<ResidentVideoPlayer*>();
         QAudioOutput* audio = controller.findChild<QAudioOutput*>();
         if (!player) {
             files.removeReceivedFileMapping(fileId);
+        residency.release(residentOwner);
             QSKIP("The installed multimedia backend cannot decode the optional MP4 fixture");
         }
         QVERIFY(audio);
@@ -616,6 +644,7 @@ private slots:
         QVERIFY(audio->isMuted());
         QVERIFY(player->playbackState() != QMediaPlayer::PlayingState);
         files.removeReceivedFileMapping(fileId);
+        residency.release(residentOwner);
     }
 
     void renderGraphReadinessFailsClosedWhenWindowIsLost()

@@ -11,7 +11,7 @@ C++ Qt application for the Mouffette media sharing system.
 
 ```bash
 # Install Qt6 via Homebrew
-brew install qt cmake ninja
+brew install qt cmake ninja ffmpeg pkg-config
 ```
 
 ### Windows
@@ -19,7 +19,7 @@ brew install qt cmake ninja
 - CMake, Ninja, Qt 6.11+, OpenSSL and the matching MinGW toolchain
 
 ```powershell
-C:\msys64\usr\bin\bash.exe -lc "pacman -S --needed mingw-w64-ucrt-x86_64-toolchain mingw-w64-ucrt-x86_64-cmake mingw-w64-ucrt-x86_64-ninja mingw-w64-ucrt-x86_64-qt6-base mingw-w64-ucrt-x86_64-qt6-tools mingw-w64-ucrt-x86_64-qt6-imageformats mingw-w64-ucrt-x86_64-qt6-websockets mingw-w64-ucrt-x86_64-qt6-declarative mingw-w64-ucrt-x86_64-qt6-multimedia mingw-w64-ucrt-x86_64-qt6-svg mingw-w64-ucrt-x86_64-openssl"
+C:\msys64\usr\bin\bash.exe -lc "pacman -S --needed mingw-w64-ucrt-x86_64-toolchain mingw-w64-ucrt-x86_64-cmake mingw-w64-ucrt-x86_64-ninja mingw-w64-ucrt-x86_64-qt6-base mingw-w64-ucrt-x86_64-qt6-tools mingw-w64-ucrt-x86_64-qt6-imageformats mingw-w64-ucrt-x86_64-qt6-websockets mingw-w64-ucrt-x86_64-qt6-declarative mingw-w64-ucrt-x86_64-qt6-multimedia mingw-w64-ucrt-x86_64-qt6-svg mingw-w64-ucrt-x86_64-ffmpeg mingw-w64-ucrt-x86_64-pkgconf mingw-w64-ucrt-x86_64-openssl"
 ```
 
 ## Building
@@ -157,6 +157,14 @@ complete release contract and validation checklist.
 - **Auto-start**: Connects to server automatically on launch
 - **Background operation**: Runs silently in the background
 - **Quick access**: Click tray icon to show/hide main window
+
+## Media memory
+
+Images and videos are completely decoded before they become available. Videos
+retain every frame and their decoded audio in RAM. The RAM button beside Settings
+shows loading, memory use and pressure-driven eviction. See
+[media residency](docs/MEDIA_RESIDENCY.md) for the memory policy, playback contract
+and protocol v5 deployment requirements.
 
 ## Architecture
 

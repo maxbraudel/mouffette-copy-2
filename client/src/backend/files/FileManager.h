@@ -33,6 +33,7 @@ public:
     
     // Get or create file ID for a given file path
     QString getOrCreateFileId(const QString& filePath);
+    void registerVerifiedLocalFile(const QString& fileId, const QString& filePath);
     
     // Associate a media ID with a file ID
     void associateMediaWithFile(const QString& mediaId, const QString& fileId);

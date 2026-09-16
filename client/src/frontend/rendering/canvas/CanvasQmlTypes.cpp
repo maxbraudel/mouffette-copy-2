@@ -4,6 +4,7 @@
 #include "frontend/rendering/canvas/TextOutlineItem.h"
 #include "frontend/rendering/remote/RemoteVideoFrameItem.h"
 #include "backend/config/AppConfig.h"
+#include "backend/media/MediaResidencyManager.h"
 
 #include <QJSEngine>
 #include <QQmlEngine>
@@ -15,6 +16,13 @@
 void registerCanvasQmlTypes() {
     static std::once_flag once;
     std::call_once(once, []() {
+        qmlRegisterSingletonType<MediaResidencyManager>(
+            "Mouffette.Canvas", 1, 0, "MediaMemory",
+            [](QQmlEngine*, QJSEngine*) -> QObject* {
+                auto* manager = &MediaResidencyManager::instance();
+                QQmlEngine::setObjectOwnership(manager, QQmlEngine::CppOwnership);
+                return manager;
+            });
         qmlRegisterType<TextOutlineItem>("Mouffette.Canvas", 1, 0, "TextOutlineItem");
         qmlRegisterType<RemoteVideoFrameItem>("Mouffette.Canvas", 1, 0, "RemoteVideoFrameItem");
         qmlRegisterSingletonType<TextEditHelper>(

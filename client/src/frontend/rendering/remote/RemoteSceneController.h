@@ -17,7 +17,7 @@
 
 class WebSocketClient;
 class FileManager;
-class QMediaPlayer;
+class ResidentVideoPlayer;
 class QVideoSink;
 class QAudioOutput;
 class QQuickWindow;
@@ -96,6 +96,7 @@ private:
 		QString mediaId;
 		QString fileId;
 		QString fileName;
+        QString residencyOwner;
 		QString type; // image | video | text
 		// Text-specific properties
 		QString text;
@@ -153,7 +154,7 @@ private:
 		bool displayReady = false; bool displayStarted = false;
 		bool hiding = false;
 		bool pausedAtEnd = false;
-		bool loaded = false; // true when QMediaPlayer reports Loaded/Buffered
+		bool loaded = false; // true once the complete resident asset is attached
 		bool readyNotified = false; // true after controller counts this media as ready
 		bool fadeInPending = false; // true when fade requested before global activation
 		qint64 startPositionMs = 0; bool hasStartPosition = false;
@@ -169,7 +170,7 @@ private:
 		qint64 lastLiveFrameTimestampMs = -1;
 		QTimer* displayTimer = nullptr; QTimer* playTimer = nullptr; QTimer* pauseTimer = nullptr; QTimer* hideTimer = nullptr;
 		// Video only
-		QMediaPlayer* player = nullptr; QAudioOutput* audio = nullptr;
+		ResidentVideoPlayer* player = nullptr; QAudioOutput* audio = nullptr;
 		QMetaObject::Connection deferredStartConn; // one-shot start after load
 		QMetaObject::Connection primingConn; // one-shot first-frame priming when autoPlay=false
 		QMetaObject::Connection mirrorConn; // multi-span frame mirroring
@@ -256,6 +257,7 @@ private:
 
 
 	private:
+	QString m_residencyGroup;
 	FileManager* m_fileManager = nullptr;
 	
 	WebSocketClient* m_ws = nullptr; // not owned

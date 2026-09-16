@@ -12,37 +12,15 @@ BaseMediaItem {
     property int videoPlaybackErrorCode: 0
     property string videoPlaybackErrorString: ""
     property bool videoHasRenderedFrame: false
-    property bool videoHasPosterFrame: false
     property bool videoFirstFramePrimed: false
-    property bool handoffCovered: false
-    property var handoffFrameSource: null
-    property var posterFrameSource: null
+    property bool residencyReady: false
+    property bool requireInitialSkeleton: true
     readonly property bool remoteFrameMode: remoteFrameSource !== null
-    readonly property bool hasHandoffPoster: handoffPoster.hasFrame
-    readonly property bool showFallbackOverlay: !hasLiveFrame && !hasHandoffPoster
     readonly property bool hasLiveFrame: remoteFrameMode
-                                          ? remoteFrameSurface.hasFrame
-                                          : (videoHasRenderedFrame || videoFirstFramePrimed || localFrameSeen)
-    // Backend poster/priming flags are useful loading hints, but they do not
-    // prove that this particular Qt Quick VideoOutput owns a visible frame.
-    // Only its sink notification may release a drag/drop handoff.
-    readonly property bool handoffContentReady: remoteFrameMode
-                                                ? remoteFrameSurface.hasFrame
-                                                : (hasHandoffPoster || localFrameSeen)
+                                          ? remoteFrameSurface.hasFrame : localFrameSeen
     property bool localFrameSeen: false
-    contentReady: hasLiveFrame
-
-    function fallbackStatusText() {
-        if (videoPlaybackErrorCode !== 0)
-            return "Video error"
-        if (!cppMediaPlayer)
-            return "Video player unavailable"
-        if (videoHasPosterFrame)
-            return "Preparing video frame..."
-        if (videoFirstFramePrimed)
-            return "Waiting for video frame..."
-        return "Loading video..."
-    }
+    contentReady: root.residencyReady && hasLiveFrame
+    initialFramePresented: !requireInitialSkeleton || mediaSurface.firstFramePresented
 
     function restoreBoundPlayer() {
         var previousPlayer = boundMediaPlayer
@@ -79,9 +57,8 @@ BaseMediaItem {
 
         restoreBoundPlayer()
         try {
-            // VideoOutput.videoSink is intentionally read-only in Qt 6. The
-            // supported, accelerated path is to give the VideoOutput object to
-            // QMediaPlayer and let Qt wire its internal sink.
+            // VideoOutput.videoSink is read-only in Qt 6. Give the output to
+            // the resident player, which presents its decoded frames there.
             cppMediaPlayer.videoOutput = videoOutput
             boundMediaPlayer = cppMediaPlayer
             boundFallbackSink = cppVideoSink
@@ -94,15 +71,8 @@ BaseMediaItem {
     MediaSurface {
         id: mediaSurface
         anchors.fill: parent
-        contentReady: root.hasHandoffPoster || root.hasLiveFrame
-        revealImmediately: root.handoffCovered
-
-        RemoteVideoFrameItem {
-            id: handoffPoster
-            anchors.fill: parent
-            z: 0
-            frameSource: root.posterFrameSource || root.handoffFrameSource
-        }
+        requireInitialSkeleton: root.requireInitialSkeleton
+        contentReady: root.residencyReady && root.hasLiveFrame
 
         VideoOutput {
             id: videoOutput
@@ -126,6 +96,11 @@ BaseMediaItem {
         }
     }
 
+    onResidencyReadyChanged: {
+        if (!residencyReady) localFrameSeen = false
+        else Qt.callLater(bindPlayerToOutput)
+    }
+
     onCppMediaPlayerChanged: {
         // Delegate role updates are not atomic: consume the player/sink pair
         // after both bindings have settled for this event-loop turn.
@@ -134,13 +109,6 @@ BaseMediaItem {
 
     onCppVideoSinkChanged: {
         Qt.callLater(bindPlayerToOutput)
-    }
-
-    onLocalFrameSeenChanged: {
-        if (localFrameSeen && posterFrameSource
-                && typeof posterFrameSource.clear === "function") {
-            posterFrameSource.clear()
-        }
     }
 
     onVisibleChanged: {
@@ -161,7 +129,7 @@ BaseMediaItem {
         target: root.cppMediaPlayer
         ignoreUnknownSignals: true
         function onPlaybackStateChanged(state) {
-            if (state === 0)
+            if (!root.residencyReady)
                 root.localFrameSeen = false
         }
     }
@@ -174,30 +142,4 @@ BaseMediaItem {
         }
     }
 
-    Rectangle {
-        anchors.fill: parent
-        visible: root.showFallbackOverlay && !root.remoteFrameMode
-        color: "transparent"
-        border.width: 0
-
-        Text {
-            anchors.centerIn: parent
-            color: "#d7deea"
-            font.pixelSize: 12
-            text: root.fallbackStatusText()
-        }
-    }
-
-    Text {
-        anchors.left: parent.left
-        anchors.leftMargin: 6
-        anchors.bottom: parent.bottom
-        anchors.bottomMargin: 4
-        visible: root.videoPlaybackErrorCode !== 0 && root.videoPlaybackErrorString.length > 0
-        color: "#ffb4b4"
-        font.pixelSize: 10
-        text: root.videoPlaybackErrorString
-        elide: Text.ElideRight
-        width: Math.max(0, parent.width - 12)
-    }
 }

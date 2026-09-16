@@ -645,6 +645,7 @@ private slots:
         }
         QVERIFY(stages.contains(QStringLiteral("screen_render_graph_ready")));
         QVERIFY(stages.contains(QStringLiteral("file_validated")));
+        QVERIFY(stages.contains(QStringLiteral("media_memory_ready")));
         QVERIFY(stages.contains(QStringLiteral("image_decoded")));
         QVERIFY(stages.contains(QStringLiteral("image_texture_ready")));
     }
@@ -662,7 +663,7 @@ private slots:
         QHash<QString, QString> mediaIds{{QStringLiteral("obsolete"), QStringLiteral("old")}};
         const QJsonArray checklist = SceneRunCoordinator::createLocalChecklist(input, &mediaIds);
         QCOMPARE(checklist, SceneRunCoordinator::createLocalChecklist(input));
-        QCOMPARE(mediaIds.size(), 3);
+        QCOMPARE(mediaIds.size(), 4);
         for (const QJsonValue& value : checklist) {
             const QJsonObject entry = value.toObject();
             QCOMPARE(entry.keys(), (QStringList{"itemId", "ready", "stage"}));

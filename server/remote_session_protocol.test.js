@@ -21,7 +21,7 @@ const { MouffetteServer } = require('./server');
     const signature = crypto.sign(null,
         challengePayload({ ...challenge, runtimeId, instanceId }), keys.privateKey);
     const response = {
-        protocolVersion: 4,
+        protocolVersion: 5,
         serverBootId,
         runtimeId,
         instanceId,
@@ -127,7 +127,7 @@ function addAuthenticationCandidate(server, connectionId, keyPair, runtimeId,
     };
     server.clients.set(connectionId, client);
     const response = {
-        protocolVersion: 4,
+        protocolVersion: 5,
         serverBootId: server.serverBootId,
         runtimeId,
         instanceId,

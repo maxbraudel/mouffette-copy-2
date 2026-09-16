@@ -1,4 +1,5 @@
 #include "backend/runtime/ApplicationRuntime.h"
+#include "backend/media/MediaResidencyManager.h"
 #include "backend/runtime/ApplicationActivityMonitor.h"
 #include "frontend/managers/ui/RemoteClientState.h"
 #include "backend/network/WebSocketClient.h"
@@ -33,6 +34,7 @@
 #include "frontend/handlers/UploadSignalConnector.h"
 #include <QHostInfo>
 #include <QGuiApplication>
+#include <QEvent>
 
 // Forward declaration for system UI extraction
 #include <QDebug>
@@ -144,25 +146,10 @@ QString sourceIdentityForPath(const QString& canonicalPath) {
         .arg(info.lastModified().toMSecsSinceEpoch());
 }
 
-QString sha256ForPath(const QString& canonicalPath) {
-    QFile file(canonicalPath);
-    if (!file.open(QIODevice::ReadOnly)) {
-        return {};
-    }
-    QCryptographicHash hash(QCryptographicHash::Sha256);
-    while (!file.atEnd()) {
-        const QByteArray chunk = file.read(4 * 1024 * 1024);
-        if (chunk.isEmpty() && file.error() != QFileDevice::NoError) {
-            return {};
-        }
-        hash.addData(chunk);
-    }
-    return QString::fromLatin1(hash.result().toHex());
-}
+
 }
 
 #ifdef Q_OS_MACOS
-#include "backend/platform/macos/MacVideoThumbnailer.h"
 #include "backend/platform/macos/MacWindowManager.h"
 #endif
 #include <QSet>
@@ -263,6 +250,11 @@ ApplicationRuntime::ApplicationRuntime(const RuntimeProfileContext& runtimeProfi
       m_fileWatcher(new FileWatcher(this)),
       m_navigationManager(new ScreenNavigationManager(this))
 {
+    connect(&MediaResidencyManager::instance(), &MediaResidencyManager::errorOccurred,
+            this, [](const QString& owner, const QString& reason) {
+        if (owner.startsWith(QLatin1String("remote:")))
+            TOAST_ERROR(QStringLiteral("Received media could not be prepared: %1").arg(reason));
+    });
     m_controlledDisconnectTimer = new QTimer(this);
     m_controlledDisconnectTimer->setSingleShot(true);
     connect(m_controlledDisconnectTimer, &QTimer::timeout,
@@ -388,6 +380,17 @@ ApplicationRuntime::ApplicationRuntime(const RuntimeProfileContext& runtimeProfi
             }
         });
     }
+    if (QCoreApplication::instance()) QCoreApplication::instance()->installEventFilter(this);
+    connect(m_uploadManager, &UploadManager::incomingFileReadersChanged, this, [this]() {
+        const auto sessions = m_readerTeardownPendingSessionIds;
+        for (const auto& session : sessions) {
+            if (!m_uploadManager->incomingFileReadersSettled({session})) continue;
+            m_readerTeardownPendingSessionIds.remove(session);
+            handleRemoteRendererTeardownSettled(session, true);
+        }
+        finishTerminalIncomingCacheCleanupIfReady();
+        if (m_cleanShutdownPrepared) finishCleanShutdownIncomingCacheTeardownIfReady();
+    });
     m_remoteSceneController = new RemoteSceneController(
         m_fileManager, m_webSocketClient, this);
     connect(m_remoteSceneController, &RemoteSceneController::teardownSettled,
@@ -1015,19 +1018,16 @@ QList<ProjectMediaReference> ApplicationRuntime::collectProjectMediaReferences(
         const QString identity = sourceIdentityForPath(canonicalPath);
         ProjectMediaReference reference = previousByMediaId.value(media->mediaId());
         reference.mediaId = media->mediaId();
-        if (reference.canonicalSourcePath != canonicalPath
-            || reference.sourceIdentity != identity
-            || reference.sha256.isEmpty()) {
-            reference.canonicalSourcePath = canonicalPath;
-            reference.sourceIdentity = identity;
-            reference.sha256 = sha256ForPath(canonicalPath);
-            reference.assetId = reference.sha256;
-        }
+        reference.canonicalSourcePath = canonicalPath;
+        reference.sourceIdentity = identity;
+        // Canvas import owns asynchronous content verification. Autosave must
+        // never reread a whole movie on the GUI thread.
+        reference.sha256 = media->fileId();
+        reference.assetId = reference.sha256;
+        reference.pendingImport = reference.sha256.isEmpty();
         reference.mediaType = media->isVideo()
             ? QStringLiteral("video") : QStringLiteral("image");
-        if (!reference.sha256.isEmpty()) {
-            references.append(reference);
-        }
+        references.append(reference);
     }
     return references;
 }
@@ -1069,8 +1069,7 @@ void ApplicationRuntime::restoreProjectCanvas(ClientWorkspace& session) {
         if (canonicalPath.isEmpty()
             || canonicalPath != reference.canonicalSourcePath
             || identity.isEmpty()
-            || identity != reference.sourceIdentity
-            || sha256ForPath(canonicalPath) != reference.sha256) {
+            || identity != reference.sourceIdentity) {
             invalidMediaIds.insert(reference.mediaId);
             continue;
         }
@@ -1267,8 +1266,7 @@ void ApplicationRuntime::validateAllProjectSources() {
                 canonicalExistingPath(reference.canonicalSourcePath);
             const bool valid = !canonicalPath.isEmpty()
                 && canonicalPath == reference.canonicalSourcePath
-                && sourceIdentityForPath(canonicalPath) == reference.sourceIdentity
-                && sha256ForPath(canonicalPath) == reference.sha256;
+                && sourceIdentityForPath(canonicalPath) == reference.sourceIdentity;
             if (valid) {
                 validMediaIds.insert(reference.mediaId);
                 retainedReferences.append(reference);
@@ -2492,7 +2490,8 @@ void ApplicationRuntime::startNextPendingRendererTeardown(
     // returns false and its eventual teardownSettled signal re-enters here.
     for (const QString& remoteSessionId :
          std::as_const(m_pendingRendererTeardownOrder)) {
-        if (remoteSessionId == excludedRemoteSessionId) continue;
+        if (remoteSessionId == excludedRemoteSessionId
+            || m_readerTeardownPendingSessionIds.contains(remoteSessionId)) continue;
         const bool requested =
             m_pendingRendererTeardowns.contains(remoteSessionId)
             || m_terminalRendererPendingSessionIds.contains(remoteSessionId)
@@ -2590,7 +2589,8 @@ void ApplicationRuntime::finishTerminalIncomingCacheCleanupIfReady()
     if (!m_terminalIncomingCleanupActive
         || m_terminalIncomingCacheTeardownStarted
         || !m_terminalRendererPendingSessionIds.isEmpty()
-        || !m_uploadManager) {
+        || !m_uploadManager
+        || !m_uploadManager->incomingFileReadersSettled(m_terminalIncomingSessionFilter)) {
         return;
     }
 
@@ -2696,6 +2696,14 @@ void ApplicationRuntime::handleRemoteRendererTeardownSettled(
         return;
     }
     const PendingRendererTeardown teardown = pending.value();
+    if (sceneStopped && m_uploadManager) {
+        m_uploadManager->beginIncomingFileReaderTeardown({remoteSessionId});
+        if (!m_uploadManager->incomingFileReadersSettled({remoteSessionId})) {
+            m_readerTeardownPendingSessionIds.insert(remoteSessionId);
+            startNextPendingRendererTeardown(remoteSessionId);
+            return;
+        }
+    }
 
     RemoteCacheStore::CommitResult cacheResult;
     bool uploadsAborted = false;
@@ -3639,7 +3647,8 @@ void ApplicationRuntime::finishCleanShutdownIncomingCacheTeardownIfReady()
 {
     if (m_cleanShutdownIncomingCacheTeardownStarted
         || !m_cleanShutdownRendererPendingSessionIds.isEmpty()
-        || !m_uploadManager) {
+        || !m_uploadManager
+        || !m_uploadManager->incomingFileReadersSettled()) {
         return;
     }
     m_cleanShutdownIncomingCacheTeardownStarted = true;
@@ -3651,11 +3660,27 @@ void ApplicationRuntime::finishCleanShutdownIncomingCacheTeardownIfReady()
                     << cleanup.errorCode
                     << "failed scopes" << cleanup.cleanupErrorScopes;
     }
+    if (m_quitDeferredForReaders) {
+        finishCleanShutdown();
+        QTimer::singleShot(0, QCoreApplication::instance(), &QCoreApplication::quit);
+    }
+}
+
+bool ApplicationRuntime::eventFilter(QObject* watched, QEvent* event)
+{
+    if (watched == QCoreApplication::instance() && event->type() == QEvent::Quit
+        && !m_cleanShutdownIncomingCacheTeardownStarted) {
+        m_quitDeferredForReaders = true;
+        prepareCleanShutdown();
+        return true;
+    }
+    return QObject::eventFilter(watched, event);
 }
 
 void ApplicationRuntime::finishCleanShutdown()
 {
-    if (m_cleanShutdownFinished) return;
+    if (m_cleanShutdownFinished || (m_quitDeferredForReaders
+        && !m_cleanShutdownIncomingCacheTeardownStarted)) return;
     m_cleanShutdownFinished = true;
     if (m_connectionManager) m_connectionManager->disconnect();
     else if (m_webSocketClient) m_webSocketClient->disconnect();

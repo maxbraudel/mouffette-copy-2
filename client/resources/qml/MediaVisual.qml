@@ -10,14 +10,11 @@ Item {
     property bool textEditable: false
     property bool freeResizePreview: false
     property QtObject editingSession: null
-    property bool handoffCovered: false
-    property var handoffFrameSource: null
 
     readonly property var visualItem: visualLoader.item
     readonly property bool editing: !!(visualItem && visualItem.editing === true)
     readonly property bool contentReady: !!(visualItem && visualItem.contentReady === true)
-    readonly property bool handoffContentReady: !!visualItem
-                                                && visualItem.handoffContentReady === true
+    readonly property bool initialFramePresented: !!(visualItem && visualItem.initialFramePresented === true)
 
     signal primaryPressed(string mediaId, bool additive)
     signal textCommitRequested(string mediaId, string text)
@@ -64,9 +61,9 @@ Item {
             mediaScale: 1.0
             mediaZ: 0
             selected: root.selected
-            handoffCovered: root.handoffCovered
-            handoffFrameSource: root.handoffFrameSource
-            imageSource: root.media ? root.media.sourceUrl : ""
+            residentFrameSource: root.media ? (root.media.residentFrameSource || null) : null
+            residencyReady: !!root.media && root.media.residencyReady === true
+            requireInitialSkeleton: !!root.media && root.media.canvasMedia === true
         }
     }
 
@@ -81,18 +78,14 @@ Item {
             mediaScale: 1.0
             mediaZ: 0
             selected: root.selected
-            handoffCovered: root.handoffCovered
-            handoffFrameSource: root.handoffFrameSource
-            posterFrameSource: root.media
-                               ? (root.media.videoPosterFrameSource || null)
-                               : null
+            residencyReady: !!root.media && root.media.residencyReady === true
+            requireInitialSkeleton: !!root.media && root.media.canvasMedia === true
             cppMediaPlayer: root.media ? (root.media.videoPlayerPtr || null) : null
             cppVideoSink: root.media ? (root.media.videoSinkPtr || null) : null
             remoteFrameSource: root.media ? (root.media.remoteFrameSource || null) : null
             videoPlaybackErrorCode: root.media ? (root.media.videoPlaybackErrorCode || 0) : 0
             videoPlaybackErrorString: root.media ? (root.media.videoPlaybackErrorString || "") : ""
             videoHasRenderedFrame: !!(root.media && root.media.videoHasRenderedFrame)
-            videoHasPosterFrame: !!(root.media && root.media.videoHasPosterFrame)
             videoFirstFramePrimed: !!(root.media && root.media.videoFirstFramePrimed)
         }
     }
