@@ -248,20 +248,43 @@ void CanvasDocument::rebuildScreenRects()
 
 void CanvasDocument::setCamera(qreal scale, qreal panX, qreal panY)
 {
-    if (!std::isfinite(scale) || scale <= 0.0001
+    if (!std::isfinite(scale) || scale <= 0.0
         || !std::isfinite(panX) || !std::isfinite(panY)) return;
-    if (qFuzzyCompare(1.0 + m_cameraScale, 1.0 + scale)
+    if (m_hasCamera && !m_hasNormalizedCamera
+        && qFuzzyCompare(m_cameraScale, scale)
         && qFuzzyCompare(1.0 + m_cameraPanX, 1.0 + panX)
         && qFuzzyCompare(1.0 + m_cameraPanY, 1.0 + panY)) return;
+    m_hasCamera = true;
+    m_hasNormalizedCamera = false;
+    setCameraProjection(scale, panX, panY);
+    emit cameraChanged();
+}
+
+void CanvasDocument::setCameraProjection(qreal scale, qreal panX, qreal panY)
+{
+    if (!std::isfinite(scale) || scale <= 0.0
+        || !std::isfinite(panX) || !std::isfinite(panY)) return;
     m_cameraScale = scale;
     m_cameraPanX = panX;
     m_cameraPanY = panY;
+}
+
+void CanvasDocument::setCameraView(const QPointF& center, qreal squareSceneSize)
+{
+    if (!std::isfinite(center.x()) || !std::isfinite(center.y())
+        || !std::isfinite(squareSceneSize) || squareSceneSize <= 0.0) return;
+    if (m_hasNormalizedCamera && m_cameraCenter == center
+        && qFuzzyCompare(m_cameraSquareSceneSize, squareSceneSize)) return;
+    m_hasCamera = true;
+    m_hasNormalizedCamera = true;
+    m_cameraCenter = center;
+    m_cameraSquareSceneSize = squareSceneSize;
     emit cameraChanged();
 }
 
 void CanvasDocument::resetCamera()
 {
-    setCamera(1.0, 0.0, 0.0);
+    setCameraView({}, 1000.0);
 }
 
 void CanvasDocument::setRemoteCursor(bool visible,
@@ -470,7 +493,7 @@ QJsonObject CanvasDocument::serializeProjectState() const
         media.replace(index, item);
     }
     root.insert(QStringLiteral("media"), media);
-    root.insert(QStringLiteral("viewport"), QJsonObject{
+    QJsonObject viewport{
         {QStringLiteral("m11"), m_cameraScale},
         {QStringLiteral("m12"), 0.0},
         {QStringLiteral("m21"), 0.0},
@@ -479,7 +502,16 @@ QJsonObject CanvasDocument::serializeProjectState() const
         {QStringLiteral("dy"), m_cameraPanY},
         {QStringLiteral("centerX"), 0.0},
         {QStringLiteral("centerY"), 0.0}
-    });
+    };
+    if (m_hasNormalizedCamera) {
+        viewport.insert(QStringLiteral("cameraVersion"), 2);
+        viewport.insert(QStringLiteral("centerX"), m_cameraCenter.x());
+        viewport.insert(QStringLiteral("centerY"), m_cameraCenter.y());
+        viewport.insert(QStringLiteral("squareSceneSize"), m_cameraSquareSceneSize);
+    }
+    // A new project can be saved before its screens or viewport are available.
+    // Such a project still needs its first fit when it is opened.
+    if (m_hasCamera) root.insert(QStringLiteral("viewport"), viewport);
     return root;
 }
 
@@ -492,6 +524,25 @@ bool CanvasDocument::restoreProjectState(
         || state.value(QStringLiteral("renderSchemaVersion")).toInt(-1) != 2) {
         return false;
     }
+    // Install the saved camera before publishing topology: screensChanged can
+    // trigger the initial fit when a controller already has a viewport.
+    const QJsonObject viewport = state.value(QStringLiteral("viewport")).toObject();
+    const qreal invalid = std::numeric_limits<qreal>::quiet_NaN();
+    const QPointF center(viewport.value(QStringLiteral("centerX")).toDouble(invalid),
+                         viewport.value(QStringLiteral("centerY")).toDouble(invalid));
+    const qreal squareSize = viewport.value(QStringLiteral("squareSceneSize")).toDouble(invalid);
+    if (viewport.value(QStringLiteral("cameraVersion")).toInt() == 2
+        && std::isfinite(center.x()) && std::isfinite(center.y())
+        && std::isfinite(squareSize) && squareSize > 0.0) {
+        setCameraProjection(viewport.value(QStringLiteral("m11")).toDouble(1.0),
+                            viewport.value(QStringLiteral("dx")).toDouble(),
+                            viewport.value(QStringLiteral("dy")).toDouble());
+        setCameraView(center, squareSize);
+    } else if (!viewport.isEmpty()) {
+        setCamera(viewport.value(QStringLiteral("m11")).toDouble(1.0),
+                  viewport.value(QStringLiteral("dx")).toDouble(),
+                  viewport.value(QStringLiteral("dy")).toDouble());
+    }
     QList<ScreenInfo> restoredScreens;
     for (const QJsonValue& value : state.value(QStringLiteral("screens")).toArray()) {
         if (value.isObject()) restoredScreens.append(ScreenInfo::fromJson(value.toObject()));
@@ -499,12 +550,6 @@ bool CanvasDocument::restoreProjectState(
     if (!restoredScreens.isEmpty()) setScreens(restoredScreens);
 
     insertProjectMedia(state, sourcePathByMediaId, skippedMediaIds, false);
-    const QJsonObject viewport = state.value(QStringLiteral("viewport")).toObject();
-    if (!viewport.isEmpty()) {
-        setCamera(viewport.value(QStringLiteral("m11")).toDouble(1.0),
-                  viewport.value(QStringLiteral("dx")).toDouble(),
-                  viewport.value(QStringLiteral("dy")).toDouble());
-    }
     clearSelection();
     return true;
 }

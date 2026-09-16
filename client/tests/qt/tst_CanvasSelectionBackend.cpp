@@ -14,6 +14,7 @@
 #include <QQuickView>
 #include <QTemporaryDir>
 #include <QtTest>
+#include <limits>
 
 #include "backend/domain/canvas/CanvasDocument.h"
 #include "backend/domain/media/CanvasMedia.h"
@@ -71,6 +72,9 @@ struct Fixture {
 
     bool initialize()
     {
+        // These media interaction fixtures use an explicit 1:1 camera.
+        // Camera initialization and responsive framing are tested separately.
+        document.setCamera(1.0, 0.0, 0.0);
         QString error;
         if (!controller.initialize(&error)) return false;
         controller.setProjectEditingEnabled(true);

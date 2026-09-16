@@ -2255,7 +2255,6 @@ void ApplicationRuntime::handleRemoteSessionReady(const QJsonObject& envelope,
             if (m_navigationManager) m_navigationManager->revealCanvas();
             if (!hadProject) {
                 session->canvas->requestDeferredInitialRecenter(53);
-                session->canvas->recenterWithMargin(53);
             }
             m_preserveViewportOnReconnect = false;
             m_canvasRevealedForCurrentClient = true;

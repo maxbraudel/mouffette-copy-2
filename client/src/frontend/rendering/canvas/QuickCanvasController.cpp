@@ -247,8 +247,12 @@ QuickCanvasController::QuickCanvasController(CanvasDocument* document,
         }
         publishSelection();
     });
-    connect(document, &CanvasDocument::screensChanged,
-            this, &QuickCanvasController::publishScreens);
+    connect(document, &CanvasDocument::screensChanged, this, [this] {
+        publishScreens();
+        ensureInitialFit(m_initialFitMargin);
+    });
+    connect(document, &CanvasDocument::cameraChanged,
+            this, &QuickCanvasController::publishCamera);
     connect(document, &CanvasDocument::remoteCursorChanged,
             this, &QuickCanvasController::publishRemoteCursor);
     connect(document, &CanvasDocument::editsLockedChanged, this, [this] {
@@ -280,7 +284,6 @@ bool QuickCanvasController::initialize(QString* errorMessage)
 void QuickCanvasController::registerWindow(QQuickWindow* window)
 {
     m_renderWindow = window;
-    ensureInitialFit();
 }
 
 QQuickWindow* QuickCanvasController::renderWindow() const
@@ -310,9 +313,7 @@ bool QuickCanvasController::editsLocked() const
 
 void QuickCanvasController::publishAll()
 {
-    m_viewScale = m_document->cameraScale();
-    m_panX = m_document->cameraPanX();
-    m_panY = m_document->cameraPanY();
+    publishCamera();
     publishScreens();
     publishMedia();
     publishSelection();
@@ -503,20 +504,35 @@ void QuickCanvasController::resetView()
 {
     if (!m_document) return;
     m_document->resetCamera();
-    updateCamera(1.0, 0.0, 0.0);
 }
 
-void QuickCanvasController::recenterView()
+void QuickCanvasController::recenterView(int marginPx)
+{
+    if (m_viewportSize.isEmpty()) return;
+    if (!fitToScreens(marginPx)) resetView();
+}
+
+bool QuickCanvasController::fitToScreens(int marginPx)
 {
     const QRectF bounds = allScreenBounds(m_document);
-    if (bounds.isEmpty()) return;
-    const qreal width = m_renderWindow ? m_renderWindow->width() : bounds.width() + 106.0;
-    const qreal height = m_renderWindow ? m_renderWindow->height() : bounds.height() + 106.0;
-    const qreal scale = std::clamp(std::min((width - 106.0) / bounds.width(),
-                                            (height - 106.0) / bounds.height()),
-                                   0.2, 10.0);
-    updateCamera(scale, width / 2.0 - bounds.center().x() * scale,
-                 height / 2.0 - bounds.center().y() * scale);
+    return fitToBounds(bounds.x(), bounds.y(), bounds.width(), bounds.height(), marginPx);
+}
+
+bool QuickCanvasController::fitToBounds(qreal x, qreal y, qreal width,
+                                       qreal height, qreal marginPx)
+{
+    if (!m_document || m_viewportSize.isEmpty()
+        || !std::isfinite(x) || !std::isfinite(y)
+        || !std::isfinite(width) || !std::isfinite(height)
+        || !std::isfinite(marginPx) || width <= 0.0 || height <= 0.0) return false;
+    const qreal margin = std::max<qreal>(0.0, marginPx);
+    const qreal availableWidth = std::max<qreal>(1.0, m_viewportSize.width() - 2.0 * margin);
+    const qreal availableHeight = std::max<qreal>(1.0, m_viewportSize.height() - 2.0 * margin);
+    const qreal scale = std::min(availableWidth / width, availableHeight / height);
+    // Fitting is allowed outside the manual zoom range.
+    m_document->setCameraView({x + width / 2.0, y + height / 2.0},
+        std::min(m_viewportSize.width(), m_viewportSize.height()) / scale);
+    return true;
 }
 
 void QuickCanvasController::setTextToolActive(bool active)
@@ -553,42 +569,99 @@ void QuickCanvasController::cancelPendingEdits()
 
 qreal QuickCanvasController::currentViewScale() const
 {
-    return m_viewScale > 0.0001 ? m_viewScale : 1.0;
+    return m_viewScale > 0.0 ? m_viewScale : 1.0;
 }
 
 void QuickCanvasController::ensureInitialFit(int marginPx)
 {
-    if (m_initialFitDone || !m_renderWindow || !m_document
+    m_initialFitMargin = marginPx;
+    if (m_viewportSize.isEmpty() || !m_document || m_document->hasCamera()
         || !m_document->hasActiveScreens()) return;
-    const QRectF bounds = allScreenBounds(m_document);
-    if (bounds.isEmpty()) return;
-    const qreal availableWidth = std::max<qreal>(1.0, m_renderWindow->width() - 2.0 * marginPx);
-    const qreal availableHeight = std::max<qreal>(1.0, m_renderWindow->height() - 2.0 * marginPx);
-    const qreal scale = std::clamp(std::min(availableWidth / bounds.width(),
-                                            availableHeight / bounds.height()),
-                                   0.2, 10.0);
-    updateCamera(scale,
-        m_renderWindow->width() / 2.0 - bounds.center().x() * scale,
-        m_renderWindow->height() / 2.0 - bounds.center().y() * scale);
-    m_initialFitDone = true;
+    fitToScreens(marginPx);
+}
+
+void QuickCanvasController::setViewportSize(qreal width, qreal height)
+{
+    if (!std::isfinite(width) || !std::isfinite(height)
+        || width <= 0.0 || height <= 0.0) return;
+    const QSizeF size(width, height);
+    if (m_viewportSize == size) return;
+    m_viewportSize = size;
+    publishCamera();
+    ensureInitialFit(m_initialFitMargin);
+}
+
+void QuickCanvasController::publishCamera()
+{
+    if (!m_document) return;
+    qreal scale = m_document->cameraScale();
+    qreal panX = m_document->cameraPanX();
+    qreal panY = m_document->cameraPanY();
+    if (!m_viewportSize.isEmpty()) {
+        const qreal side = std::min(m_viewportSize.width(), m_viewportSize.height());
+        const QPointF viewCenter(m_viewportSize.width() / 2.0, m_viewportSize.height() / 2.0);
+        if (m_document->hasCamera() && !m_document->hasNormalizedCamera()) {
+            // Legacy projects have no saved viewport size. Adopt their pixel
+            // transform in the first valid viewport, then keep only its framing.
+            m_document->setCameraView((viewCenter - QPointF(panX, panY)) / scale,
+                                      side / scale);
+            return; // cameraChanged publishes the normalized projection.
+        }
+        scale = side / m_document->cameraSquareSceneSize();
+        const QPointF pan = viewCenter - m_document->cameraCenter() * scale;
+        panX = pan.x();
+        panY = pan.y();
+    }
+    if (!std::isfinite(scale) || scale <= 0.0
+        || !std::isfinite(panX) || !std::isfinite(panY)) return;
+    m_document->setCameraProjection(scale, panX, panY);
+    if (m_viewScale == scale && m_panX == panX && m_panY == panY) return;
+    m_viewScale = scale;
+    m_panX = panX;
+    m_panY = panY;
+    emit presentationChanged();
 }
 
 void QuickCanvasController::updateCamera(qreal scale, qreal panX, qreal panY)
 {
-    scale = std::clamp(scale, 0.2, 10.0);
-    if (qFuzzyCompare(1.0 + m_viewScale, 1.0 + scale)
-        && qFuzzyCompare(1.0 + m_panX, 1.0 + panX)
-        && qFuzzyCompare(1.0 + m_panY, 1.0 + panY)) return;
-    m_viewScale = scale;
-    m_panX = panX;
-    m_panY = panY;
-    if (m_document) m_document->setCamera(scale, panX, panY);
-    emit presentationChanged();
+    if (!m_document || !std::isfinite(scale) || scale <= 0.0
+        || !std::isfinite(panX) || !std::isfinite(panY)) return;
+    if (m_viewportSize.isEmpty()) {
+        m_document->setCamera(scale, panX, panY);
+        return;
+    }
+    m_document->setCameraView(
+        {(m_viewportSize.width() / 2.0 - panX) / scale,
+         (m_viewportSize.height() / 2.0 - panY) / scale},
+        std::min(m_viewportSize.width(), m_viewportSize.height()) / scale);
+}
+
+void QuickCanvasController::panBy(qreal dx, qreal dy)
+{
+    if (!m_document || m_viewportSize.isEmpty()
+        || !std::isfinite(dx) || !std::isfinite(dy)) return;
+    m_document->setCameraView(m_document->cameraCenter() - QPointF(dx, dy) / m_viewScale,
+                              m_document->cameraSquareSceneSize());
+}
+
+void QuickCanvasController::zoomAt(qreal x, qreal y, qreal factor)
+{
+    if (!m_document || m_viewportSize.isEmpty() || !std::isfinite(x)
+        || !std::isfinite(y) || !std::isfinite(factor) || factor <= 0.0) return;
+    const qreal zoom = 1000.0 / m_document->cameraSquareSceneSize();
+    // When a fit lies outside [0.2, 10], allow gradual movement back into the
+    // range, but do not allow a gesture to move farther away from it.
+    const qreal nextZoom = std::clamp(zoom * factor,
+                                     std::min(0.2, zoom), std::max(10.0, zoom));
+    if (qFuzzyCompare(zoom, nextZoom)) return;
+    const qreal scale = m_viewScale * (nextZoom / zoom);
+    const QPointF anchor = mapViewPointToScene({x, y});
+    updateCamera(scale, x - anchor.x() * scale, y - anchor.y() * scale);
 }
 
 QPointF QuickCanvasController::mapViewPointToScene(const QPointF& point) const
 {
-    const qreal scale = std::max<qreal>(0.0001, m_viewScale);
+    const qreal scale = currentViewScale();
     return {(point.x() - m_panX) / scale,
             (point.y() - m_panY) / scale};
 }

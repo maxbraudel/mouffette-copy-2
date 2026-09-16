@@ -363,9 +363,9 @@ void QuickCanvasHost::requestDeferredInitialRecenter(int marginPx)
     });
 }
 
-void QuickCanvasHost::recenterWithMargin(int)
+void QuickCanvasHost::recenterWithMargin(int marginPx)
 {
-    if (m_controller) m_controller->recenterView();
+    if (m_controller) m_controller->recenterView(marginPx);
 }
 
 void QuickCanvasHost::hideContentPreservingState()

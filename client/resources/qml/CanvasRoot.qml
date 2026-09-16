@@ -95,8 +95,6 @@ Rectangle {
     property real viewScale: 1.0
     property real panX: 0.0
     property real panY: 0.0
-    property real minScale: 0.2
-    property real maxScale: 10.0
     property real wheelZoomBase: 1.0015
     property real wheelZoomSensitivity: 5.0
     // Transient live-resize overlay state (avoids full model mutation per pointer tick)
@@ -253,19 +251,20 @@ Rectangle {
         }
     }
 
-    onCanvasControllerChanged: {
-        synchronizeTransientState()
-        if (canvasController && hostingWindow)
+    function registerCanvasSurface() {
+        if (!canvasController)
+            return
+        if (hostingWindow)
             canvasController.registerWindow(hostingWindow)
+        canvasController.setViewportSize(width, height)
+        synchronizeTransientState()
     }
-    onHostingWindowChanged: if (canvasController && hostingWindow)
-                                canvasController.registerWindow(hostingWindow)
-    onViewScaleChanged: if (canvasController)
-                            canvasController.updateCamera(viewScale, panX, panY)
-    onPanXChanged: if (canvasController)
-                       canvasController.updateCamera(viewScale, panX, panY)
-    onPanYChanged: if (canvasController)
-                       canvasController.updateCamera(viewScale, panX, panY)
+
+    onCanvasControllerChanged: registerCanvasSurface()
+    onHostingWindowChanged: registerCanvasSurface()
+    onWidthChanged: if (canvasController) canvasController.setViewportSize(width, height)
+    onHeightChanged: if (canvasController) canvasController.setViewportSize(width, height)
+    Component.onCompleted: registerCanvasSurface()
 
     Connections {
         target: root.canvasController
@@ -472,103 +471,36 @@ Rectangle {
             && inputLayer.inputCoordinator.canStartTextToolTap()
     }
 
-    function clampScale(value) {
-        return Math.max(minScale, Math.min(maxScale, value))
+    // The controller owns camera math and publishes one complete transform.
+    // The unhosted surface also supports local pan for interaction fixtures.
+    function panBy(dx, dy) {
+        if (canvasController) {
+            canvasController.panBy(dx, dy)
+        } else {
+            panX += dx
+            panY += dy
+        }
     }
 
     function applyZoomAt(anchorX, anchorY, factor) {
-        if (!isFiniteNumber(factor) || factor <= 0.0)
-            return
-
-        var oldScale = viewScale
-        var nextScale = clampScale(oldScale * factor)
-        if (!isFiniteNumber(nextScale) || Math.abs(nextScale - oldScale) < 0.000001)
-            return
-
-        var worldX = (anchorX - panX) / oldScale
-        var worldY = (anchorY - panY) / oldScale
-
-        viewScale = nextScale
-        panX = anchorX - worldX * nextScale
-        panY = anchorY - worldY * nextScale
+        if (canvasController)
+            canvasController.zoomAt(anchorX, anchorY, factor)
     }
 
     function fitToScreens(marginPx) {
-        if (!screensModel || screensModel.length === 0)
-            return false
-
-        var minX = Number.POSITIVE_INFINITY
-        var minY = Number.POSITIVE_INFINITY
-        var maxX = Number.NEGATIVE_INFINITY
-        var maxY = Number.NEGATIVE_INFINITY
-
-        for (var i = 0; i < screensModel.length; ++i) {
-            var s = screensModel[i]
-            if (!s)
-                continue
-            minX = Math.min(minX, s.x)
-            minY = Math.min(minY, s.y)
-            maxX = Math.max(maxX, s.x + s.width)
-            maxY = Math.max(maxY, s.y + s.height)
-        }
-
-        if (!isFiniteNumber(minX) || !isFiniteNumber(minY) || !isFiniteNumber(maxX) || !isFiniteNumber(maxY))
-            return false
-
-        var boundsW = Math.max(1.0, maxX - minX)
-        var boundsH = Math.max(1.0, maxY - minY)
-        var margin = Math.max(0.0, marginPx || 0.0)
-        var availW = Math.max(1.0, viewport.width - margin * 2.0)
-        var availH = Math.max(1.0, viewport.height - margin * 2.0)
-
-        var sx = availW / boundsW
-        var sy = availH / boundsH
-        var fitScale = Math.min(sx, sy)
-        if (!isFiniteNumber(fitScale) || fitScale <= 0.0)
-            return false
-
-        var cx = (minX + maxX) * 0.5
-        var cy = (minY + maxY) * 0.5
-
-        viewScale = fitScale
-        panX = viewport.width * 0.5 - cx * fitScale
-        panY = viewport.height * 0.5 - cy * fitScale
-        return true
+        return canvasController
+            ? canvasController.fitToScreens(marginPx === undefined ? 53 : marginPx) : false
     }
 
     function recenterView(marginPx) {
-        if (fitToScreens(marginPx === undefined ? 53 : marginPx))
-            return
-        panX = 0.0
-        panY = 0.0
-        viewScale = 1.0
+        if (canvasController)
+            canvasController.recenterView(marginPx === undefined ? 53 : marginPx)
     }
 
     function fitToBounds(boundsX, boundsY, boundsW, boundsH, marginPx) {
-        if (!isFiniteNumber(boundsW) || !isFiniteNumber(boundsH) || boundsW <= 0.0 || boundsH <= 0.0) {
-            recenterView()
-            return
-        }
-
-        var margin = Math.max(0.0, marginPx || 0.0)
-        var availW = Math.max(1.0, viewport.width - margin * 2.0)
-        var availH = Math.max(1.0, viewport.height - margin * 2.0)
-        var sx = availW / boundsW
-        var sy = availH / boundsH
-        var targetScale = clampScale(Math.min(sx, sy))
-
-        if (!isFiniteNumber(targetScale) || targetScale <= 0.0)
-            targetScale = 1.0
-
-        viewScale = targetScale
-
-        var contentW = boundsW * targetScale
-        var contentH = boundsH * targetScale
-        var left = margin + (availW - contentW) * 0.5
-        var top = margin + (availH - contentH) * 0.5
-
-        panX = left - boundsX * targetScale
-        panY = top - boundsY * targetScale
+        if (canvasController)
+            canvasController.fitToBounds(boundsX, boundsY, boundsW, boundsH,
+                                         marginPx === undefined ? 53 : marginPx)
     }
 
     function isZoomModifier(modifiers) {
@@ -1491,8 +1423,8 @@ Rectangle {
                 dragThreshold: 16
                 // Yield to media/resize drags whenever they need the gesture.
                 grabPermissions: PointerHandler.ApprovesTakeOverByAnything
-                property real startPanX: 0.0
-                property real startPanY: 0.0
+                property real lastTranslationX: 0.0
+                property real lastTranslationY: 0.0
                 property bool panSessionActive: false
 
                 onActiveChanged: {
@@ -1504,8 +1436,8 @@ Rectangle {
                             return
                         }
                         panSessionActive = true
-                        startPanX = root.panX
-                        startPanY = root.panY
+                        lastTranslationX = 0.0
+                        lastTranslationY = 0.0
                     } else {
                         if (panSessionActive)
                             inputLayer.inputCoordinator.endPan()
@@ -1516,8 +1448,10 @@ Rectangle {
                 onTranslationChanged: {
                     if (!panSessionActive)
                         return
-                    root.panX = startPanX + translation.x
-                    root.panY = startPanY + translation.y
+                    root.panBy(translation.x - lastTranslationX,
+                               translation.y - lastTranslationY)
+                    lastTranslationX = translation.x
+                    lastTranslationY = translation.y
                 }
 
                 onCanceled: {
@@ -1537,8 +1471,8 @@ Rectangle {
                 dragThreshold: 0
                 grabPermissions: PointerHandler.TakeOverForbidden
                 cursorShape: active ? Qt.ClosedHandCursor : Qt.ArrowCursor
-                property real startPanX: 0.0
-                property real startPanY: 0.0
+                property real lastTranslationX: 0.0
+                property real lastTranslationY: 0.0
                 property bool panSessionActive: false
 
                 onActiveChanged: {
@@ -1549,8 +1483,8 @@ Rectangle {
                             return
                         }
                         panSessionActive = true
-                        startPanX = root.panX
-                        startPanY = root.panY
+                        lastTranslationX = 0.0
+                        lastTranslationY = 0.0
                     } else {
                         if (panSessionActive)
                             inputLayer.inputCoordinator.endPan()
@@ -1561,8 +1495,10 @@ Rectangle {
                 onTranslationChanged: {
                     if (!panSessionActive)
                         return
-                    root.panX = startPanX + translation.x
-                    root.panY = startPanY + translation.y
+                    root.panBy(translation.x - lastTranslationX,
+                               translation.y - lastTranslationY)
+                    lastTranslationX = translation.x
+                    lastTranslationY = translation.y
                 }
 
                 onCanceled: {
@@ -1626,8 +1562,7 @@ Rectangle {
                         var panDx = root.wheelDeltaX(event)
                         var panDy = root.wheelDeltaY(event)
                         if (panDx !== 0.0 || panDy !== 0.0) {
-                            root.panX += panDx
-                            root.panY += panDy
+                            root.panBy(panDx, panDy)
                         }
                         event.accepted = true
                         return

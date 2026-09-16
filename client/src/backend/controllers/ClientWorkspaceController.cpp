@@ -142,6 +142,10 @@ void ClientWorkspaceController::configureWorkspace(ClientWorkspace* workspace) {
                     projectAutosaveTimer, [projectAutosaveTimer] {
                         projectAutosaveTimer->start();
                     });
+            connect(workspace->canvas->document(), &CanvasDocument::cameraChanged,
+                    projectAutosaveTimer, [projectAutosaveTimer] {
+                        projectAutosaveTimer->start();
+                    });
         }
         connect(workspace->canvas, &ICanvasHost::mediaItemAdded, m_runtime,
                 [this, targetEndpointId=workspace->targetEndpointId](CanvasMedia* mediaItem) {

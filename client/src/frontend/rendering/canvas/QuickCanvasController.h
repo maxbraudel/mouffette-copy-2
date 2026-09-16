@@ -114,8 +114,11 @@ public:
     void setShellActive(bool active);
     void updateRemoteCursor(int globalX, int globalY);
     void hideRemoteCursor();
-    void resetView();
-    void recenterView();
+    Q_INVOKABLE void resetView();
+    Q_INVOKABLE void recenterView(int marginPx = 53);
+    Q_INVOKABLE bool fitToScreens(int marginPx = 53);
+    Q_INVOKABLE bool fitToBounds(qreal x, qreal y, qreal width, qreal height,
+                                qreal marginPx = 53);
     void setTextToolActive(bool active);
     qreal currentViewScale() const;
     void ensureInitialFit(int marginPx = 53);
@@ -125,7 +128,10 @@ public:
     bool commitLocalFileDrop(qreal viewX, qreal viewY);
     void cancelLocalFileDrag();
     Q_INVOKABLE void registerWindow(QQuickWindow* window);
+    Q_INVOKABLE void setViewportSize(qreal width, qreal height);
     Q_INVOKABLE void updateCamera(qreal scale, qreal panX, qreal panY);
+    Q_INVOKABLE void panBy(qreal dx, qreal dy);
+    Q_INVOKABLE void zoomAt(qreal x, qreal y, qreal factor);
 
 signals:
     void editingEnabledChanged();
@@ -197,6 +203,7 @@ public slots:
 
 private:
     void publishAll();
+    void publishCamera();
     void publishMedia();
     void publishSelection();
     void publishScreens();
@@ -241,7 +248,8 @@ private:
     bool m_textToolActive = false;
     bool m_shellActive = false;
     bool m_projectEditingEnabled = false;
-    bool m_initialFitDone = false;
+    QSizeF m_viewportSize;
+    int m_initialFitMargin = 53;
     QString m_lastSelectedId;
     QString m_dragMediaId;
     QPointF m_lastSnappedPosition;

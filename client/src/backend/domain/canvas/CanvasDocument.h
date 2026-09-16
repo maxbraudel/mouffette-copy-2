@@ -51,7 +51,16 @@ public:
     QHash<int, QRectF> screenRects() const { return m_screenRects; }
     bool hasActiveScreens() const { return !m_screens.isEmpty(); }
 
+    // Legacy pixel transform, converted on the first valid viewport size.
     void setCamera(qreal scale, qreal panX, qreal panY);
+    bool hasCamera() const { return m_hasCamera; }
+    bool hasNormalizedCamera() const { return m_hasNormalizedCamera; }
+    QPointF cameraCenter() const { return m_cameraCenter; }
+    qreal cameraSquareSceneSize() const { return m_cameraSquareSceneSize; }
+    void setCameraView(const QPointF& center, qreal squareSceneSize);
+    // Compatibility snapshot only: resizing must not change the logical camera
+    // or emit cameraChanged (which schedules project autosave).
+    void setCameraProjection(qreal scale, qreal panX, qreal panY);
     qreal cameraScale() const { return m_cameraScale; }
     qreal cameraPanX() const { return m_cameraPanX; }
     qreal cameraPanY() const { return m_cameraPanY; }
@@ -103,6 +112,10 @@ private:
     QHash<int, QRectF> m_screenRects;
     FileManager* m_fileManager = nullptr;
     QString m_projectId;
+    bool m_hasCamera = false;
+    bool m_hasNormalizedCamera = false;
+    QPointF m_cameraCenter;
+    qreal m_cameraSquareSceneSize = 1000.0;
     qreal m_cameraScale = 1.0;
     qreal m_cameraPanX = 0.0;
     qreal m_cameraPanY = 0.0;
