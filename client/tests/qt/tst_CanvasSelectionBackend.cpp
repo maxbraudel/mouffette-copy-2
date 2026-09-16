@@ -15,6 +15,8 @@
 #include <QTemporaryDir>
 #include <QtTest>
 #include <limits>
+#include <cmath>
+#include <QtQuick/private/qquickpinchhandler_p.h>
 
 #include "backend/domain/canvas/CanvasDocument.h"
 #include "backend/domain/media/CanvasMedia.h"
@@ -305,6 +307,199 @@ private slots:
         CanvasDocument untouched, reopened;
         QVERIFY(reopened.restoreProjectState(untouched.serializeProjectState(), {}));
         QVERIFY(!reopened.hasCamera());
+    }
+
+    void nativePinchUsesOnlyEachMovementDelta()
+    {
+        QPointingDevice trackpad("test trackpad", 0xCAFE,
+            QInputDevice::DeviceType::TouchPad, QPointingDevice::PointerType::Finger,
+            QInputDevice::Capability::Position | QInputDevice::Capability::PixelScroll, 2, 0);
+        Fixture fixture;
+        QVERIFY(fixture.initialize());
+        fixture.view.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&fixture.view));
+#ifdef Q_OS_MACOS
+        MacWindowManager::activateApplicationWindow(&fixture.view);
+#else
+        fixture.view.requestActivate();
+#endif
+        QVERIFY(QTest::qWaitForWindowActive(&fixture.view));
+        auto* pinch = fixture.view.rootObject()->findChild<QQuickPinchHandler*>();
+        QVERIFY(pinch);
+        fixture.document.setCameraView({230, -80}, 1500);
+        const QPointF cursor(fixture.view.width() * .63, fixture.view.height() * .42);
+        auto sceneUnderCursor = [&] {
+            return (cursor - QPointF(fixture.controller.panX(), fixture.controller.panY()))
+                / fixture.controller.viewScale();
+        };
+        auto sendGesture = [&](Qt::NativeGestureType type, qreal value = 0.0) {
+            QNativeGestureEvent event(type, &trackpad, 2, cursor, cursor,
+                fixture.view.mapToGlobal(cursor.toPoint()), value, {});
+            QCoreApplication::sendEvent(&fixture.view, &event);
+        };
+        // A tiny second pinch must not reapply the scale accumulated by the
+        // first one. Wheel zoom and viewport resize between pinches must not
+        // change the interpretation of subsequent native magnification deltas.
+        const QList<QList<qreal>> gestures{{-.2, -.1}, {-.01}, {.01, .02}, {-.005, .005}};
+        for (const auto& deltas : gestures) {
+            qreal expectedScale = fixture.controller.viewScale();
+            const QPointF anchor = sceneUnderCursor();
+            sendGesture(Qt::BeginNativeGesture);
+            QVERIFY(pinch->active());
+            QCOMPARE(fixture.controller.viewScale(), expectedScale);
+            for (qreal delta : deltas) {
+                sendGesture(Qt::ZoomNativeGesture, delta);
+                expectedScale *= 1.0 + delta;
+                QVERIFY2(qAbs(fixture.controller.viewScale() / expectedScale - 1.0) < 1e-9,
+                    qPrintable(QString("Pinch delta %1: expected scale %2, got %3")
+                        .arg(delta).arg(expectedScale).arg(fixture.controller.viewScale())));
+                QVERIFY(QLineF(sceneUnderCursor(), anchor).length() < 1e-8);
+            }
+            sendGesture(Qt::EndNativeGesture);
+            QVERIFY(!pinch->active());
+            QVERIFY(qAbs(fixture.controller.viewScale() / expectedScale - 1.0) < 1e-9);
+            fixture.controller.zoomAt(cursor.x(), cursor.y(), 1.03);
+            fixture.view.resize(fixture.view.width() - 5, fixture.view.height() - 3);
+        }
+    }
+
+    void trackpadControlScrollZoomsAtCursor_data()
+    {
+        QTest::addColumn<int>("direction");
+        QTest::addColumn<bool>("naturalScrolling");
+        QTest::addColumn<bool>("pixelDeltas");
+        for (int direction : {-1, 1})
+            for (bool natural : {false, true})
+                for (bool pixels : {false, true})
+                    QTest::newRow(qPrintable(QString("%1-%2-%3")
+                        .arg(direction > 0 ? "up" : "down")
+                        .arg(natural ? "natural" : "standard")
+                        .arg(pixels ? "pixels" : "angles"))) << direction << natural << pixels;
+    }
+
+    void trackpadControlScrollZoomsAtCursor()
+    {
+        QFETCH(int, direction);
+        QFETCH(bool, naturalScrolling);
+        QFETCH(bool, pixelDeltas);
+        QPointingDevice trackpad("test trackpad", 0xCAFE,
+            QInputDevice::DeviceType::TouchPad, QPointingDevice::PointerType::Finger,
+            QInputDevice::Capability::Position | QInputDevice::Capability::PixelScroll, 2, 0);
+        Fixture fixture;
+        QVERIFY(fixture.initialize());
+        fixture.view.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&fixture.view));
+#ifdef Q_OS_MACOS
+        MacWindowManager::activateApplicationWindow(&fixture.view);
+        constexpr Qt::KeyboardModifier control = Qt::MetaModifier;
+#else
+        fixture.view.requestActivate();
+        constexpr Qt::KeyboardModifier control = Qt::ControlModifier;
+#endif
+        QVERIFY(QTest::qWaitForWindowActive(&fixture.view));
+        fixture.document.setCameraView({120, -50}, 1000);
+        const QPointF cursor(fixture.view.width() * .7, fixture.view.height() * .3);
+        auto sceneUnderCursor = [&] {
+            return (cursor - QPointF(fixture.controller.panX(), fixture.controller.panY()))
+                / fixture.controller.viewScale();
+        };
+        const QPointF anchor = sceneUnderCursor();
+        const qreal originalScale = fixture.controller.viewScale();
+        auto scroll = [&](int fingerDirection, Qt::ScrollPhase phase) {
+            const int sign = fingerDirection * (naturalScrolling ? -1 : 1);
+            QWheelEvent event(cursor, fixture.view.mapToGlobal(cursor.toPoint()),
+                pixelDeltas ? QPoint(0, sign * 24) : QPoint(), QPoint(0, sign * 120),
+                Qt::NoButton, control, phase, naturalScrolling, Qt::MouseEventNotSynthesized, &trackpad);
+            QCoreApplication::sendEvent(&fixture.view, &event);
+        };
+        scroll(direction, Qt::ScrollBegin);
+        QVERIFY(direction > 0 ? fixture.controller.viewScale() > originalScale
+                              : fixture.controller.viewScale() < originalScale);
+        QVERIFY(QLineF(sceneUnderCursor(), anchor).length() < 1e-8);
+        scroll(-direction, Qt::ScrollUpdate);
+        QVERIFY(qAbs(fixture.controller.viewScale() / originalScale - 1.0) < 1e-9);
+        QVERIFY(QLineF(sceneUnderCursor(), anchor).length() < 1e-8);
+        scroll(0, Qt::ScrollEnd);
+        QVERIFY(qAbs(fixture.controller.viewScale() / originalScale - 1.0) < 1e-9);
+
+        // A horizontal high-resolution packet must not fall back to a stale
+        // vertical angle delta and inadvertently zoom.
+        QSignalSpy changes(&fixture.document, &CanvasDocument::cameraChanged);
+        QWheelEvent horizontal(cursor, fixture.view.mapToGlobal(cursor.toPoint()), {30,0}, {120,120},
+            Qt::NoButton, control, Qt::ScrollBegin, false, Qt::MouseEventNotSynthesized, &trackpad);
+        QCoreApplication::sendEvent(&fixture.view, &horizontal);
+        scroll(0, Qt::ScrollEnd);
+        QCOMPARE(changes.count(), 0);
+    }
+
+    void pinchExcludesWheelAndOrdinaryScrollStillPans()
+    {
+        QPointingDevice trackpad("test trackpad", 0xCAFE,
+            QInputDevice::DeviceType::TouchPad, QPointingDevice::PointerType::Finger,
+            QInputDevice::Capability::Position | QInputDevice::Capability::PixelScroll, 2, 0);
+        QPointingDevice mouse("test mouse", 0xCAFF,
+            QInputDevice::DeviceType::Mouse, QPointingDevice::PointerType::Generic,
+            QInputDevice::Capability::Position | QInputDevice::Capability::Scroll, 1, 3);
+        Fixture fixture;
+        QVERIFY(fixture.initialize());
+        fixture.view.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&fixture.view));
+#ifdef Q_OS_MACOS
+        MacWindowManager::activateApplicationWindow(&fixture.view);
+        constexpr Qt::KeyboardModifier control = Qt::MetaModifier;
+#else
+        fixture.view.requestActivate();
+        constexpr Qt::KeyboardModifier control = Qt::ControlModifier;
+#endif
+        QVERIFY(QTest::qWaitForWindowActive(&fixture.view));
+        fixture.document.setCameraView({120,-50}, 1000);
+        const QPointF cursor(fixture.view.width() * .7, fixture.view.height() * .3);
+        auto native = [&](Qt::NativeGestureType type, qreal value = 0.0) {
+            QNativeGestureEvent event(type, &trackpad, 2, cursor, cursor,
+                fixture.view.mapToGlobal(cursor.toPoint()), value, {});
+            QCoreApplication::sendEvent(&fixture.view, &event);
+        };
+        auto scroll = [&](Qt::KeyboardModifiers modifiers, bool end = false) {
+            QWheelEvent event(cursor, fixture.view.mapToGlobal(cursor.toPoint()),
+                end ? QPoint() : QPoint(30, -20), {}, Qt::NoButton, modifiers,
+                end ? Qt::ScrollEnd : Qt::ScrollBegin, false, Qt::MouseEventNotSynthesized, &trackpad);
+            QCoreApplication::sendEvent(&fixture.view, &event);
+        };
+        auto wheel = [&] {
+            QWheelEvent event(cursor, fixture.view.mapToGlobal(cursor.toPoint()), {}, {0,120},
+                Qt::NoButton, Qt::NoModifier, Qt::NoScrollPhase, false, Qt::MouseEventNotSynthesized, &mouse);
+            QCoreApplication::sendEvent(&fixture.view, &event);
+        };
+        native(Qt::BeginNativeGesture);
+        native(Qt::ZoomNativeGesture, .01);
+        const QPointF center = fixture.document.cameraCenter();
+        const qreal span = fixture.document.cameraSquareSceneSize();
+        scroll(Qt::NoModifier);
+        scroll(Qt::NoModifier, true);
+        scroll(control);
+        scroll(control, true);
+        wheel();
+        QCOMPARE(fixture.document.cameraCenter(), center);
+        QCOMPARE(fixture.document.cameraSquareSceneSize(), span);
+        native(Qt::EndNativeGesture);
+
+        const qreal scale = fixture.controller.viewScale();
+        scroll(Qt::NoModifier);
+        scroll(Qt::NoModifier, true);
+        QCOMPARE(fixture.document.cameraSquareSceneSize(), span);
+        QVERIFY(QLineF(fixture.document.cameraCenter(),
+                      center - QPointF(30,-20) / scale).length() < 1e-8);
+#ifdef Q_OS_MACOS
+        // The physical Command key must not substitute for Control.
+        const QPointF beforeCommand = fixture.document.cameraCenter();
+        scroll(Qt::ControlModifier);
+        scroll(Qt::ControlModifier, true);
+        QCOMPARE(fixture.document.cameraSquareSceneSize(), span);
+        QVERIFY(QLineF(fixture.document.cameraCenter(),
+                      beforeCommand - QPointF(30,-20) / scale).length() < 1e-8);
+#endif
+        wheel();
+        QVERIFY(fixture.controller.viewScale() > scale);
     }
 
     void cameraQmlGesturesResizeAndWorkspaceSwitch()

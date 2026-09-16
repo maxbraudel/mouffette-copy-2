@@ -97,6 +97,7 @@ Rectangle {
     property real panY: 0.0
     property real wheelZoomBase: 1.0015
     property real wheelZoomSensitivity: 5.0
+    property real trackpadZoomSensitivity: 0.003
     // Transient live-resize overlay state (avoids full model mutation per pointer tick)
     property bool liveResizeActive: false
     property string liveResizeMediaId: ""
@@ -504,6 +505,8 @@ Rectangle {
     }
 
     function isZoomModifier(modifiers) {
+        // Qt maps the physical macOS Control key to MetaModifier (Command is
+        // ControlModifier). This gesture deliberately uses Control, not Command.
         if (Qt.platform.os === "osx") {
             return (modifiers & Qt.MetaModifier) !== 0
         }
@@ -511,7 +514,7 @@ Rectangle {
     }
 
     function wheelDeltaY(wheel) {
-        if (wheel.pixelDelta && wheel.pixelDelta.y !== 0)
+        if (wheel.pixelDelta && (wheel.pixelDelta.x !== 0 || wheel.pixelDelta.y !== 0))
             return wheel.pixelDelta.y
         if (wheel.angleDelta)
             return wheel.angleDelta.y / 8.0
@@ -519,7 +522,7 @@ Rectangle {
     }
 
     function wheelDeltaX(wheel) {
-        if (wheel.pixelDelta && wheel.pixelDelta.x !== 0)
+        if (wheel.pixelDelta && (wheel.pixelDelta.x !== 0 || wheel.pixelDelta.y !== 0))
             return wheel.pixelDelta.x
         if (wheel.angleDelta)
             return wheel.angleDelta.x / 8.0
@@ -530,17 +533,12 @@ Rectangle {
         if (!wheel)
             return false
 
-        // On macOS, two-finger trackpad scroll is typically delivered as
-        // synthesized wheel events with pixel deltas.
-        if (wheel.source !== undefined) {
-            if (wheel.source === Qt.MouseEventSynthesizedBySystem
-                    || wheel.source === Qt.MouseEventSynthesizedByQt) {
-                return true
-            }
-        }
-
-        return !!wheel.pixelDelta
-            && (wheel.pixelDelta.x !== 0 || wheel.pixelDelta.y !== 0)
+        // QML WheelEvent exposes the device and phase, not QWheelEvent.source.
+        // Begin/end packets can have zero pixel deltas and still be trackpad events.
+        return (wheel.device && wheel.device.type === PointerDevice.TouchPad)
+            || wheel.phase !== Qt.NoScrollPhase
+            || (!!wheel.pixelDelta
+                && (wheel.pixelDelta.x !== 0 || wheel.pixelDelta.y !== 0))
     }
 
     function isFiniteNumber(v) {
@@ -1512,21 +1510,14 @@ Rectangle {
                 id: pinchZoom
                 target: null
                 enabled: interactionMode === "idle"
-                property real lastScale: 1.0
 
-                onActiveChanged: {
-                    if (active) {
-                        lastScale = 1.0
-                    }
-                }
-
-                onScaleChanged: {
+                onScaleChanged: function(delta) {
                     if (!active)
                         return
-                    var factor = scale / lastScale
-                    if (isFiniteNumber(factor) && factor > 0.0)
-                        root.applyZoomAt(centroid.position.x, centroid.position.y, factor)
-                    lastScale = scale
+                    // delta is the multiplier for this movement. The deprecated
+                    // scale property persists across gestures and must not be
+                    // compared with a baseline reset to 1 at each new pinch.
+                    root.applyZoomAt(centroid.position.x, centroid.position.y, delta)
                 }
             }
 
@@ -1551,17 +1542,23 @@ Rectangle {
                 preventStealing: false
 
                 onWheel: function(event) {
-                    if (!root.canProcessCameraWheel()) {
+                    if (pinchZoom.active || !root.canProcessCameraWheel()) {
                         event.accepted = true
                         return
                     }
 
-                    // Trackpad two-finger scrolling is reserved for camera pan.
-                    // Keep mouse wheel behavior unchanged (zoom).
                     if (root.isTrackpadWheel(event)) {
                         var panDx = root.wheelDeltaX(event)
                         var panDy = root.wheelDeltaY(event)
-                        if (panDx !== 0.0 || panDy !== 0.0) {
+                        if (root.isZoomModifier(event.modifiers)) {
+                            // Physical swipe up zooms in, regardless of the
+                            // macOS natural-scrolling setting. Keep ordinary
+                            // panning in the system's configured direction.
+                            var zoomDelta = event.inverted ? -panDy : panDy
+                            if (zoomDelta !== 0.0)
+                                root.applyZoomAt(event.x, event.y,
+                                    Math.exp(zoomDelta * root.trackpadZoomSensitivity))
+                        } else if (panDx !== 0.0 || panDy !== 0.0) {
                             root.panBy(panDx, panDy)
                         }
                         event.accepted = true
