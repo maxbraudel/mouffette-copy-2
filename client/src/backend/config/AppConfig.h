@@ -25,6 +25,7 @@ public:
     enum class Key {
         ServerUrl,
         RemoteSessionHiddenTimeoutMs,
+        ProjectMediaHiddenTimeoutMs,
         ProjectHiddenRetentionMs,
         IncomingSessionOrphanTimeoutMs,
         UploadIdleTimeoutMs,
@@ -137,6 +138,7 @@ public:
     QString serverUrl() const { return m_serverUrl.toString(QUrl::FullyEncoded); }
     QUrl serverUrlValue() const { return m_serverUrl; }
     qint64 remoteSessionHiddenTimeoutMs() const { return m_remoteSessionHiddenTimeoutMs; }
+    qint64 projectMediaHiddenTimeoutMs() const { return m_projectMediaHiddenTimeoutMs; }
     qint64 projectHiddenRetentionMs() const { return m_projectHiddenRetentionMs; }
     qint64 incomingSessionOrphanTimeoutMs() const { return m_incomingSessionOrphanTimeoutMs; }
     int uploadIdleTimeoutMs() const { return m_uploadIdleTimeoutMs; }
@@ -210,6 +212,7 @@ private:
 
     QUrl m_serverUrl;
     qint64 m_remoteSessionHiddenTimeoutMs = 60000;
+    qint64 m_projectMediaHiddenTimeoutMs = 60000;
     qint64 m_projectHiddenRetentionMs = 300000;
     qint64 m_incomingSessionOrphanTimeoutMs = 3000;
     int m_uploadIdleTimeoutMs = 45000;

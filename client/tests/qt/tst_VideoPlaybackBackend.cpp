@@ -2,6 +2,7 @@
 #include <QAudioOutput>
 #include <QElapsedTimer>
 #include <QFile>
+#include <QFutureWatcher>
 #include <QMediaPlayer>
 #include <QJsonArray>
 #include "frontend/qml/MediaSettingsViewModel.h"
@@ -41,6 +42,80 @@ private slots:
     void cleanup()
     {
         MediaResidencyManager::instance().clearMemorySnapshotForTesting();
+    }
+
+    void suspensionReleasesVideoAndPreservesPreview_data()
+    {
+        QTest::addColumn<bool>("whileLoading");
+        QTest::newRow("loaded") << false;
+        QTest::newRow("audio-discovery-pending") << true;
+    }
+
+    void suspensionReleasesVideoAndPreservesPreview()
+    {
+        QFETCH(bool, whileLoading);
+        CanvasDocument document;
+        auto* video = document.addPreparedFile(videoFixture(), QSize(160, 90), true, {12, 34});
+        QVERIFY(video && video->player());
+        auto* player = video->player();
+        video->setMuted(true);
+        video->setVolume(0.27);
+        video->setPositionMs(1234);
+        QVERIFY(video->setPlaybackRange(1000, 2400));
+        if (!whileLoading)
+            QTRY_VERIFY(player->asset() && video->hasRenderedFrame());
+        std::weak_ptr<const ResidentMediaAsset> asset = player->asset();
+        const QJsonObject saved = document.serializeProjectState();
+
+        document.setMediaResidencySuspended(true);
+        QVERIFY(!video->residencyReady());
+        QVERIFY(!player->asset());
+        QTRY_VERIFY(asset.expired());
+        QVERIFY(!video->isPlaying());
+        QVERIFY(!video->hasRenderedFrame());
+        QVERIFY(!video->firstFramePrimed());
+        if (video->videoSink()) QVERIFY(!video->videoSink()->videoFrame().isValid());
+        QCOMPARE(video->positionMs(), 1234);
+        QCOMPARE(document.serializeProjectState(), saved);
+
+        // A completed device future cannot recreate sinks or decode assets
+        // after suspension, but must be restartable on the next activation.
+        QTRY_VERIFY(video->findChildren<QFutureWatcherBase*>().isEmpty());
+        if (whileLoading) {
+            QVERIFY(!video->audioOutput());
+            QVERIFY(!video->videoSink());
+        }
+        QVERIFY(!player->asset());
+        document.setMediaResidencySuspended(false);
+        QTRY_VERIFY(player->asset() && video->hasRenderedFrame());
+        QCOMPARE(video->player(), player);
+        QCOMPARE(video->positionMs(), 1234);
+        QVERIFY(!video->isPlaying());
+        QVERIFY(video->muted());
+        QCOMPARE(video->volume(), 0.27);
+        QCOMPARE(video->startMarkerMs(), 1000);
+        QCOMPARE(video->endMarkerMs(), 2400);
+    }
+
+    void restoringSuspendedVideoRetainsPendingCursor()
+    {
+        CanvasDocument original;
+        auto* source = original.addPreparedFile(videoFixture(), QSize(160, 90), true, {});
+        QVERIFY(source);
+        source->setPositionMs(1789);
+        const QJsonObject saved = original.serializeProjectState();
+        CanvasDocument restored;
+        restored.setMediaResidencySuspended(true);
+        QVERIFY(restored.restoreProjectState(saved, {{source->mediaId(), videoFixture()}}));
+        auto* video = restored.mediaById(source->mediaId());
+        QVERIFY(video);
+        QVERIFY(video->residencySuspended());
+        QVERIFY(!video->player());
+        QCOMPARE(video->positionMs(), 1789);
+        restored.setMediaResidencySuspended(false);
+        QTRY_VERIFY(video->player() && video->player()->asset());
+        QCOMPARE(video->positionMs(), 1789);
+        QVERIFY(!video->isPlaying());
     }
 
     void seekBeforeFirstPlay_data()

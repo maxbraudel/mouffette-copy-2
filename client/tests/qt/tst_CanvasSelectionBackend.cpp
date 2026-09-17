@@ -355,6 +355,141 @@ private slots:
         QCOMPARE(availability.count(), 0);
     }
 
+    void suspendedDocumentReleasesOnlyItsOwnMediaLeases()
+    {
+        QTemporaryDir directory;
+        const QString path = directory.filePath(QStringLiteral("shared-image.png"));
+        QImage image(128, 64, QImage::Format_RGBA8888);
+        image.fill(Qt::cyan);
+        QVERIFY(image.save(path));
+        CanvasDocument sleeping;
+        CanvasDocument active;
+        auto* first = sleeping.addPreparedFile(path, image.size(), false, {20, 30});
+        auto* second = active.addPreparedFile(path, image.size(), false, {40, 50});
+        QVERIFY(first && second);
+        QTRY_VERIFY(first->residencyReady() && second->residencyReady());
+        auto& manager = MediaResidencyManager::instance();
+        QCOMPARE(manager.asset(first->residencyOwnerId()), manager.asset(second->residencyOwnerId()));
+        std::weak_ptr<const ResidentMediaAsset> asset = manager.asset(first->residencyOwnerId());
+        auto* source = qobject_cast<RemoteVideoFrameSource*>(
+            first->toModelMap().value(QStringLiteral("residentFrameSource")).value<QObject*>());
+        QVERIFY(source && source->hasFrame());
+        const QJsonObject saved = sleeping.serializeProjectState();
+        QSignalSpy edits(&sleeping, &CanvasDocument::documentChanged);
+
+        sleeping.setMediaResidencySuspended(true);
+        QVERIFY(sleeping.mediaResidencySuspended());
+        QVERIFY(first->residencySuspended());
+        QVERIFY(!first->residencyReady());
+        QCOMPARE(first->residencyState(), QStringLiteral("suspended"));
+        QVERIFY(!source->hasFrame());
+        QVERIFY(!manager.asset(first->residencyOwnerId()));
+        QVERIFY(second->residencyReady());
+        QVERIFY(!asset.expired());
+        QCOMPARE(sleeping.serializeProjectState(), saved);
+        QCOMPARE(edits.count(), 0);
+
+        active.setMediaResidencySuspended(true);
+        QTRY_VERIFY(asset.expired()); // Pending decoder callbacks can now finish releasing pixels.
+        sleeping.setMediaResidencySuspended(false);
+        QTRY_VERIFY(first->residencyReady());
+        QVERIFY(source->hasFrame());
+        QVERIFY(!second->residencyReady());
+        QCOMPARE(sleeping.serializeProjectState(), saved);
+    }
+
+    void resumingSuspendedMediaRejectsChangedSource()
+    {
+        QTemporaryDir directory;
+        const QString path = directory.filePath(QStringLiteral("changed-while-suspended.png"));
+        QImage image(96, 54, QImage::Format_ARGB32);
+        image.fill(Qt::red);
+        QVERIFY(image.save(path));
+        CanvasDocument document;
+        auto* media = document.addPreparedFile(path, image.size(), false, {});
+        QVERIFY(media);
+        const QString id = media->mediaId();
+        QTRY_VERIFY(media->residencyReady());
+        QVERIFY(!media->fileId().isEmpty());
+        document.setMediaResidencySuspended(true);
+        image.fill(Qt::green);
+        QVERIFY(image.save(path));
+        QSignalSpy invalidated(&document, &CanvasDocument::mediaSourceInvalidated);
+        document.setMediaResidencySuspended(false);
+        QTRY_COMPARE(invalidated.count(), 1);
+        QCOMPARE(invalidated.first().first().toString(), id);
+        QTRY_VERIFY(!document.mediaById(id));
+    }
+
+    void suspensionCancelsQueuedAcquiresAndDefersNewMedia()
+    {
+        QTemporaryDir directory;
+        const QString path = directory.filePath(QStringLiteral("queued-image.png"));
+        QImage image(96, 54, QImage::Format_ARGB32);
+        image.fill(Qt::yellow);
+        QVERIFY(image.save(path));
+        CanvasDocument document;
+        auto* queued = document.addPreparedFile(path, image.size(), false, {});
+        document.setMediaResidencySuspended(true);
+        auto* added = document.addPreparedFile(path, image.size(), false, {10, 20});
+        QVERIFY(queued && added);
+        QCoreApplication::sendPostedEvents();
+        QCoreApplication::processEvents();
+        auto& manager = MediaResidencyManager::instance();
+        QVERIFY(!manager.asset(queued->residencyOwnerId()));
+        QVERIFY(!manager.asset(added->residencyOwnerId()));
+        QVERIFY(!manager.hasBackgroundWorkForPath(path));
+        QVERIFY(added->residencySuspended());
+
+        // Even a rapid resume/suspend cycle cannot execute an obsolete acquire.
+        document.setMediaResidencySuspended(false);
+        document.setMediaResidencySuspended(true);
+        QCoreApplication::sendPostedEvents();
+        QCoreApplication::processEvents();
+        QVERIFY(!manager.hasBackgroundWorkForPath(path));
+        QVERIFY(!queued->residencyReady() && !added->residencyReady());
+        document.setMediaResidencySuspended(false);
+        QTRY_VERIFY(queued->residencyReady() && added->residencyReady());
+    }
+
+    void pendingMetadataImportSuspendsWithoutLosingIntent()
+    {
+        QTemporaryDir directory;
+        const QString path = directory.filePath(QStringLiteral("pending-suspension.png"));
+        QImage image(96, 54, QImage::Format_ARGB32);
+        image.fill(Qt::green);
+        QVERIFY(image.save(path));
+        CanvasDocument document;
+        const QString id = document.queueFileImport(path, {31, 47});
+        QVERIFY(!id.isEmpty());
+        const QJsonObject saved = document.serializeProjectState();
+        QSignalSpy added(&document, &CanvasDocument::mediaAdded);
+        document.setMediaResidencySuspended(true);
+        QTRY_VERIFY(document.findChildren<QFutureWatcherBase*>().isEmpty());
+        QCOMPARE(added.count(), 0);
+        QVERIFY(document.media().isEmpty());
+        QVERIFY(document.hasPendingImports());
+        QCOMPARE(document.serializeProjectState(), saved);
+
+        // Project restore must obey an already-suspended document as well.
+        CanvasDocument restored;
+        restored.setMediaResidencySuspended(true);
+        QVERIFY(restored.restoreProjectState(saved, {}));
+        QVERIFY(restored.hasPendingImports());
+        QVERIFY(restored.findChildren<QFutureWatcherBase*>().isEmpty());
+        restored.setMediaResidencySuspended(false);
+        QTRY_VERIFY(restored.mediaById(id));
+        QCOMPARE(restored.mediaById(id)->sceneRect().center(), QPointF(31, 47));
+        QTRY_VERIFY(restored.mediaById(id)->residencyReady());
+        QVERIFY(!restored.hasPendingImports());
+
+        document.setMediaResidencySuspended(false);
+        QTRY_VERIFY(document.mediaById(id));
+        QCOMPARE(document.mediaById(id)->sceneRect().center(), QPointF(31, 47));
+        QCOMPARE(added.count(), 1);
+        QVERIFY(!document.hasPendingImports());
+    }
+
     void pendingMetadataImportDoesNotWaitForBulkWorkers_data()
     {
         QTest::addColumn<bool>("video");

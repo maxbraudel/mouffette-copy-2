@@ -295,6 +295,177 @@ private slots:
         QVERIFY(persisted.isEmpty());
     }
 
+    void mediaDeadlineIsExactPerProjectAndNeverExtended()
+    {
+        QTemporaryDir temporary;
+        ProjectStore store(temporary.filePath(QStringLiteral("projects.json")));
+        ProjectManager::TimingPolicy timing;
+        timing.projectMediaHiddenTimeoutMs = 1'000;
+        ProjectManager manager(&store, timing);
+        manager.stopAutomaticTimersForTesting();
+        const QString endpoint = QStringLiteral("device-a");
+        const QString projectId = createProject(manager, target(endpoint, QStringLiteral("Studio A")),
+                                               ProjectLifecycleState::Hidden, 100);
+        QVERIFY(!projectId.isEmpty());
+        QVERIFY(!createProject(manager, target(QStringLiteral("device-visible"), QStringLiteral("Visible")),
+                               ProjectLifecycleState::Visible, 100).isEmpty());
+        QVERIFY(!createProject(manager, target(QStringLiteral("device-later"), QStringLiteral("Later")),
+                               ProjectLifecycleState::Hidden, 500).isEmpty());
+        QSignalSpy releaseSpy(&manager, &ProjectManager::projectMediaReleaseDue);
+        QCOMPARE(manager.projectMediaReleaseAtMs(endpoint), qint64(1'100));
+        QCOMPARE(manager.projectMediaReleaseAtMs(QStringLiteral("device-visible")), qint64(-1));
+        QCOMPARE(manager.projectMediaReleaseAtMs(QStringLiteral("missing")), qint64(-1));
+        QVERIFY(manager.setHidden(endpoint, 900));
+        QVERIFY(manager.updateCanvasState(endpoint, {{QStringLiteral("test"), 42}}, {}, {}, 999));
+        const ProjectRecord beforeRelease = *manager.projectForTarget(endpoint);
+        manager.processDeadlines(1'099);
+        QCOMPARE(releaseSpy.count(), 0);
+        QVERIFY(!manager.projectMediaReleaseExpired(endpoint));
+
+        manager.processDeadlines(1'100);
+        QCOMPARE(releaseSpy.count(), 1);
+        QCOMPARE(releaseSpy.first().at(0).toString(), projectId);
+        QCOMPARE(releaseSpy.first().at(1).toString(), endpoint);
+        QVERIFY(manager.projectMediaReleaseExpired(endpoint));
+        QCOMPARE(manager.projectMediaReleaseAtMs(endpoint), qint64(-1));
+        QCOMPARE(manager.projectForTarget(endpoint)->toJson(), beforeRelease.toJson());
+        QCOMPARE(manager.projectDeleteAtMs(endpoint), qint64(300'100));
+        QVERIFY(manager.setHidden(endpoint, 1'101));
+        manager.processDeadlines(1'499);
+        QCOMPARE(releaseSpy.count(), 1);
+        manager.processDeadlines(1'500);
+        QCOMPARE(releaseSpy.count(), 2);
+        QVERIFY(!manager.projectMediaReleaseExpired(QStringLiteral("device-visible")));
+        QCOMPARE(manager.projectCount(), 3);
+    }
+
+    void mediaDeadlineCancelsAndRearmsWhenVisibilityChanges()
+    {
+        QTemporaryDir temporary;
+        ProjectStore store(temporary.filePath(QStringLiteral("projects.json")));
+        ProjectManager::TimingPolicy timing;
+        timing.projectMediaHiddenTimeoutMs = 1'000;
+        ProjectManager manager(&store, timing);
+        manager.stopAutomaticTimersForTesting();
+        const QString endpoint = QStringLiteral("device-a");
+        QVERIFY(!createProject(manager, target(endpoint, QStringLiteral("Studio A")),
+                               ProjectLifecycleState::Hidden, 100).isEmpty());
+        QSignalSpy releaseSpy(&manager, &ProjectManager::projectMediaReleaseDue);
+        QVERIFY(manager.setVisible(endpoint, 1'099));
+        manager.processDeadlines(1'100);
+        QCOMPARE(releaseSpy.count(), 0);
+        QCOMPARE(manager.projectMediaReleaseAtMs(endpoint), qint64(-1));
+
+        QVERIFY(manager.setHidden(endpoint, 2'000));
+        // Opening exactly at expiry consumes the deadline before resuming.
+        QVERIFY(manager.setVisible(endpoint, 3'000));
+        QCOMPARE(releaseSpy.count(), 1);
+        QVERIFY(!manager.projectMediaReleaseExpired(endpoint));
+        QVERIFY(manager.setHidden(endpoint, 4'000));
+        manager.processDeadlines(5'000);
+        QCOMPARE(releaseSpy.count(), 2);
+        QVERIFY(manager.projectMediaReleaseExpired(endpoint));
+        QVERIFY(manager.setVisible(endpoint, 5'001));
+        QCOMPARE(releaseSpy.count(), 2);
+        QVERIFY(!manager.projectMediaReleaseExpired(endpoint));
+        QVERIFY(manager.setHidden(endpoint, 6'000));
+        QVERIFY(manager.deleteProject(endpoint));
+        QVERIFY(!manager.projectMediaReleaseExpired(endpoint));
+        manager.processDeadlines(7'000);
+        QCOMPARE(releaseSpy.count(), 2);
+    }
+
+    void mediaDeadlineReloadUsesOriginalHiddenTimestamp()
+    {
+        QTemporaryDir temporary;
+        ProjectStore store(temporary.filePath(QStringLiteral("projects.json")));
+        ProjectManager::TimingPolicy timing;
+        timing.projectMediaHiddenTimeoutMs = 1'000;
+        ProjectManager manager(&store, timing);
+        manager.stopAutomaticTimersForTesting();
+        const QString endpoint = QStringLiteral("device-a");
+        QVERIFY(!createProject(manager, target(endpoint, QStringLiteral("Studio A")),
+                               ProjectLifecycleState::Hidden, 100).isEmpty());
+        QVERIFY(manager.flush());
+        QSignalSpy releaseSpy(&manager, &ProjectManager::projectMediaReleaseDue);
+        manager.processDeadlines(1'100);
+        QCOMPARE(releaseSpy.count(), 1);
+        QVERIFY(manager.projectMediaReleaseExpired(endpoint));
+
+        manager.setNowProviderForTesting([] { return qint64(1'101); });
+        QVERIFY(manager.load());
+        QVERIFY(!manager.projectMediaReleaseExpired(endpoint));
+        QCOMPARE(manager.projectMediaReleaseAtMs(endpoint), qint64(1'100));
+        manager.processDeadlines(1'101);
+        QCOMPARE(releaseSpy.count(), 2);
+        manager.processDeadlines(1'102);
+        QCOMPARE(releaseSpy.count(), 2);
+    }
+
+    void mediaDeadlineCallbacksMayReenterAndDeleteProjects()
+    {
+        QTemporaryDir temporary;
+        ProjectStore store(temporary.filePath(QStringLiteral("projects.json")));
+        ProjectManager::TimingPolicy timing;
+        timing.projectMediaHiddenTimeoutMs = 1'000;
+        ProjectManager manager(&store, timing);
+        manager.stopAutomaticTimersForTesting();
+        const QString endpoint = QStringLiteral("device-a");
+        QVERIFY(!createProject(manager, target(endpoint, QStringLiteral("Studio A")),
+                               ProjectLifecycleState::Hidden, 100).isEmpty());
+        QSignalSpy releaseSpy(&manager, &ProjectManager::projectMediaReleaseDue);
+        connect(&manager, &ProjectManager::projectMediaReleaseDue, this,
+                [&](const QString&, const QString& targetEndpointId) {
+            QVERIFY(manager.projectMediaReleaseExpired(targetEndpointId));
+            manager.processDeadlines(1'100);
+            QVERIFY(manager.deleteProject(targetEndpointId));
+        });
+        QVERIFY(!manager.setVisible(endpoint, 1'100));
+        QCOMPARE(releaseSpy.count(), 1);
+        QCOMPARE(manager.projectCount(), 0);
+        QVERIFY(!manager.projectMediaReleaseExpired(endpoint));
+    }
+
+    void mediaDeadlineIsIndependentOfRemoteSession_data()
+    {
+        QTest::addColumn<qint64>("sessionTimeoutMs");
+        QTest::newRow("session-closes-first") << qint64(1'000);
+        QTest::newRow("media-releases-first") << qint64(3'000);
+    }
+
+    void mediaDeadlineIsIndependentOfRemoteSession()
+    {
+        QFETCH(qint64, sessionTimeoutMs);
+        QTemporaryDir temporary;
+        ProjectStore store(temporary.filePath(QStringLiteral("projects.json")));
+        ProjectManager::TimingPolicy timing;
+        timing.projectMediaHiddenTimeoutMs = 2'000;
+        ProjectManager manager(&store, timing);
+        manager.stopAutomaticTimersForTesting();
+        const QString endpoint = QStringLiteral("device-a");
+        QVERIFY(!createProject(manager, target(endpoint, QStringLiteral("Studio A")),
+                               ProjectLifecycleState::Hidden, 100).isEmpty());
+        WorkspaceManager sessions;
+        sessions.stopAutomaticTimersForTesting();
+        sessions.setRemoteSessionHiddenTimeoutMs(sessionTimeoutMs);
+        sessions.getOrCreateWorkspace(endpoint, client(endpoint, QStringLiteral("socket-a"),
+                                                       QStringLiteral("Studio A")));
+        QVERIFY(sessions.setWorkspaceVisible(endpoint, 100));
+        QVERIFY(sessions.setRemoteSessionState(endpoint, WorkspaceManager::RemoteSessionState::Active));
+        QVERIFY(sessions.setWorkspaceHidden(endpoint, 100));
+        QSignalSpy releaseSpy(&manager, &ProjectManager::projectMediaReleaseDue);
+        QSignalSpy closeSpy(&sessions, &WorkspaceManager::remoteSessionCloseDue);
+
+        sessions.processDeadlines(2'100);
+        QCOMPARE(closeSpy.count(), sessionTimeoutMs < 2'000 ? 1 : 0);
+        QCOMPARE(releaseSpy.count(), 0);
+        manager.processDeadlines(2'100);
+        QCOMPARE(releaseSpy.count(), 1);
+        QCOMPARE(closeSpy.count(), sessionTimeoutMs < 2'000 ? 1 : 0);
+        QVERIFY(manager.hasProjectForTarget(endpoint));
+        QCOMPARE(manager.projectDeleteAtMs(endpoint), qint64(300'100));
+    }
+
     void discoveryProjectionCannotReenterDeadlineDeletion()
     {
         QTemporaryDir temporary;

@@ -58,6 +58,7 @@ public:
     QString availabilityStatus() const { return m_availabilityStatus; }
     QString projectId() const { return m_projectId; }
     bool hasProject() const { return m_hasProject; }
+    qint64 projectMediaReleaseAtMs() const { return m_projectMediaReleaseAtMs; }
     qint64 remoteSessionCloseAtMs() const { return m_remoteSessionCloseAtMs; }
     qint64 projectDeleteAtMs() const { return m_projectDeleteAtMs; }
     
@@ -76,6 +77,7 @@ public:
     void setAvailabilityStatus(const QString& status) { m_availabilityStatus = status; }
     void setProjectId(const QString& id) { m_projectId = id; }
     void setHasProject(bool value) { m_hasProject = value; }
+    void setProjectMediaReleaseAtMs(qint64 value) { m_projectMediaReleaseAtMs = value; }
     void setRemoteSessionCloseAtMs(qint64 value) { m_remoteSessionCloseAtMs = value; }
     void setProjectDeleteAtMs(qint64 value) { m_projectDeleteAtMs = value; }
     
@@ -108,6 +110,7 @@ private:
     QString m_availabilityStatus = QStringLiteral("Unreachable");
     QString m_projectId;
     bool m_hasProject = false;
+    qint64 m_projectMediaReleaseAtMs = -1;
     qint64 m_remoteSessionCloseAtMs = 0;
     qint64 m_projectDeleteAtMs = 0;
 };

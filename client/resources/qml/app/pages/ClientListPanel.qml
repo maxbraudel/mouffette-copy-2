@@ -84,14 +84,30 @@ AppPanel {
                     height: 22
                     spacing: 8
 
-                    Text {
+                    Row {
                         id: clientDeadline
-                        visible: !root.sceneMode && text.length > 0
+                        visible: !root.sceneMode && row.secondaryValue.length > 0
                         height: 22
-                        text: row.secondaryValue
-                        color: Theme.mutedText
-                        font.pixelSize: 12
-                        verticalAlignment: Text.AlignVCenter
+                        spacing: 0
+
+                        // StyledText does not apply <font face>. Give each time
+                        // value its own Text item so Qt uses its actual font.
+                        Repeater {
+                            model: row.secondaryValue.split(/(\b\d+:\d{2}\b)/)
+
+                            delegate: Text {
+                                required property int index
+                                required property string modelData
+                                height: clientDeadline.height
+                                text: modelData
+                                textFormat: Text.PlainText
+                                color: Theme.mutedText
+                                font.family: index % 2 === 1
+                                    ? Theme.monospaceFontFamily : Qt.application.font.family
+                                font.pixelSize: 12
+                                verticalAlignment: Text.AlignVCenter
+                            }
+                        }
                     }
 
                     Rectangle {

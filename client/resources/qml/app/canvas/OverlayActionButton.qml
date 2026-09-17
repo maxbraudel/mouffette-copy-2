@@ -56,7 +56,7 @@ AbstractButton {
     StateTextMetrics {
         id: monospaceMetrics
         text: control.monospace ? control.text : ""
-        font.family: Qt.platform.os === "osx" ? "Menlo" : "Courier New"
+        font.family: Theme.monospaceFontFamily
         font.pixelSize: 14
         font.bold: true
     }

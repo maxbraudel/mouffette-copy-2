@@ -120,7 +120,7 @@ QString CanvasDocument::queueFileImport(const QString& sourcePath,
 
 void CanvasDocument::startPendingImport(const QString& mediaId)
 {
-    if (m_editsLocked || !m_pendingImports.contains(mediaId)
+    if (m_editsLocked || m_mediaResidencySuspended || !m_pendingImports.contains(mediaId)
         || m_activeImports.contains(mediaId)) return;
     auto& stored = m_pendingImports[mediaId];
     stored.cancelled = std::make_shared<std::atomic_bool>(false);
@@ -136,7 +136,7 @@ void CanvasDocument::startPendingImport(const QString& mediaId)
             || !m_pendingImports.contains(pending.mediaId)) return;
         m_activeImports.remove(pending.mediaId);
         // A locked document retains the durable intent and retries after unlock.
-        if (m_editsLocked) return;
+        if (m_editsLocked || m_mediaResidencySuspended) return;
         const QString error = sourceSignature(pending.sourcePath) != pending.sourceSignature
             ? QStringLiteral("The source file changed or disappeared during import.")
             : probe.error;
@@ -189,6 +189,7 @@ void CanvasDocument::adoptMedia(CanvasMedia* media)
 {
     if (!media) return;
     media->setParent(this);
+    media->setResidencySuspended(m_mediaResidencySuspended);
     m_media.append(media);
     connect(media, &CanvasMedia::changed, this, [this, media]() {
         emit mediaChanged(media->mediaId());
@@ -255,6 +256,7 @@ CanvasMedia* CanvasDocument::addPreparedFile(
     auto* media = new CanvasMedia(video ? CanvasMedia::Type::Video
                                         : CanvasMedia::Type::Image,
                                   nativeSize.expandedTo(QSize(1, 1)));
+    media->setResidencySuspended(m_mediaResidencySuspended);
     media->setSourcePath(sourcePath);
     media->setPosition(position);
     media->setZ(nextZ());
@@ -515,6 +517,18 @@ void CanvasDocument::setContentAvailable(bool available)
     if (m_contentAvailable == available) return;
     m_contentAvailable = available;
     emit contentAvailabilityChanged();
+}
+
+void CanvasDocument::setMediaResidencySuspended(bool suspended)
+{
+    if (m_mediaResidencySuspended == suspended) return;
+    m_mediaResidencySuspended = suspended;
+    if (suspended) cancelPendingImportTasks();
+    for (CanvasMedia* media : std::as_const(m_media))
+        if (media) media->setResidencySuspended(suspended);
+    if (!suspended)
+        for (const QString& id : m_pendingImports.keys()) startPendingImport(id);
+    emit mediaResidencySuspendedChanged();
 }
 
 QJsonObject CanvasDocument::serializeSceneState() const
@@ -880,6 +894,7 @@ QStringList CanvasDocument::insertProjectMedia(
             media = new CanvasMedia(type == QLatin1String("video")
                                         ? CanvasMedia::Type::Video
                                         : CanvasMedia::Type::Image, base);
+            media->setResidencySuspended(m_mediaResidencySuspended);
             if (!freshIds) media->restoreMediaId(id);
             media->setSourcePath(path, source.value(QStringLiteral("fileId")).toString());
             if (media->isVideo()) media->initializeVideoRuntime();

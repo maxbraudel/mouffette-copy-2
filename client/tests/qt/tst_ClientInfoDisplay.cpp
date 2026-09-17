@@ -58,15 +58,24 @@ void ClientInfoDisplayTest::formatsProjectDeadlines()
     ClientInfo client(QStringLiteral("device-c"), QStringLiteral("Studio C"),
                       QStringLiteral("Windows"));
     client.setHasProject(true);
+    client.setProjectMediaReleaseAtMs(30'000);
     client.setRemoteSessionCloseAtMs(60'000);
     client.setProjectDeleteAtMs(300'000);
 
+    QCOMPARE(client.getProjectDeadlineText(1'000),
+             QStringLiteral("Free RAM in 0:29 · Disconnect in 0:59 · Delete project in 4:59"));
+    QCOMPARE(client.getProjectDeadlineText(30'000),
+             QStringLiteral("Free RAM in 0:00 · Disconnect in 0:30 · Delete project in 4:30"));
+    QCOMPARE(client.getProjectDeadlineText(30'001),
+             QStringLiteral("Disconnect in 0:30 · Delete project in 4:30"));
+    client.setProjectMediaReleaseAtMs(-1);
     QCOMPARE(client.getProjectDeadlineText(1'000),
              QStringLiteral("Disconnect in 0:59 · Delete project in 4:59"));
     QCOMPARE(client.getProjectDeadlineText(60'001),
              QStringLiteral("Delete project in 4:00"));
     QVERIFY(client.getProjectDeadlineText(300'001).isEmpty());
 
+    client.setProjectMediaReleaseAtMs(30'000);
     client.setHasProject(false);
     QVERIFY(client.getProjectDeadlineText(1'000).isEmpty());
 }

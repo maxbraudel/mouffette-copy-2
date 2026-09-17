@@ -206,6 +206,7 @@ private:
     void updateApplicationSuspendedState(bool suspended);
     void updateHistoryVisibilityState();
     void persistProjectCanvas(const QString& targetEndpointId);
+    void reconcileProjectMediaResidency(const QString& targetEndpointId);
     void restoreProjectCanvas(ClientWorkspace& workspace);
     bool wantsForegroundRemoteSession(const QString& targetEndpointId) const;
     void reconcileForegroundRemoteSession();

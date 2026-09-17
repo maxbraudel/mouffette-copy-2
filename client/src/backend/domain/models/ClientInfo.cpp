@@ -229,6 +229,10 @@ QString ClientInfo::getProjectDeadlineText(qint64 nowMs) const
 
     const qint64 current = nowMs >= 0 ? nowMs : QDateTime::currentMSecsSinceEpoch();
     QStringList parts;
+    if (m_projectMediaReleaseAtMs >= current && m_projectMediaReleaseAtMs > 0) {
+        parts.append(QStringLiteral("Free RAM in %1")
+                         .arg(formatRemainingTime(m_projectMediaReleaseAtMs - current)));
+    }
     if (m_remoteSessionCloseAtMs >= current && m_remoteSessionCloseAtMs > 0) {
         parts.append(QStringLiteral("Disconnect in %1")
                          .arg(formatRemainingTime(m_remoteSessionCloseAtMs - current)));

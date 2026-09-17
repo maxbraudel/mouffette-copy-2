@@ -24,9 +24,10 @@ struct SettingSpec {
     bool boolean;
 };
 
-constexpr std::array<SettingSpec, 63> kSpecs{{
+constexpr std::array<SettingSpec, 64> kSpecs{{
     {Key::ServerUrl, "MOUFFETTE_SERVER_URL", "server-url", "serverUrl", "ws://localhost:8080", false},
     {Key::RemoteSessionHiddenTimeoutMs, "MOUFFETTE_REMOTE_SESSION_HIDDEN_TIMEOUT_MS", "remote-session-hidden-timeout-ms", nullptr, "60000", false},
+    {Key::ProjectMediaHiddenTimeoutMs, "MOUFFETTE_PROJECT_MEDIA_HIDDEN_TIMEOUT_MS", "project-media-hidden-timeout-ms", nullptr, "60000", false},
     {Key::ProjectHiddenRetentionMs, "MOUFFETTE_PROJECT_HIDDEN_RETENTION_MS", "project-hidden-retention-ms", nullptr, "300000", false},
     {Key::IncomingSessionOrphanTimeoutMs, "MOUFFETTE_INCOMING_SESSION_ORPHAN_TIMEOUT_MS", "incoming-session-orphan-timeout-ms", nullptr, "3000", false},
     {Key::UploadIdleTimeoutMs, "MOUFFETTE_UPLOAD_IDLE_TIMEOUT_MS", "upload-idle-timeout-ms", nullptr, "45000", false},
@@ -371,6 +372,7 @@ void AppConfig::resetToCompiledDefaults() {
     }
     m_serverUrl = QUrl(QStringLiteral("ws://localhost:8080"));
     m_remoteSessionHiddenTimeoutMs = 60000;
+    m_projectMediaHiddenTimeoutMs = 60000;
     m_projectHiddenRetentionMs = 300000;
     m_incomingSessionOrphanTimeoutMs = 3000;
     m_uploadIdleTimeoutMs = 45000;
@@ -585,6 +587,11 @@ bool AppConfig::load(const LoadOptions& options, QString* errorMessage) {
                       candidate.m_remoteSessionHiddenTimeoutMs, errorMessage)) {
         return false;
     }
+    if (!parseInteger(rawValues.at(Key::ProjectMediaHiddenTimeoutMs),
+                      keyName(Key::ProjectMediaHiddenTimeoutMs), 1000, 86400000,
+                      candidate.m_projectMediaHiddenTimeoutMs, errorMessage)) {
+        return false;
+    }
     if (!parseInteger(rawValues.at(Key::ProjectHiddenRetentionMs),
                       keyName(Key::ProjectHiddenRetentionMs), 60000, 2592000000LL,
                       candidate.m_projectHiddenRetentionMs, errorMessage)) {
@@ -594,6 +601,11 @@ bool AppConfig::load(const LoadOptions& options, QString* errorMessage) {
         return setError(errorMessage,
                         QStringLiteral("MOUFFETTE_PROJECT_HIDDEN_RETENTION_MS must be greater than "
                                        "MOUFFETTE_REMOTE_SESSION_HIDDEN_TIMEOUT_MS"));
+    }
+    if (candidate.m_projectHiddenRetentionMs <= candidate.m_projectMediaHiddenTimeoutMs) {
+        return setError(errorMessage,
+                        QStringLiteral("MOUFFETTE_PROJECT_HIDDEN_RETENTION_MS must be greater than "
+                                       "MOUFFETTE_PROJECT_MEDIA_HIDDEN_TIMEOUT_MS"));
     }
     if (!parseInteger(rawValues.at(Key::IncomingSessionOrphanTimeoutMs),
                       keyName(Key::IncomingSessionOrphanTimeoutMs), 1000, 86400000,

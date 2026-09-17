@@ -180,6 +180,7 @@ QtObject {
     readonly property int controlRadius: 6
     readonly property int controlMinWidth: 80
     readonly property int controlFontSize: 13
+    readonly property string monospaceFontFamily: Qt.platform.os === "osx" ? "Menlo" : "Courier New"
     readonly property int titleFontSize: 16
     readonly property int titleHeight: 24
     readonly property int segmentPadding: 6

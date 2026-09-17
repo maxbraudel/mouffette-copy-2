@@ -108,9 +108,10 @@ QSet<QString> ClientListModel::activeCountdownEndpointIds(qint64 nowMs) const
 {
     QSet<QString> result;
     for (const ClientInfo& client : m_clients) {
+        const bool mediaCountdown = client.projectMediaReleaseAtMs() > nowMs;
         const bool sessionCountdown = client.remoteSessionCloseAtMs() > nowMs;
         const bool projectCountdown = client.projectDeleteAtMs() > nowMs;
-        if (sessionCountdown || projectCountdown) {
+        if (mediaCountdown || sessionCountdown || projectCountdown) {
             result.insert(endpointIdFor(client));
         }
     }

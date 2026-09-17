@@ -54,10 +54,39 @@ void CanvasMedia::retireResidency()
 {
     if (isText() || m_residencyRetired) return;
     m_residencyRetired = true;
+    releaseResidencyResources();
+}
+
+void CanvasMedia::releaseResidencyResources()
+{
+    // Invalidate queued acquires even if suspension ends before they run.
+    ++m_residencyGeneration;
+    if (isVideo()) m_pendingPositionMs = positionMs();
     if (m_player) m_player->clearAsset();
+    if (m_videoSink) m_videoSink->setVideoFrame({});
     if (m_residentFrameSource) m_residentFrameSource->clear();
     if (m_residencyAcquired) MediaResidencyManager::instance().release(m_residencyOwnerId);
     m_residencyAcquired = false;
+    m_hasRenderedFrame = false;
+    m_firstFramePrimed = false;
+}
+
+void CanvasMedia::setResidencySuspended(bool suspended)
+{
+    if (m_residencyRetired || m_residencySuspended == suspended) return;
+    m_residencySuspended = suspended;
+    if (isText()) return;
+    if (suspended) {
+        // An accepted import has an identity even when its original request
+        // did not specify a digest. Reactivation must validate the same bytes.
+        if (m_expectedSha256.isEmpty() && m_identityPublished)
+            m_expectedSha256 = m_fileId;
+        releaseResidencyResources();
+    } else if (!m_sourcePath.isEmpty()) {
+        requestResidency();
+    }
+    emit residencyChanged();
+    emit runtimeStateChanged();
 }
 
 QString CanvasMedia::typeName() const
@@ -99,6 +128,7 @@ void CanvasMedia::setSourcePath(const QString& path, const QString& expectedSha2
     const QFileInfo source(path);
     m_sourceSizeBytes = source.isFile() ? source.size() : -1;
     if (!isText()) {
+        ++m_residencyGeneration;
         if (m_residencyAcquired) MediaResidencyManager::instance().release(m_residencyOwnerId);
         m_residencyAcquired = false;
         if (!path.isEmpty()) requestResidency();
@@ -109,12 +139,16 @@ void CanvasMedia::setSourcePath(const QString& path, const QString& expectedSha2
 
 void CanvasMedia::requestResidency()
 {
+    if (m_residencyRetired || m_residencySuspended || m_sourcePath.isEmpty()) return;
     const QString path = m_sourcePath;
     const QString expected = m_expectedSha256;
+    const quint64 generation = m_residencyGeneration;
     // Defer even a shared-cache hit until the document has adopted the node
     // and installed identity/invalidation observers.
-    QMetaObject::invokeMethod(this, [this, path, expected]() {
-        if (m_residencyRetired || m_sourcePath != path || m_expectedSha256 != expected) return;
+    QMetaObject::invokeMethod(this, [this, path, expected, generation]() {
+        if (m_residencyRetired || m_residencySuspended || m_residencyAcquired
+            || m_residencyGeneration != generation
+            || m_sourcePath != path || m_expectedSha256 != expected) return;
         m_residencyAcquired = true;
         MediaResidencyManager::instance().acquire(m_residencyOwnerId, path, expected);
         refreshResidency();
@@ -128,7 +162,9 @@ bool CanvasMedia::residencyReady() const
 
 QString CanvasMedia::residencyState() const
 {
-    return isText() ? QStringLiteral("ready") : MediaResidencyManager::instance().state(m_residencyOwnerId);
+    if (isText()) return QStringLiteral("ready");
+    return m_residencySuspended ? QStringLiteral("suspended")
+                               : MediaResidencyManager::instance().state(m_residencyOwnerId);
 }
 
 double CanvasMedia::residencyProgress() const
@@ -143,7 +179,7 @@ QString CanvasMedia::residencyError() const
 
 void CanvasMedia::refreshResidency()
 {
-    if (isText() || m_residencyRetired) return;
+    if (isText() || m_residencyRetired || m_residencySuspended) return;
     auto& manager = MediaResidencyManager::instance();
     const QString digest = manager.sha256(m_residencyOwnerId);
     const bool mismatched = !m_expectedSha256.isEmpty() && !digest.isEmpty()
@@ -524,7 +560,11 @@ void CanvasMedia::setVerticalAlignment(const QString& alignment)
 
 void CanvasMedia::initializeVideoRuntime()
 {
-    if (!isVideo() || m_player) return;
+    if (!isVideo() || m_residencyRetired || m_residencySuspended) return;
+    if (m_player) {
+        initializeVideoOutputs();
+        return;
+    }
     m_player = new ResidentVideoPlayer(this);
     connect(m_player, &ResidentVideoPlayer::playbackStateChanged,
             this, &CanvasMedia::runtimeStateChanged);
@@ -545,7 +585,8 @@ void CanvasMedia::initializeVideoRuntime()
             // The multimedia backend still finalizes its stopped state while
             // delivering EndOfMedia. Restart after that transition has settled.
             QMetaObject::invokeMethod(this, [this]() {
-                if (m_player->mediaStatus() == QMediaPlayer::EndOfMedia)
+                if (!m_residencyRetired && !m_residencySuspended
+                    && m_player->mediaStatus() == QMediaPlayer::EndOfMedia)
                     enforcePlaybackEnd(m_player->duration(), true);
             }, Qt::QueuedConnection);
         }
@@ -555,11 +596,19 @@ void CanvasMedia::initializeVideoRuntime()
     connect(m_player, &ResidentVideoPlayer::errorChanged,
             this, &CanvasMedia::runtimeStateChanged);
     updateVideoLoops();
+    initializeVideoOutputs();
+}
+
+void CanvasMedia::initializeVideoOutputs()
+{
+    if (m_audioOutput || m_audioInitializationPending) return;
+    m_audioInitializationPending = true;
     auto* audio = new QFutureWatcher<QAudioDevice>(this);
     connect(audio, &QFutureWatcher<QAudioDevice>::finished, this, [this, audio] {
         const QAudioDevice device = audio->result();
         audio->deleteLater();
-        if (m_residencyRetired) return;
+        m_audioInitializationPending = false;
+        if (m_residencyRetired || m_residencySuspended) return;
         // QObjects stay on the GUI thread. The potentially slow enumeration
         // above returns only the thread-safe, implicitly shared device value.
         // The first QVideoSink also initializes Qt's platform backend. Create
@@ -753,11 +802,11 @@ void CanvasMedia::seekToRatio(qreal ratio)
 
 void CanvasMedia::setPositionMs(qint64 positionMs)
 {
-    if (!m_player) return;
+    if (!isVideo()) return;
     const qint64 target = qMax<qint64>(0, positionMs);
     // A restored or pasted video can still be loading. Preserve the requested
     // preview position until the decoder is ready to accept the seek.
-    if (m_player->duration() <= 0 || m_player->mediaStatus() == QMediaPlayer::LoadingMedia
+    if (!m_player || m_player->duration() <= 0 || m_player->mediaStatus() == QMediaPlayer::LoadingMedia
         || m_player->mediaStatus() == QMediaPlayer::NoMedia) {
         m_pendingPositionMs = target;
     } else {

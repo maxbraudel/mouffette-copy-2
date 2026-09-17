@@ -3,6 +3,7 @@
 #include "backend/domain/project/ProjectStore.h"
 
 #include <QDateTime>
+#include <QScopedValueRollback>
 #include <QUuid>
 #include <algorithm>
 #include <utility>
@@ -99,6 +100,7 @@ bool ProjectManager::load()
     m_lastError.clear();
     m_projectsByTarget.clear();
     m_targetByProjectId.clear();
+    m_mediaReleaseExpiredTargets.clear();
     m_dirty = false;
     m_autosaveTimer.stop();
 
@@ -274,6 +276,13 @@ bool ProjectManager::setVisible(const QString& targetEndpointId, qint64 atMs)
     if (!project) {
         return false;
     }
+    const QString projectId = project->projectId;
+    releaseProjectMediaIfDue(targetEndpointId, current);
+    // A release observer can delete, replace or reopen this project.
+    project = mutableProjectForTarget(targetEndpointId);
+    if (!project || project->projectId != projectId) {
+        return false;
+    }
     if (project->state == ProjectLifecycleState::Hidden
         && project->hiddenAtMs >= 0
         && current >= project->hiddenAtMs + m_timing.projectHiddenRetentionMs) {
@@ -288,9 +297,10 @@ bool ProjectManager::setVisible(const QString& targetEndpointId, qint64 atMs)
     project->hiddenAtMs = -1;
     project->lastCheckpointAtMs = current;
     project->updatedAtMs = current;
+    m_mediaReleaseExpiredTargets.remove(targetEndpointId);
     scheduleSave();
-    emit projectVisibilityChanged(project->projectId, targetEndpointId, project->state);
-    emit projectUpdated(project->projectId, targetEndpointId);
+    emit projectVisibilityChanged(projectId, targetEndpointId, ProjectLifecycleState::Visible);
+    emit projectUpdated(projectId, targetEndpointId);
     emit projectsChanged();
     return true;
 }
@@ -312,9 +322,11 @@ bool ProjectManager::setHidden(const QString& targetEndpointId, qint64 atMs)
     project->state = ProjectLifecycleState::Hidden;
     project->hiddenAtMs = current;
     project->updatedAtMs = current;
+    m_mediaReleaseExpiredTargets.remove(targetEndpointId);
+    const QString projectId = project->projectId;
     scheduleSave();
-    emit projectVisibilityChanged(project->projectId, targetEndpointId, project->state);
-    emit projectUpdated(project->projectId, targetEndpointId);
+    emit projectVisibilityChanged(projectId, targetEndpointId, ProjectLifecycleState::Hidden);
+    emit projectUpdated(projectId, targetEndpointId);
     emit projectsChanged();
     return true;
 }
@@ -353,6 +365,7 @@ bool ProjectManager::removeProjectInternal(const QString& targetEndpointId)
 
     m_projectsByTarget.remove(targetEndpointId);
     m_targetByProjectId.remove(snapshot.projectId);
+    m_mediaReleaseExpiredTargets.remove(targetEndpointId);
     emit projectDeleted(snapshot.projectId, targetEndpointId);
     emit projectsChanged();
     return true;
@@ -454,25 +467,51 @@ qint64 ProjectManager::projectDeleteAtMs(const QString& targetEndpointId) const
         : -1;
 }
 
-void ProjectManager::processDeadlines(qint64 atMs)
+qint64 ProjectManager::projectMediaReleaseAtMs(const QString& targetEndpointId) const
 {
-    const qint64 current = atMs >= 0 ? atMs : nowMs();
-    QStringList expiredProjects;
-    const QStringList targets = m_projectsByTarget.keys();
-    for (const QString& target : targets) {
-        const ProjectRecord* project = projectForTarget(target);
-        if (!project || project->state != ProjectLifecycleState::Hidden || project->hiddenAtMs < 0) {
-            continue;
-        }
-        if (current >= project->hiddenAtMs + m_timing.projectHiddenRetentionMs) {
-            expiredProjects.append(target);
-        }
-    }
+    const ProjectRecord* project = projectForTarget(targetEndpointId);
+    return project && project->state == ProjectLifecycleState::Hidden && project->hiddenAtMs >= 0
+            && !projectMediaReleaseExpired(targetEndpointId)
+        ? project->hiddenAtMs + m_timing.projectMediaHiddenTimeoutMs
+        : -1;
+}
 
-    if (expiredProjects.isEmpty()) {
+bool ProjectManager::projectMediaReleaseExpired(const QString& targetEndpointId) const
+{
+    return m_mediaReleaseExpiredTargets.contains(targetEndpointId);
+}
+
+void ProjectManager::releaseProjectMediaIfDue(const QString& targetEndpointId, qint64 atMs)
+{
+    const qint64 deadline = projectMediaReleaseAtMs(targetEndpointId);
+    if (deadline < 0 || atMs < deadline || projectMediaReleaseExpired(targetEndpointId)) {
         return;
     }
-    for (const QString& target : expiredProjects) {
+    const QString projectId = projectForTarget(targetEndpointId)->projectId;
+    // Mark first: observers may process deadlines again or update residency.
+    m_mediaReleaseExpiredTargets.insert(targetEndpointId);
+    emit projectMediaReleaseDue(projectId, targetEndpointId);
+    emit projectsChanged();
+}
+
+void ProjectManager::processDeadlines(qint64 atMs)
+{
+    if (m_processingDeadlines) {
+        return;
+    }
+    const QScopedValueRollback<bool> processing(m_processingDeadlines, true);
+    const qint64 current = atMs >= 0 ? atMs : nowMs();
+    const QStringList targets = m_projectsByTarget.keys();
+    for (const QString& target : targets) {
+        releaseProjectMediaIfDue(target, current);
+    }
+    // RAM release must not be delayed by an unavailable project store.
+    for (const QString& target : targets) {
+        // Release callbacks may change visibility or remove a project.
+        const qint64 deleteAt = projectDeleteAtMs(target);
+        if (deleteAt < 0 || current < deleteAt) {
+            continue;
+        }
         // Commit before exposing each deletion. If storage is temporarily
         // unavailable, retain this and the remaining projects for the next
         // deadline poll instead of losing them from memory.

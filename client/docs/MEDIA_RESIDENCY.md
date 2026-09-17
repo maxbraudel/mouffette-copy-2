@@ -155,3 +155,37 @@ tests inject memory snapshots for deterministic admission, deduplication, evicti
 hysteresis and protected-scene behavior. Canvas and remote lifecycle suites cover
 skeleton interaction, launch gating and asynchronous transfer readiness. Run CTest
 and the server's npm test suite after changing these contracts.
+
+## Inactive project media
+
+`MOUFFETTE_PROJECT_MEDIA_HIDDEN_TIMEOUT_MS` controls how long an inactive project
+retains local image/video RAM (60,000 ms by default). It uses the same activity
+source as session disconnection and project retention: a visible control window
+with the pointer inside keeps all projects active. Pointer departure, hiding the
+window or system suspension starts their deadlines; repeated inactive events do
+not extend them. The configured media delay must be at least 1,000 ms and less
+than project retention. It is independent of the remote session delay.
+
+`ProjectManager` owns this transient deadline, polls it alongside project deletion
+and reports expiry once per inactive interval. `ApplicationRuntime` applies the
+result to each workspace's `CanvasDocument`. The document suspends file leases,
+cancels outstanding metadata imports and retains their durable intent. Each
+`CanvasMedia` clears its decoded image/video resources, playback queues and frame
+references, and fences queued acquisitions until activity resumes. Source files,
+media IDs, geometry, settings and preview cursors remain intact. On return, the
+same media nodes reacquire residency asynchronously through the normal validation
+and memory-admission path; scene actions remain gated on readiness.
+
+Scene preparation and playback keep their leases until the canvas restores its
+draft and unlocks. An expired media deadline then applies immediately; activity
+resumption before the scene ends cancels it. Assets shared with another active
+project or an incoming session stay resident for those owners. This local deadline
+does not close a remote session or remove its receiver's cache; their existing
+session teardown policy continues to apply.
+
+The client list shows `Free RAM in m:ss` alongside the session and project
+deadlines. Timer values use the shared monospace font while labels retain the UI
+font. Expired RAM countdowns disappear, including when a scene defers reclamation.
+`AppConfig`, `ProjectManager`, `ClientInfoDisplay`, `ClientConnectionFlow` and
+canvas/video lifecycle tests cover configuration, boundary expiry, cancellation,
+shared assets, pending imports, scene protection and rehydration.

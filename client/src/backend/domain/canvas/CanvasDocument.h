@@ -88,6 +88,10 @@ public:
     bool editsLocked() const { return m_editsLocked; }
     void setContentAvailable(bool available);
     bool contentAvailable() const { return m_contentAvailable; }
+    // Runtime-only: preserve the project and pending import intents while
+    // releasing all of this document's media residency leases.
+    void setMediaResidencySuspended(bool suspended);
+    bool mediaResidencySuspended() const { return m_mediaResidencySuspended; }
 
     QJsonObject serializeSceneState() const;
     QJsonObject serializeProjectState() const;
@@ -114,6 +118,7 @@ signals:
     void remoteCursorChanged();
     void editsLockedChanged();
     void contentAvailabilityChanged();
+    void mediaResidencySuspendedChanged();
     void documentChanged();
 
 private:
@@ -155,4 +160,5 @@ private:
     QPointF m_remoteCursorScreenPosition;
     bool m_editsLocked = false;
     bool m_contentAvailable = true;
+    bool m_mediaResidencySuspended = false;
 };

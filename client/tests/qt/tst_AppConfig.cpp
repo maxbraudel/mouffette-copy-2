@@ -36,6 +36,7 @@ class AppConfigTest final : public QObject {
 private slots:
     void loadsEmbeddedDefaults();
     void configuresMediaRamReserve();
+    void configuresProjectMediaHiddenTimeout();
     void configuresCanvasTextInitialHeight();
     void compiledDefaultDisablesMultipleInstances();
     void appliesDocumentedPrecedence();
@@ -64,8 +65,9 @@ void AppConfigTest::loadsEmbeddedDefaults() {
     QCOMPARE(config.mediaRamReserveMinMiB(), 0);
     QVERIFY(config.provenance(AppConfig::Key::MediaRamReserveMinMiB)
                 .startsWith(QStringLiteral("embedded-env:")));
-    QCOMPARE(config.remoteSessionHiddenTimeoutMs(), qint64(30000));
-    QCOMPARE(config.projectHiddenRetentionMs(), qint64(60000));
+    QCOMPARE(config.remoteSessionHiddenTimeoutMs(), qint64(120000));
+    QCOMPARE(config.projectMediaHiddenTimeoutMs(), qint64(60000));
+    QCOMPARE(config.projectHiddenRetentionMs(), qint64(240000));
     QCOMPARE(config.incomingSessionOrphanTimeoutMs(), qint64(3000));
     QCOMPARE(config.uploadActionMinIntervalMs(), 300);
     QCOMPARE(config.uploadCancelGuardMs(), 1000);
@@ -121,6 +123,46 @@ void AppConfigTest::configuresMediaRamReserve() {
     QVERIFY2(config.load(options, &error), qPrintable(error));
     QCOMPARE(config.mediaRamReservePercent(), 0);
     QCOMPARE(config.mediaRamReserveMinMiB(), 0);
+}
+
+void AppConfigTest::configuresProjectMediaHiddenTimeout() {
+    AppConfig config;
+    auto options = isolatedOptions(QString());
+    QString error;
+    QVERIFY2(config.load(options, &error), qPrintable(error));
+    QCOMPARE(config.projectMediaHiddenTimeoutMs(), qint64(60000));
+
+    QTemporaryDir directory;
+    options.defaultEnvFilePath = writeEnvFile(directory, "media-timeout.env",
+        "MOUFFETTE_PROJECT_MEDIA_HIDDEN_TIMEOUT_MS=15000\n");
+    QVERIFY(!options.defaultEnvFilePath.isEmpty());
+    QVERIFY2(config.load(options, &error), qPrintable(error));
+    QCOMPARE(config.projectMediaHiddenTimeoutMs(), qint64(15000));
+    options.processEnvironment.insert("MOUFFETTE_PROJECT_MEDIA_HIDDEN_TIMEOUT_MS", "30000");
+    QVERIFY2(config.load(options, &error), qPrintable(error));
+    QCOMPARE(config.projectMediaHiddenTimeoutMs(), qint64(30000));
+
+    // Media expiry may precede or follow session expiry independently.
+    options.arguments << "--project-media-hidden-timeout-ms=90000";
+    QVERIFY2(config.load(options, &error), qPrintable(error));
+    QCOMPARE(config.projectMediaHiddenTimeoutMs(), qint64(90000));
+    QCOMPARE(config.remoteSessionHiddenTimeoutMs(), qint64(60000));
+    QCOMPARE(config.provenance(AppConfig::Key::ProjectMediaHiddenTimeoutMs),
+             QStringLiteral("cli:--project-media-hidden-timeout-ms"));
+    options.arguments.removeLast();
+
+    for (const QString value : {"0", "-1", "999", "86400001", "1.5", "abc", "300000"}) {
+        options.processEnvironment.insert("MOUFFETTE_PROJECT_MEDIA_HIDDEN_TIMEOUT_MS", value);
+        QVERIFY(!config.load(options, &error));
+        QVERIFY(error.contains("MOUFFETTE_PROJECT_MEDIA_HIDDEN_TIMEOUT_MS"));
+        QCOMPARE(config.projectMediaHiddenTimeoutMs(), qint64(90000)); // Atomic failure.
+    }
+    options.processEnvironment.insert("MOUFFETTE_PROJECT_HIDDEN_RETENTION_MS", "86400001");
+    for (const QString value : {"1000", "86400000"}) {
+        options.processEnvironment.insert("MOUFFETTE_PROJECT_MEDIA_HIDDEN_TIMEOUT_MS", value);
+        QVERIFY2(config.load(options, &error), qPrintable(error));
+        QCOMPARE(config.projectMediaHiddenTimeoutMs(), value.toLongLong());
+    }
 }
 
 void AppConfigTest::configuresCanvasTextInitialHeight() {

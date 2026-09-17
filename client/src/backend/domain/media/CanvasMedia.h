@@ -50,6 +50,10 @@ public:
     QString residencyState() const;
     double residencyProgress() const;
     QString residencyError() const;
+    // Drop this occurrence's lease and decoded resources without retiring its
+    // authoring identity. Shared assets remain available to other owners.
+    void setResidencySuspended(bool suspended);
+    bool residencySuspended() const { return m_residencySuspended; }
     void retireResidency();
 
     QSize baseSize() const { return m_baseSize; }
@@ -175,6 +179,8 @@ private:
     void enforcePlaybackEnd(qint64 position, bool atEnd = false);
     void refreshResidency();
     void requestResidency();
+    void releaseResidencyResources();
+    void initializeVideoOutputs();
 
     Type m_type;
     QString m_mediaId;
@@ -184,7 +190,9 @@ private:
     bool m_identityPublished = false;
     bool m_sourceInvalidationReported = false;
     bool m_residencyRetired = false;
+    bool m_residencySuspended = false;
     bool m_residencyAcquired = false;
+    quint64 m_residencyGeneration = 0;
     QString m_residencyOwnerId;
     qint64 m_sourceSizeBytes = -1;
     QSize m_baseSize;
@@ -223,6 +231,7 @@ private:
     RemoteVideoFrameSource* m_residentFrameSource = nullptr;
     QVideoSink* m_videoSink = nullptr;
     QAudioOutput* m_audioOutput = nullptr;
+    bool m_audioInitializationPending = false;
     bool m_muted = false;
     qreal m_volume = 1.0;
     qint64 m_pendingPositionMs = -1;

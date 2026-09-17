@@ -139,6 +139,10 @@ void ClientWorkspaceController::configureWorkspace(ClientWorkspace* workspace) {
             }
         });
         if (workspace->canvas->document()) {
+            connect(workspace->canvas->document(), &CanvasDocument::editsLockedChanged,
+                    m_runtime, [this, targetEndpointId=workspace->targetEndpointId] {
+                m_runtime->reconcileProjectMediaResidency(targetEndpointId);
+            });
             connect(workspace->canvas->document(), &CanvasDocument::documentChanged,
                     projectAutosaveTimer, [projectAutosaveTimer] {
                         projectAutosaveTimer->start();

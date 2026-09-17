@@ -120,6 +120,8 @@ bool isCommandReadyBinding(
 
 ProjectManager::TimingPolicy projectTimingPolicyFromConfig() {
     ProjectManager::TimingPolicy timing;
+    timing.projectMediaHiddenTimeoutMs =
+        AppConfig::instance().projectMediaHiddenTimeoutMs();
     timing.projectHiddenRetentionMs =
         AppConfig::instance().projectHiddenRetentionMs();
     timing.autosaveDelayMs = AppConfig::instance().projectAutosaveDelayMs();
@@ -326,6 +328,15 @@ ApplicationRuntime::ApplicationRuntime(const RuntimeProfileContext& runtimeProfi
     if (m_projectManager) {
         connect(m_projectManager, &ProjectManager::projectCheckpointDue,
                 this, &ApplicationRuntime::persistProjectCanvas);
+        connect(m_projectManager, &ProjectManager::projectMediaReleaseDue,
+                this, [this](const QString&, const QString& targetEndpointId) {
+            reconcileProjectMediaResidency(targetEndpointId);
+        });
+        connect(m_projectManager, &ProjectManager::projectVisibilityChanged,
+                this, [this](const QString&, const QString& targetEndpointId,
+                             ProjectLifecycleState) {
+            reconcileProjectMediaResidency(targetEndpointId);
+        });
         connect(m_projectManager, &ProjectManager::projectDeleted,
                 this, [this](const QString&, const QString& targetEndpointId) {
             const bool wasSelected = m_activeWorkspaceEndpointId == targetEndpointId;
@@ -953,6 +964,8 @@ QList<ClientInfo> ApplicationRuntime::buildDisplayClientList(const QList<ClientI
         client.setRemoteSessionCloseAtMs(m_workspaceManager
             ? m_workspaceManager->remoteSessionCloseAtMs(entry.endpointId) : -1);
         client.setProjectDeleteAtMs(entry.projectDeleteAtMs);
+        client.setProjectMediaReleaseAtMs(
+            m_projectManager->projectMediaReleaseAtMs(entry.endpointId));
         if (!entry.online) {
             const QString status = m_webSocketClient
                     && m_webSocketClient->isConnected()
@@ -1085,6 +1098,21 @@ void ApplicationRuntime::persistProjectCanvas(const QString& targetEndpointId) {
             ? session->canvas->document()->screens() : QList<ScreenInfo>());
 }
 
+void ApplicationRuntime::reconcileProjectMediaResidency(const QString& targetEndpointId)
+{
+    ClientWorkspace* workspace = findWorkspace(targetEndpointId);
+    if (!workspace || !workspace->canvas || !m_projectManager) return;
+    CanvasDocument* document = workspace->canvas->document();
+    if (!document) return;
+
+    const bool expired = m_projectManager->projectMediaReleaseExpired(targetEndpointId);
+    // PREPARE and playback own scene leases. Keep them intact until the host
+    // restores its draft and unlocks the document, then apply the expired
+    // deadline immediately. Returning to the application cancels the request.
+    if (expired && document->editsLocked()) return;
+    document->setMediaResidencySuspended(expired);
+}
+
 void ApplicationRuntime::restoreProjectCanvas(ClientWorkspace& session) {
     if (!m_projectManager || !session.canvas
         || m_restoredProjectIds.contains(session.targetEndpointId)) {
@@ -1127,6 +1155,7 @@ void ApplicationRuntime::restoreProjectCanvas(ClientWorkspace& session) {
     }
     durableState.insert(QStringLiteral("media"), filteredMedia);
 
+    reconcileProjectMediaResidency(session.targetEndpointId);
     QStringList skipped;
     if (!session.canvas->restoreProjectState(durableState, validSources, &skipped)) {
         qWarning() << "Project canvas restoration failed for device"

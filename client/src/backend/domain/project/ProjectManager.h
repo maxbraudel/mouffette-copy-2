@@ -22,6 +22,7 @@ class ProjectManager final : public QObject {
 public:
     struct TimingPolicy {
         qint64 projectHiddenRetentionMs = 300'000;
+        qint64 projectMediaHiddenTimeoutMs = 60'000;
         int autosaveDelayMs = 300;
         int checkpointIntervalMs = 15'000;
         int deadlinePollIntervalMs = 250;
@@ -73,9 +74,11 @@ public:
                               qint64 nowMs = -1);
 
     qint64 projectDeleteAtMs(const QString& targetEndpointId) const;
+    qint64 projectMediaReleaseAtMs(const QString& targetEndpointId) const;
+    bool projectMediaReleaseExpired(const QString& targetEndpointId) const;
 
     // Deterministic entry point for tests and wake/resume handling. Deadlines
-    // use >= comparisons, so an event at exactly 3:00/5:00 is terminal.
+    // use >= comparisons, so expiration wins at the exact configured deadline.
     void processDeadlines(qint64 nowMs = -1);
     void checkpointVisibleProjects(qint64 nowMs = -1);
 
@@ -95,6 +98,7 @@ signals:
                                   const QString& targetEndpointId,
                                   ProjectLifecycleState state);
     void projectCheckpointDue(const QString& targetEndpointId);
+    void projectMediaReleaseDue(const QString& projectId, const QString& targetEndpointId);
     void projectAboutToDelete(const ProjectRecord& project);
     void projectDeleted(const QString& projectId, const QString& targetEndpointId);
     void projectsChanged();
@@ -108,12 +112,15 @@ private:
     QList<ProjectRecord> sortedProjects() const;
     ProjectRecord* mutableProjectForTarget(const QString& targetEndpointId);
     bool removeProjectInternal(const QString& targetEndpointId);
+    void releaseProjectMediaIfDue(const QString& targetEndpointId, qint64 atMs);
 
     std::unique_ptr<ProjectStore> m_ownedStore;
     ProjectStore* m_store = nullptr;
     TimingPolicy m_timing;
     QHash<QString, ProjectRecord> m_projectsByTarget;
     QHash<QString, QString> m_targetByProjectId;
+    // Residency belongs to this process; durable records retain only hiddenAt.
+    QSet<QString> m_mediaReleaseExpiredTargets;
     QTimer m_autosaveTimer;
     QTimer m_checkpointTimer;
     QTimer m_deadlineTimer;
@@ -121,6 +128,7 @@ private:
     QString m_lastError;
     bool m_dirty = false;
     bool m_automaticTimersEnabled = true;
+    bool m_processingDeadlines = false;
 };
 
 #endif // PROJECTMANAGER_H

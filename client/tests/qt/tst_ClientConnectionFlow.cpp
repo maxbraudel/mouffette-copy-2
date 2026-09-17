@@ -7,12 +7,14 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QImage>
 #include <QPointer>
 #include <QProcess>
 #include <QPromise>
 #include <QApplication>
 #include <QQmlApplicationEngine>
 #include <QQuickStyle>
+#include <QScopeGuard>
 #include <QThreadPool>
 #include <QTemporaryDir>
 #include <QTimer>
@@ -22,6 +24,7 @@
 
 #include "backend/runtime/ApplicationRuntime.h"
 #include "backend/media/MediaBackendBootstrap.h"
+#include "backend/media/MediaResidencyManager.h"
 #include "backend/runtime/ApplicationActivityMonitor.h"
 #include "backend/runtime/RuntimeProfile.h"
 #include "backend/runtime/RuntimeStorageBootstrap.h"
@@ -595,16 +598,27 @@ private slots:
         QVERIFY(!navigation.canvasVisible());
     }
 
+    void projectDeadlinesRefreshAsLiveCountdowns_data()
+    {
+        QTest::addColumn<bool>("mediaOnly");
+        QTest::newRow("all-deadlines") << false;
+        QTest::newRow("media-only") << true;
+    }
+
     void projectDeadlinesRefreshAsLiveCountdowns()
     {
+        QFETCH(bool, mediaOnly);
         ClientListModel model;
         ClientInfo client = onlineClient(
             QStringLiteral("endpoint-countdown"),
             QStringLiteral("Countdown client"));
         const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
         client.setHasProject(true);
-        client.setRemoteSessionCloseAtMs(nowMs + 4'000);
-        client.setProjectDeleteAtMs(nowMs + 8'000);
+        client.setProjectMediaReleaseAtMs(nowMs + 3'000);
+        if (!mediaOnly) {
+            client.setRemoteSessionCloseAtMs(nowMs + 4'000);
+            client.setProjectDeleteAtMs(nowMs + 8'000);
+        }
 
         QSignalSpy changes(&model, &QAbstractItemModel::dataChanged);
         model.setClients({client});
@@ -617,6 +631,7 @@ private slots:
         QVERIFY(refreshTimer->isActive());
         const QString initial = model.data(
             model.index(0), ClientListModel::SecondaryTextRole).toString();
+        QVERIFY(initial.startsWith(QStringLiteral("Free RAM in ")));
 
         QTRY_VERIFY_WITH_TIMEOUT(changes.count() >= 1, 1'500);
         const QString refreshed = model.data(
@@ -625,6 +640,7 @@ private slots:
                  qPrintable(QStringLiteral("Countdown stayed frozen at '%1'")
                                 .arg(initial)));
 
+        client.setProjectMediaReleaseAtMs(-1);
         client.setRemoteSessionCloseAtMs(0);
         client.setProjectDeleteAtMs(0);
         client.setHasProject(false);
@@ -1203,11 +1219,16 @@ private slots:
         RuntimeProfile::configure(context);
 
         ApplicationRuntime runtime(context);
+        auto& residency = MediaResidencyManager::instance();
+        constexpr quint64 GiB = 1024ULL * 1024 * 1024;
+        residency.setMemorySnapshotForTesting({16 * GiB, 12 * GiB, 128 * 1024 * 1024});
+        const auto restoreMemory = qScopeGuard([&] { residency.clearMemorySnapshotForTesting(); });
         WorkspaceManager* workspaces = runtime.getWorkspaceManager();
         ProjectManager* projects = runtime.getProjectManager();
         workspaces->stopAutomaticTimersForTesting();
         projects->stopAutomaticTimersForTesting();
-        workspaces->setRemoteSessionHiddenTimeoutMs(60'000);
+        workspaces->setRemoteSessionHiddenTimeoutMs(
+            projects->timingPolicy().projectMediaHiddenTimeoutMs + 60'000);
 
         qint64 nowMs = 1'000'000;
         ApplicationActivityMonitor* activity =
@@ -1254,6 +1275,18 @@ private slots:
                                      WorkspaceManager::RemoteSessionState::Active, 1'000);
         }
 
+        QImage image(16, 16, QImage::Format_ARGB32);
+        image.fill(Qt::green);
+        const QString source = root.filePath(QStringLiteral("inactivity.png"));
+        QVERIFY(image.save(source));
+        QList<CanvasMedia*> media;
+        for (const QString& target : targets) {
+            CanvasDocument* document = runtime.findWorkspace(target)->canvas->document();
+            media.append(document->addPreparedFile(source, image.size(), false, {}));
+            QVERIFY(media.last());
+            QTRY_VERIFY_WITH_TIMEOUT(media.last()->residencyReady(), 5'000);
+        }
+        QSignalSpy mediaReleaseSpy(projects, &ProjectManager::projectMediaReleaseDue);
         QSignalSpy closeDueSpy(workspaces, &WorkspaceManager::remoteSessionCloseDue);
         QSignalSpy projectDeletedSpy(projects, &ProjectManager::projectDeleted);
         const qint64 retentionMs = projects->timingPolicy().projectHiddenRetentionMs;
@@ -1272,9 +1305,10 @@ private slots:
             QVERIFY(projects->hasProjectForTarget(target));
         }
         QCOMPARE(closeDueSpy.count(), 0);
+        QCOMPARE(mediaReleaseSpy.count(), 0);
         QCOMPARE(projectDeletedSpy.count(), 0);
 
-        // A single departure starts both deadlines for every project,
+        // A single departure starts all deadlines for every project,
         // including the project that is no longer the selected page.
         const qint64 leftAtMs = nowMs;
         runtime.setPointerInsideControlWindow(false);
@@ -1285,15 +1319,18 @@ private slots:
             QCOMPARE(workspaces->remoteSessionCloseAtMs(target),
                      leftAtMs + workspaces->remoteSessionHiddenTimeoutMs());
             QCOMPARE(projects->projectDeleteAtMs(target), leftAtMs + retentionMs);
+            QCOMPARE(projects->projectMediaReleaseAtMs(target),
+                     leftAtMs + projects->timingPolicy().projectMediaHiddenTimeoutMs);
         }
 
-        // Returning before expiry cancels both deadlines everywhere; even
+        // Returning before expiry cancels all deadlines everywhere; even
         // advancing past their former expiry cannot close or delete anything.
         runtime.setPointerInsideControlWindow(true);
         QVERIFY(activity->isActive());
         for (const QString& target : targets) {
             QCOMPARE(workspaces->remoteSessionCloseAtMs(target), qint64(-1));
             QCOMPARE(projects->projectDeleteAtMs(target), qint64(-1));
+            QCOMPARE(projects->projectMediaReleaseAtMs(target), qint64(-1));
         }
         nowMs += qMax(retentionMs, workspaces->remoteSessionHiddenTimeoutMs()) + 1;
         workspaces->processDeadlines(nowMs);
@@ -1304,6 +1341,57 @@ private slots:
         for (const QString& target : targets) {
             QCOMPARE(workspaces->remoteSessionState(target),
                      WorkspaceManager::RemoteSessionState::Active);
+        }
+        QCOMPARE(server.closeCommands.size(), 0);
+        QCOMPARE(mediaReleaseSpy.count(), 0);
+
+        // Each project sheds only its own leases. A scene in the second
+        // project keeps the shared asset pinned until its draft is restored.
+        ICanvasHost* playingCanvas = runtime.findWorkspace(targets.last())->canvas;
+        playingCanvas->triggerTestSceneAction();
+        QVERIFY(playingCanvas->testSceneLaunched());
+        QVERIFY(playingCanvas->document()->editsLocked());
+        runtime.setPointerInsideControlWindow(false);
+        const qint64 mediaDeadline = projects->projectMediaReleaseAtMs(targets.first());
+        QVERIFY(mediaDeadline > nowMs);
+        nowMs = mediaDeadline - 1;
+        projects->processDeadlines(nowMs);
+        QCOMPARE(mediaReleaseSpy.count(), 0);
+        QVERIFY(media.first()->residencyReady());
+        ++nowMs;
+        projects->processDeadlines(nowMs);
+        QCOMPARE(mediaReleaseSpy.count(), 2);
+        QVERIFY(!media.first()->residencyReady());
+        QVERIFY(media.last()->residencyReady());
+        QVERIFY(playingCanvas->testSceneLaunched());
+        QVERIFY(!playingCanvas->document()->mediaResidencySuspended());
+        QCOMPARE(projects->projectCount(), 2);
+        QCOMPARE(server.closeCommands.size(), 0);
+        for (const QString& target : targets) {
+            QCOMPARE(workspaces->remoteSessionState(target),
+                     WorkspaceManager::RemoteSessionState::Active);
+            QCOMPARE(projects->projectForTarget(target)->mediaReferences.size(), 1);
+        }
+
+        playingCanvas->triggerTestSceneAction();
+        QVERIFY(!playingCanvas->testSceneLaunched());
+        QVERIFY(playingCanvas->document()->mediaResidencySuspended());
+        QVERIFY(!media.last()->residencyReady());
+        QVERIFY(!residency.asset(media.first()->residencyOwnerId()));
+        QVERIFY(!residency.asset(media.last()->residencyOwnerId()));
+        QVERIFY(QFileInfo::exists(source));
+        projects->processDeadlines(nowMs);
+        QCOMPARE(mediaReleaseSpy.count(), 2);
+
+        // Pointer return rehydrates both existing graphs and cancels all
+        // inactivity deadlines without creating another project or session.
+        runtime.setPointerInsideControlWindow(true);
+        for (qsizetype i = 0; i < targets.size(); ++i) {
+            const auto* workspace = runtime.findWorkspace(targets.at(i));
+            QVERIFY(!workspace->canvas->document()->mediaResidencySuspended());
+            QCOMPARE(workspace->canvas->document()->media().size(), 1);
+            QTRY_VERIFY_WITH_TIMEOUT(media.at(i)->residencyReady(), 5'000);
+            QCOMPARE(projects->projectMediaReleaseAtMs(targets.at(i)), qint64(-1));
         }
         QCOMPARE(server.closeCommands.size(), 0);
 
