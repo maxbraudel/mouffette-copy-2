@@ -172,17 +172,6 @@ void ApplicationController::runBootstrap()
         return;
     }
 
-    if (m_bootstrapResult.hadReset()) {
-        m_bootstrapDecision = BootstrapDecision::AcknowledgeReset;
-        m_bootstrapDecisionRequired = true;
-        m_bootstrapTitle = QStringLiteral("Local data recovered");
-        m_bootstrapDetail = m_bootstrapResult.cause.isEmpty()
-            ? QStringLiteral("Mouffette repaired its local storage and can now continue.")
-            : m_bootstrapResult.cause;
-        m_bootstrapPrimaryText = QStringLiteral("Continue");
-        emit bootstrapChanged();
-        return;
-    }
     finishBootstrap();
 }
 
@@ -191,9 +180,6 @@ void ApplicationController::acceptBootstrapDecision()
     if (m_bootstrapDecision == BootstrapDecision::Retry) {
         QTimer::singleShot(0, this, &ApplicationController::runBootstrap);
         return;
-    }
-    if (m_bootstrapDecision == BootstrapDecision::AcknowledgeReset) {
-        finishBootstrap();
     }
 }
 

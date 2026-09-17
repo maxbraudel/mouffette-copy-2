@@ -5,6 +5,8 @@
 #include <QJsonObject>
 #include <QString>
 #include <QStringList>
+#include "backend/runtime/storage/StorageVersions.h"
+#include "backend/runtime/storage/StorageUpgradeEngine.h"
 
 enum class NotificationSeverity {
     Success,
@@ -43,7 +45,7 @@ struct NotificationHistoryData {
 /** Atomic, versioned persistence for the last 100 notifications. */
 class HistoryStore {
 public:
-    static constexpr int SchemaVersion = 1;
+    static constexpr int SchemaVersion = StorageVersions::History;
     static constexpr int MaximumEntries = 100;
     static constexpr int MaximumTerminalCorrelations = 1024;
 
@@ -52,6 +54,7 @@ public:
     static QString defaultFilePath();
     QString filePath() const { return m_filePath; }
     QString lastError() const { return m_lastError; }
+    RuntimeStorage::Failure lastReadFailure() const { return m_readFailure; }
 
     bool load(NotificationHistoryData* history);
     bool save(const NotificationHistoryData& history);
@@ -59,6 +62,7 @@ public:
 private:
     QString m_filePath;
     QString m_lastError;
+    RuntimeStorage::Failure m_readFailure = RuntimeStorage::Failure::None;
 };
 
 Q_DECLARE_METATYPE(NotificationEntry)

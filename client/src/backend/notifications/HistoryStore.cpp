@@ -151,13 +151,13 @@ HistoryStore::HistoryStore(QString filePath)
 
 QString HistoryStore::defaultFilePath()
 {
-    return QDir(RuntimeProfile::appDataLocation())
-        .filePath(QStringLiteral("notification-history-v1.json"));
+    return RuntimeProfile::historyFilePath();
 }
 
 bool HistoryStore::load(NotificationHistoryData* history)
 {
     m_lastError.clear();
+    m_readFailure = RuntimeStorage::Failure::InvalidData;
     if (!history) {
         m_lastError = QStringLiteral("Missing notification history output");
         return false;
@@ -166,14 +166,22 @@ bool HistoryStore::load(NotificationHistoryData* history)
 
     QFile file(m_filePath);
     if (!file.exists()) {
+        m_readFailure = RuntimeStorage::Failure::None;
         return true;
     }
     if (!file.open(QIODevice::ReadOnly)) {
+        m_readFailure = RuntimeStorage::Failure::IoError;
         m_lastError = QStringLiteral("Cannot open notification history: %1").arg(file.errorString());
         return false;
     }
     QJsonParseError parseError;
-    const QJsonDocument document = QJsonDocument::fromJson(file.readAll(), &parseError);
+    const QByteArray bytes = file.readAll();
+    if (file.error() != QFileDevice::NoError) {
+        m_readFailure = RuntimeStorage::Failure::IoError;
+        m_lastError = file.errorString();
+        return false;
+    }
+    const QJsonDocument document = QJsonDocument::fromJson(bytes, &parseError);
     if (parseError.error != QJsonParseError::NoError || !document.isObject()) {
         m_lastError = QStringLiteral("Invalid notification history JSON: %1").arg(parseError.errorString());
         return false;
@@ -237,6 +245,7 @@ bool HistoryStore::load(NotificationHistoryData* history)
     }
 
     *history = parsed;
+    m_readFailure = RuntimeStorage::Failure::None;
     return true;
 }
 

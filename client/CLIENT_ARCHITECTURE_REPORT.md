@@ -17,6 +17,15 @@ items.
 `ApplicationRuntime` coordinates networking, sessions, uploads, files,
 persistence, system lifecycle, and the tray. It has no widget pointers.
 
+## Storage startup
+
+Before constructing runtime services, the bootstrap initializes, migrates or
+resets settings, projects, notification history, identity and received-media
+cache independently. Successful operations are silent. Development and
+production use separate profiles and credential namespaces. The
+[storage guide](src/backend/runtime/storage/README.md) owns the version inventory,
+transition registry, restart guarantees and contributor procedure.
+
 ## QML presentation
 
 `resources/qml/app/` owns the application window, bootstrap, top bar, Clients,

@@ -5,6 +5,7 @@
 #include <QString>
 
 #include <memory>
+#include "backend/runtime/storage/StorageVersions.h"
 
 /**
  * Stable, self-certifying installation identity used by protocol v4.
@@ -15,6 +16,8 @@
  */
 class DeviceIdentityStore final {
 public:
+    static constexpr int SchemaVersion = StorageVersions::Identity;
+    enum class ReadState { Missing, Valid, Corrupt, IoError };
     enum class StorageBackend {
         Uninitialized,
         NativeVault,
@@ -30,6 +33,7 @@ public:
     DeviceIdentityStore& operator=(const DeviceIdentityStore&) = delete;
 
     bool initialize(QString* errorMessage = nullptr);
+    ReadState inspectStored(QString* errorMessage = nullptr) const;
     // Validates the stored identity and, if it is corrupt, removes it and
     // generates a fresh Ed25519 identity in the same runtime namespace.
     bool validateOrReset(bool* wasReset = nullptr,

@@ -141,7 +141,7 @@ signals:
     void hideRequested();
 
 private:
-    enum class BootstrapDecision { None, Retry, AcknowledgeReset };
+    enum class BootstrapDecision { None, Retry };
 
     void runBootstrap();
     void finishBootstrap();

@@ -3252,6 +3252,41 @@ private slots:
         runtime.handleApplicationAboutToQuit();
     }
 
+    void storageBootstrapDoesNotRequestRecoveryAcknowledgement_data()
+    {
+        QTest::addColumn<bool>("corrupt");
+        QTest::newRow("first-launch") << false;
+        QTest::newRow("automatic-project-reset") << true;
+    }
+
+    void storageBootstrapDoesNotRequestRecoveryAcknowledgement()
+    {
+        QFETCH(bool, corrupt);
+        QTemporaryDir root;
+        QVERIFY(root.isValid());
+        RuntimeProfileContext context;
+        context.rootPath = root.path();
+        context.profileId = QStringLiteral("silent-bootstrap-test");
+        context.persistent = false;
+        if (corrupt) {
+            QVERIFY(RuntimeStorageBootstrap(context).run().succeeded());
+            QFile projects(RuntimeProfile::projectsFilePath());
+            QVERIFY(projects.open(QIODevice::WriteOnly | QIODevice::Truncate));
+            QCOMPARE(projects.write("invalid"), qint64(7));
+        }
+        ApplicationController controller(context,
+            {QStringLiteral("tst_ClientConnectionFlow"), QStringLiteral("--server-url=ws://127.0.0.1:1")});
+        bool requestedDecision = false;
+        connect(&controller, &ApplicationController::bootstrapChanged, this, [&] {
+            requestedDecision |= controller.bootstrapDecisionRequired();
+        });
+        controller.start();
+        QTRY_VERIFY_WITH_TIMEOUT(controller.ready(), 8000);
+        QVERIFY(!requestedDecision);
+        QVERIFY(!controller.bootstrapDecisionRequired());
+        controller.handleApplicationAboutToQuit();
+    }
+
     void workspaceDeletionEvictsViewModelAndReopenCreatesFreshPresentation()
     {
         QTemporaryDir root;
@@ -3263,13 +3298,6 @@ private slots:
         context.profileId = QStringLiteral("controller-workspace-eviction");
         context.rootPath = root.path();
         context.persistent = false;
-
-        // Seed a valid temporary profile so ApplicationController's normal
-        // bootstrap does not pause on the first-run recovery acknowledgement.
-        RuntimeStorageBootstrap initialBootstrap(context);
-        const RuntimeStorageBootstrap::Result bootstrapResult =
-            initialBootstrap.run();
-        QVERIFY(bootstrapResult.succeeded());
 
         QWebSocketServer server(QStringLiteral("controller-workspace-eviction-test"),
                                 QWebSocketServer::NonSecureMode);

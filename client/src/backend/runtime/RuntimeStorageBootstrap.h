@@ -2,6 +2,7 @@
 #define RUNTIMESTORAGEBOOTSTRAP_H
 
 #include "backend/runtime/RuntimeProfile.h"
+#include "storage/StorageUpgradeEngine.h"
 
 #include <QString>
 #include <QStringList>
@@ -10,8 +11,6 @@
 
 class RuntimeStorageBootstrap final {
 public:
-    static constexpr int StorageVersion = 1;
-
     enum class Status {
         Success,
         SuccessWithReset,
@@ -20,10 +19,10 @@ public:
 
     enum class Stage {
         PreparingRuntime,
-        ValidatingManifest,
         PurgingCache,
         ValidatingSettings,
         ValidatingProjects,
+        ValidatingHistory,
         ValidatingIdentity
     };
 
@@ -31,8 +30,7 @@ public:
         Status status = Status::RecoverableFailure;
         QString code;
         QString cause;
-        QString foundVersion;
-        int expectedVersion = StorageVersion;
+        QList<RuntimeStorage::Report> components;
         QStringList resetCategories;
 
         bool succeeded() const { return status != Status::RecoverableFailure; }

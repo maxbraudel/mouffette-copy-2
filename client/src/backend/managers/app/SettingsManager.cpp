@@ -1,6 +1,7 @@
 #include "backend/managers/app/SettingsManager.h"
 #include "backend/config/AppConfig.h"
 #include "backend/runtime/RuntimeProfile.h"
+#include "backend/runtime/storage/StorageVersions.h"
 #include <QSettings>
 #include <QDebug>
 #include <algorithm>
@@ -27,6 +28,7 @@ void SettingsManager::saveSettings() {
                                       ? AppConfig::instance().serverUrl()
                                       : m_serverUrlConfig);
     settings->setValue("autoUploadImportedMedia", m_autoUploadImportedMedia);
+    settings->setValue("storage/schemaVersion", StorageVersions::Settings);
     settings->sync();
     
     qDebug() << "SettingsManager: Settings saved";
@@ -45,6 +47,7 @@ void SettingsManager::setServerUrl(const QString& url) {
         m_serverUrlConfig = canonical;
         const std::unique_ptr<QSettings> settings = RuntimeProfile::createSettings();
         settings->setValue("serverUrl", m_serverUrlConfig);
+        settings->setValue("storage/schemaVersion", StorageVersions::Settings);
         settings->sync();
         emit serverUrlChanged(canonical);
     }
@@ -55,6 +58,7 @@ void SettingsManager::setAutoUploadImportedMedia(bool enabled) {
         m_autoUploadImportedMedia = enabled;
         const std::unique_ptr<QSettings> settings = RuntimeProfile::createSettings();
         settings->setValue("autoUploadImportedMedia", m_autoUploadImportedMedia);
+        settings->setValue("storage/schemaVersion", StorageVersions::Settings);
         settings->sync();
     }
 }

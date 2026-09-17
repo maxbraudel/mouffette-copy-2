@@ -35,3 +35,11 @@ Connection badges share `ConnectionStatusMetrics`. Upload progress reserves
 its counter's digit capacity from the media count before the transfer begins,
 including the separate monospace font. Do not cache the greatest width seen so
 far: that still allows the first transition to move the layout.
+
+## Storage compatibility
+
+All persisted-component versions and migration/reset policies are centralized
+in [runtime/storage](../src/backend/runtime/storage/README.md). Business stores
+read and write their current formats; bootstrap runs before their consumers.
+Compatibility decisions and migration code must not be added to QML, domain
+loaders or individual application controllers.

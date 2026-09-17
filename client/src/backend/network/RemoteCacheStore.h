@@ -8,6 +8,7 @@
 #include <QString>
 
 #include <optional>
+#include "backend/runtime/storage/StorageVersions.h"
 
 /**
  * Durable, session-scoped storage for media received from another device.
@@ -28,7 +29,7 @@ class RemoteCacheStore final : public QObject {
     Q_OBJECT
 
 public:
-    static constexpr int MetadataSchemaVersion = 1;
+    static constexpr int MetadataSchemaVersion = StorageVersions::ReceivedMedia;
 
     struct Scope {
         QString senderEndpointId;

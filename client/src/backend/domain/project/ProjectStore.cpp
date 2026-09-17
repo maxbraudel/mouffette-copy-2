@@ -24,6 +24,7 @@ QString ProjectStore::defaultFilePath()
 bool ProjectStore::load(QList<ProjectRecord>* projects)
 {
     m_lastError.clear();
+    m_readFailure = RuntimeStorage::Failure::InvalidData;
     if (!projects) {
         m_lastError = QStringLiteral("Missing projects output");
         return false;
@@ -32,22 +33,31 @@ bool ProjectStore::load(QList<ProjectRecord>* projects)
 
     QFile file(m_filePath);
     if (!file.exists()) {
+        m_readFailure = RuntimeStorage::Failure::None;
         return true;
     }
     if (!file.open(QIODevice::ReadOnly)) {
+        m_readFailure = RuntimeStorage::Failure::IoError;
         m_lastError = QStringLiteral("Cannot open project store: %1").arg(file.errorString());
         return false;
     }
 
     QJsonParseError parseError;
-    const QJsonDocument document = QJsonDocument::fromJson(file.readAll(), &parseError);
+    const QByteArray bytes = file.readAll();
+    if (file.error() != QFileDevice::NoError) {
+        m_readFailure = RuntimeStorage::Failure::IoError;
+        m_lastError = file.errorString();
+        return false;
+    }
+    const QJsonDocument document = QJsonDocument::fromJson(bytes, &parseError);
     if (parseError.error != QJsonParseError::NoError || !document.isObject()) {
         m_lastError = QStringLiteral("Invalid project store JSON: %1").arg(parseError.errorString());
         return false;
     }
 
     const QJsonObject root = document.object();
-    if (root.value(QStringLiteral("schemaVersion")).toInt(-1) != SchemaVersion) {
+    const QJsonValue version = root.value(QStringLiteral("schemaVersion"));
+    if (!version.isDouble() || version.toDouble(-1) != SchemaVersion) {
         m_lastError = QStringLiteral("Unsupported project store schema version");
         return false;
     }
@@ -77,6 +87,7 @@ bool ProjectStore::load(QList<ProjectRecord>* projects)
     }
 
     *projects = parsed;
+    m_readFailure = RuntimeStorage::Failure::None;
     return true;
 }
 

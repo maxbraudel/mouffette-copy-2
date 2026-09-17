@@ -30,13 +30,16 @@ Windows releases on Windows.
 
 `dev` selects CMake Debug and application channel `development`. Its bundle
 identifier is `com.mouffette.client.dev`, so it is distinguishable from a
-packaged Release, while the primary profile retains the existing `Mouffette`
-data paths and `Mouffette/Client` QSettings identity.
+packaged Release, while its persistent profile lives under
+`runtimes/development/instance-1` in the platform application-data directory.
 
 `prod` selects CMake Release and application channel `production`. It uses the
-final `Mouffette` and `com.mouffette.client` identities. The instance lock and
-IPC channel include the build channel, so Development and Release do not block
-one another even though their primary profile remains backward-compatible.
+final `Mouffette` and `com.mouffette.client` identities. Its persistent profile
+lives under `runtimes/production/instance-1`. Instance
+locks, IPC coordination and credential namespaces include the build channel.
+Development and Release have independent projects, settings, history, cache
+and device identities; this layout starts fresh without importing the previous
+shared runtime.
 
 Build type does not select the WebSocket server. Runtime configuration keeps
 the documented precedence:
@@ -109,6 +112,10 @@ source. CMake propagates it to:
 - macOS bundle metadata;
 - Windows VERSIONINFO;
 - package filenames.
+
+This release version never triggers storage resets. Each storage component has
+an independent schema version and an explicit migration/reset policy; see the
+[storage upgrade guide](../src/backend/runtime/storage/README.md).
 
 Increase it before cutting a release. A CI/release job should attach the
 artifact and `.sha256` file to a tag with the same version.

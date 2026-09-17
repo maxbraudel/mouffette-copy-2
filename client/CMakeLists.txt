@@ -32,9 +32,9 @@ if(MOUFFETTE_CHANNEL STREQUAL "production")
 else()
     set(MOUFFETTE_BUNDLE_IDENTIFIER "com.mouffette.client.dev")
 endif()
-# The primary profile deliberately retains the pre-v3 application and
-# QSettings identities in both channels. Development/production coordination
-# remains separate through MOUFFETTE_BUILD_CHANNEL, not through data paths.
+# Display/application names remain common. RuntimeProfile isolates durable
+# data and credential namespaces by MOUFFETTE_BUILD_CHANNEL; package/release
+# versions never select storage compatibility.
 set(MOUFFETTE_APPLICATION_NAME "Mouffette")
 set(MOUFFETTE_SETTINGS_APPLICATION "Client")
 set(MOUFFETTE_EXECUTABLE_NAME "Mouffette")
@@ -174,6 +174,16 @@ if(WIN32)
 endif()
 
 
+# Shared by the application and focused storage tests; migrations are registered
+# explicitly, never discovered by a filesystem glob.
+set(MOUFFETTE_STORAGE_SOURCES
+    src/backend/runtime/RuntimeStorageBootstrap.cpp
+    src/backend/runtime/storage/StorageUpgradeEngine.cpp
+    src/backend/runtime/storage/StorageIO.cpp
+    src/backend/runtime/storage/StorageRegistry.cpp
+    src/backend/runtime/storage/migrations/settings/v0_to_v1.cpp
+)
+
 # Source files - Frontend/Backend Architecture
 set(SOURCES
     # ═══════════════════════════════════════════════════════
@@ -236,7 +246,7 @@ set(SOURCES
     # Runtime profile / instance coordination
     src/backend/runtime/RuntimeProfile.cpp
     src/backend/runtime/ApplicationInstanceManager.cpp
-    src/backend/runtime/RuntimeStorageBootstrap.cpp
+    ${MOUFFETTE_STORAGE_SOURCES}
 
     # Security
     src/backend/security/DeviceIdentityStore.cpp
@@ -743,7 +753,7 @@ if(BUILD_TESTING)
 
     add_executable(tst_RuntimeStorageBootstrap
         tests/qt/tst_RuntimeStorageBootstrap.cpp
-        src/backend/runtime/RuntimeStorageBootstrap.cpp
+        ${MOUFFETTE_STORAGE_SOURCES}
         src/backend/runtime/RuntimeStorageBootstrap.h
         src/backend/runtime/RuntimeProfile.cpp
         src/backend/runtime/RuntimeProfile.h
@@ -757,6 +767,8 @@ if(BUILD_TESTING)
         src/backend/domain/project/ProjectModel.h
         src/backend/domain/project/ProjectStore.cpp
         src/backend/domain/project/ProjectStore.h
+        src/backend/notifications/HistoryStore.cpp
+        src/backend/notifications/HistoryStore.h
     )
     target_include_directories(tst_RuntimeStorageBootstrap PRIVATE src)
     target_link_libraries(tst_RuntimeStorageBootstrap PRIVATE

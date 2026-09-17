@@ -30,6 +30,7 @@ bool acquireRecoveringStaleLock(QLockFile& lock)
     // tryLock owns stale-PID detection, native locking and serialized stale
     // removal. Forcing removeStaleLockFile after contention can race a live
     // initializer and bypass Qt's .rmlock/recheck protocol.
+    lock.setStaleLockTime(0);
     return lock.tryLock(0);
 }
 }
@@ -139,6 +140,7 @@ bool ApplicationInstanceManager::createTemporaryProfile(QString* errorMessage)
     }
     m_profileLock = std::make_unique<QLockFile>(
         QDir(m_profile.rootPath).filePath(QStringLiteral("active.lock")));
+    m_profileLock->setStaleLockTime(0);
     if (!m_profileLock->tryLock(0)) {
         if (errorMessage) *errorMessage = QStringLiteral("Cannot lock temporary instance profile");
         return false;
@@ -269,15 +271,31 @@ ApplicationInstanceManager::start(QString* errorMessage)
             // Test/embedded callers that explicitly isolate coordination also
             // isolate the persistent runtime from the real user profile.
             m_profile.rootPath = QDir(m_coordinationRoot).filePath(
-                QStringLiteral("persistent/instance-1"));
+                QStringLiteral("persistent/%1/instance-1").arg(m_profile.channel));
         } else {
             const QString base = QStandardPaths::writableLocation(
                 QStandardPaths::AppDataLocation);
             const QString persistentBase = base.isEmpty()
                 ? QDir(QDir::homePath()).filePath(QStringLiteral(".mouffette/data"))
                 : base;
-            m_profile.rootPath = QDir(persistentBase).filePath(
-                QStringLiteral("runtimes/instance-1"));
+            m_profile.rootPath = RuntimeProfile::persistentRoot(persistentBase, m_profile.channel);
+        }
+        const QFileInfo profileRoot(m_profile.rootPath);
+        if (profileRoot.isSymLink() || (profileRoot.exists() && !profileRoot.isDir())
+            || !QDir().mkpath(m_profile.rootPath)) {
+            if (errorMessage) *errorMessage = QStringLiteral("Cannot prepare persistent runtime");
+            return StartResult::Failed;
+        }
+        const QString lockPath = QDir(m_profile.rootPath).filePath(QStringLiteral("active.lock"));
+        if (QFileInfo(lockPath).isSymLink()) {
+            if (errorMessage) *errorMessage = QStringLiteral("Unsafe persistent runtime lock");
+            return StartResult::Failed;
+        }
+        m_profileLock = std::make_unique<QLockFile>(lockPath);
+        m_profileLock->setStaleLockTime(0);
+        if (!m_profileLock->tryLock(0)) {
+            if (errorMessage) *errorMessage = QStringLiteral("Persistent runtime is already in use");
+            return StartResult::Failed;
         }
         if (!startActivationServer(errorMessage)) {
             return StartResult::Failed;

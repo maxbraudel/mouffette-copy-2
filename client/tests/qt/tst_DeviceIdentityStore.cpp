@@ -4,6 +4,8 @@
 
 #include <QFile>
 #include <QTemporaryDir>
+#include <QScopeGuard>
+#include <QUuid>
 
 #include <openssl/evp.h>
 #include <openssl/x509.h>
@@ -17,6 +19,8 @@ private slots:
     void signatureVerifiesAndRejectsTampering();
     void corruptStoredIdentityIsNotSilentlyRotated();
     void storedIdentityWithTrailingDataIsRejected();
+    void nativeVaultNamespacesAreIndependent();
+    void danglingFallbackLinkDoesNotCreateExternalKey();
 };
 
 void DeviceIdentityStoreTest::endpointIdentityIsInstanceScoped() {
@@ -131,6 +135,53 @@ void DeviceIdentityStoreTest::storedIdentityWithTrailingDataIsRejected() {
     DeviceIdentityStore restored(directory.path(), false);
     QVERIFY(!restored.initialize(&error));
     QVERIFY(error.contains(QStringLiteral("valid Ed25519")));
+}
+
+void DeviceIdentityStoreTest::danglingFallbackLinkDoesNotCreateExternalKey()
+{
+#ifdef Q_OS_WIN
+    QSKIP("QFile::link creates Windows shortcuts, not symbolic links.");
+#else
+    QTemporaryDir directory;
+    DeviceIdentityStore identity(directory.path(), false);
+    const QString external = directory.filePath("external-key.pk8");
+    QVERIFY(QFile::link(external, identity.fallbackFilePath()));
+    QString error;
+    QCOMPARE(identity.inspectStored(&error), DeviceIdentityStore::ReadState::Corrupt);
+    QVERIFY(!identity.initialize(&error));
+    QVERIFY(!QFileInfo::exists(external));
+    bool reset = false;
+    QVERIFY2(identity.validateOrReset(&reset, &error), qPrintable(error));
+    QVERIFY(reset);
+    QVERIFY(!QFileInfo::exists(external));
+    QVERIFY(!QFileInfo(identity.fallbackFilePath()).isSymLink());
+#endif
+}
+
+void DeviceIdentityStoreTest::nativeVaultNamespacesAreIndependent()
+{
+#ifndef Q_OS_WIN
+    QSKIP("Native Credential Manager integration runs in Windows CI; avoids macOS Keychain prompts.");
+#else
+    QTemporaryDir directory;
+    const QString suffix = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    const QString devNamespace = QStringLiteral("development:test-%1").arg(suffix);
+    const QString prodNamespace = QStringLiteral("production:test-%1").arg(suffix);
+    DeviceIdentityStore dev(directory.filePath("dev"), true, devNamespace);
+    DeviceIdentityStore prod(directory.filePath("prod"), true, prodNamespace);
+    const auto cleanup = qScopeGuard([&] { dev.reset(); prod.reset(); });
+    QString error;
+    QVERIFY2(dev.initialize(&error), qPrintable(error));
+    QVERIFY2(prod.initialize(&error), qPrintable(error));
+    QCOMPARE(dev.storageBackend(), DeviceIdentityStore::StorageBackend::NativeVault);
+    QCOMPARE(prod.storageBackend(), DeviceIdentityStore::StorageBackend::NativeVault);
+    QVERIFY(dev.installationId() != prod.installationId());
+    const QString productionId = prod.installationId();
+    QVERIFY2(dev.reset(&error), qPrintable(error));
+    DeviceIdentityStore restored(directory.filePath("prod"), true, prodNamespace);
+    QVERIFY2(restored.initialize(&error), qPrintable(error));
+    QCOMPARE(restored.installationId(), productionId);
+#endif
 }
 
 QTEST_GUILESS_MAIN(DeviceIdentityStoreTest)

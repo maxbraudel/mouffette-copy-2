@@ -307,11 +307,15 @@ public:
         return encoded;
     }
 
-    bool loadFallback(QByteArray* encoded, QString* errorMessage) const {
+    bool loadFallback(QByteArray* encoded, QString* errorMessage,
+                      ReadState* state = nullptr) const {
+        if (state) *state = ReadState::Missing;
         const QString path = resolvedFallbackPath();
-        if (path.isEmpty() || !QFileInfo::exists(path)) return false;
         const QFileInfo info(path);
+        if (path.isEmpty() || (!info.exists() && !info.isSymLink())) return false;
+        if (state) *state = ReadState::IoError;
         if (info.isSymLink() || !info.isFile()) {
+            if (state) *state = ReadState::Corrupt;
             if (errorMessage) {
                 *errorMessage = QStringLiteral(
                     "Device identity fallback must be a regular, non-symlink file");
@@ -340,8 +344,13 @@ public:
             }
             if (!file.open(QIODevice::ReadOnly)) return false;
         }
-        *encoded = file.readAll();
+        *encoded = file.read(4097);
+        if (file.error() != QFileDevice::NoError) {
+            if (errorMessage) *errorMessage = file.errorString();
+            return false;
+        }
         if (encoded->isEmpty() || encoded->size() > 4096) {
+            if (state) *state = ReadState::Corrupt;
             if (errorMessage) {
                 *errorMessage = QStringLiteral(
                     "Device identity file has an invalid size");
@@ -349,6 +358,7 @@ public:
             encoded->clear();
             return false;
         }
+        if (state) *state = ReadState::Valid;
         return true;
     }
 
@@ -392,10 +402,32 @@ DeviceIdentityStore::DeviceIdentityStore(QString fallbackDirectory,
                                          QString runtimeNamespace)
     : d(std::make_unique<Impl>(std::move(fallbackDirectory), preferNativeVault,
                               runtimeNamespace.trimmed().isEmpty()
-                                  ? RuntimeProfile::context().profileId
+                                  ? RuntimeProfile::context().identityNamespace()
                                   : std::move(runtimeNamespace))) {}
 
 DeviceIdentityStore::~DeviceIdentityStore() = default;
+
+DeviceIdentityStore::ReadState DeviceIdentityStore::inspectStored(QString* errorMessage) const
+{
+    if (errorMessage) errorMessage->clear();
+    QByteArray encoded;
+    QString vaultError;
+    const bool native = d->preferNativeVault
+        && loadNativeSecret(d->vaultAccount, &encoded, &vaultError);
+    if (!native) {
+        ReadState state;
+        QString fallbackError;
+        if (!d->loadFallback(&encoded, &fallbackError, &state)) {
+            if (errorMessage) *errorMessage = fallbackError.isEmpty() ? vaultError : fallbackError;
+            return state == ReadState::Missing && !vaultError.isEmpty() ? ReadState::IoError : state;
+        }
+    }
+    if (!Impl::decodePrivateKey(encoded)) {
+        if (errorMessage) *errorMessage = QStringLiteral("Stored device identity is not a valid Ed25519 key");
+        return ReadState::Corrupt;
+    }
+    return ReadState::Valid;
+}
 
 bool DeviceIdentityStore::initialize(QString* errorMessage) {
     if (d->key) return true;
@@ -415,7 +447,7 @@ bool DeviceIdentityStore::initialize(QString* errorMessage) {
     }
 
     if (!loadedFromVault && !loadedFromFile
-        && (fallbackExists || !vaultDiagnostic.isEmpty())) {
+        && (fallbackExists || !fallbackDiagnostic.isEmpty() || !vaultDiagnostic.isEmpty())) {
         if (errorMessage) {
             *errorMessage = !fallbackDiagnostic.isEmpty()
                 ? fallbackDiagnostic
@@ -424,7 +456,7 @@ bool DeviceIdentityStore::initialize(QString* errorMessage) {
         return false;
     }
 
-    if (!encoded.isEmpty()) {
+    if (loadedFromVault || loadedFromFile) {
         d->key = Impl::decodePrivateKey(encoded);
         if (!d->key) {
             if (errorMessage) {
@@ -516,6 +548,7 @@ bool DeviceIdentityStore::validateOrReset(bool* wasReset, QString* errorMessage)
         if (errorMessage) errorMessage->clear();
         return true;
     }
+    if (inspectStored(errorMessage) == ReadState::IoError) return false;
     QString resetError;
     if (!reset(&resetError) || !initialize(errorMessage)) {
         if (errorMessage && errorMessage->isEmpty()) {
