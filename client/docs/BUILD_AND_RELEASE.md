@@ -103,6 +103,16 @@ provide its password through the process environment, and use
 `.\scripts\package-release.ps1 -RequireSigning`. Secrets and certificates must never be stored
 in this repository.
 
+## Application icons
+
+All application, tray and native package icons derive from
+`resources/icons/logo/mouffette-logo.svg`. The generated assets are checked in;
+normal builds do not require image conversion tools. See the
+[logo guide](../resources/icons/logo/README.md) for regeneration and platform
+details. Windows embeds the ICO in the executable shipped in the portable ZIP.
+macOS embeds the ICNS in the app and uses it for the mounted DMG volume;
+packaging requires `SetFile` from Xcode Command Line Tools.
+
 ## Versioning
 
 `project(MouffetteClient VERSION ...)` in `CMakeLists.txt` is the single version

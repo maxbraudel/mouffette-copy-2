@@ -365,8 +365,8 @@ VERSION="$(sed -nE 's/^MouffetteClient_VERSION:STATIC=(.+)$/\1/p' "$BUILD_DIR/CM
 ARCH="$(uname -m)"
 DMG="$PACKAGE_DIR/Mouffette-$VERSION-macos-$ARCH.dmg"
 cmake -E rm -f "$DMG" "$DMG.sha256"
-hdiutil create -volname "Mouffette $VERSION" -srcfolder "$APP" \
-    -ov -format UDZO "$DMG"
+bash "$SCRIPTS_DIR/internal/create-dmg.sh" "$APP" "$DMG" "Mouffette $VERSION" \
+    "$CLIENT_ROOT/resources/icons/logo/mouffette.icns"
 
 if [[ -n "${MOUFFETTE_MACOS_SIGN_IDENTITY:-}" ]]; then
     codesign --force --timestamp --sign "$MOUFFETTE_MACOS_SIGN_IDENTITY" "$DMG"

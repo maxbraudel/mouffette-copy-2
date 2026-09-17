@@ -4,7 +4,19 @@
         <file alias="client.production.env">../.env.production</file>
     </qresource>
     <qresource prefix="/icons">
-    <file>mouffette.png</file>
+    <file alias="logo/mouffette-16.png">icons/logo/mouffette-16.png</file>
+    <file alias="logo/mouffette-20.png">icons/logo/mouffette-20.png</file>
+    <file alias="logo/mouffette-24.png">icons/logo/mouffette-24.png</file>
+    <file alias="logo/mouffette-32.png">icons/logo/mouffette-32.png</file>
+    <file alias="logo/mouffette-40.png">icons/logo/mouffette-40.png</file>
+    <file alias="logo/mouffette-48.png">icons/logo/mouffette-48.png</file>
+    <file alias="logo/mouffette-64.png">icons/logo/mouffette-64.png</file>
+    <file alias="logo/mouffette-128.png">icons/logo/mouffette-128.png</file>
+    <file alias="logo/mouffette-256.png">icons/logo/mouffette-256.png</file>
+    <file alias="logo/mouffette-512.png">icons/logo/mouffette-512.png</file>
+    <file alias="logo/mouffette-1024.png">icons/logo/mouffette-1024.png</file>
+    <file alias="logo/mouffette-tray-macos.png">icons/logo/mouffette-tray-macos.png</file>
+    <file alias="logo/mouffette-tray-macos@2x.png">icons/logo/mouffette-tray-macos@2x.png</file>
     <file>icons/play.svg</file>
     <file>icons/loop.svg</file>
     <file>icons/pause.svg</file>

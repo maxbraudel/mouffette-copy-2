@@ -10,6 +10,8 @@
     <string>@MOUFFETTE_BUNDLE_IDENTIFIER@</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
+    <key>CFBundleIconFile</key>
+    <string>@MOUFFETTE_MACOS_ICON_FILE@</string>
     <key>CFBundleName</key>
     <string>@MOUFFETTE_APPLICATION_NAME@</string>
     <key>CFBundlePackageType</key>

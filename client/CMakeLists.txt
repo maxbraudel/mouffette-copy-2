@@ -38,6 +38,8 @@ endif()
 set(MOUFFETTE_APPLICATION_NAME "Mouffette")
 set(MOUFFETTE_SETTINGS_APPLICATION "Client")
 set(MOUFFETTE_EXECUTABLE_NAME "Mouffette")
+set(MOUFFETTE_ICON_DIR "${CMAKE_CURRENT_SOURCE_DIR}/resources/icons/logo")
+set(MOUFFETTE_MACOS_ICON_FILE "mouffette.icns")
 
 configure_file(
     cmake/AppBuildConfig.h.in
@@ -540,12 +542,16 @@ qt_add_qml_module(MouffetteClient
         resources/qml/VideoItem.qml)
 
 if(WIN32)
+    enable_language(RC)
     configure_file(
         cmake/MouffetteVersion.rc.in
         "${CMAKE_CURRENT_BINARY_DIR}/generated/MouffetteVersion.rc"
         @ONLY)
     target_sources(MouffetteClient PRIVATE
         "${CMAKE_CURRENT_BINARY_DIR}/generated/MouffetteVersion.rc")
+    target_include_directories(MouffetteClient PRIVATE "${MOUFFETTE_ICON_DIR}")
+    set_property(SOURCE "${CMAKE_CURRENT_BINARY_DIR}/generated/MouffetteVersion.rc"
+        APPEND PROPERTY OBJECT_DEPENDS "${MOUFFETTE_ICON_DIR}/mouffette.ico")
 endif()
 
 # Link Qt libraries
@@ -598,8 +604,13 @@ if(UNIX AND NOT APPLE AND TARGET Qt6::DBus)
 endif()
 
 if(APPLE)
+    set_source_files_properties("${MOUFFETTE_ICON_DIR}/${MOUFFETTE_MACOS_ICON_FILE}"
+        PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
+    target_sources(MouffetteClient PRIVATE
+        "${MOUFFETTE_ICON_DIR}/${MOUFFETTE_MACOS_ICON_FILE}")
     set_target_properties(MouffetteClient PROPERTIES
         MACOSX_BUNDLE TRUE
+        MACOSX_BUNDLE_ICON_FILE "${MOUFFETTE_MACOS_ICON_FILE}"
         MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_BINARY_DIR}/generated/Info.plist"
         MACOSX_BUNDLE_BUNDLE_NAME "${MOUFFETTE_APPLICATION_NAME}"
         MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}"

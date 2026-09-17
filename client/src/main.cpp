@@ -1,5 +1,6 @@
 #include <QApplication>
 #include <QFontDatabase>
+#include <QIcon>
 #include <QSystemTrayIcon>
 #include <QDebug>
 #include <QCoreApplication>
@@ -87,6 +88,15 @@ int main(int argc, char *argv[]) {
     app.setApplicationVersion(QStringLiteral(MOUFFETTE_VERSION_STRING));
     app.setOrganizationName("Mouffette");
     app.setOrganizationDomain("mouffette.app");
+
+    // Share the same logo between windows, the taskbar/Dock and the Windows tray.
+    // Embedded PNG sizes also work without an SVG/ICO image plugin at runtime.
+    QIcon applicationIcon;
+    for (int size : {16, 20, 24, 32, 40, 48, 64, 128, 256, 512, 1024}) {
+        applicationIcon.addFile(
+            QStringLiteral(":/icons/logo/mouffette-%1.png").arg(size), QSize(size, size));
+    }
+    app.setWindowIcon(applicationIcon);
 
     ApplicationInstanceManager instanceManager(
         QStringLiteral(MOUFFETTE_BUNDLE_IDENTIFIER ":" MOUFFETTE_BUILD_CHANNEL),

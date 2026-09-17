@@ -1,6 +1,6 @@
 #include "backend/managers/app/SystemTrayManager.h"
 #include <QIcon>
-#include <QPixmap>
+#include <QGuiApplication>
 
 SystemTrayManager::SystemTrayManager(QObject* parent)
     : QObject(parent)
@@ -17,14 +17,14 @@ void SystemTrayManager::setup() {
     // Create tray icon (no context menu, just click handling)
     m_trayIcon = new QSystemTrayIcon(this);
     
-    // Set icon - try to load from resources, fallback to simple icon
-    QIcon trayIconIcon(":/icons/mouffette.png");
-    if (trayIconIcon.isNull()) {
-        // Fallback to simple colored icon
-        QPixmap pixmap(16, 16);
-        pixmap.fill(Qt::blue);
-        trayIconIcon = QIcon(pixmap);
-    }
+    QIcon trayIconIcon = QGuiApplication::windowIcon();
+#ifdef Q_OS_MACOS
+    // The template preserves the logo's cutouts. AppKit chooses its colour
+    // for light/dark menu bars, including the highlighted state.
+    trayIconIcon = QIcon(QStringLiteral(":/icons/logo/mouffette-tray-macos.png"));
+    trayIconIcon.addFile(QStringLiteral(":/icons/logo/mouffette-tray-macos@2x.png"));
+    trayIconIcon.setIsMask(true);
+#endif
     m_trayIcon->setIcon(trayIconIcon);
     
     // Connect tray icon activation to forward the signal

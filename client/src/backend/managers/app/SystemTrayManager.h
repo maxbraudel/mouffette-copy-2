@@ -10,7 +10,7 @@ class QIcon;
  * @brief SystemTrayManager - Manages system tray icon and interactions
  * 
  * This class encapsulates system tray functionality including:
- * - Tray icon setup with fallback
+ * - Tray icon setup using the shared application logo
  * - Activation signals (open and focus window)
  * - Tooltip management
  */
@@ -32,7 +32,7 @@ public:
     /**
      * @brief Setup and show the system tray icon
      * 
-     * Creates tray icon with Mouffette icon (with fallback),
+     * Creates tray icon with the Mouffette logo (a native template on macOS),
      * sets tooltip, and shows the icon.
      */
     void setup();
