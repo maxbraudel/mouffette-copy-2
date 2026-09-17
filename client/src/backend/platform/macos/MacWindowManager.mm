@@ -70,17 +70,21 @@ void MacWindowManager::configureControlWindow(QWindow* qtWindow, bool alwaysOnTo
         [(NSPanel*)window setBecomesKeyOnlyIfNeeded:NO];
     }
     // Set collection behavior before the level: AppKit validates the combination.
-    NSWindowCollectionBehavior behavior = NSWindowCollectionBehaviorFullScreenAuxiliary
+    const bool fullscreen = qtWindow->windowState() == Qt::WindowFullScreen
+        || ([window styleMask] & NSWindowStyleMaskFullScreen);
+    NSWindowCollectionBehavior behavior = NSWindowCollectionBehaviorFullScreenPrimary
         | NSWindowCollectionBehaviorFullScreenDisallowsTiling
         | NSWindowCollectionBehaviorParticipatesInCycle;
-    behavior |= alwaysOnTop
+    behavior |= fullscreen ? NSWindowCollectionBehaviorManaged : alwaysOnTop
         ? NSWindowCollectionBehaviorCanJoinAllSpaces | NSWindowCollectionBehaviorStationary
         : NSWindowCollectionBehaviorMoveToActiveSpace | NSWindowCollectionBehaviorManaged;
-    if (@available(macOS 13.0, *)) behavior |= NSWindowCollectionBehaviorCanJoinAllApplications;
+    if (@available(macOS 13.0, *)) {
+        if (!fullscreen) behavior |= NSWindowCollectionBehaviorCanJoinAllApplications;
+    }
     if ([window collectionBehavior] != behavior) [window setCollectionBehavior:behavior];
     // Interactive windows must remain below the WindowServer drag layer.
     const NSWindowLevel topmostLevel = NSPopUpMenuWindowLevel + 1;
-    const NSWindowLevel level = alwaysOnTop ? topmostLevel : NSNormalWindowLevel;
+    const NSWindowLevel level = alwaysOnTop && !fullscreen ? topmostLevel : NSNormalWindowLevel;
     if ([window level] != level) [window setLevel:level];
     [window setHidesOnDeactivate:NO];
     for (NSWindow* child in controlChildren(qtWindow, window)) {

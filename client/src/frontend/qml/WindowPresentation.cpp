@@ -42,16 +42,10 @@ void WindowPresentation::setWindow(QWindow* window)
                          | Qt::WindowSystemMenuHint | Qt::WindowMinMaxButtonsHint
                          | Qt::WindowCloseButtonHint;
 #ifdef Q_OS_MACOS
-        // Keep Qt from replacing FullScreenAuxiliary with FullScreenPrimary
-        // when it creates/updates the native window.
-        // Cocoa only admits auxiliary panels into another application's
-        // fullscreen Space. Keep one Qt-owned QNSPanel in both priority modes;
-        // changing its level does not replace the Quick window or its scene.
-        // Dialog gives that panel standard macOS title-bar buttons. Tool adds
-        // NSWindowStyleMaskUtilityWindow, shrinking the title bar and buttons.
-        // Window type alone does not make the window modal.
-        flags = (flags & ~Qt::WindowType_Mask) | Qt::Dialog | Qt::CustomizeWindowHint;
-        flags &= ~Qt::WindowFullscreenButtonHint;
+        // Keep standard-size native title-bar controls on the nonmodal panel.
+        // AppKit owns the green button's fullscreen icon, menu and action.
+        flags = (flags & ~Qt::WindowType_Mask) | Qt::Dialog | Qt::CustomizeWindowHint
+                | Qt::WindowFullscreenButtonHint;
 #endif
         flags.setFlag(Qt::WindowStaysOnTopHint, m_alwaysOnTop);
         window->setFlags(flags);

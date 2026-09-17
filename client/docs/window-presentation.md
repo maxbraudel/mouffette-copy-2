@@ -35,10 +35,14 @@ still opening on the user's current desktop, including a macOS fullscreen Space.
   activating the application's previous desktop. Configure it before showing;
   never call Qt's Cocoa `raise()` here, which activates the whole process.
   The nonmodal `Qt::Dialog` type keeps that native panel with a standard title
-  bar and standard-size close/minimize/zoom buttons. `Qt::Tool` adds the compact
+  bar and standard-size close/minimize/fullscreen buttons. `Qt::Tool` adds the compact
   `NSWindowStyleMaskUtilityWindow` decoration in [Qt's Cocoa backend](https://github.com/qt/qtbase/blob/v6.11.2/src/plugins/platforms/cocoa/qcocoawindow.mm#L580-L581),
   shrinking these buttons. Use AppKit's normal metrics instead of manually
   resizing buttons or compensating in QML.
+  `WindowFullscreenButtonHint` and `FullScreenPrimary` enable AppKit's native
+  fullscreen button, including its icon, menu and action. No custom button
+  handler is installed. Fullscreen uses a managed Space and normal window
+  level; leaving fullscreen restores the current normal/topmost policy.
   Explicit opening also calls `orderFrontRegardless` after assigning keyboard
   focus: a nonactivating panel can become key while remaining behind another
   application's window. This raises it once without changing its normal/topmost
@@ -168,6 +172,10 @@ compares all three native button sizes and the title-bar height with a standard
 window, including after priority changes and native handle recreation. It
 also checks Space/fullscreen flags and scene-above-dialog-above-control ordering,
 hidden native preparation and retired surfaces staying destroyed.
+The green-button regression clicks the actual native button in both priority
+modes, waits for AppKit's fullscreen entry/exit notifications, verifies screen
+size and Qt state, changes priority in fullscreen, and checks geometry and
+window policy restoration after exit.
 It checks that both the editor and its dialogs stay below the native drag
 layer, including across enforcement ticks. `CanvasSelectionBackend` also
 imports images and videos through the production QML `DropArea`, with the

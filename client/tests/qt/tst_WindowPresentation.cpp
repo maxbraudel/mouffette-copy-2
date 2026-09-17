@@ -158,6 +158,8 @@ private slots:
                     NSButton* expected = [standard standardWindowButton:type];
                     QVERIFY(actual && expected);
                     QVERIFY(!actual.hidden && actual.enabled);
+                    if (type == NSWindowZoomButton)
+                        QVERIFY(native.accessibilityFullScreenButton != nil);
                     QCOMPARE(actual.frame.size.width, expected.frame.size.width);
                     QCOMPARE(actual.frame.size.height, expected.frame.size.height);
                 }
@@ -169,6 +171,74 @@ private slots:
                 window.destroy();
             }
         }
+#endif
+    }
+
+    void greenButtonEntersNativeFullscreen_data()
+    {
+        QTest::addColumn<bool>("alwaysOnTop");
+        QTest::newRow("topmost") << true;
+        QTest::newRow("normal") << false;
+    }
+
+    void greenButtonEntersNativeFullscreen()
+    {
+#ifdef Q_OS_MACOS
+        if (QGuiApplication::platformName() != QLatin1String("cocoa"))
+            QSKIP("Requires native macOS fullscreen");
+        QFETCH(bool, alwaysOnTop);
+        QWindow window;
+        WindowPresentation presentation;
+        presentation.setAlwaysOnTop(alwaysOnTop);
+        presentation.setWindow(&window);
+        presentation.open();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        QTest::qWait(700);
+        const auto native = [(__bridge NSView*)reinterpret_cast<void*>(window.winId()) window];
+        __block bool entered = false;
+        __block bool exited = false;
+        id enterObserver = [[NSNotificationCenter defaultCenter]
+            addObserverForName:NSWindowDidEnterFullScreenNotification object:native queue:nil
+            usingBlock:^(NSNotification*) { entered = true; }];
+        id exitObserver = [[NSNotificationCenter defaultCenter]
+            addObserverForName:NSWindowDidExitFullScreenNotification object:native queue:nil
+            usingBlock:^(NSNotification*) { exited = true; }];
+        const auto cleanup = qScopeGuard([&] {
+            if (native.styleMask & NSWindowStyleMaskFullScreen) {
+                window.showNormal();
+                QTest::qWait(1000);
+            }
+            [[NSNotificationCenter defaultCenter] removeObserver:enterObserver];
+            [[NSNotificationCenter defaultCenter] removeObserver:exitObserver];
+        });
+        const QRect geometry = window.geometry();
+        NSButton* green = [native standardWindowButton:NSWindowZoomButton];
+        QVERIFY(green && green.enabled);
+        QVERIFY(native.accessibilityFullScreenButton != nil);
+        QVERIFY(native.collectionBehavior & NSWindowCollectionBehaviorFullScreenPrimary);
+        [green performClick:nil];
+        QTRY_VERIFY_WITH_TIMEOUT(entered, 8000);
+        QTRY_COMPARE_WITH_TIMEOUT(window.windowState(), Qt::WindowFullScreen, 8000);
+        QVERIFY(native.styleMask & NSWindowStyleMaskFullScreen);
+        QTRY_COMPARE(window.size(), window.screen()->geometry().size());
+        presentation.setAlwaysOnTop(!alwaysOnTop);
+        QTest::qWait(650);
+        QCOMPARE(window.windowState(), Qt::WindowFullScreen);
+        QVERIFY(native.styleMask & NSWindowStyleMaskFullScreen);
+        [[native standardWindowButton:NSWindowZoomButton] performClick:nil];
+        QTRY_VERIFY_WITH_TIMEOUT(exited, 8000);
+        QTRY_COMPARE_WITH_TIMEOUT(window.windowState(), Qt::WindowNoState, 8000);
+        QVERIFY(!(native.styleMask & NSWindowStyleMaskFullScreen));
+        QTRY_COMPARE(window.geometry(), geometry);
+        WindowStackingCoordinator::instance().enforce();
+        QVERIFY(native.collectionBehavior & NSWindowCollectionBehaviorFullScreenPrimary);
+        QVERIFY(!(native.collectionBehavior & NSWindowCollectionBehaviorFullScreenAuxiliary));
+        // WindowServer retires the fullscreen Space after AppKit reports exit.
+        // Keep its owner alive until that desktop transition has settled.
+        QTest::qWait(1200);
+        window.hide();
+#else
+        QSKIP("macOS traffic lights regression");
 #endif
     }
 
@@ -426,7 +496,7 @@ private slots:
             QVERIFY([child level] < NSPopUpMenuWindowLevel);
             QVERIFY([native collectionBehavior] & NSWindowCollectionBehaviorMoveToActiveSpace);
             QVERIFY(!([native collectionBehavior] & NSWindowCollectionBehaviorCanJoinAllSpaces));
-            QVERIFY(!([native collectionBehavior] & NSWindowCollectionBehaviorFullScreenPrimary));
+            QVERIFY([native collectionBehavior] & NSWindowCollectionBehaviorFullScreenPrimary);
 #elif defined(Q_OS_WIN)
             if (QGuiApplication::platformName() != QLatin1String("windows")) return;
             QVERIFY(!(GetWindowLongPtr(reinterpret_cast<HWND>(window.winId()), GWL_EXSTYLE) & WS_EX_TOPMOST));
@@ -467,7 +537,7 @@ private slots:
         QTRY_COMPARE([native() level], expectedLevel);
         const auto behavior = [native() collectionBehavior];
         QVERIFY(behavior & NSWindowCollectionBehaviorCanJoinAllSpaces);
-        QVERIFY(behavior & NSWindowCollectionBehaviorFullScreenAuxiliary);
+        QVERIFY(behavior & NSWindowCollectionBehaviorFullScreenPrimary);
         QVERIFY(behavior & NSWindowCollectionBehaviorStationary);
         if (@available(macOS 13.0, *)) {
             QVERIFY(behavior & NSWindowCollectionBehaviorCanJoinAllApplications);
