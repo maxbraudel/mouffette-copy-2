@@ -21,9 +21,12 @@ NSWindow* nativeWindowFor(QWindow* qtWindow)
 void MacWindowManager::setWindowAlwaysOnTop(QWindow* qtWindow) {
     NSWindow* window = nativeWindowFor(qtWindow);
     if (!window) return;
-    // Above normal windows, floating panels, menus and our remote overlays.
-    // This affects window stacking, never process/scheduler priority.
-    [window setLevel:NSScreenSaverWindowLevel];
+    // Keep the editor above our popup-level remote overlays, but below the
+    // WindowServer drag layer. NSScreenSaverWindowLevel (1000) is above that
+    // layer (500): Finder can advertise a copy cursor yet never deliver Drop.
+    // Leave room for owned dialogs too; they must remain valid drop targets.
+    const NSWindowLevel controlLevel = NSPopUpMenuWindowLevel + 1;
+    if ([window level] != controlLevel) [window setLevel:controlLevel];
     NSWindowCollectionBehavior behavior = NSWindowCollectionBehaviorCanJoinAllSpaces |
         NSWindowCollectionBehaviorFullScreenAuxiliary |
         NSWindowCollectionBehaviorFullScreenDisallowsTiling |
@@ -32,8 +35,8 @@ void MacWindowManager::setWindowAlwaysOnTop(QWindow* qtWindow) {
     if (@available(macOS 13.0, *)) {
         behavior |= NSWindowCollectionBehaviorCanJoinAllApplications;
     }
-    [window setCollectionBehavior:behavior];
-    [window setHidesOnDeactivate:NO];
+    if ([window collectionBehavior] != behavior) [window setCollectionBehavior:behavior];
+    if ([window hidesOnDeactivate]) [window setHidesOnDeactivate:NO];
     if (![window isVisible] || [window isMiniaturized] || [NSApp isHidden]) return;
 
     [window orderFrontRegardless];
@@ -55,7 +58,7 @@ void MacWindowManager::setWindowAlwaysOnTop(QWindow* qtWindow) {
         if ([child parentWindow] == window || [child sheetParent] == window
             || child == [NSApp modalWindow] || ownedPopup
             || [child isKindOfClass:[NSColorPanel class]]) {
-            [child setLevel:NSScreenSaverWindowLevel + 1];
+            if ([child level] != controlLevel + 1) [child setLevel:controlLevel + 1];
             [child orderFrontRegardless];
         }
     }

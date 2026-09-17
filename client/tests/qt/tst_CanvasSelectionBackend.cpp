@@ -32,6 +32,8 @@
 #include <cmath>
 #include <QtQuick/private/qquickpinchhandler_p.h>
 #include <QtQuick/private/qquicktextedit_p.h>
+#include <qpa/qwindowsysteminterface.h>
+#include <qpa/qplatformdrag.h>
 
 #include "backend/domain/canvas/CanvasDocument.h"
 #include "backend/config/AppConfig.h"
@@ -45,8 +47,10 @@
 #include "shared/rendering/MediaFrameSource.h"
 #include "frontend/qml/ClientWorkspaceViewModel.h"
 #include "frontend/qml/MediaSettingsViewModel.h"
+#include "frontend/qml/WindowPresentation.h"
 #ifdef Q_OS_MACOS
 #include "backend/platform/macos/MacWindowManager.h"
+bool performFinderDrop(QWindow* window, const QString& path, const QPoint& position);
 #endif
 
 namespace {
@@ -2218,6 +2222,91 @@ private slots:
         QVERIFY(imported && !imported->isText());
         QCOMPARE(imported->baseSize(), QSize(80, 60));
         QCOMPARE(imported->sceneRect().center(), QPointF(520, 320));
+    }
+
+    void externalFileDropThroughQml_data()
+    {
+        QTest::addColumn<bool>("video");
+        QTest::addColumn<bool>("cocoaPasteboard");
+        QTest::newRow("qt-image") << false << false;
+        QTest::newRow("qt-video") << true << false;
+#ifdef Q_OS_MACOS
+        QTest::newRow("cocoa-image") << false << true;
+        QTest::newRow("cocoa-video") << true << true;
+#endif
+    }
+
+    void externalFileDropThroughQml()
+    {
+        QFETCH(bool, video);
+        QFETCH(bool, cocoaPasteboard);
+        QString error;
+        std::unique_ptr<QuickCanvasHost> host(QuickCanvasHost::create(&error));
+        QVERIFY2(host, qPrintable(error));
+        host->setProjectEditingEnabled(true);
+        ClientWorkspaceViewModel session(QStringLiteral("drop-session"), host.get(),
+            [] {}, nullptr, [] { return false; }, [] { return true; },
+            [] { return true; });
+        session.setLoading(false);
+        QQuickView view;
+        WindowPresentation presentation;
+        presentation.setWindow(&view);
+        view.resize(900, 600);
+        view.setResizeMode(QQuickView::SizeRootObjectToView);
+        view.setSource(QUrl(QStringLiteral(
+            "qrc:/qt/qml/Mouffette/App/resources/qml/CanvasRoot.qml")));
+        QVERIFY(view.rootObject());
+        view.rootObject()->setProperty("sessionViewModel", QVariant::fromValue(&session));
+        view.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&view));
+        host->controller()->updateCamera(0.75, 120, 80);
+
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        const QString path = directory.filePath(video
+            ? QStringLiteral("vidéo été #1.mp4") : QStringLiteral("image été #1.png"));
+        if (video) {
+            QVERIFY(QFile::copy(QString::fromUtf8(TEST_VIDEO_FILE), path));
+        } else {
+            QImage image(160, 90, QImage::Format_RGB32);
+            image.fill(Qt::cyan);
+            QVERIFY(image.save(path));
+        }
+        const QPoint position(480, 300);
+        if (cocoaPasteboard) {
+#ifdef Q_OS_MACOS
+            if (QGuiApplication::platformName() != QLatin1String("cocoa"))
+                QSKIP("Requires a native Cocoa pasteboard and view");
+            QVERIFY(performFinderDrop(&view, path, position));
+#endif
+        } else {
+            QMimeData mime;
+            mime.setUrls({QUrl::fromLocalFile(path)});
+            const auto actions = Qt::CopyAction | Qt::MoveAction | Qt::LinkAction;
+            const auto enter = QWindowSystemInterface::handleDrag(
+                &view, &mime, position, actions, Qt::LeftButton, Qt::NoModifier);
+            QVERIFY(enter.isAccepted());
+            QCOMPARE(enter.acceptedAction(), Qt::CopyAction);
+            QVERIFY(host->document()->media().isEmpty());
+            // Exercise the production always-on-top timer during the drag.
+            QTest::qWait(650);
+            const auto drop = QWindowSystemInterface::handleDrop(
+                &view, &mime, position, actions, Qt::NoButton, Qt::NoModifier);
+            QVERIFY(drop.isAccepted());
+            QCOMPARE(drop.acceptedAction(), Qt::CopyAction);
+        }
+        QTRY_COMPARE(host->document()->media().size(), 1);
+        CanvasMedia* imported = host->document()->selectedMedia();
+        QVERIFY(imported);
+        QCOMPARE(imported->sourcePath(), QFileInfo(path).canonicalFilePath());
+        QCOMPARE(imported->isVideo(), video);
+        const QPointF expectedCenter((position.x() - host->controller()->panX())
+                                        / host->controller()->viewScale(),
+                                    (position.y() - host->controller()->panY())
+                                        / host->controller()->viewScale());
+        QVERIFY(QLineF(imported->sceneRect().center(), expectedCenter).length() < 0.01);
+        QTRY_VERIFY_WITH_TIMEOUT(imported->residencyReady(), 10000);
+        QVERIFY(!host->document()->hasPendingImports());
     }
 
     void imageDropDoesNotCreateMediaUntilDropAndRemainsMovable()

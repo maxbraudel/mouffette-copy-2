@@ -161,7 +161,8 @@ private slots:
         const auto native = [&window] {
             return [(__bridge NSView*)reinterpret_cast<void*>(window.winId()) window];
         };
-        QTRY_COMPARE([native() level], NSScreenSaverWindowLevel);
+        const NSWindowLevel expectedLevel = NSPopUpMenuWindowLevel + 1;
+        QTRY_COMPARE([native() level], expectedLevel);
         const auto behavior = [native() collectionBehavior];
         QVERIFY(behavior & NSWindowCollectionBehaviorCanJoinAllSpaces);
         QVERIFY(behavior & NSWindowCollectionBehaviorFullScreenAuxiliary);
@@ -172,7 +173,7 @@ private slots:
         QVERIFY(![native() hidesOnDeactivate]);
         [native() setLevel:NSNormalWindowLevel];
         [native() setCollectionBehavior:NSWindowCollectionBehaviorDefault];
-        QTRY_COMPARE([native() level], NSScreenSaverWindowLevel);
+        QTRY_COMPARE([native() level], expectedLevel);
         QVERIFY([native() collectionBehavior] & NSWindowCollectionBehaviorCanJoinAllSpaces);
 
         QWindow remoteOverlay;
@@ -201,7 +202,7 @@ private slots:
         presentation.open();
         QVERIFY(QTest::qWaitForWindowExposed(&window));
 #ifdef Q_OS_MACOS
-        QTRY_COMPARE([native() level], NSScreenSaverWindowLevel);
+        QTRY_COMPARE([native() level], expectedLevel);
         QVERIFY([native() collectionBehavior] & NSWindowCollectionBehaviorCanJoinAllSpaces);
 #else
         QTRY_VERIFY(GetWindowLongPtr(native(), GWL_EXSTYLE) & WS_EX_TOPMOST);
@@ -209,6 +210,39 @@ private slots:
         window.hide();
 #else
         QSKIP("Native priority regression covers macOS and Windows");
+#endif
+    }
+
+    void nativePriorityAllowsFinderDrops()
+    {
+#ifdef Q_OS_MACOS
+        if (QGuiApplication::platformName() != QLatin1String("cocoa"))
+            QSKIP("Requires Cocoa window levels");
+        QWindow window;
+        WindowPresentation presentation;
+        presentation.setWindow(&window);
+        presentation.open();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        const auto native = [(__bridge NSView*)reinterpret_cast<void*>(window.winId()) window];
+        const auto draggingLevel = CGWindowLevelForKey(kCGDraggingWindowLevelKey);
+        // WindowServer routes external drops only at/below the dragging level.
+        // Sending synthetic QDropEvents directly to Qt bypasses this boundary.
+        QVERIFY2([native level] < draggingLevel,
+                 "The interactive canvas must stay below the native drag layer");
+        QVERIFY([native level] > NSPopUpMenuWindowLevel);
+        QTest::qWait(650);
+        QVERIFY([native level] < draggingLevel);
+
+        QWindow dialog;
+        dialog.setTransientParent(&window);
+        dialog.setModality(Qt::WindowModal);
+        dialog.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&dialog));
+        const auto nativeDialog = [(__bridge NSView*)reinterpret_cast<void*>(dialog.winId()) window];
+        QTRY_VERIFY([nativeDialog level] > [native level]);
+        QVERIFY([nativeDialog level] < draggingLevel);
+#else
+        QSKIP("Finder's native drop routing is macOS-specific");
 #endif
     }
 };

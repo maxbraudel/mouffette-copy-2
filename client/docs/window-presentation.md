@@ -18,10 +18,15 @@ activation request all use the same `open()` path.
   positioned to the left of or above the primary screen.
 - Raising an already visible window preserves its current size and position.
   Closing still hides it; priority enforcement stops while hidden/minimized.
-- macOS uses `NSScreenSaverWindowLevel`, joins all Spaces and other apps' full
+- macOS uses `NSPopUpMenuWindowLevel + 1`, joins all Spaces and other apps' full
   screen/Stage Manager groups, and remains stationary in Mission Control.
   Native child dialogs/color pickers stay above the control window; remote
-  rendering overlays retain their own lower level.
+  rendering overlays retain their own lower level. Both the control window
+  and its dialogs must stay below `CGWindowLevelForKey(kCGDraggingWindowLevelKey)`.
+  The earlier `NSScreenSaverWindowLevel` policy put them above that layer
+  (1000/1001 versus 500), preventing native Finder drops from reaching the
+  canvas despite the copy cursor. See the native window-level restriction
+  documented by [Hammerspoon](https://www.hammerspoon.org/docs/hs.canvas.html#windowLevels).
 - Windows uses `HWND_TOPMOST` without taking focus and pins the individual
   window with the shell's `IVirtualDesktopPinnedApps::PinView`. It does not pin
   every window of the application. Pinning is queried again after reopening or
@@ -52,6 +57,12 @@ guarantees placement above non-topmost windows, not an exclusive global rank.
 origins, QML binding, reopen/minimize restoration, preserving manual movement/resizing,
 staying hidden, native demotion recovery and native handle recreation. macOS
 also checks Space/fullscreen flags and dialog/remote-overlay ordering.
+It checks that both the editor and its dialogs stay below the native drag
+layer, including across enforcement ticks. `CanvasSelectionBackend` also
+imports images and videos through the production QML `DropArea`, with the
+production window policy enabled, using Qt events and a native Cocoa pasteboard.
+Those injected events cannot establish WindowServer routing; a real Finder
+drop remains part of native desktop acceptance.
 On Windows it checks the native caption style, the enabled system Move command
 and `WM_NCHITTEST` returning `HTCAPTION` over the title bar.
 

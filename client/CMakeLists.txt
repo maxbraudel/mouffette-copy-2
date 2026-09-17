@@ -897,6 +897,9 @@ if(BUILD_TESTING)
     target_link_libraries(tst_CanvasSelectionBackend PRIVATE
         "$<TARGET_PROPERTY:MouffetteClient,LINK_LIBRARIES>" Qt6::Test)
     add_test(NAME CanvasSelectionBackend COMMAND tst_CanvasSelectionBackend)
+    if(APPLE)
+        target_sources(tst_CanvasSelectionBackend PRIVATE tests/qt/FinderDropTestSupport.mm)
+    endif()
 
     add_executable(tst_VideoPlaybackBackend
         tests/qt/tst_VideoPlaybackBackend.cpp
