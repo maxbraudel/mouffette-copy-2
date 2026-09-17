@@ -13,6 +13,10 @@
 
 #ifdef Q_OS_WIN
 #include <windows.h>
+#include <objbase.h>
+// Instantiate Core Audio GUIDs with their consumer so standalone targets such
+// as tst_SystemMonitor do not depend on ApplicationRuntime.cpp to link on MinGW.
+#include <initguid.h>
 #include <mmdeviceapi.h>
 #include <endpointvolume.h>
 #include <functiondiscoverykeys_devpkey.h>

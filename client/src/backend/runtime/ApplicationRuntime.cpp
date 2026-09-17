@@ -176,13 +176,6 @@ QString sourceIdentityForPath(const QString& canonicalPath) {
 #include <windows.h>
 #include <objbase.h>
 #include <combaseapi.h>
-// Ensure GUIDs (IIDs/CLSIDs) are defined in this translation unit for MinGW linkers
-#ifndef INITGUID
-#define INITGUID
-#endif
-#include <initguid.h>
-#include <mmdeviceapi.h>
-#include <endpointvolume.h>
 #endif
 #ifdef Q_OS_MACOS
 #include <QProcess>
