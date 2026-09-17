@@ -132,6 +132,43 @@ private slots:
         QCOMPARE(SendMessage(hwnd, WM_NCHITTEST, 0, MAKELPARAM(caption.x, caption.y)),
                  LRESULT(HTCAPTION));
         window.hide();
+#elif defined(Q_OS_MACOS)
+        if (QGuiApplication::platformName() != QLatin1String("cocoa")) {
+            QSKIP("Native title bar metrics require Cocoa");
+        }
+        QWindow reference;
+        reference.setFlags(Qt::Window | Qt::WindowTitleHint | Qt::WindowSystemMenuHint
+                           | Qt::WindowMinMaxButtonsHint | Qt::WindowCloseButtonHint);
+        reference.resize(400, 300);
+        reference.create();
+        const auto standard = [(__bridge NSView*)reinterpret_cast<void*>(reference.winId()) window];
+        const auto titleBarHeight = [](NSWindow* native) {
+            return NSHeight(native.frame) - NSHeight([native contentRectForFrameRect:native.frame]);
+        };
+        // Compare with AppKit's current standard metrics, not hardcoded pixels.
+        // Changing priority rewrites Qt's native flags; recreation starts fresh.
+        for (bool alwaysOnTop : {true, false}) {
+            presentation.setAlwaysOnTop(alwaysOnTop);
+            for (int opening = 0; opening < 2; ++opening) {
+                presentation.open();
+                QVERIFY(QTest::qWaitForWindowExposed(&window));
+                const auto native = [(__bridge NSView*)reinterpret_cast<void*>(window.winId()) window];
+                for (NSWindowButton type : {NSWindowCloseButton, NSWindowMiniaturizeButton, NSWindowZoomButton}) {
+                    NSButton* actual = [native standardWindowButton:type];
+                    NSButton* expected = [standard standardWindowButton:type];
+                    QVERIFY(actual && expected);
+                    QVERIFY(!actual.hidden && actual.enabled);
+                    QCOMPARE(actual.frame.size.width, expected.frame.size.width);
+                    QCOMPARE(actual.frame.size.height, expected.frame.size.height);
+                }
+                QCOMPARE(titleBarHeight(native), titleBarHeight(standard));
+                QVERIFY([native isKindOfClass:[NSPanel class]]);
+                QVERIFY(native.styleMask & NSWindowStyleMaskNonactivatingPanel);
+                QVERIFY(!(native.styleMask & NSWindowStyleMaskUtilityWindow));
+                window.hide();
+                window.destroy();
+            }
+        }
 #endif
     }
 

@@ -34,6 +34,11 @@ still opening on the user's current desktop, including a macOS fullscreen Space.
   become key and accept input in another app's fullscreen Space without
   activating the application's previous desktop. Configure it before showing;
   never call Qt's Cocoa `raise()` here, which activates the whole process.
+  The nonmodal `Qt::Dialog` type keeps that native panel with a standard title
+  bar and standard-size close/minimize/zoom buttons. `Qt::Tool` adds the compact
+  `NSWindowStyleMaskUtilityWindow` decoration in [Qt's Cocoa backend](https://github.com/qt/qtbase/blob/v6.11.2/src/plugins/platforms/cocoa/qcocoawindow.mm#L580-L581),
+  shrinking these buttons. Use AppKit's normal metrics instead of manually
+  resizing buttons or compensating in QML.
   Explicit opening also calls `orderFrontRegardless` after assigning keyboard
   focus: a nonactivating panel can become key while remaining behind another
   application's window. This raises it once without changing its normal/topmost
@@ -159,6 +164,8 @@ Fullscreen coverage also checks actual WindowServer ordering above the host.
 The suite additionally covers frame-inclusive geometry, negative screen
 origins, QML binding, reopen/minimize restoration, preserving manual movement/resizing,
 staying hidden, native demotion recovery and native handle recreation. macOS
+compares all three native button sizes and the title-bar height with a standard
+window, including after priority changes and native handle recreation. It
 also checks Space/fullscreen flags and scene-above-dialog-above-control ordering,
 hidden native preparation and retired surfaces staying destroyed.
 It checks that both the editor and its dialogs stay below the native drag

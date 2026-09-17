@@ -47,7 +47,10 @@ void WindowPresentation::setWindow(QWindow* window)
         // Cocoa only admits auxiliary panels into another application's
         // fullscreen Space. Keep one Qt-owned QNSPanel in both priority modes;
         // changing its level does not replace the Quick window or its scene.
-        flags = (flags & ~Qt::WindowType_Mask) | Qt::Tool | Qt::CustomizeWindowHint;
+        // Dialog gives that panel standard macOS title-bar buttons. Tool adds
+        // NSWindowStyleMaskUtilityWindow, shrinking the title bar and buttons.
+        // Window type alone does not make the window modal.
+        flags = (flags & ~Qt::WindowType_Mask) | Qt::Dialog | Qt::CustomizeWindowHint;
         flags &= ~Qt::WindowFullscreenButtonHint;
 #endif
         flags.setFlag(Qt::WindowStaysOnTopHint, m_alwaysOnTop);
