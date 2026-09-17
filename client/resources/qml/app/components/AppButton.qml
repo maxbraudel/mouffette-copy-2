@@ -12,7 +12,10 @@ AbstractButton {
     property alias textVariants: textMetrics.textVariants
     property url iconSource: ""
     property bool iconOnly: false
-    readonly property real textWidth: Math.max(Theme.controlMinWidth, textMetrics.maximumWidth + 24)
+    readonly property bool hasIcon: iconSource.toString().length > 0
+    readonly property real iconLabelWidth: hasIcon ? 16 + 6 : 0
+    readonly property real textWidth: Math.max(Theme.controlMinWidth,
+                                              textMetrics.maximumWidth + iconLabelWidth + 24)
     readonly property color foregroundColor: !enabled ? Theme.disabledText
         : destructive ? Theme.errorText : primary ? Theme.brandBlue : Theme.text
 
@@ -36,32 +39,43 @@ AbstractButton {
     }
 
     contentItem: Item {
-        Text {
-            id: label
-            anchors.fill: parent
-            visible: !control.iconOnly
-            text: control.text
-            color: control.foregroundColor
-            font.pixelSize: Theme.controlFontSize
-            font.bold: true
-            horizontalAlignment: Text.AlignHCenter
-            verticalAlignment: Text.AlignVCenter
-            elide: Text.ElideRight
-        }
-        Image {
+        id: buttonContent
+        readonly property real labelWidth: Math.min(label.implicitWidth,
+                                                    Math.max(0, width - control.iconLabelWidth))
+
+        Row {
             anchors.centerIn: parent
-            visible: control.iconOnly
-            width: 16
-            height: 16
-            source: control.iconSource
-            sourceSize: Qt.size(width * 4, height * 4)
-            fillMode: Image.PreserveAspectFit
-            layer.enabled: control.iconOnly
-            layer.effect: MultiEffect {
-                contrast: -1
-                brightness: 0.5
-                colorization: 1
-                colorizationColor: control.foregroundColor
+            height: parent.height
+            spacing: 6
+
+            Image {
+                anchors.verticalCenter: parent.verticalCenter
+                visible: control.hasIcon
+                width: 16
+                height: 16
+                source: control.iconSource
+                sourceSize: Qt.size(width * 4, height * 4)
+                fillMode: Image.PreserveAspectFit
+                layer.enabled: control.hasIcon
+                layer.effect: MultiEffect {
+                    contrast: -1
+                    brightness: 0.5
+                    colorization: 1
+                    colorizationColor: control.foregroundColor
+                }
+            }
+            Text {
+                id: label
+                visible: !control.iconOnly
+                width: buttonContent.labelWidth
+                height: parent.height
+                text: control.text
+                color: control.foregroundColor
+                font.pixelSize: Theme.controlFontSize
+                font.bold: true
+                horizontalAlignment: Text.AlignHCenter
+                verticalAlignment: Text.AlignVCenter
+                elide: Text.ElideRight
             }
         }
     }

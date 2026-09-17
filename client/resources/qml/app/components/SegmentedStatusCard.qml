@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Effects
 import Mouffette.App
 
 Item {
@@ -19,7 +20,7 @@ Item {
     readonly property real primaryWidth: Math.max(20, primaryLabel.implicitWidth + Theme.segmentPadding * 2)
     readonly property real statusWidth: statusMetrics.maximumWidth + Theme.segmentPadding * 2
     readonly property real auxiliaryWidth: auxiliaryVisible
-        ? Math.max(40, auxiliaryMetrics.maximumWidth + Theme.segmentPadding * 2) : 0
+        ? Math.max(40, auxiliaryMetrics.maximumWidth + Theme.segmentPadding * 2 + 16 + 4) : 0
     readonly property real busyWidth: busy ? Theme.controlHeight + Theme.segmentPadding : 0
     readonly property bool availableStatus: statusText.trim().toUpperCase() === "AVAILABLE"
 
@@ -92,13 +93,62 @@ Item {
         }
 
         Rectangle {
+            id: auxiliarySegment
+            visible: root.auxiliaryVisible
+            height: root.height
+            width: root.auxiliaryWidth
+            color: "transparent"
+
+            Image {
+                id: volumeIcon
+                anchors.left: parent.left
+                anchors.leftMargin: Theme.segmentPadding
+                anchors.verticalCenter: parent.verticalCenter
+                width: 16
+                height: 16
+                source: "qrc:/icons/icons/volume-on.svg"
+                sourceSize: Qt.size(width * 4, height * 4)
+                fillMode: Image.PreserveAspectFit
+                layer.enabled: true
+                layer.effect: MultiEffect {
+                    contrast: -1
+                    brightness: 0.5
+                    colorization: 1
+                    colorizationColor: Theme.text
+                }
+            }
+
+            Text {
+                id: auxiliaryLabel
+                anchors.left: volumeIcon.right
+                anchors.leftMargin: 4
+                anchors.right: parent.right
+                anchors.rightMargin: Theme.segmentPadding
+                height: parent.height
+                text: root.auxiliaryText
+                color: Theme.text
+                font.pixelSize: Theme.titleFontSize
+                font.bold: true
+                verticalAlignment: Text.AlignVCenter
+                horizontalAlignment: Text.AlignHCenter
+            }
+        }
+
+        Rectangle {
+            visible: root.auxiliaryVisible
+            width: visible ? 1 : 0
+            height: root.height
+            color: Theme.border
+        }
+
+        Rectangle {
             id: statusSegment
             objectName: "statusSegment"
             height: root.height
             width: root.statusWidth
             color: root.statusBackground
-            topRightRadius: root.auxiliaryVisible || root.busy ? 0 : Theme.controlRadius
-            bottomRightRadius: root.auxiliaryVisible || root.busy ? 0 : Theme.controlRadius
+            topRightRadius: root.busy ? 0 : Theme.controlRadius
+            bottomRightRadius: root.busy ? 0 : Theme.controlRadius
 
             Text {
                 id: statusLabel
@@ -112,36 +162,6 @@ Item {
                 verticalAlignment: Text.AlignVCenter
                 horizontalAlignment: Text.AlignHCenter
                 elide: Text.ElideRight
-            }
-        }
-
-        Rectangle {
-            visible: root.auxiliaryVisible
-            width: visible ? 1 : 0
-            height: root.height
-            color: Theme.border
-        }
-
-        Rectangle {
-            id: auxiliarySegment
-            visible: root.auxiliaryVisible
-            height: root.height
-            width: root.auxiliaryWidth
-            color: "transparent"
-            topRightRadius: root.busy ? 0 : Theme.controlRadius
-            bottomRightRadius: root.busy ? 0 : Theme.controlRadius
-
-            Text {
-                id: auxiliaryLabel
-                anchors.fill: parent
-                anchors.leftMargin: Theme.segmentPadding
-                anchors.rightMargin: Theme.segmentPadding
-                text: root.auxiliaryText
-                color: Theme.text
-                font.pixelSize: Theme.titleFontSize
-                font.bold: true
-                verticalAlignment: Text.AlignVCenter
-                horizontalAlignment: Text.AlignHCenter
             }
         }
     }

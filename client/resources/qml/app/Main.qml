@@ -99,7 +99,7 @@ QtObject {
                     visible: root.controller.applicationPage !== 0
                     x: topBar.stacked ? actions.x - width - topBar.gap
                                       : pageTitle.width + topBar.gap
-                    text: "← Go Back"
+                    text: "Go Back"
                     iconSource: "qrc:/icons/icons/arrow-left.svg"
                     iconOnly: topBar.compactButtons
                     onClicked: root.controller.goBack()
