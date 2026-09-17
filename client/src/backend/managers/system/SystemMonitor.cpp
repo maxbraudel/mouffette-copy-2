@@ -1,5 +1,6 @@
 #include "backend/managers/system/SystemMonitor.h"
 #include "backend/managers/system/ScreenCoordinateMapping.h"
+#include "backend/platform/LocalScreenTopology.h"
 #include "backend/config/AppConfig.h"
 #include "backend/domain/models/ClientInfo.h"
 #include <QTimer>
@@ -15,50 +16,6 @@
 #include <mmdeviceapi.h>
 #include <endpointvolume.h>
 #include <functiondiscoverykeys_devpkey.h>
-#include <array>
-
-namespace {
-
-constexpr size_t kMaxEnumeratedMonitors = 16; // Defensive upper bound
-
-struct WinMonRect {
-    RECT rc;
-    RECT rcWork;
-    bool primary;
-};
-
-struct MonitorEnumContext {
-    std::array<WinMonRect, kMaxEnumeratedMonitors> monitors{};
-    size_t count = 0;
-    bool overflow = false;
-};
-
-static BOOL CALLBACK MouffetteEnumMonProc(HMONITOR hMon, HDC, LPRECT, LPARAM lParam) {
-    auto* ctx = reinterpret_cast<MonitorEnumContext*>(lParam);
-    if (!ctx) {
-        return FALSE;
-    }
-
-    MONITORINFOEXW mi{};
-    mi.cbSize = sizeof(mi);
-    if (!GetMonitorInfoW(hMon, &mi)) {
-        return TRUE; // Skip but continue enumeration
-    }
-
-    if (ctx->count >= ctx->monitors.size()) {
-        ctx->overflow = true;
-        return TRUE; // Continue but do not write past the buffer
-    }
-
-    WinMonRect entry{};
-    entry.rc = mi.rcMonitor;
-    entry.rcWork = mi.rcWork;
-    entry.primary = (mi.dwFlags & MONITORINFOF_PRIMARY) != 0;
-    ctx->monitors[ctx->count++] = entry;
-    return TRUE;
-}
-
-} // namespace
 #endif
 
 SystemMonitor::SystemMonitor(QObject* parent)
@@ -225,48 +182,14 @@ void SystemMonitor::stopVolumeMonitoring() {
 
 QList<ScreenInfo> SystemMonitor::getLocalScreenInfo() const {
     QList<ScreenInfo> screens;
-    
-#ifdef Q_OS_WIN
-    // Use WinAPI to enumerate monitors in PHYSICAL pixels with correct origins (no logical gaps)
-    MonitorEnumContext ctx;
-    EnumDisplayMonitors(nullptr, nullptr, MouffetteEnumMonProc, reinterpret_cast<LPARAM>(&ctx));
-    
-    if (ctx.count == 0) {
-        // Fallback to Qt API
-        QList<QScreen*> screenList = QGuiApplication::screens();
-        for (int i = 0; i < screenList.size(); ++i) {
-            QScreen* s = screenList[i];
-            const QRect g = s->geometry();
-            screens.append(ScreenInfo(i, g.width(), g.height(), g.x(), g.y(), 
-                                    s == QGuiApplication::primaryScreen()));
-        }
-    } else {
-        for (size_t i = 0; i < ctx.count; ++i) {
-            const auto& m = ctx.monitors[i];
-            const int px = m.rc.left;
-            const int py = m.rc.top;
-            const int pw = m.rc.right - m.rc.left;
-            const int ph = m.rc.bottom - m.rc.top;
-            // For ScreenInfo we keep absolute coordinates so cursor mapping (physical) matches exactly
-            screens.append(ScreenInfo(static_cast<int>(i), pw, ph, px, py, m.primary));
-        }
+    const auto topology = LocalScreenTopology::screens();
+    for (qsizetype index = 0; index < topology.size(); ++index) {
+        const auto& screen = topology[index];
+        const QRect& geometry = screen.advertisedGeometry;
+        screens.append(ScreenInfo(static_cast<int>(index), geometry.width(), geometry.height(),
+                                  geometry.x(), geometry.y(), screen.primary));
     }
-#else
-    // macOS, Linux, etc. - use Qt's screen API
-    QList<QScreen*> screenList = QGuiApplication::screens();
-    for (int i = 0; i < screenList.size(); ++i) {
-        QScreen* screen = screenList[i];
-        QRect geometry = screen->geometry();
-#ifdef Q_OS_MACOS
-        const qreal dpr = std::max<qreal>(1.0, screen->devicePixelRatio());
-        geometry = ScreenCoordinateMapping::scaledScreenGeometry(geometry, dpr);
-#endif
-        bool isPrimary = (screen == QGuiApplication::primaryScreen());
-        screens.append(ScreenInfo(i, geometry.width(), geometry.height(), 
-                                geometry.x(), geometry.y(), isPrimary));
-    }
-#endif
-    
+
     return screens;
 }
 
@@ -284,21 +207,17 @@ bool SystemMonitor::getLocalCursorPosition(int* screenId,
     POINT physicalPosition{};
     if (!GetPhysicalCursorPos(&physicalPosition)) return false;
 
-    MonitorEnumContext ctx;
-    EnumDisplayMonitors(nullptr, nullptr, MouffetteEnumMonProc,
-                        reinterpret_cast<LPARAM>(&ctx));
-    for (size_t i = 0; i < ctx.count; ++i) {
-        const RECT& rectangle = ctx.monitors[i].rc;
-        if (physicalPosition.x < rectangle.left || physicalPosition.x >= rectangle.right
-            || physicalPosition.y < rectangle.top || physicalPosition.y >= rectangle.bottom) {
-            continue;
-        }
-        *screenId = static_cast<int>(i);
-        *screenPosition = QPointF(physicalPosition.x - rectangle.left,
-                                 physicalPosition.y - rectangle.top);
+    const auto topology = LocalScreenTopology::screens();
+    for (qsizetype index = 0; index < topology.size(); ++index) {
+        const auto& screen = topology[index];
+        if (!screen.nativeWindowsCoordinates) break;
+        const QPoint position(physicalPosition.x, physicalPosition.y);
+        if (!screen.advertisedGeometry.contains(position)) continue;
+        *screenId = static_cast<int>(index);
+        *screenPosition = position - screen.advertisedGeometry.topLeft();
         return true;
     }
-    if (ctx.count != 0) return false;
+    if (!topology.isEmpty() && topology.first().nativeWindowsCoordinates) return false;
     // Mirror getLocalScreenInfo()'s Qt fallback when native enumeration fails.
 #endif
 

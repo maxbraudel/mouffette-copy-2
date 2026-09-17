@@ -6,6 +6,7 @@
 #include <QQmlEngine>
 
 #include "frontend/qml/WindowPresentation.h"
+#include "backend/platform/WindowStackingCoordinator.h"
 
 #ifdef Q_OS_MACOS
 #import <Cocoa/Cocoa.h>
@@ -188,7 +189,7 @@ private slots:
         const auto nativeDialog = [(__bridge NSView*)reinterpret_cast<void*>(dialog.winId()) window];
         const auto nativeOverlay = [(__bridge NSView*)reinterpret_cast<void*>(remoteOverlay.winId()) window];
         QTRY_VERIFY([nativeDialog level] > [native() level]);
-        QVERIFY([nativeOverlay level] < [native() level]);
+        QVERIFY([nativeOverlay level] > [nativeDialog level]);
         dialog.hide();
         remoteOverlay.hide();
 #else
@@ -211,6 +212,104 @@ private slots:
 #else
         QSKIP("Native priority regression covers macOS and Windows");
 #endif
+    }
+
+    void scenesStayAboveControlDialogsAndRecreation()
+    {
+        if (QGuiApplication::platformName() != QLatin1String("cocoa")
+            && QGuiApplication::platformName() != QLatin1String("windows"))
+            QSKIP("Requires a native desktop");
+        QWindow control;
+        WindowPresentation presentation;
+        presentation.setWindow(&control);
+        presentation.open();
+        QVERIFY(QTest::qWaitForWindowExposed(&control));
+        QWindow scene;
+        scene.setFlags(Qt::Tool | Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint
+                       | Qt::WindowDoesNotAcceptFocus | Qt::WindowTransparentForInput);
+        scene.setGeometry(20, 20, 160, 120);
+        auto& stacking = WindowStackingCoordinator::instance();
+        stacking.registerSceneWindow(&scene);
+        stacking.enforce();
+        QVERIFY(!scene.isVisible());
+#ifdef Q_OS_MACOS
+        const auto nativeScene = [&scene] {
+            return [(__bridge NSView*)reinterpret_cast<void*>(scene.winId()) window];
+        };
+        QVERIFY(![nativeScene() isVisible]);
+        MacWindowManager::setWindowAsGlobalOverlay(&scene);
+        QVERIFY(![nativeScene() isVisible]);
+#endif
+        scene.show();
+        stacking.setSceneWindowActive(&scene, true);
+        QVERIFY(QTest::qWaitForWindowExposed(&scene));
+        QVERIFY(!scene.isActive());
+
+        QWindow dialog;
+        dialog.setTransientParent(&control);
+        dialog.setModality(Qt::WindowModal);
+        dialog.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&dialog));
+        const auto ordered = [&]() {
+#ifdef Q_OS_MACOS
+            auto* nativeControl = [(__bridge NSView*)reinterpret_cast<void*>(control.winId()) window];
+            auto* nativeDialog = [(__bridge NSView*)reinterpret_cast<void*>(dialog.winId()) window];
+            return [nativeScene() level] == CGWindowLevelForKey(kCGScreenSaverWindowLevelKey)
+                && [nativeScene() level] > [nativeDialog level]
+                && [nativeDialog level] > [nativeControl level]
+                && [nativeDialog level] < CGWindowLevelForKey(kCGDraggingWindowLevelKey)
+                && [nativeScene() ignoresMouseEvents] && ![nativeScene() isKeyWindow];
+#elif defined(Q_OS_WIN)
+            const HWND overlay = reinterpret_cast<HWND>(scene.winId());
+            const HWND main = reinterpret_cast<HWND>(control.winId());
+            const HWND popup = reinterpret_cast<HWND>(dialog.winId());
+            if (!(GetWindowLongPtr(overlay, GWL_EXSTYLE) & WS_EX_TOPMOST)) return false;
+            bool sawScene = false;
+            bool sawDialog = false;
+            for (HWND handle = GetTopWindow(nullptr); handle; handle = GetWindow(handle, GW_HWNDNEXT)) {
+                if (handle == overlay) sawScene = true;
+                if (handle == popup) { if (!sawScene) return false; sawDialog = true; }
+                if (handle == main) return sawScene && sawDialog;
+            }
+            return false;
+#else
+            return true;
+#endif
+        };
+        QTRY_VERIFY(ordered());
+        presentation.open();
+        dialog.raise();
+        dialog.requestActivate();
+        QTRY_VERIFY(ordered());
+        QTest::qWait(1100); // Multiple enforcement ticks, not just initial show.
+        QVERIFY(ordered());
+#ifdef Q_OS_MACOS
+        const auto behavior = [nativeScene() collectionBehavior];
+        QVERIFY(behavior & NSWindowCollectionBehaviorCanJoinAllSpaces);
+        QVERIFY(behavior & NSWindowCollectionBehaviorFullScreenAuxiliary);
+        QVERIFY(behavior & NSWindowCollectionBehaviorStationary);
+        if (@available(macOS 13.0, *)) {
+            QVERIFY(behavior & NSWindowCollectionBehaviorCanJoinAllApplications);
+        }
+        [nativeScene() setLevel:NSNormalWindowLevel];
+#elif defined(Q_OS_WIN)
+        SetWindowPos(reinterpret_cast<HWND>(scene.winId()), HWND_NOTOPMOST, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+#endif
+        QTRY_VERIFY(ordered());
+        scene.hide();
+        scene.destroy();
+        scene.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&scene));
+        QTRY_VERIFY(ordered());
+        QVERIFY(scene.flags().testFlag(Qt::WindowTransparentForInput));
+        QVERIFY(scene.flags().testFlag(Qt::WindowDoesNotAcceptFocus));
+        stacking.unregisterWindow(&scene);
+        scene.hide();
+        scene.destroy();
+        QTest::qWait(600);
+        QVERIFY(!scene.isVisible());
+        QVERIFY(!scene.handle()); // No stale enforcement recreates the surface.
     }
 
     void nativePriorityAllowsFinderDrops()

@@ -201,6 +201,8 @@ set(SOURCES
     src/frontend/qml/MediaSettingsViewModel.cpp
     src/frontend/qml/QmlRuntime.cpp
     src/frontend/qml/WindowPresentation.cpp
+    src/backend/platform/WindowStackingCoordinator.cpp
+    src/backend/platform/WindowStackingCoordinator.h
     src/frontend/qml/WindowPresentation.h
     src/frontend/qml/SceneActivityListModel.cpp
     
@@ -305,6 +307,8 @@ set(SOURCES
     
     # Backend Managers - System
     src/backend/managers/system/SystemMonitor.cpp
+    src/backend/platform/LocalScreenTopology.cpp
+    src/backend/platform/LocalScreenTopology.h
     src/backend/managers/system/SystemLifecycleMonitor.cpp
     
     # Controllers
@@ -644,13 +648,15 @@ if(BUILD_TESTING)
     add_executable(tst_WindowPresentation
         tests/qt/tst_WindowPresentation.cpp
         src/frontend/qml/WindowPresentation.cpp
-        src/frontend/qml/WindowPresentation.h)
+        src/frontend/qml/WindowPresentation.h
+        src/backend/platform/WindowStackingCoordinator.cpp
+        src/backend/platform/WindowStackingCoordinator.h)
     target_include_directories(tst_WindowPresentation PRIVATE src)
     target_link_libraries(tst_WindowPresentation PRIVATE Qt6::Quick Qt6::Test)
     if(APPLE)
         target_sources(tst_WindowPresentation PRIVATE src/backend/platform/macos/MacWindowManager.mm)
         set_source_files_properties(tests/qt/tst_WindowPresentation.cpp PROPERTIES LANGUAGE OBJCXX)
-        target_link_libraries(tst_WindowPresentation PRIVATE "-framework AppKit")
+        target_link_libraries(tst_WindowPresentation PRIVATE "-framework AppKit" "-framework CoreGraphics")
     elseif(WIN32)
         target_sources(tst_WindowPresentation PRIVATE src/backend/platform/windows/WindowsWindowManager.cpp)
         target_link_libraries(tst_WindowPresentation PRIVATE ole32 uuid user32)

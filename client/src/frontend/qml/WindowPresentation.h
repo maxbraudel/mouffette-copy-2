@@ -2,7 +2,6 @@
 
 #include <QObject>
 #include <QPointer>
-#include <QTimer>
 #include <QWindow>
 
 // Owns presentation policy, independently of the application/session lifecycle.
@@ -13,6 +12,7 @@ class WindowPresentation : public QObject
 
 public:
     explicit WindowPresentation(QObject* parent = nullptr);
+    ~WindowPresentation() override;
     QWindow* window() const { return m_window; }
     void setWindow(QWindow* window);
     Q_INVOKABLE void open();
@@ -22,13 +22,7 @@ public:
 signals:
     void windowChanged();
 
-protected:
-    bool eventFilter(QObject* watched, QEvent* event) override;
-
 private:
-    void enforcePriority();
-    void updateEnforcement();
     void fitToScreen(QScreen* screen);
     QPointer<QWindow> m_window;
-    QTimer m_priorityTimer;
 };

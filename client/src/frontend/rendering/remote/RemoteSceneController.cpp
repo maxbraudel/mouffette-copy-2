@@ -38,6 +38,7 @@
 #include <cmath>
 #include "backend/files/FileManager.h"
 #include "backend/platform/macos/MacWindowManager.h"
+#include "backend/platform/WindowStackingCoordinator.h"
 #include <algorithm>
 #include <chrono>
 #include <limits>
@@ -232,6 +233,22 @@ RemoteSceneController::RemoteSceneController(FileManager* fileManager, WebSocket
     : QObject(parent)
     , m_fileManager(fileManager)
     , m_ws(ws) {
+    m_screenRefreshTimer.setSingleShot(true);
+    m_screenRefreshTimer.setInterval(0);
+    connect(&m_screenRefreshTimer, &QTimer::timeout, this, [this] {
+        refreshScreenBindings(LocalScreenTopology::screens());
+    });
+    for (QScreen* screen : QGuiApplication::screens()) watchLocalScreen(screen);
+    connect(qGuiApp, &QGuiApplication::screenAdded, this, [this](QScreen* screen) {
+        watchLocalScreen(screen);
+        m_screenRefreshTimer.start();
+    });
+    connect(qGuiApp, &QGuiApplication::screenRemoved, this, [this](QScreen* screen) {
+        // Direct connection on the GUI thread: hide before Qt migrates the
+        // removed screen's windows to the primary display.
+        handleLocalScreenRemoved(screen);
+        m_screenRefreshTimer.start();
+    });
     connect(&MediaResidencyManager::instance(), &MediaResidencyManager::ownerChanged,
             this, [this](const QString& owner) {
         if (m_teardownInProgress || m_pendingSceneInstanceId.isEmpty()) return;
@@ -564,7 +581,7 @@ bool RemoteSceneController::remoteRenderGraphsReady() const
     if (m_screenWindows.isEmpty()) return false;
     for (auto it = m_screenWindows.cbegin(); it != m_screenWindows.cend(); ++it) {
         const ScreenWindow& window = it.value();
-        if (!window.window || !window.mediaModel) {
+        if (!window.window || !window.mediaModel || !window.targetScreen) {
             return false;
         }
     }
@@ -1405,7 +1422,7 @@ void RemoteSceneController::onRemoteSceneStart(const QString& senderClientId, co
         failWithMessage(QStringLiteral("Scene exceeds the remote screen limit"));
         return;
     }
-    const QList<QScreen*> localScreens = QGuiApplication::screens();
+    const auto localScreens = LocalScreenTopology::screens();
     if (localScreens.size() < screens.size()) {
         failWithMessage(QStringLiteral("Remote display topology is incompatible: %1 screen(s) required, %2 available")
                             .arg(screens.size())
@@ -2345,6 +2362,7 @@ void RemoteSceneController::clearScene() {
     }
 
     m_teardownInProgress = true;
+    m_screenRefreshTimer.stop();
     m_teardownCompletionScheduled = false;
     m_pendingTeardownObjects.clear();
     ++m_teardownBarrierEpoch;
@@ -2381,6 +2399,7 @@ void RemoteSceneController::clearScene() {
         QQuickWindow* window = sw.window;
         sw.sceneEpoch = 0;
 
+        WindowStackingCoordinator::instance().unregisterWindow(window);
         QObject::disconnect(window, nullptr, nullptr, nullptr);
         window->hide();
 
@@ -2672,6 +2691,7 @@ void RemoteSceneController::evaluateItemReadiness(const std::shared_ptr<RemoteMe
 void RemoteSceneController::startSceneActivationIfReady() {
     if (m_sceneActivated || m_sceneActivationRequested) return;
     if (m_totalMediaToPrime > 0 && m_mediaReadyCount < m_totalMediaToPrime) return;
+    if (!remoteRenderGraphsReady()) return;
 
     // PREPARE is complete. Keep all windows hidden and every automation timer
     // stopped until the server sends COMMIT with a shared monotonic deadline.
@@ -2984,6 +3004,7 @@ void RemoteSceneController::activateScene() {
 		// emitted while the window was hidden is therefore outside this
 		// activation generation and cannot satisfy the barrier.
 		sw.window->show();
+        WindowStackingCoordinator::instance().setSceneWindowActive(sw.window, true);
 
         const int screenId = it.key();
         m_screensAwaitingFirstFrame.insert(screenId);
@@ -3005,11 +3026,11 @@ void RemoteSceneController::activateScene() {
 				}
 
 				ScreenWindow& presentedWindow = windowIt.value();
-				if (!presentedWindow.window->isVisible()
+				if (!presentedWindow.targetScreen || !presentedWindow.window->isVisible()
 					|| !presentedWindow.window->isExposed()) {
 					// A hidden/off-screen render pass is not a presented frame. Keep
 					// the barrier armed and request another compositor cycle.
-					presentedWindow.window->update();
+					if (presentedWindow.targetScreen) presentedWindow.window->update();
 					return;
                 }
 
@@ -3032,25 +3053,7 @@ void RemoteSceneController::activateScene() {
 			}, Qt::QueuedConnection);
 
 		renderWindow->update();
-#ifdef Q_OS_MAC
-        QTimer::singleShot(0, this, [this, activationEpoch, screenId]() {
-            if (activationEpoch != m_sceneEpoch) {
-                return;
-            }
 
-            auto macIt = m_screenWindows.find(screenId);
-            if (macIt == m_screenWindows.end()) {
-                return;
-            }
-
-            ScreenWindow& macWindow = macIt.value();
-            if (macWindow.sceneEpoch != activationEpoch || !macWindow.window) {
-                return;
-            }
-
-            MacWindowManager::setWindowAsGlobalOverlay(macWindow.window, /*clickThrough*/ true);
-        });
-#endif
     }
 
     // Mute all videos at scene start and schedule automatic unmute if enabled
@@ -3266,7 +3269,7 @@ void RemoteSceneController::resetWindowForNewScene(ScreenWindow& sw, int screenI
     sw.window->update();
 
 #ifdef Q_OS_MAC
-    MacWindowManager::setWindowAsGlobalOverlay(sw.window, /*clickThrough*/ true);
+    MacWindowManager::configureGlobalOverlay(sw.window, /*clickThrough*/ true);
 #endif
 }
 
@@ -3300,6 +3303,7 @@ QQuickWindow* RemoteSceneController::ensureScreenWindow(int screenId, int x, int
                             | Qt::WindowDoesNotAcceptFocus
                             | Qt::WindowTransparentForInput);
         sw.window->setColor(Qt::transparent);
+        WindowStackingCoordinator::instance().registerSceneWindow(sw.window);
         mediaModel->setParent(sw.window);
         sw.mediaModel = mediaModel;
         connect(sw.window, SIGNAL(spanReady(QString,QString)),
@@ -3312,32 +3316,133 @@ QQuickWindow* RemoteSceneController::ensureScreenWindow(int screenId, int x, int
 }
 
 void RemoteSceneController::buildWindows(const QJsonArray& screensArray) {
-    // Map host screen list to local physical screens by index.
-    const QList<QScreen*> localScreens = QGuiApplication::screens();
+    const auto localScreens = LocalScreenTopology::screens();
     int hostIndex = 0;
-    for (const auto& v : screensArray) {
-        QJsonObject o = v.toObject();
-        int hostScreenId = o.value("id").toInt();
-        // The snapshot is validated against the current topology before any
-        // window is built. Never fold excess host screens onto the primary:
-        // that creates multiple full-screen overlays on the same display.
-        QScreen* target = (hostIndex < localScreens.size()) ? localScreens[hostIndex] : nullptr;
-        if (!target) {
-            qWarning() << "RemoteSceneController: local screen disappeared during preparation"
-                       << hostIndex;
-            ++hostIndex;
+    for (const auto& value : screensArray) {
+        const QJsonObject source = value.toObject();
+        const int screenId = source.value("id").toInt();
+        if (hostIndex >= localScreens.size()) break;
+        const auto& target = localScreens[hostIndex++];
+        if (!target.screen) {
+            qWarning() << "RemoteSceneController: local screen disappeared during preparation";
             continue;
         }
-        const QRect geom = target->geometry();
-        const bool primary = target == QGuiApplication::primaryScreen();
-        ensureScreenWindow(hostScreenId, geom.x(), geom.y(), geom.width(), geom.height(), primary);
-		auto windowIt = m_screenWindows.find(hostScreenId);
-		if (windowIt != m_screenWindows.end()) {
-			windowIt->sourceScreenDefinition = o;
-		}
-        ++hostIndex;
+        const QRect& geometry = target.geometry;
+        if (!ensureScreenWindow(screenId, geometry.x(), geometry.y(),
+                                geometry.width(), geometry.height(), target.primary)) continue;
+        ScreenWindow& window = m_screenWindows[screenId];
+        window.sourceScreenDefinition = source;
+        window.targetScreen = target.screen;
+        window.screenIdentity = target.identity;
+        window.window->setScreen(target.screen);
+        window.window->setGeometry(geometry);
     }
-    qDebug() << "RemoteSceneController: created" << m_screenWindows.size() << "remote screen windows (host screens:" << screensArray.size() << ", local screens:" << localScreens.size() << ")";
+    qDebug() << "RemoteSceneController: created" << m_screenWindows.size()
+             << "remote screen windows (host screens:" << screensArray.size()
+             << ", local screens:" << localScreens.size() << ")";
+}
+
+void RemoteSceneController::watchLocalScreen(QScreen* screen)
+{
+    if (!screen) return;
+    const auto changed = [this] { m_screenRefreshTimer.start(); };
+    connect(screen, &QScreen::geometryChanged, this, changed);
+    connect(screen, &QScreen::logicalDotsPerInchChanged, this, changed);
+    connect(screen, &QScreen::physicalDotsPerInchChanged, this, changed);
+}
+
+void RemoteSceneController::handleLocalScreenRemoved(QScreen* screen)
+{
+    if (!screen || m_teardownInProgress) return;
+    for (auto it = m_screenWindows.begin(); it != m_screenWindows.end(); ++it) {
+        ScreenWindow& output = it.value();
+        if (output.targetScreen != screen) continue;
+        output.targetScreen = nullptr;
+        if (output.window) {
+            WindowStackingCoordinator::instance().setSceneWindowActive(output.window, false);
+            output.window->hide();
+#ifdef Q_OS_MACOS
+            MacWindowManager::orderOutWindow(output.window);
+#endif
+        }
+        // Once the first presentation barrier has completed, display loss
+        // never changes the run. Before that, a missing display cannot satisfy
+        // STARTED, even if it presented an earlier frame in this generation.
+        if (m_sceneActivated && m_firstFramePresentedLocalSteadyMs < 0) {
+            m_screensAwaitingFirstFrame.insert(it.key());
+            output.firstFramePassesRemaining = 1;
+        }
+    }
+}
+
+void RemoteSceneController::updateScreenGeometry(int screenId, QScreen* screen,
+                                                const QRect& geometry)
+{
+    auto found = m_screenWindows.find(screenId);
+    if (found == m_screenWindows.end() || !found->window || !screen || geometry.isEmpty()) return;
+    ScreenWindow& output = found.value();
+    const bool returning = !output.targetScreen;
+    const bool resized = output.w != geometry.width() || output.h != geometry.height();
+    output.targetScreen = screen;
+    output.x = geometry.x();
+    output.y = geometry.y();
+    output.w = geometry.width();
+    output.h = geometry.height();
+    if (output.window->screen() != screen) output.window->setScreen(screen);
+    output.window->setGeometry(geometry);
+    if (resized) {
+        for (const auto& item : m_mediaItems) {
+            if (std::any_of(item->spans.cbegin(), item->spans.cend(),
+                            [screenId](const auto& span) { return span.screenId == screenId; })) {
+                updatePublishedMediaItem(item);
+            }
+        }
+    }
+    if (returning && m_sceneActivated) {
+        // The model, frame source, media players and all envelopes continued
+        // running while hidden; show their current state without rescheduling.
+        output.window->show();
+        WindowStackingCoordinator::instance().setSceneWindowActive(output.window, true);
+        output.window->update();
+    }
+}
+
+void RemoteSceneController::refreshScreenBindings(const QList<LocalScreenTopology::Screen>& screens)
+{
+    if (m_teardownInProgress || m_screenWindows.isEmpty()) return;
+    QSet<QScreen*> occupied;
+    // Retain existing associations before reconnecting absent outputs. The
+    // enumeration order and protocol source topology may both differ now.
+    for (auto it = m_screenWindows.begin(); it != m_screenWindows.end(); ++it) {
+        ScreenWindow& output = it.value();
+        if (!output.targetScreen) continue;
+        const auto present = std::find_if(screens.cbegin(), screens.cend(), [&](const auto& candidate) {
+            return candidate.screen == output.targetScreen
+                && (output.screenIdentity.isEmpty() || candidate.identity == output.screenIdentity);
+        });
+        if (present == screens.cend()) {
+            handleLocalScreenRemoved(output.targetScreen);
+        } else {
+            occupied.insert(present->screen);
+            updateScreenGeometry(it.key(), present->screen, present->geometry);
+        }
+    }
+    for (auto it = m_screenWindows.begin(); it != m_screenWindows.end(); ++it) {
+        ScreenWindow& output = it.value();
+        if (output.targetScreen || output.screenIdentity.isEmpty()) continue;
+        const LocalScreenTopology::Screen* match = nullptr;
+        int matches = 0;
+        for (const auto& candidate : screens) {
+            if (candidate.screen && candidate.identity == output.screenIdentity) {
+                match = &candidate;
+                ++matches;
+            }
+        }
+        if (matches != 1 || occupied.contains(match->screen)) continue;
+        occupied.insert(match->screen);
+        updateScreenGeometry(it.key(), match->screen, match->geometry);
+    }
+    startSceneActivationIfReady();
 }
 
 void RemoteSceneController::publishScreenModel(int screenId) {

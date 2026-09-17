@@ -3,6 +3,7 @@
 #include <QDebug>
 #include <QGuiApplication>
 #include <QWindow>
+#include <QVariant>
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -85,15 +86,41 @@ void followCurrentDesktop(HWND hwnd)
 }
 }
 
-void WindowsWindowManager::keepAboveAndOnAllDesktops(QWindow* window)
+void WindowsWindowManager::keepAboveAndOnAllDesktops(QWindow* window, QWindow* preceding,
+                                                   bool preserveOrderBelow)
 {
     if (!window || QGuiApplication::platformName() != QLatin1String("windows")) return;
     const HWND hwnd = reinterpret_cast<HWND>(window->winId());
     if (!IsWindow(hwnd) || IsIconic(hwnd) || !IsWindowVisible(hwnd)) return;
 
     // Do not take keyboard focus or disturb the current bounds when enforcing.
-    SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
-                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+    const HWND after = preceding ? reinterpret_cast<HWND>(preceding->winId()) : HWND_TOPMOST;
+    bool correctlyOrdered = false;
+    if (GetWindowLongPtr(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST) {
+        for (HWND candidate = GetWindow(hwnd, GW_HWNDPREV); candidate;
+             candidate = GetWindow(candidate, GW_HWNDPREV)) {
+            if (!IsWindowVisible(candidate)) continue;
+            correctlyOrdered = candidate == after;
+            if (correctlyOrdered || !preserveOrderBelow) break;
+        }
+        if (!preceding) {
+            correctlyOrdered = true;
+            for (HWND candidate = GetWindow(hwnd, GW_HWNDPREV); candidate;
+                 candidate = GetWindow(candidate, GW_HWNDPREV)) {
+                if (IsWindowVisible(candidate)) { correctlyOrdered = false; break; }
+            }
+        }
+    }
+    if (!correctlyOrdered
+        && !SetWindowPos(hwnd, after, 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER)) {
+        // Rate-limit errors by native handle; a new handle gets a fresh check.
+        const qulonglong failedHandle = reinterpret_cast<qulonglong>(hwnd);
+        if (window->property("mouffetteStackingFailure").toULongLong() != failedHandle) {
+            window->setProperty("mouffetteStackingFailure", failedHandle);
+            qWarning() << "Window priority failed" << window->objectName() << GetLastError();
+        }
+    }
 
     const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     if (SUCCEEDED(com) || com == RPC_E_CHANGED_MODE) {

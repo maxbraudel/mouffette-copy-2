@@ -14,6 +14,7 @@
 #include <memory>
 
 #include "backend/network/RemoteCacheStore.h"
+#include "backend/platform/LocalScreenTopology.h"
 
 class WebSocketClient;
 class FileManager;
@@ -90,6 +91,8 @@ private:
 		// is the local physical mapping and must never be replaced by a resumed
 		// owner's coordinates.
 		QJsonObject sourceScreenDefinition;
+		QPointer<QScreen> targetScreen;
+		QString screenIdentity;
 		int x=0,y=0,w=0,h=0;
 		quint64 sceneEpoch = 0;
 	};
@@ -205,6 +208,10 @@ private:
 	QQuickWindow* ensureScreenWindow(int screenId, int x, int y, int w, int h, bool primary);
 	void resetWindowForNewScene(ScreenWindow& sw, int screenId, int x, int y, int w, int h, bool primary);
 	void buildWindows(const QJsonArray& screensArray);
+	void watchLocalScreen(QScreen* screen);
+	void handleLocalScreenRemoved(QScreen* screen);
+	void refreshScreenBindings(const QList<LocalScreenTopology::Screen>& screens);
+	void updateScreenGeometry(int screenId, QScreen* screen, const QRect& geometry);
 	void buildMedia(const QJsonArray& mediaArray);
 	void scheduleMedia(const std::shared_ptr<RemoteMediaItem>& item);
 	void scheduleMediaMulti(const std::shared_ptr<RemoteMediaItem>& item);
@@ -298,6 +305,7 @@ private:
 	QTimer* m_sceneReadyTimeout = nullptr;
 	QTimer* m_activationTimer = nullptr;
 	QTimer* m_windowShowTimer = nullptr; // Timer for deferred window showing
+	QTimer m_screenRefreshTimer;
 	bool m_teardownInProgress = false;
 	quint64 m_teardownBarrierEpoch = 0;
 	bool m_teardownCompletionScheduled = false;

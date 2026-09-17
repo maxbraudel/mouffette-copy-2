@@ -1,16 +1,14 @@
 #include "frontend/qml/WindowPresentation.h"
+#include "backend/platform/WindowStackingCoordinator.h"
 
 #include <QCursor>
-#include <QEvent>
 #include <QGuiApplication>
-#include <QPlatformSurfaceEvent>
 #include <QScreen>
 #include <QtQml/qqml.h>
 
 #if defined(Q_OS_MACOS)
 #include "backend/platform/macos/MacWindowManager.h"
-#elif defined(Q_OS_WIN)
-#include "backend/platform/windows/WindowsWindowManager.h"
+
 #endif
 
 namespace {
@@ -23,37 +21,27 @@ Q_COREAPP_STARTUP_FUNCTION(registerWindowPresentation)
 
 WindowPresentation::WindowPresentation(QObject* parent) : QObject(parent)
 {
-    // Reassert without activating: another topmost app, Qt flag changes or an
-    // Explorer restart must not permanently demote an open control window.
-    m_priorityTimer.setInterval(500);
-    connect(&m_priorityTimer, &QTimer::timeout, this, &WindowPresentation::enforcePriority);
+}
+
+WindowPresentation::~WindowPresentation()
+{
+    if (m_window) WindowStackingCoordinator::instance().unregisterWindow(m_window);
 }
 
 void WindowPresentation::setWindow(QWindow* window)
 {
     if (m_window == window) return;
-    m_priorityTimer.stop();
-    if (m_window) {
-        m_window->removeEventFilter(this);
-        disconnect(m_window, nullptr, this, nullptr);
-    }
+    auto& stacking = WindowStackingCoordinator::instance();
+    if (m_window) stacking.unregisterWindow(m_window);
     m_window = window;
     if (window) {
-        // Qt's Windows plugin supplies default decorations only for a bare
-        // window type. Adding StaysOnTop alone leaves a resize frame without a
-        // caption (and therefore without the native title-bar drag surface).
-        // Keep the complete control-window policy here instead of replacing
-        // these hints with a separate QML flags binding.
+        // Explicit decorations are needed when Qt's Windows backend receives
+        // additional flags (StaysOnTop otherwise suppresses the title bar).
         window->setFlags(window->flags() | Qt::WindowTitleHint
                          | Qt::WindowSystemMenuHint | Qt::WindowMinMaxButtonsHint
                          | Qt::WindowCloseButtonHint | Qt::WindowStaysOnTopHint);
-        window->installEventFilter(this);
-        connect(window, &QWindow::visibilityChanged, this,
-                &WindowPresentation::updateEnforcement);
-        connect(window, &QWindow::screenChanged, this,
-                &WindowPresentation::updateEnforcement);
-        connect(window, &QObject::destroyed, this, [this] { m_priorityTimer.stop(); });
-        updateEnforcement();
+        stacking.registerControlWindow(window);
+        stacking.enforce();
     }
     emit windowChanged();
 }
@@ -95,49 +83,10 @@ void WindowPresentation::open()
     m_window->show();
     // Native decoration sizes may only be known once the window is shown.
     if (reopening) fitToScreen(screen);
-    enforcePriority();
     m_window->raise();
     m_window->requestActivate();
 #ifdef Q_OS_MACOS
     MacWindowManager::activateApplicationWindow(m_window);
 #endif
-}
-
-void WindowPresentation::updateEnforcement()
-{
-    if (!m_window || !m_window->isVisible() || m_window->windowState() == Qt::WindowMinimized) {
-        m_priorityTimer.stop();
-        return;
-    }
-    enforcePriority();
-    m_priorityTimer.start();
-}
-
-void WindowPresentation::enforcePriority()
-{
-    if (!m_window || !m_window->isVisible() || m_window->windowState() == Qt::WindowMinimized) return;
-#if defined(Q_OS_MACOS)
-    MacWindowManager::setWindowAlwaysOnTop(m_window);
-#elif defined(Q_OS_WIN)
-    WindowsWindowManager::keepAboveAndOnAllDesktops(m_window);
-#endif
-}
-
-bool WindowPresentation::eventFilter(QObject* watched, QEvent* event)
-{
-    if (watched == m_window) {
-        bool reapply = event->type() == QEvent::Show
-            || event->type() == QEvent::WinIdChange
-            || event->type() == QEvent::WindowStateChange;
-        if (event->type() == QEvent::PlatformSurface) {
-            reapply = static_cast<QPlatformSurfaceEvent*>(event)->surfaceEventType()
-                == QPlatformSurfaceEvent::SurfaceCreated;
-        }
-        if (reapply) {
-            // Qt's platform plugin must finish creating/updating the native
-            // window before its default level/collection behavior is overridden.
-            QTimer::singleShot(0, this, &WindowPresentation::updateEnforcement);
-        }
-    }
-    return QObject::eventFilter(watched, event);
+    WindowStackingCoordinator::instance().enforce();
 }

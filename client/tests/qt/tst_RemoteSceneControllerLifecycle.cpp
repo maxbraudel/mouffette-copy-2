@@ -16,12 +16,45 @@
 #include <QVariantAnimation>
 #include <QVideoSink>
 #include <QtTest>
+#include <qpa/qplatformscreen.h>
+#include <qpa/qwindowsysteminterface.h>
 
 #include "backend/files/FileManager.h"
 #include "frontend/rendering/canvas/MediaListModel.h"
 #include "frontend/rendering/remote/RemoteSceneController.h"
+#include "frontend/rendering/remote/RemoteVideoFrameItem.h"
 
 namespace {
+// Actual Qt screen-added/removed/geometry events, confined to the offscreen
+// plugin so a test cannot disturb the user's native display configuration.
+class TestPlatformScreen final : public QPlatformScreen {
+public:
+    explicit TestPlatformScreen(QString serial) : m_serial(std::move(serial)) {}
+    QRect geometry() const override { return bounds; }
+    int depth() const override { return 32; }
+    QImage::Format format() const override { return QImage::Format_ARGB32_Premultiplied; }
+    QString serialNumber() const override { return m_serial; }
+    QString name() const override { return m_serial; }
+    QString manufacturer() const override { return QStringLiteral("MouffetteTest"); }
+    QString model() const override { return QStringLiteral("Hotplug"); }
+    QRect bounds{-800, -600, 800, 600};
+private:
+    QString m_serial;
+};
+
+class TestDisplay final {
+public:
+    explicit TestDisplay(const QString& serial) : platform(new TestPlatformScreen(serial)) {
+        QWindowSystemInterface::handleScreenAdded(platform);
+    }
+    ~TestDisplay() { remove(); }
+    void remove() {
+        if (platform) QWindowSystemInterface::handleScreenRemoved(platform);
+        platform = nullptr;
+    }
+    TestPlatformScreen* platform;
+};
+
 QJsonObject textScene()
 {
     QJsonObject screen;
@@ -214,6 +247,170 @@ private slots:
             Q_ARG(QString, QStringLiteral("schema-test-owner")),
             Q_ARG(QJsonObject, incomplete)));
         QVERIFY(!findRemoteWindow());
+    }
+
+    void screenHotplugPreservesRunAndMatchesIdentity()
+    {
+        if (QGuiApplication::platformName() != QLatin1String("offscreen"))
+            QSKIP("Synthetic QPA screens require the offscreen platform");
+        TestDisplay display(QStringLiteral("display-a"));
+        RemoteSceneController controller(nullptr, nullptr);
+        auto scene = textScene();
+        auto screen = scene["screens"].toArray().first().toObject();
+        screen["id"] = 1;
+        screen["primary"] = false;
+        scene["screens"] = QJsonArray{scene["screens"].toArray().first(), screen};
+        auto media = scene["media"].toArray().first().toObject();
+        auto span = media["spans"].toArray().first().toObject();
+        span["screenId"] = 1;
+        span["spanDestNormX"] = 0.25;
+        span["spanDestNormW"] = 0.5;
+        media["spans"] = QJsonArray{media["spans"].toArray().first(), span};
+        media["autoDisplay"] = true;
+        media["fadeInSeconds"] = 0.8;
+        media["autoHide"] = true;
+        media["autoHideDelayMs"] = 10000;
+        scene["media"] = QJsonArray{media};
+        controller.onRemoteSceneStart(QStringLiteral("hotplug-owner"), scene);
+        QTRY_VERIFY_WITH_TIMEOUT(controller.m_sceneActivationRequested, 5000);
+        QCOMPARE(controller.m_screenWindows.size(), 2);
+        auto& primary = controller.m_screenWindows[0];
+        auto& secondary = controller.m_screenWindows[1];
+        QCOMPARE(secondary.targetScreen, display.platform->screen());
+        QVERIFY(!secondary.window->isVisible());
+        controller.activateScene();
+        QTRY_VERIFY_WITH_TIMEOUT(controller.m_firstFramePresentedLocalSteadyMs >= 0, 5000);
+        QTRY_VERIFY(controller.m_mediaItems.first()->visualFadeAnimation);
+        const auto item = controller.m_mediaItems.first();
+        const auto fade = item->visualFadeAnimation;
+        const auto timer = item->hideTimer;
+        const auto epoch = controller.m_sceneEpoch;
+        const auto firstFrame = controller.m_firstFramePresentedLocalSteadyMs;
+        const auto sourceTopology = secondary.sourceScreenDefinition;
+        QPointer<QQuickWindow> oldWindow = secondary.window;
+
+        display.platform->bounds = QRect(-1200, -900, 1200, 900);
+        QWindowSystemInterface::handleScreenGeometryChange(display.platform->screen(),
+            display.platform->bounds, display.platform->bounds);
+        QTRY_COMPARE(secondary.window->geometry(), display.platform->screen()->geometry());
+        QTRY_COMPARE(secondary.w, secondary.window->width());
+        const auto rendered = [&] {
+            return secondary.mediaModel->data(secondary.mediaModel->index(0, 0),
+                                              MediaListModel::ModelDataRole).toMap();
+        };
+        QTRY_COMPARE(rendered()["destWidth"].toDouble(), secondary.w * 0.5);
+        QCOMPARE(rendered()["destX"].toDouble(), secondary.w * 0.25);
+        QCOMPARE(secondary.sourceScreenDefinition, sourceTopology);
+
+        display.remove();
+        QVERIFY(!secondary.window->isVisible()); // Before the deferred refresh.
+        QVERIFY(!secondary.targetScreen);
+        QVERIFY(primary.window->isVisible());
+        QVERIFY(controller.m_sceneActivated);
+        QCOMPARE(item->visualFadeAnimation, fade);
+        QCOMPARE(item->hideTimer, timer);
+        QVERIFY(timer && timer->isActive());
+        const int remaining = timer->remainingTime();
+        QTest::qWait(80);
+        QVERIFY(timer->remainingTime() < remaining);
+        QCOMPARE(controller.m_sceneEpoch, epoch);
+        QVERIFY(controller.applyAuthoritativeStateSnapshot(snapshotForScene(scene), 1, 0));
+        QCOMPARE(controller.m_screenWindows.size(), 2);
+        QCOMPARE(secondary.sourceScreenDefinition, sourceTopology);
+
+        TestDisplay unrelated(QStringLiteral("display-b"));
+        QTest::qWait(30);
+        QVERIFY(!secondary.window->isVisible());
+        TestDisplay ambiguous1(QStringLiteral("display-a"));
+        TestDisplay ambiguous2(QStringLiteral("display-a"));
+        QTest::qWait(30);
+        QVERIFY(!secondary.window->isVisible());
+        QVERIFY(!secondary.targetScreen);
+        ambiguous2.remove();
+        QTRY_COMPARE(secondary.targetScreen, ambiguous1.platform->screen());
+        QTRY_VERIFY(secondary.window->isVisible());
+        QCOMPARE(secondary.window, oldWindow);
+        QCOMPARE(controller.m_sceneEpoch, epoch);
+        QCOMPARE(controller.m_firstFramePresentedLocalSteadyMs, firstFrame);
+        QCOMPARE(item->hideTimer, timer);
+        QVERIFY(timer->remainingTime() < remaining);
+
+        controller.onRemoteSceneStop(QStringLiteral("hotplug-owner"), scene["sceneInstanceId"].toString());
+        QTRY_VERIFY(oldWindow.isNull());
+        ambiguous1.remove();
+        TestDisplay afterStop(QStringLiteral("display-a"));
+        QTest::qWait(50);
+        QVERIFY(controller.m_screenWindows.isEmpty());
+        QVERIFY(!findRemoteWindow());
+    }
+
+    void absentDisplayCannotCompletePreparationOrActivation()
+    {
+        RemoteSceneController controller(nullptr, nullptr);
+        const auto scene = textScene();
+        controller.onRemoteSceneStart(QStringLiteral("missing-screen-owner"), scene);
+        QVERIFY(!controller.m_screenWindows.isEmpty());
+        controller.refreshScreenBindings({});
+        QVERIFY(!controller.remoteRenderGraphsReady());
+        QTest::qWait(60);
+        QVERIFY(!controller.m_sceneActivationRequested);
+        QVERIFY(!controller.m_screenWindows[0].window->isVisible());
+        // Even a COMMIT crossing an unplug must not claim successful output.
+        controller.m_sceneActivationRequested = true;
+        controller.activateScene();
+        QVERIFY(!controller.m_sceneActivated);
+        QTRY_VERIFY_WITH_TIMEOUT(!findRemoteWindow(), 2000);
+    }
+
+    void allOutputsAbsentKeepVideoAndAudioTimeline()
+    {
+        const QString fileId = QStringLiteral("hotplug-video");
+        const QString owner = UploadManager::residencyOwnerId({}, 0, fileId);
+        FileManager files;
+        files.registerReceivedFilePath(fileId, QString::fromUtf8(TEST_VIDEO_FILE));
+        auto& residency = MediaResidencyManager::instance();
+        residency.acquire(owner, QString::fromUtf8(TEST_VIDEO_FILE));
+        QTRY_VERIFY_WITH_TIMEOUT(residency.ready(owner), 60000);
+        RemoteSceneController controller(&files, nullptr);
+        auto scene = videoScene(fileId);
+        auto media = scene["media"].toArray().first().toObject();
+        media["continuousLoop"] = true;
+        scene["media"] = QJsonArray{media};
+        controller.onRemoteSceneStart(QStringLiteral("video-hotplug-owner"), scene);
+        QTRY_VERIFY_WITH_TIMEOUT(controller.m_sceneActivationRequested, 5000);
+        controller.activateScene();
+        const auto item = controller.m_mediaItems.first();
+        QTRY_COMPARE(item->player->playbackState(), QMediaPlayer::PlayingState);
+        QTRY_VERIFY_WITH_TIMEOUT(controller.m_firstFramePresentedLocalSteadyMs >= 0, 5000);
+        auto& output = controller.m_screenWindows[0];
+        output.screenIdentity = QStringLiteral("test-video-screen");
+        LocalScreenTopology::Screen target{output.targetScreen, output.screenIdentity,
+            output.window->geometry(), {}, true, false};
+        const auto player = item->player;
+        const auto audio = item->audio;
+        const auto frameSource = item->frameSource;
+        const auto epoch = controller.m_sceneEpoch;
+        controller.refreshScreenBindings({});
+        QVERIFY(!output.window->isVisible());
+        const qint64 position = player->position();
+        QTRY_VERIFY_WITH_TIMEOUT(player->position() != position, 2000);
+        QCOMPARE(player->playbackState(), QMediaPlayer::PlayingState);
+        QCOMPARE(item->audio, audio);
+        QCOMPARE(item->frameSource, frameSource);
+        QVERIFY(audio->isMuted());
+        QVERIFY(controller.m_sceneActivated);
+        QCOMPARE(controller.m_sceneEpoch, epoch);
+        controller.refreshScreenBindings({target});
+        QVERIFY(output.window->isVisible());
+        QCOMPARE(item->player, player);
+        QCOMPARE(item->audio, audio);
+        QCOMPARE(item->frameSource, frameSource);
+        QCOMPARE(player->playbackState(), QMediaPlayer::PlayingState);
+        QCOMPARE(controller.m_sceneEpoch, epoch);
+        controller.onRemoteSceneStop(QStringLiteral("video-hotplug-owner"), scene["sceneInstanceId"].toString());
+        QTRY_VERIFY_WITH_TIMEOUT(!findRemoteWindow(), 2000);
+        files.removeReceivedFileMapping(fileId);
+        residency.release(owner);
     }
 
     void visualAutomation_data()
