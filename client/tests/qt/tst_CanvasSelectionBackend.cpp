@@ -42,6 +42,7 @@
 #include "frontend/rendering/canvas/MediaListModel.h"
 #include "frontend/rendering/canvas/QuickCanvasController.h"
 #include "frontend/rendering/canvas/QuickCanvasHost.h"
+#include "frontend/rendering/canvas/CanvasQmlTypes.h"
 #include "frontend/rendering/canvas/TextOutlineItem.h"
 #include "frontend/rendering/remote/RemoteVideoFrameItem.h"
 #include "shared/rendering/MediaFrameSource.h"
@@ -156,6 +157,64 @@ private slots:
     {
         // The complete page must use the same controls as production main().
         QQuickStyle::setStyle(QStringLiteral("Basic"));
+    }
+
+    void appPrioritySettingCommitsOnlyOnSave()
+    {
+        registerCanvasQmlTypes();
+        QQmlEngine engine;
+        QQmlComponent component(&engine);
+        component.setData(
+            "import QtQuick\n"
+            "import QtQuick.Controls\n"
+            "import \"qrc:/qt/qml/Mouffette/App/resources/qml/app/dialogs\"\n"
+            "ApplicationWindow {\n"
+            "    width: 640; height: 500; visible: true\n"
+            "    property QtObject settingsController: QtObject {\n"
+            "        property string settingsServerUrl: \"ws://127.0.0.1:3000\"\n"
+            "        property bool settingsAutoUpload: true\n"
+            "        property bool settingsAppAlwaysOnTop: true\n"
+            "        property bool ready: true\n"
+            "        property bool clearingStorage: false\n"
+            "        property int saveCalls: 0\n"
+            "        function saveSettings(url, upload, priority) {\n"
+            "            settingsAppAlwaysOnTop = priority; ++saveCalls; return \"\"\n"
+            "        }\n"
+            "    }\n"
+            "    property SettingsDialog settingsDialog: SettingsDialog { controller: settingsController }\n"
+            "}\n", QUrl());
+        QTRY_VERIFY(!component.isLoading());
+        QScopedPointer<QObject> window(component.create());
+        QVERIFY2(window, qPrintable(component.errorString()));
+        QObject* dialog = window->property("settingsDialog").value<QObject*>();
+        QObject* controller = window->property("settingsController").value<QObject*>();
+        QVERIFY(dialog && controller);
+        QObject* checkbox = dialog->findChild<QObject*>(QStringLiteral("settingsAppAlwaysOnTop"));
+        QVERIFY(checkbox);
+        const auto content = dialog->property("contentItem").value<QQuickItem*>();
+        QObject* cancel = findQuickItemWithProperty(content, "text", QStringLiteral("Cancel"));
+        QObject* save = findQuickItemWithProperty(content, "text", QStringLiteral("Save"));
+        QVERIFY(cancel && save);
+        QVERIFY(QMetaObject::invokeMethod(dialog, "open"));
+        QTRY_VERIFY(dialog->property("opened").toBool());
+        QVERIFY(checkbox->property("checked").toBool());
+        checkbox->setProperty("checked", false);
+        QVERIFY(controller->property("settingsAppAlwaysOnTop").toBool());
+        QVERIFY(QMetaObject::invokeMethod(cancel, "clicked"));
+        QTRY_VERIFY(!dialog->property("visible").toBool());
+        QCOMPARE(controller->property("saveCalls").toInt(), 0);
+        QVERIFY(QMetaObject::invokeMethod(dialog, "open"));
+        QTRY_VERIFY(dialog->property("opened").toBool());
+        QVERIFY(checkbox->property("checked").toBool());
+        checkbox->setProperty("checked", false);
+        QVERIFY(QMetaObject::invokeMethod(save, "clicked"));
+        QTRY_VERIFY(!dialog->property("visible").toBool());
+        QVERIFY(!controller->property("settingsAppAlwaysOnTop").toBool());
+        QCOMPARE(controller->property("saveCalls").toInt(), 1);
+        QVERIFY(QMetaObject::invokeMethod(dialog, "open"));
+        QTRY_VERIFY(dialog->property("opened").toBool());
+        QVERIFY(!checkbox->property("checked").toBool());
+        QVERIFY(QMetaObject::invokeMethod(cancel, "clicked"));
     }
 
     void remoteCursorUsesScreenIdentityAndExactPixels()

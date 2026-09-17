@@ -1959,4 +1959,48 @@ function cursorContext(prefix) {
     assert.equal(messages(context.ownerSocket, 'remote_session_cursor').at(-1).visible, false);
 }
 
+// Full display state is coalesced under congestion and always precedes cursor
+// coordinates which refer to the replacement topology.
+{
+    const context = cursorContext('snapshot-backpressure');
+    const { server, session, ownerSocket, targetSocket } = context;
+    const observer = addAuthenticatedClient(server, 'snapshot-observer', 'observer');
+    const snapshotMessage = (sequence, screens) => ({
+        ...context.cursorMessage(),
+        type: 'remote_session_snapshot',
+        snapshotSequence: sequence,
+        snapshot: { screens, systemUI: [], volumePercent: 42,
+            revision: sequence, capturedAtEpochMs: 1234 },
+    });
+    ownerSocket.bufferedAmount = 64 * 1024 + 1;
+    server.handleRemoteSessionSnapshot('target-connection', snapshotMessage(2, []));
+    const replacement = [{ id: 3, x: 0, y: 0, width: 1920, height: 1080, primary: true }];
+    server.handleRemoteSessionSnapshot('target-connection', snapshotMessage(3, replacement));
+    assert.equal(messages(ownerSocket, 'remote_session_snapshot').length, 0);
+    assert.equal(session.pendingTargetSnapshot.snapshotSequence, 3);
+    server.handleRemoteSessionCursor('target-connection', context.cursorMessage({ x: 10, y: 20 }));
+    assert.equal(messages(ownerSocket, 'remote_session_cursor').length, 0);
+    ownerSocket.bufferedAmount = 0;
+    server.handleRemoteSessionCursor('target-connection', context.cursorMessage({ sequence: 2, x: 10, y: 20 }));
+    assert.equal(session.pendingTargetSnapshot, undefined);
+    assert.deepEqual(ownerSocket.messages.slice(-2).map(m => m.type),
+        ['remote_session_snapshot', 'remote_session_cursor']);
+    assert.deepEqual(messages(ownerSocket, 'remote_session_snapshot').at(-1).snapshot.screens, replacement);
+    assert.equal(messages(observer, 'remote_session_snapshot').length, 0);
+    // Bounds follow the session snapshot even before discovery catches up.
+    server.handleRemoteSessionCursor('target-connection', context.cursorMessage({ sequence: 3 }));
+    assert.equal(targetSocket.messages.at(-1).code, 'invalid_remote_session_cursor');
+    server.handleRemoteSessionSnapshot('target-connection', snapshotMessage(4, []));
+    assert.deepEqual(messages(ownerSocket, 'remote_session_snapshot').at(-1).snapshot.screens, []);
+    server.handleRemoteSessionSnapshot('target-connection', snapshotMessage(3, replacement));
+    assert.equal(targetSocket.messages.at(-1).code, 'invalid_remote_session_snapshot');
+    ownerSocket.bufferedAmount = 64 * 1024 + 1;
+    server.handleRemoteSessionSnapshot('target-connection', snapshotMessage(5, replacement));
+    session.phase = 'Terminating';
+    ownerSocket.bufferedAmount = 0;
+    server.flushRemoteSessionSnapshot(session);
+    assert.equal(session.pendingTargetSnapshot, undefined);
+    assert.equal(messages(ownerSocket, 'remote_session_snapshot').length, 2);
+}
+
 console.log('remote session protocol tests passed');

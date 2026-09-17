@@ -424,6 +424,11 @@ ApplicationRuntime::ApplicationRuntime(const RuntimeProfileContext& runtimeProfi
     connect(m_webSocketClient, &WebSocketClient::clientListReceived,
             this, &ApplicationRuntime::onClientListReceived);
 
+    m_deviceSnapshotTimer = new QTimer(this);
+    m_deviceSnapshotTimer->setInterval(5000);
+    connect(m_deviceSnapshotTimer, &QTimer::timeout, this, &ApplicationRuntime::syncRegistration);
+    connect(m_webSocketClient, &WebSocketClient::localDeviceSnapshotRequested,
+            this, &ApplicationRuntime::syncRegistration);
     m_cursorClock.start();
     m_cursorPublishTimer = new QTimer(this);
     m_cursorPublishTimer->setTimerType(Qt::PreciseTimer);
@@ -756,6 +761,7 @@ ApplicationRuntime::ApplicationRuntime(const RuntimeProfileContext& runtimeProfi
             this, [this](bool ready, const QString&) {
         // A welcome may have completed while renderer destruction was still
         // pending. Publish the device only after logical quarantine commits.
+        if (!ready && m_webSocketClient) m_webSocketClient->invalidateLocalDeviceSnapshot();
         if (ready && m_webSocketClient && m_webSocketClient->isConnected()) {
             syncRegistration();
         }
@@ -1423,6 +1429,7 @@ void ApplicationRuntime::handleApplicationStateChanged(Qt::ApplicationState stat
 
 void ApplicationRuntime::handleNativeSystemSuspendedChanged(bool suspended) {
     m_nativeSystemSuspended = suspended;
+    if (!suspended && m_webSocketClient && m_webSocketClient->isConnected()) syncRegistration();
     setApplicationSuspended(suspended
                             || QGuiApplication::applicationState() == Qt::ApplicationHidden
                             || QGuiApplication::applicationState() == Qt::ApplicationSuspended);
@@ -2422,12 +2429,15 @@ void ApplicationRuntime::handleRemoteSessionSnapshot(const QJsonObject& envelope
     ClientWorkspace* workspace =
         m_workspaceManager->findWorkspace(targetEndpointId);
     if (!workspace) return;
+    const bool topologyChanged = workspace->lastClientInfo.getScreens() != screens;
+    const bool changed = topologyChanged || workspace->lastClientInfo.getVolumePercent() != volumePercent;
+    if (topologyChanged && workspace->canvas) workspace->canvas->hideRemoteCursor();
     workspace->lastClientInfo.setScreens(screens);
     workspace->lastClientInfo.setVolumePercent(volumePercent);
     m_projectManager->updateRemoteSnapshot(
         targetEndpointId, screens, volumePercent, revision, capturedAtMs);
     if (workspace->canvas) workspace->canvas->setScreens(screens);
-    if (m_activeWorkspaceEndpointId == targetEndpointId) {
+    if (changed && m_activeWorkspaceEndpointId == targetEndpointId) {
         m_selectedClient = workspace->lastClientInfo;
         m_remoteVolumePercent = volumePercent;
         emit presentationStateChanged();
@@ -3843,8 +3853,7 @@ void ApplicationRuntime::onTrayIconActivated(int reason) {
     case SystemTrayManager::ActivationReason::Trigger:
     case SystemTrayManager::ActivationReason::DoubleClick:
     case SystemTrayManager::ActivationReason::Context:
-        if (m_qmlWindowVisible) emit qmlHideRequested();
-        else emit qmlRaiseRequested();
+        emit qmlToggleRequested();
         break;
     default:
         break;
@@ -3968,6 +3977,13 @@ void ApplicationRuntime::refreshRemoteCursorStreaming()
             publish |= binding.targetEndpointId == m_webSocketClient->endpointId();
             receive |= binding.ownerEndpointId == m_webSocketClient->endpointId();
         }
+    }
+    if (m_deviceSnapshotTimer) {
+        const int interval = publish ? 1000 : 5000;
+        if (m_deviceSnapshotTimer->interval() != interval) m_deviceSnapshotTimer->setInterval(interval);
+        if (m_webSocketClient->isConnected()) {
+            if (!m_deviceSnapshotTimer->isActive()) m_deviceSnapshotTimer->start();
+        } else m_deviceSnapshotTimer->stop();
     }
     if (publish) m_cursorPublishTimer->start();
     else m_cursorPublishTimer->stop();
@@ -4160,12 +4176,14 @@ void ApplicationRuntime::syncRegistration() {
     // periodic refreshes must never bypass that fail-closed decision.
     if (m_uploadManager
         && !m_uploadManager->receiverReadyForAdvertisement()) {
+        if (m_webSocketClient) m_webSocketClient->invalidateLocalDeviceSnapshot();
         qWarning() << "Device snapshot suppressed until remote cache cleanup commits:"
                    << m_uploadManager->receiverCleanupError();
         return;
     }
     if (m_screenEventHandler) {
         m_screenEventHandler->syncRegistration();
+        for (auto& cursor : m_publishedCursors) cursor.lastSentAtMs = -1;
     }
 }
 
@@ -4175,8 +4193,14 @@ void ApplicationRuntime::onRemoteSceneLaunchStateChanged(bool active, const QStr
     Q_UNUSED(targetMachineName);
 }
 
+bool ApplicationRuntime::captureLocalScreenInfo(QList<ScreenInfo>* screens) {
+    return m_systemMonitor && m_systemMonitor->captureScreenInfo(screens);
+}
+
 QList<ScreenInfo> ApplicationRuntime::getLocalScreenInfo() {
-    return m_systemMonitor ? m_systemMonitor->getLocalScreenInfo() : QList<ScreenInfo>();
+    QList<ScreenInfo> screens;
+    captureLocalScreenInfo(&screens);
+    return screens;
 }
 
 

@@ -10,6 +10,7 @@ SettingsManager::SettingsManager(QObject* parent)
     : QObject(parent)
     , m_serverUrlConfig(AppConfig::instance().serverUrl())
     , m_autoUploadImportedMedia(AppConfig::instance().autoUploadImportedMedia())
+    , m_appAlwaysOnTop(AppConfig::instance().appAlwaysOnTop())
 {
 }
 
@@ -17,6 +18,7 @@ void SettingsManager::loadSettings() {
     const AppConfig& config = AppConfig::instance();
     m_serverUrlConfig = config.serverUrl();
     m_autoUploadImportedMedia = config.autoUploadImportedMedia();
+    m_appAlwaysOnTop = config.appAlwaysOnTop();
     
     qDebug() << "SettingsManager: Settings loaded - URL:" << m_serverUrlConfig
              << "Auto-upload:" << m_autoUploadImportedMedia;
@@ -28,6 +30,7 @@ void SettingsManager::saveSettings() {
                                       ? AppConfig::instance().serverUrl()
                                       : m_serverUrlConfig);
     settings->setValue("autoUploadImportedMedia", m_autoUploadImportedMedia);
+    settings->setValue("appAlwaysOnTop", m_appAlwaysOnTop);
     settings->setValue("storage/schemaVersion", StorageVersions::Settings);
     settings->sync();
     
@@ -61,4 +64,8 @@ void SettingsManager::setAutoUploadImportedMedia(bool enabled) {
         settings->setValue("storage/schemaVersion", StorageVersions::Settings);
         settings->sync();
     }
+}
+
+void SettingsManager::setAppAlwaysOnTop(bool enabled) {
+    m_appAlwaysOnTop = enabled;
 }

@@ -2006,6 +2006,7 @@ class MouffetteServer {
                 accepted.error, accepted.error, message);
         }
         accepted.session.initialSnapshot = snapshot;
+        accepted.session.latestTargetSnapshot = { generation: accepted.session.generation, snapshot };
         accepted.session.snapshotSequence = 1;
         accepted.session.snapshotRevision = snapshot.revision;
         const payload = this.remoteSessionPayload(
@@ -2091,11 +2092,36 @@ class MouffetteServer {
         session.snapshotSequence = message.snapshotSequence;
         session.snapshotRevision = snapshot.revision;
         session.updatedAt = this.remoteSessions.now();
-        this.sendToEndpoint(session.ownerEndpointId, {
-            ...this.remoteSessionPayload(session, 'remote_session_snapshot'),
+        session.latestTargetSnapshot = { generation: session.generation, snapshot };
+        // One bounded slot per session; a slow owner receives the latest full
+        // replacement, never a backlog of historical display configurations.
+        session.pendingTargetSnapshot = {
+            generation: session.generation,
             snapshotSequence: message.snapshotSequence,
             snapshot,
-        });
+        };
+        this.flushRemoteSessionSnapshot(session);
+    }
+
+    flushRemoteSessionSnapshot(session) {
+        const pending = session.pendingTargetSnapshot;
+        if (!pending) return true;
+        if (pending.generation !== session.generation || session.phase !== 'Active') {
+            delete session.pendingTargetSnapshot;
+            return false;
+        }
+        const ownerId = this.resolveClientId(session.ownerEndpointId);
+        const owner = ownerId && this.clients.get(ownerId);
+        if (!owner || !owner.ws || owner.connectionGeneration !== session.ownerConnectionGeneration
+            || owner.runtimeId !== session.ownerRuntimeId
+            || Number(owner.ws.bufferedAmount) > this.MAX_OWNER_BUFFERED_CURSOR_BYTES) return false;
+        if (!this.sendToEndpoint(session.ownerEndpointId, {
+            ...this.remoteSessionPayload(session, 'remote_session_snapshot'),
+            snapshotSequence: pending.snapshotSequence,
+            snapshot: pending.snapshot,
+        })) return false;
+        delete session.pendingTargetSnapshot;
+        return true;
     }
 
     handleRemoteSessionCursor(targetId, message) {
@@ -2109,7 +2135,13 @@ class MouffetteServer {
         const fields = ['type', 'protocolVersion', 'serverBootId', 'messageId',
             'connectionGeneration', 'remoteSessionId', 'generation',
             'sequence', 'visible', 'screenId', 'x', 'y'];
-        const screen = client.screens.find(candidate => candidate.id === message.screenId);
+        // Keep the cursor behind its topology, including when the relay had
+        // to coalesce snapshots. Connection/session generations still gate it.
+        if (!this.flushRemoteSessionSnapshot(session)) return false;
+        const latest = session.latestTargetSnapshot;
+        const screens = latest?.generation === session.generation
+            ? latest.snapshot.screens : client.screens;
+        const screen = screens.find(candidate => candidate.id === message.screenId);
         const hidden = message.visible === false && message.screenId === -1
             && message.x === 0 && message.y === 0;
         const onScreen = screen && isBoundedInteger(message.x, 0, screen.width - 1)
@@ -2674,6 +2706,9 @@ class MouffetteServer {
                     }, session.targetEndpointId);
             }
             this.beginRemoteSessionTeardown(session);
+        }
+        for (const session of this.remoteSessions.sessions.values()) {
+            this.flushRemoteSessionSnapshot(session);
         }
         this.retryPendingRemoteSessionTeardowns(now);
         this.sweepExpiredClientTransports(now);

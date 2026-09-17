@@ -7,7 +7,6 @@
 #include <QPointer>
 #include <QTimer>
 #include <functional>
-#include <optional>
 
 class CanvasDocument;
 class CanvasMedia;
@@ -115,7 +114,7 @@ private:
     bool m_sceneLaunching = false;
     bool m_sceneStopping = false;
     bool m_sceneLaunched = false;
-    std::optional<QList<ScreenInfo>> m_pendingScreens;
+    QJsonObject m_runningSceneDefinition;
     bool m_testSceneLaunched = false;
     bool m_sceneAccepted = false;
     bool m_localPreparedReported = false;

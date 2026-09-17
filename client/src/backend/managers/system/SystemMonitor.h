@@ -5,6 +5,9 @@
 #include <QList>
 #include <QPointF>
 #include <QString>
+#include <functional>
+#include "backend/platform/LocalScreenTopology.h"
+#include "backend/domain/models/ClientInfo.h"
 
 class QTimer;
 class QProcess;
@@ -26,7 +29,8 @@ class SystemMonitor : public QObject {
     Q_OBJECT
     
 public:
-    explicit SystemMonitor(QObject* parent = nullptr);
+    using ScreenProvider = std::function<QList<LocalScreenTopology::Screen>(bool*)>;
+    explicit SystemMonitor(QObject* parent = nullptr, ScreenProvider screenProvider = {});
     ~SystemMonitor() override;
     
     /**
@@ -57,6 +61,7 @@ public:
      * @return List of ScreenInfo objects describing each display
      */
     QList<ScreenInfo> getLocalScreenInfo() const;
+    bool captureScreenInfo(QList<ScreenInfo>* screens);
 
     /**
      * Sample the desktop cursor in the advertised screen's local coordinates.
@@ -95,6 +100,10 @@ private:
     void scheduleScreenConfigurationChanged();
 
     // Volume monitoring state
+    ScreenProvider m_screenProvider;
+    QList<LocalScreenTopology::Screen> m_topology;
+    QList<ScreenInfo> m_screens;
+    bool m_topologyReady = false;
     int m_cachedSystemVolume = -1;  // Last known value (0-100), -1 = unknown
     QTimer* m_screenChangeTimer = nullptr;
     

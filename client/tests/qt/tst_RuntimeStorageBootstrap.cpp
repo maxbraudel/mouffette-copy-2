@@ -213,6 +213,7 @@ void RuntimeStorageBootstrapTest::unversionedSettingsMigration()
     const SettingsData stored = readSettings(context.rootPath, path);
     QCOMPARE(stored.inspection.state, State::Current);
     QCOMPARE(stored.values.value("autoUploadImportedMedia").toBool(), expected);
+    QVERIFY(stored.values.value("appAlwaysOnTop").toBool());
     QCOMPARE(stored.values.value("serverUrl").toString(), QStringLiteral("ws://127.0.0.1:9191"));
     QCOMPARE(stored.values.value("optionalFutureSetting").toString(), QStringLiteral("retained"));
     const auto after = snapshots(context);

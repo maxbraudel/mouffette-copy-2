@@ -758,6 +758,7 @@ void ConnectionManagerTest::protocolUploadWireSchemaAndActiveGate() {
     QVector<QJsonObject> endpointSnapshots;
     QVector<QJsonObject> teardownAcknowledgements;
     QVector<QJsonObject> cursorCommands;
+    QVector<QJsonObject> deviceSnapshots;
     QWebSocket* peer = nullptr;
 
     WebSocketClient client(identityDirectory.path(), false);
@@ -843,6 +844,8 @@ void ConnectionManagerTest::protocolUploadWireSchemaAndActiveGate() {
                 uploadCommands.append(message);
             } else if (type == QLatin1String("remote_session_teardown_ack")) {
                 teardownAcknowledgements.append(message);
+            } else if (type == QLatin1String("remote_session_snapshot")) {
+                deviceSnapshots.append(message);
             } else if (type == QLatin1String("remote_session_cursor")) {
                 cursorCommands.append(message);
             }
@@ -1056,6 +1059,26 @@ void ConnectionManagerTest::protocolUploadWireSchemaAndActiveGate() {
     QCOMPARE(cursorCommands.last().value(QStringLiteral("screenId")).toInt(), -1);
     QCOMPARE(cursorCommands.last().value(QStringLiteral("x")).toInt(), 0);
     QCOMPARE(cursorCommands.last().value(QStringLiteral("y")).toInt(), 0);
+    // A capture after hot-plug must reach an already active incoming session.
+    // Empty is authoritative too; unchanged captures only refresh the session
+    // heartbeat and must not broadcast discovery repeatedly.
+    QTRY_COMPARE_WITH_TIMEOUT(deviceSnapshots.size(), 1, 1000);
+    const int discoveryCount = endpointSnapshots.size();
+    client.registerClient(QStringLiteral("test-device"), QStringLiteral("test-platform"), {}, 42);
+    QTRY_COMPARE_WITH_TIMEOUT(deviceSnapshots.size(), 2, 1000);
+    QTRY_COMPARE_WITH_TIMEOUT(endpointSnapshots.size(), discoveryCount + 1, 1000);
+    QVERIFY(deviceSnapshots.last().value("snapshot").toObject().value("screens").toArray().isEmpty());
+    QCOMPARE(deviceSnapshots.last().value("snapshot").toObject().value("volumePercent").toInt(), 42);
+    const auto removedRevision = deviceSnapshots.last().value("snapshot").toObject().value("revision").toInteger();
+    client.registerClient(QStringLiteral("test-device"), QStringLiteral("test-platform"), {}, 42);
+    QTest::qWait(100);
+    QCOMPARE(deviceSnapshots.size(), 2);
+    QCOMPARE(endpointSnapshots.size(), discoveryCount + 1);
+    QTest::qWait(5050);
+    client.registerClient(QStringLiteral("test-device"), QStringLiteral("test-platform"), {}, 42);
+    QTRY_COMPARE_WITH_TIMEOUT(deviceSnapshots.size(), 3, 1000);
+    QVERIFY(deviceSnapshots.last().value("snapshot").toObject().value("revision").toInteger() > removedRevision);
+    QCOMPARE(endpointSnapshots.size(), discoveryCount + 1);
     QVERIFY(!client.acknowledgeRemoteSessionTeardown(
         incomingSessionId, QStringLiteral("teardown_reverse"), true, true, true, 0));
 

@@ -3618,6 +3618,15 @@ private slots:
         QTRY_VERIFY_WITH_TIMEOUT(controller.ready(), 8'000);
         QVERIFY(observedMediaBootstrap);
         QVERIFY(backendReadyAtPublication);
+        QVERIFY(controller.settingsAppAlwaysOnTop());
+        QVERIFY(controller.saveSettings(controller.settingsServerUrl(),
+            controller.settingsAutoUpload(), false).isEmpty());
+        QVERIFY(!controller.settingsAppAlwaysOnTop());
+        QCOMPARE(RuntimeProfile::readSettings().value("appAlwaysOnTop").toBool(), false);
+        QVERIFY(controller.saveSettings(controller.settingsServerUrl(),
+            controller.settingsAutoUpload(), true).isEmpty());
+        QVERIFY(controller.settingsAppAlwaysOnTop());
+        QCOMPARE(RuntimeProfile::readSettings().value("appAlwaysOnTop").toBool(), true);
         QTRY_VERIFY_WITH_TIMEOUT(!ownerEndpointId.isEmpty(), 2'000);
         QTRY_VERIFY_WITH_TIMEOUT(!endpointSnapshots.isEmpty(), 2'000);
 

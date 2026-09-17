@@ -28,6 +28,7 @@ QtObject {
         WindowPresentation {
             id: presentation
             window: window
+            alwaysOnTop: root.controller.settingsAppAlwaysOnTop
         }
         Component.onCompleted: {
             if (root.controller.ready) presentation.open()
@@ -229,6 +230,7 @@ QtObject {
                 }
                 presentation.open()
             }
+            function onToggleRequested() { presentation.toggle() }
             function onHideRequested() { window.hide() }
         }
         ToastStack {

@@ -8,6 +8,8 @@
 
 #if defined(Q_OS_MACOS)
 #include "backend/platform/macos/MacWindowManager.h"
+#elif defined(Q_OS_WIN)
+#include "backend/platform/windows/WindowsWindowManager.h"
 #endif
 
 namespace {
@@ -36,13 +38,52 @@ void WindowPresentation::setWindow(QWindow* window)
     if (window) {
         // Explicit decorations are needed when Qt's Windows backend receives
         // additional flags (StaysOnTop otherwise suppresses the title bar).
-        window->setFlags(window->flags() | Qt::WindowTitleHint
+        auto flags = window->flags() | Qt::WindowTitleHint
                          | Qt::WindowSystemMenuHint | Qt::WindowMinMaxButtonsHint
-                         | Qt::WindowCloseButtonHint | Qt::WindowStaysOnTopHint);
-        stacking.registerControlWindow(window);
+                         | Qt::WindowCloseButtonHint;
+#ifdef Q_OS_MACOS
+        // Keep Qt from replacing FullScreenAuxiliary with FullScreenPrimary
+        // when it creates/updates the native window.
+        // Cocoa only admits auxiliary panels into another application's
+        // fullscreen Space. Keep one Qt-owned QNSPanel in both priority modes;
+        // changing its level does not replace the Quick window or its scene.
+        flags = (flags & ~Qt::WindowType_Mask) | Qt::Tool | Qt::CustomizeWindowHint;
+        flags &= ~Qt::WindowFullscreenButtonHint;
+#endif
+        flags.setFlag(Qt::WindowStaysOnTopHint, m_alwaysOnTop);
+        window->setFlags(flags);
+        stacking.registerControlWindow(window, m_alwaysOnTop);
         stacking.enforce();
     }
     emit windowChanged();
+}
+
+void WindowPresentation::setAlwaysOnTop(bool enabled)
+{
+    if (m_alwaysOnTop == enabled) return;
+    m_alwaysOnTop = enabled;
+    if (m_window) {
+        auto& stacking = WindowStackingCoordinator::instance();
+        stacking.setControlAlwaysOnTop(m_window, enabled);
+        m_window->setFlag(Qt::WindowStaysOnTopHint, enabled);
+        stacking.configureControlWindow(m_window);
+        stacking.enforce();
+    }
+    emit alwaysOnTopChanged();
+}
+
+void WindowPresentation::toggle()
+{
+    if (!m_window) return;
+    bool current = true;
+#ifdef Q_OS_MACOS
+    current = MacWindowManager::isOnCurrentSpace(m_window);
+#elif defined(Q_OS_WIN)
+    current = WindowsWindowManager::isOnCurrentDesktop(m_window);
+#endif
+    if (current && m_window->isVisible() && m_window->isActive()
+        && m_window->windowState() != Qt::WindowMinimized) m_window->hide();
+    else open();
 }
 
 QRect WindowPresentation::openingGeometry(const QRect& available, const QMargins& margins)
@@ -79,13 +120,22 @@ void WindowPresentation::open()
         m_window->create();
         fitToScreen(screen);
     }
+    m_window->create();
+    auto& stacking = WindowStackingCoordinator::instance();
+    stacking.configureControlWindow(m_window);
+#ifdef Q_OS_WIN
+    WindowsWindowManager::moveToCurrentDesktop(m_window);
+#endif
     m_window->show();
+    stacking.configureControlWindow(m_window);
     // Native decoration sizes may only be known once the window is shown.
     if (reopening) fitToScreen(screen);
+#ifdef Q_OS_MACOS
+    // QCocoaWindow::raise() activates the whole process and can switch Spaces.
+    MacWindowManager::activateApplicationWindow(m_window);
+#else
     m_window->raise();
     m_window->requestActivate();
-#ifdef Q_OS_MACOS
-    MacWindowManager::activateApplicationWindow(m_window);
 #endif
     WindowStackingCoordinator::instance().enforce();
 }

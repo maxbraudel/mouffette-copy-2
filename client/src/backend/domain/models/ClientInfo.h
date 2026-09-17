@@ -19,6 +19,10 @@ struct ScreenInfo {
         int y = 0;
         int width = 0;
         int height = 0;
+        bool operator==(const UIZone& other) const {
+            return type == other.type && x == other.x && y == other.y
+                && width == other.width && height == other.height;
+        }
         bool isValid() const;
         QJsonObject toJson() const;
         static UIZone fromJson(const QJsonObject &json);
@@ -28,6 +32,11 @@ struct ScreenInfo {
     ScreenInfo() : id(0), width(0), height(0), x(0), y(0), primary(false) {}
     ScreenInfo(int id, int w, int h, int x, int y, bool p) : id(id), width(w), height(h), x(x), y(y), primary(p) {}
     
+    bool operator==(const ScreenInfo& other) const {
+        return id == other.id && width == other.width && height == other.height
+            && x == other.x && y == other.y && primary == other.primary && uiZones == other.uiZones;
+    }
+    bool operator!=(const ScreenInfo& other) const { return !(*this == other); }
     bool isValid() const;
     QJsonObject toJson() const;
     static ScreenInfo fromJson(const QJsonObject& json);

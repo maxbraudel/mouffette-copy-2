@@ -564,13 +564,6 @@ void QuickCanvasHost::updateRemoteSceneTargetFromClientList(
 
 void QuickCanvasHost::setScreens(const QList<ScreenInfo>& screens)
 {
-    if (m_sceneLaunching || m_sceneLaunched || m_sceneStopping) {
-        // Screen discovery keeps updating during hot-plug, but the run's
-        // screens and normalized spans are immutable. Re-serializing against
-        // a new topology would make the receiver reject every state snapshot.
-        m_pendingScreens = screens;
-        return;
-    }
     m_document->setScreens(screens);
     // A topology replacement never owns the camera. Initial fitting is an
     // explicit workspace transition; subsequent screen changes must preserve
@@ -997,6 +990,7 @@ void QuickCanvasHost::triggerRemoteSceneAction()
         sceneToast(NotificationSeverity::Error, QStringLiteral("Scene media changed or insufficient RAM remains for playback buffers; try again"));
         return;
     }
+    m_runningSceneDefinition = scene;
     m_sceneLaunching = true;
     m_sceneAccepted = false;
     m_localPreparedReported = false;
@@ -1098,11 +1092,7 @@ void QuickCanvasHost::stopScenePresentation()
     m_residencyGroup.clear();
     m_document->setEditsLocked(false);
     cancelPresentationBarrier();
-    if (m_pendingScreens) {
-        const auto screens = std::move(*m_pendingScreens);
-        m_pendingScreens.reset();
-        m_document->setScreens(screens);
-    }
+    m_runningSceneDefinition = {};
 }
 
 void QuickCanvasHost::startPresentationBarrier()
@@ -1227,7 +1217,23 @@ void QuickCanvasHost::sendVideoSnapshot()
             {QStringLiteral("repeatAvailable"), media->repeatAvailable()}});
     }
     static quint64 sequence = 0;
-    QJsonObject scene = m_document->serializeSceneState();
+    // Topology shown by the editor is live. A running scene, however, retains
+    // its accepted outputs and normalized spans even if all displays vanish.
+    QJsonObject scene = m_runningSceneDefinition;
+    QJsonArray mediaStates = scene.value(QStringLiteral("media")).toArray();
+    for (qsizetype i = 0; i < mediaStates.size(); ++i) {
+        QJsonObject state = mediaStates[i].toObject();
+        const auto* media = m_document->mediaById(state.value(QStringLiteral("mediaId")).toString());
+        if (!media) continue;
+        state.insert(QStringLiteral("visible"), media->contentVisible());
+        state.insert(QStringLiteral("contentOpacity"), media->contentOpacity());
+        if (media->isVideo()) {
+            state.insert(QStringLiteral("muted"), media->muted());
+            state.insert(QStringLiteral("volume"), media->volume());
+        }
+        mediaStates.replace(i, state);
+    }
+    scene.insert(QStringLiteral("media"), mediaStates);
     m_webSocket->sendSceneStateSnapshot(m_sceneRunId, ++sequence,
         m_webSocket->estimatedServerMonotonicMs(),
         QJsonObject{{QStringLiteral("scene"), scene},

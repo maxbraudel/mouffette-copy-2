@@ -18,15 +18,16 @@
 #include <functiondiscoverykeys_devpkey.h>
 #endif
 
-SystemMonitor::SystemMonitor(QObject* parent)
-    : QObject(parent)
+SystemMonitor::SystemMonitor(QObject* parent, ScreenProvider screenProvider)
+    : QObject(parent), m_screenProvider(std::move(screenProvider))
 {
     m_screenChangeTimer = new QTimer(this);
     m_screenChangeTimer->setSingleShot(true);
     m_screenChangeTimer->setInterval(
         AppConfig::instance().screenChangeDebounceMs());
     connect(m_screenChangeTimer, &QTimer::timeout, this, [this]() {
-        emit screenConfigurationChanged(getLocalScreenInfo());
+        QList<ScreenInfo> screens;
+        if (captureScreenInfo(&screens)) emit screenConfigurationChanged(screens);
     });
 
     if (QGuiApplication* app = qobject_cast<QGuiApplication*>(QCoreApplication::instance())) {
@@ -57,6 +58,7 @@ void SystemMonitor::watchScreen(QScreen* screen) {
 }
 
 void SystemMonitor::scheduleScreenConfigurationChanged() {
+    m_topologyReady = false;
     if (m_screenChangeTimer) {
         m_screenChangeTimer->start();
     }
@@ -181,60 +183,80 @@ void SystemMonitor::stopVolumeMonitoring() {
 }
 
 QList<ScreenInfo> SystemMonitor::getLocalScreenInfo() const {
-    QList<ScreenInfo> screens;
-    const auto topology = LocalScreenTopology::screens(false);
-    for (qsizetype index = 0; index < topology.size(); ++index) {
-        const auto& screen = topology[index];
-        const QRect& geometry = screen.advertisedGeometry;
-        screens.append(ScreenInfo(static_cast<int>(index), geometry.width(), geometry.height(),
-                                  geometry.x(), geometry.y(), screen.primary));
-    }
-
-    return screens;
+    return m_screens;
 }
 
-bool SystemMonitor::getLocalCursorPosition(int* screenId,
-                                          QPointF* screenPosition) const
+bool SystemMonitor::captureScreenInfo(QList<ScreenInfo>* screens)
 {
-    if (!screenId || !screenPosition) return false;
-    // Screen ids follow enumeration order. Wait until the debounced topology
-    // snapshot is published before using ids from a newly changed desktop.
-    if (m_screenChangeTimer && m_screenChangeTimer->isActive()) return false;
-
-#ifdef Q_OS_WIN
-    // Qt cursor coordinates are logical. Query physical coordinates to match
-    // the monitor rectangles advertised by getLocalScreenInfo().
-    POINT physicalPosition{};
-    if (!GetPhysicalCursorPos(&physicalPosition)) return false;
-
-    const auto topology = LocalScreenTopology::screens(false);
+    bool valid = false;
+    const auto topology = m_screenProvider
+        ? m_screenProvider(&valid) : LocalScreenTopology::screens(false, &valid);
+    if (!valid) {
+        m_topologyReady = false;
+        return false;
+    }
+    QList<ScreenInfo> result;
     for (qsizetype index = 0; index < topology.size(); ++index) {
-        const auto& screen = topology[index];
-        if (!screen.nativeWindowsCoordinates) break;
+        const auto& entry = topology[index];
+        const QRect g = entry.advertisedGeometry;
+        const QRect work = entry.advertisedAvailableGeometry.intersected(g);
+        ScreenInfo screen(static_cast<int>(index), g.width(), g.height(), g.x(), g.y(), entry.primary);
+        if (!work.isEmpty()) {
+            const auto zone = [&](const QString& type, int x, int y, int w, int h) {
+                if (w > 0 && h > 0) screen.uiZones.append({type, x, y, w, h});
+            };
+#ifdef Q_OS_WIN
+            const QString top = QStringLiteral("taskbar"), other = top;
+#elif defined(Q_OS_MACOS)
+            const QString top = QStringLiteral("menu_bar"), other = QStringLiteral("dock");
+#else
+            const QString top = QStringLiteral("taskbar"), other = top;
+#endif
+            zone(top, 0, 0, g.width(), work.top() - g.top());
+            zone(other, 0, work.bottom() - g.top() + 1, g.width(), g.bottom() - work.bottom());
+            zone(other, 0, 0, work.left() - g.left(), g.height());
+            zone(other, work.right() - g.left() + 1, 0, g.right() - work.right(), g.height());
+        }
+        result.append(screen);
+    }
+    // The same immutable enumeration supplies both publication and cursor ids.
+    // Never enumerate monitors on the 16-ms mouse sampling path.
+    m_topology = topology;
+    m_screens = result;
+    m_topologyReady = !(m_screenChangeTimer && m_screenChangeTimer->isActive());
+    if (screens) *screens = result;
+    return true;
+}
+
+bool SystemMonitor::getLocalCursorPosition(int* screenId, QPointF* screenPosition) const
+{
+    if (!screenId || !screenPosition || !m_topologyReady) return false;
+#ifdef Q_OS_WIN
+    if (!m_topology.isEmpty() && m_topology.first().nativeWindowsCoordinates) {
+        POINT physicalPosition{};
+        if (!GetPhysicalCursorPos(&physicalPosition)) return false;
         const QPoint position(physicalPosition.x, physicalPosition.y);
-        if (!screen.advertisedGeometry.contains(position)) continue;
-        *screenId = static_cast<int>(index);
-        *screenPosition = position - screen.advertisedGeometry.topLeft();
+        for (qsizetype i = 0; i < m_topology.size(); ++i) {
+            const QRect bounds = m_topology[i].advertisedGeometry;
+            if (!bounds.contains(position)) continue;
+            *screenId = static_cast<int>(i);
+            *screenPosition = position - bounds.topLeft();
+            return true;
+        }
+        return false;
+    }
+#endif
+    const QPoint position = QCursor::pos();
+    for (qsizetype i = 0; i < m_topology.size(); ++i) {
+        const auto& entry = m_topology[i];
+        if (!entry.geometry.contains(position)) continue;
+        const qreal scale = entry.geometry.width() > 0
+            ? qreal(entry.advertisedGeometry.width()) / entry.geometry.width() : 1.0;
+        *screenId = static_cast<int>(i);
+        *screenPosition = ScreenCoordinateMapping::screenLocalPosition(position, entry.geometry, scale);
         return true;
     }
-    if (!topology.isEmpty() && topology.first().nativeWindowsCoordinates) return false;
-    // Mirror getLocalScreenInfo()'s Qt fallback when native enumeration fails.
-#endif
-
-    const QPoint position = QCursor::pos();
-    QScreen* screen = QGuiApplication::screenAt(position);
-    if (!screen) return false;
-    const int id = QGuiApplication::screens().indexOf(screen);
-    if (id < 0) return false;
-#ifdef Q_OS_MACOS
-    const qreal scale = std::max<qreal>(1.0, screen->devicePixelRatio());
-#else
-    const qreal scale = 1.0;
-#endif
-    *screenId = id;
-    *screenPosition = ScreenCoordinateMapping::screenLocalPosition(
-        position, screen->geometry(), scale);
-    return true;
+    return false;
 }
 
 QString SystemMonitor::getMachineName() const {

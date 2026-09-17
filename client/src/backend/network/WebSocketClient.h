@@ -64,6 +64,7 @@ public:
     
     // Client registration
     void registerClient(const QString& machineName, const QString& platform, const QList<ScreenInfo>& screens, int volumePercent);
+    void invalidateLocalDeviceSnapshot();
 
     // Protocol-v5 uploads. Authenticated socket identity supplies the peer;
     // every command is correlated solely by RemoteSession + generation.
@@ -234,6 +235,7 @@ signals:
     void remoteSessionOpened(const QJsonObject& envelope);
     void remoteSessionOfferReceived(const QJsonObject& envelope);
     void remoteSessionSnapshotReceived(const QJsonObject& envelope);
+    void localDeviceSnapshotRequested();
     void remoteCursorReceived(const QString& remoteSessionId, int screenId,
                               const QPointF& screenPosition, bool visible);
     void remoteSessionResumed(const QJsonObject& envelope);
@@ -283,6 +285,7 @@ private:
     bool validateServerPolicy(const QJsonObject& policy, QString* errorMessage) const;
     QJsonObject addProtocolEnvelope(const QJsonObject& message) const;
     bool sendRawControlMessage(const QJsonObject& message);
+    void publishDeviceSnapshots();
     void noteServerContact();
     qint64 suspendInclusiveNowMs() const;
     qint64 leaseElapsedMs() const;
@@ -318,6 +321,17 @@ private:
     QString m_registeredMachineName;
     QString m_registeredPlatform;
     QJsonObject m_registeredTargetSnapshot;
+    QJsonObject m_registeredDeviceContent;
+    QJsonObject m_registeredEndpointSnapshot;
+    QJsonObject m_publishedEndpointSnapshot;
+    quint64 m_publishedEndpointGeneration = 0;
+    struct PublishedDeviceSnapshot {
+        quint64 generation = 0;
+        QJsonObject content;
+        qint64 sentAtMs = -1;
+    };
+    QHash<QString, PublishedDeviceSnapshot> m_publishedDeviceSnapshots;
+    QTimer m_deviceSnapshotRetryTimer;
     quint64 m_targetSnapshotRevision = 0;
     QHash<QString, quint64> m_targetSnapshotSequenceBySession;
     struct CursorSequence {

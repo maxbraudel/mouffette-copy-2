@@ -136,6 +136,12 @@ bool ApplicationController::settingsAutoUpload() const
                     : AppConfig::instance().autoUploadImportedMedia();
 }
 
+bool ApplicationController::settingsAppAlwaysOnTop() const
+{
+    auto* settings = m_runtime ? m_runtime->getSettingsManager() : nullptr;
+    return settings ? settings->getAppAlwaysOnTop() : AppConfig::instance().appAlwaysOnTop();
+}
+
 void ApplicationController::start()
 {
     if (m_bootstrapStarted) return;
@@ -247,6 +253,8 @@ void ApplicationController::initializeBackend()
         setApplicationPage(static_cast<ApplicationPage>(page));
         refreshActiveWorkspace();
     });
+    connect(m_runtime.get(), &ApplicationRuntime::qmlToggleRequested,
+            this, &ApplicationController::toggleRequested);
     connect(m_runtime.get(), &ApplicationRuntime::qmlRaiseRequested,
             this, &ApplicationController::raiseRequested);
     connect(m_runtime.get(), &ApplicationRuntime::qmlHideRequested,
@@ -273,6 +281,7 @@ void ApplicationController::initializeBackend()
     m_toastModel->setSource(m_runtime->getNotificationCenter());
 
     m_ready = true;
+    emit settingsChanged();
     emit readyChanged();
     emit bootstrapChanged();
     refreshPresentation();
@@ -384,7 +393,7 @@ void ApplicationController::rejectDialog()
 }
 
 QString ApplicationController::saveSettings(const QString& serverUrl,
-                                            bool autoUpload)
+                                            bool autoUpload, bool appAlwaysOnTop)
 {
     if (m_clearingStorage) return QStringLiteral("The application is closing.");
     if (!m_runtime || !m_runtime->getSettingsManager()) {
@@ -400,6 +409,7 @@ QString ApplicationController::saveSettings(const QString& serverUrl,
     const bool reconnect = canonical != settings->getServerUrl();
     settings->setServerUrl(canonical);
     settings->setAutoUploadImportedMedia(autoUpload);
+    settings->setAppAlwaysOnTop(appAlwaysOnTop);
     settings->saveSettings();
     if (reconnect) {
         m_runtime->setUserDisconnected(false);

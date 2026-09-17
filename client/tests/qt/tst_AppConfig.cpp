@@ -35,6 +35,7 @@ class AppConfigTest final : public QObject {
 
 private slots:
     void loadsEmbeddedDefaults();
+    void appAlwaysOnTopIsOptionalAndPersistent();
     void configuresMediaRamReserve();
     void configuresProjectMediaHiddenTimeout();
     void configuresCanvasTextInitialHeight();
@@ -50,6 +51,24 @@ private slots:
     void validatesIncomingSessionOrphanTimeoutFromCli();
     void warnsAndIgnoresUnknownNamespacedEnvKey();
 };
+
+void AppConfigTest::appAlwaysOnTopIsOptionalAndPersistent() {
+    AppConfig config;
+    AppConfig::LoadOptions options;
+    options.arguments = {QStringLiteral("test")};
+    options.processEnvironment = QProcessEnvironment();
+    QString error;
+    QVERIFY2(config.load(options, &error), qPrintable(error));
+    QVERIFY(config.appAlwaysOnTop());
+    options.settings.insert(QStringLiteral("appAlwaysOnTop"), false);
+    QVERIFY2(config.load(options, &error), qPrintable(error));
+    QVERIFY(!config.appAlwaysOnTop());
+    options.settings.insert(QStringLiteral("appAlwaysOnTop"), true);
+    QVERIFY2(config.load(options, &error), qPrintable(error));
+    QVERIFY(config.appAlwaysOnTop());
+    options.settings.insert(QStringLiteral("appAlwaysOnTop"), QStringLiteral("invalid"));
+    QVERIFY(!config.load(options, &error));
+}
 
 void AppConfigTest::loadsEmbeddedDefaults() {
     AppConfig config;

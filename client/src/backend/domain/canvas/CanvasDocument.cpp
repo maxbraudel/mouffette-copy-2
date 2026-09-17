@@ -395,6 +395,7 @@ void CanvasDocument::clearSelection()
 
 void CanvasDocument::setScreens(const QList<ScreenInfo>& screens)
 {
+    if (m_screens == screens) return;
     m_screens = screens;
     rebuildScreenRects();
     if (m_remoteCursorScreenId >= 0)

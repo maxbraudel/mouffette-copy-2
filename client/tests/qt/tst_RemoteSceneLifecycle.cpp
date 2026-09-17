@@ -182,6 +182,7 @@ private slots:
         QString ownerId;
         QPointer<QWebSocket> serverPeer;
         QJsonObject scenePrepare;
+        QJsonObject stateSnapshot;
         QJsonObject prepared;
         QJsonObject progress;
         int preparedCount = 0;
@@ -289,6 +290,8 @@ private slots:
                 } else if (type == QLatin1String("prepare_progress")) {
                     progress = message;
                     ++progressCount;
+                } else if (type == QLatin1String("state_snapshot")) {
+                    stateSnapshot = message.value("snapshot").toObject();
                 } else if (type == QLatin1String("stop")) {
                     ++stopCount;
                 }
@@ -443,15 +446,23 @@ private slots:
         // serialization used by periodic state_snapshot messages must retain
         // the accepted screen definitions AND their normalized media spans.
         const auto frozenScene = host->document()->serializeSceneState();
+        const auto mediaRect = host->document()->media().first()->sceneRect();
         host->setScreens({});
-        QCOMPARE(host->document()->serializeSceneState(), frozenScene);
+        QVERIFY(host->document()->screens().isEmpty());
+        QCOMPARE(host->document()->media().first()->sceneRect(), mediaRect);
         client.sceneStartedReceived({{"sceneRunId", scenePrepare.value("sceneRunId")},
                                      {"digest", scenePrepare.value("digest")},
                                      {"allStarted", true}});
         QVERIFY(host->remoteSceneLaunched());
         const ScreenInfo replacement(0, 1280, 720, -1280, -720, true);
         host->setScreens({replacement});
-        QCOMPARE(host->document()->serializeSceneState(), frozenScene);
+        QCOMPARE(host->document()->screens(), QList<ScreenInfo>{replacement});
+        QCOMPARE(host->document()->media().first()->sceneRect(), mediaRect);
+        QTRY_VERIFY_WITH_TIMEOUT(!stateSnapshot.isEmpty(), 2500);
+        const auto transmittedScene = stateSnapshot.value("scene").toObject();
+        QCOMPARE(transmittedScene.value("screens"), frozenScene.value("screens"));
+        QCOMPARE(transmittedScene.value("media").toArray().first().toObject().value("spans"),
+                 frozenScene.value("media").toArray().first().toObject().value("spans"));
         host->handleRemoteConnectionLost();
         QCOMPARE(host->document()->serializeSceneState().value("screens").toArray(),
                  QJsonArray{replacement.toJson()});

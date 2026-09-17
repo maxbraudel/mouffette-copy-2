@@ -19,10 +19,12 @@ public:
     // Getters
     QString getServerUrl() const { return m_serverUrlConfig; }
     bool getAutoUploadImportedMedia() const { return m_autoUploadImportedMedia; }
+    bool getAppAlwaysOnTop() const { return m_appAlwaysOnTop; }
     
     // Setters
     void setServerUrl(const QString& url);
     void setAutoUploadImportedMedia(bool enabled);
+    void setAppAlwaysOnTop(bool enabled);
 
 signals:
     void settingsChanged();
@@ -32,6 +34,7 @@ private:
     // Settings values
     QString m_serverUrlConfig;
     bool m_autoUploadImportedMedia;
+    bool m_appAlwaysOnTop = true;
 };
 
 #endif // SETTINGSMANAGER_H

@@ -67,6 +67,27 @@ private slots:
         qRegisterMetaType<ProjectLifecycleState>();
     }
 
+    void snapshotFreshnessDoesNotEditProject()
+    {
+        QTemporaryDir directory;
+        ProjectStore store(directory.filePath(QStringLiteral("snapshots.json")));
+        ProjectManager manager(&store);
+        manager.stopAutomaticTimersForTesting();
+        const auto reference = target(QStringLiteral("device"), QStringLiteral("Studio"));
+        QVERIFY(!createProject(manager, reference, ProjectLifecycleState::Visible, 1000).isEmpty());
+        QSignalSpy updates(&manager, &ProjectManager::projectUpdated);
+        QVERIFY(manager.updateRemoteSnapshot(reference.endpointId, {}, 50, 2, 2000, 2000));
+        QCOMPARE(updates.size(), 0);
+        QCOMPARE(manager.projectForTarget(reference.endpointId)->updatedAtMs, qint64(1000));
+        QCOMPARE(manager.projectForTarget(reference.endpointId)->snapshotRevision, quint64(2));
+        QVERIFY(manager.updateRemoteSnapshot(reference.endpointId,
+            {ScreenInfo(0, 1920, 1080, 0, 0, true)}, 50, 3, 3000, 3000));
+        QCOMPARE(updates.size(), 1);
+        QVERIFY(manager.updateRemoteSnapshot(reference.endpointId, {}, 50, 4, 4000, 4000));
+        QCOMPARE(updates.size(), 2);
+        QVERIFY(manager.projectForTarget(reference.endpointId)->savedScreens.isEmpty());
+    }
+
     void pendingImportSurvivesCheckpointWithoutInventingContentIdentity()
     {
         QTemporaryDir directory;

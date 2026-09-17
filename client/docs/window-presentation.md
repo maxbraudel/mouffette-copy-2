@@ -3,7 +3,15 @@
 `WindowPresentation` owns the Qt Quick shell's opening geometry.
 `WindowStackingCoordinator` owns the shared native stacking policy: active remote
 scene surfaces stay above the control window and its dialogs/menus. Startup after bootstrap, tray activation and a second process's
-activation request all use the same `open()` path.
+activation request all use the same `open()` path. Tray clicks hide only a
+focused window on the current desktop; a window on another desktop is recalled.
+
+The Settings checkbox **App always on top** is enabled by default. Save applies
+it immediately and persists `appAlwaysOnTop` in the profile settings; Cancel
+leaves the current policy untouched. Existing settings without the key mean
+`true`. Only the interactive shell and its owned dialogs use this setting.
+Normal mode removes topmost priority and automatic all-desktop pinning while
+still opening on the user's current desktop, including a macOS fullscreen Space.
 
 - The native title bar, system menu and minimize/maximize/close controls are
   explicitly preserved alongside the topmost hint. Qt's Windows backend does
@@ -20,8 +28,14 @@ activation request all use the same `open()` path.
 - Raising an already visible window preserves its current size and position.
   Closing still hides it; its priority is not enforced while hidden/minimized.
   Live scene surfaces keep their independent visibility and priority.
-- macOS uses `NSPopUpMenuWindowLevel + 1`, joins all Spaces and other apps' full
-  screen/Stage Manager groups, and remains stationary in Mission Control.
+- macOS uses a Qt-owned, nonactivating `QNSPanel` in both priority modes. It can
+  become key and accept input in another app's fullscreen Space without
+  activating the application's previous desktop. Configure it before showing;
+  never call Qt's Cocoa `raise()` here, which activates the whole process.
+  Topmost mode uses `NSPopUpMenuWindowLevel + 1`, joins all Spaces and other apps'
+  fullscreen/Stage Manager groups, and remains stationary in Mission Control.
+  Normal mode uses `NSNormalWindowLevel` and `MoveToActiveSpace`; disabling
+  topmost restores the original levels of owned native dialogs.
   Native child dialogs/color pickers stay above the control window; remote
   rendering overlays use `CGWindowLevelForKey(kCGScreenSaverWindowLevelKey)`
   above both (currently scene 1000, dialogs 103, control 102). Both the control window
@@ -34,7 +48,10 @@ activation request all use the same `open()` path.
   window with the shell's `IVirtualDesktopPinnedApps::PinView`. It does not pin
   every window of the application. Pinning is queried again after reopening or
   native handle recreation, and shell services are reacquired to recover after
-  Explorer restarts.
+  Explorer restarts. Normal mode unpins the control window and uses
+  `HWND_NOTOPMOST`. Before opening, the documented desktop manager moves it to
+  the foreground desktop. An invisible, nonactivating native reference window
+  supplies the current desktop ID when the foreground window has none.
 - The coordinator applies scene priority on activation and after native
   surface/state changes, control-window reopening and popup activation. One
   500 ms timer covers all visible registered windows, without taking focus.
@@ -95,15 +112,41 @@ an absent output cannot falsely acknowledge STARTED. After that barrier, removin
 screens neither resets nor stops the run. Existing session, memory and shutdown
 stop conditions still apply.
 
-On the owner, screen discovery continues but `QuickCanvasHost` defers applying
-new screen layouts to an active/preparing/stopping remote canvas. This preserves
-the immutable screens and spans in periodic state snapshots. The latest pending
-layout (including an empty one) is applied when presentation stops. Local test
-playback keeps its existing screen-update behavior. No wire format changes.
+On the owner, `QuickCanvasHost` applies current screen layouts immediately,
+including an empty layout, during preparation, playback and stopping. Removed
+screens disappear without moving media or resetting the camera. The accepted
+scene definition is stored independently: periodic playback snapshots use its
+original screen definitions and normalized spans with current visual/video
+state. Changing the displayed topology therefore does not redefine a live run.
+
+`SystemMonitor` captures one native inventory for discovery and cursor mapping,
+including physical dimensions and menu/Dock/taskbar zones. Windows uses
+`EnumDisplayMonitors`; macOS uses CoreGraphics active displays and display modes,
+so periodic reconciliation can detect a change even without a Qt notification.
+An enumeration failure preserves the last inventory and suppresses ambiguous
+cursor samples; a successfully captured empty inventory is authoritative.
+
+The runtime captures on screen/volume events (150 ms topology debounce), every
+second during an active incoming session, every five seconds while connected
+without one, and at session opening/resumption/system wake. `WebSocketClient`
+publishes changed discovery state first, then `remote_session_snapshot` to each
+active owner. Sessions also receive an unchanged full snapshot every five
+seconds. There is no wire format/version change. Under control-socket congestion
+only the latest capture is retained; the relay likewise keeps one pending
+snapshot per session, retried by the existing lease sweep. Cursor relay waits
+until that topology has been enqueued. Identical received snapshots update
+freshness without rebuilding screens or scheduling project writes.
 
 ## Validation
 
-`tst_WindowPresentation` covers frame-inclusive geometry, negative screen
+`tst_WindowPresentation` starts a separate Cocoa `tst_FullscreenHost` process to
+verify that both priority modes open inside another application's fullscreen
+Space, receive native keyboard events, and can switch priority without leaving that Space. The
+helper exits after each test. It also verifies native inventory/Retina coordinate
+parity, native minimization, normal-mode demotion and restoration of owned dialog levels,
+including a dialog that already inherited its parent's elevated priority.
+
+The suite additionally covers frame-inclusive geometry, negative screen
 origins, QML binding, reopen/minimize restoration, preserving manual movement/resizing,
 staying hidden, native demotion recovery and native handle recreation. macOS
 also checks Space/fullscreen flags and scene-above-dialog-above-control ordering,
@@ -128,8 +171,11 @@ Qt offscreen/software plugins. It injects QPA screen-added, screen-removed and
 geometry events for multiple screens, including negative origins, identity
 ambiguity and unrelated replacement displays. It also covers snapshots during
 absence, first-frame barriers and video playback while every output is absent.
-`RemoteSceneLifecycle` verifies that owner-side topology updates do not mutate
-an accepted scene and are applied after stop.
+`RemoteSceneLifecycle` verifies immediate owner-side screen replacement during
+playback while the transmitted scene screens and spans stay unchanged.
+`SystemMonitor` tests missed events, failure versus an empty inventory and
+cursor sampling without re-enumeration. Connection/protocol suites cover active
+snapshot publication, periodic freshness, coalescing, ordering and isolation.
 
 Desktop acceptance additionally includes unplug/replug during fades and video
 playback, all outputs absent, resolution/DPI changes, transparent media over

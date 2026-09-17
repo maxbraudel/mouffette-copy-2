@@ -42,9 +42,10 @@ Windows, Qt screen coordinates on Linux. Hidden samples use screen ID -1 and
 zero coordinates. Screen identity removes ambiguity when scaled desktop
 rectangles overlap on a mixed-DPI layout.
 
-Windows uses `GetPhysicalCursorPos` with the same native monitor enumeration as
-screen discovery. macOS scales the Qt screen-local position by that screen's
-device-pixel ratio. Screen geometry is built from immutable rectangle components:
+Windows uses `GetPhysicalCursorPos` with the last captured native inventory.
+macOS scales the cursor's logical screen-local position using the same backing
+scale as that inventory. Mouse ticks never enumerate displays; periodic capture
+and system events replace the shared mapping before publishing new samples. Screen geometry is built from immutable rectangle components:
 mutating `QRect::setX/setY` before scaling width/height previously distorted
 non-primary Retina screens.
 
@@ -56,8 +57,9 @@ session generation changes permit a fresh sequence.
 
 The receiving canvas hides its marker when the session becomes inactive or
 disconnects, and after 3 seconds without an accepted sample (checked every
-500 ms). A fresh pulse restores a stationary marker. Screen snapshots reproject
-the last sample; an unknown screen or out-of-bounds position hides it. Explicit
+500 ms). A fresh pulse restores a stationary marker. Changed session topologies clear the previous marker before installing the new
+mapping; the next sample restores it. An unknown screen or out-of-bounds position
+hides it. Explicit
 stream closure clears the sample so later screen changes cannot resurrect it.
 Cursor state is transient and is never saved into the project.
 

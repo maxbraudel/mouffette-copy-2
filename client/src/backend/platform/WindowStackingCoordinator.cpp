@@ -78,9 +78,33 @@ WindowStackingCoordinator::~WindowStackingCoordinator()
     }
 }
 
-void WindowStackingCoordinator::registerControlWindow(QWindow* window)
+void WindowStackingCoordinator::registerControlWindow(QWindow* window, bool alwaysOnTop)
 {
     registerWindow(window, false);
+    setControlAlwaysOnTop(window, alwaysOnTop);
+}
+
+void WindowStackingCoordinator::setControlAlwaysOnTop(QWindow* window, bool enabled)
+{
+    for (Entry& entry : m_windows) {
+        if (entry.window == window && !entry.scene) entry.alwaysOnTop = enabled;
+    }
+    configureControlWindow(window);
+    scheduleEnforcement();
+}
+
+void WindowStackingCoordinator::configureControlWindow(QWindow* window)
+{
+    if (!window || !window->handle()) return;
+    for (const Entry& entry : m_windows) {
+        if (entry.window != window || entry.scene) continue;
+#if defined(Q_OS_MACOS)
+        MacWindowManager::configureControlWindow(window, entry.alwaysOnTop);
+#elif defined(Q_OS_WIN)
+        WindowsWindowManager::configureControlWindow(window, entry.alwaysOnTop);
+#endif
+        break;
+    }
 }
 
 void WindowStackingCoordinator::registerSceneWindow(QWindow* window)
@@ -156,7 +180,9 @@ void WindowStackingCoordinator::enforce()
         lastScene = entry.window;
     }
     for (const Entry& entry : windows) {
-        if (entry.scene || !visible(entry.window)) continue;
+        if (entry.scene || !entry.window) continue;
+        configureControlWindow(entry.window);
+        if (!entry.alwaysOnTop || !visible(entry.window)) continue;
         anyVisible = true;
 #if defined(Q_OS_MACOS)
         MacWindowManager::setWindowAlwaysOnTop(entry.window);

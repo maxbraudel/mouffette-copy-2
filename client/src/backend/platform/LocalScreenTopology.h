@@ -14,9 +14,10 @@ struct Screen {
     QRect advertisedGeometry; // Existing protocol coordinates.
     bool primary = false;
     bool nativeWindowsCoordinates = false;
+    QRect advertisedAvailableGeometry; // Same units/origin as advertisedGeometry.
 };
 
 // Shared by discovery, cursor mapping and the renderer. Windows' monitor
 // enumeration order need not be QGuiApplication::screens() order.
-QList<Screen> screens(bool includeIdentity = true);
+QList<Screen> screens(bool includeIdentity = true, bool* success = nullptr);
 }

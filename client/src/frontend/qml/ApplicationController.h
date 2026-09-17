@@ -52,6 +52,7 @@ class ApplicationController final : public QObject
 
     Q_PROPERTY(QString settingsServerUrl READ settingsServerUrl NOTIFY settingsChanged)
     Q_PROPERTY(bool settingsAutoUpload READ settingsAutoUpload NOTIFY settingsChanged)
+    Q_PROPERTY(bool settingsAppAlwaysOnTop READ settingsAppAlwaysOnTop NOTIFY settingsChanged)
     Q_PROPERTY(bool clearingStorage READ clearingStorage NOTIFY clearingStorageChanged)
 
     Q_PROPERTY(QString dialogTitle READ dialogTitle NOTIFY dialogChanged)
@@ -106,6 +107,7 @@ public:
 
     QString settingsServerUrl() const;
     bool settingsAutoUpload() const;
+    bool settingsAppAlwaysOnTop() const;
     bool clearingStorage() const { return m_clearingStorage; }
 
     QString dialogTitle() const { return m_dialogTitle; }
@@ -127,7 +129,7 @@ public:
     Q_INVOKABLE void requestClearHistory();
     Q_INVOKABLE void acceptDialog();
     Q_INVOKABLE void rejectDialog();
-    Q_INVOKABLE QString saveSettings(const QString& serverUrl, bool autoUpload);
+    Q_INVOKABLE QString saveSettings(const QString& serverUrl, bool autoUpload, bool appAlwaysOnTop);
     Q_INVOKABLE void clearStorageAndClose();
     Q_INVOKABLE void hideWindow();
     Q_INVOKABLE void setWindowVisible(bool visible);
@@ -150,6 +152,7 @@ signals:
     void dialogChanged();
     void dialogRequested();
     void raiseRequested();
+    void toggleRequested();
     void hideRequested();
 
 private:

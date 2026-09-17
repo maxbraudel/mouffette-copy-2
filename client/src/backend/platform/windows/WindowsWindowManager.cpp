@@ -44,7 +44,7 @@ struct VirtualDesktopPinnedApps : IUnknown {
     virtual HRESULT STDMETHODCALLTYPE UnpinView(IUnknown*) = 0;
 };
 
-bool pinWindow(HWND hwnd)
+bool setWindowPinned(HWND hwnd, bool enabled)
 {
     // Reacquiring the services also recovers from an Explorer restart.
     ComPtr<IServiceProvider> shell;
@@ -63,27 +63,83 @@ bool pinWindow(HWND hwnd)
     if (FAILED(views->GetViewForHwnd(hwnd, view.GetAddressOf())) || !view) return false;
     BOOL pinned = FALSE;
     if (FAILED(pins->IsViewPinned(view.Get(), &pinned))) return false;
-    return pinned || SUCCEEDED(pins->PinView(view.Get()));
+    return bool(pinned) == enabled || SUCCEEDED(enabled
+        ? pins->PinView(view.Get()) : pins->UnpinView(view.Get()));
 }
 
 void followCurrentDesktop(HWND hwnd)
 {
-    // Best effort with the documented API if a future shell drops the pin ABI.
-    // Only use a window confirmed to be on the current desktop as the source.
     ComPtr<IVirtualDesktopManager> desktops;
     if (FAILED(CoCreateInstance(CLSID_VirtualDesktopManager, nullptr, CLSCTX_INPROC_SERVER,
                                 IID_PPV_ARGS(desktops.GetAddressOf())))) return;
-    BOOL current = TRUE;
-    if (FAILED(desktops->IsWindowOnCurrentVirtualDesktop(hwnd, &current)) || current) return;
-    const HWND foreground = GetForegroundWindow();
-    if (!foreground || foreground == hwnd) return;
-    if (FAILED(desktops->IsWindowOnCurrentVirtualDesktop(foreground, &current)) || !current) return;
+    BOOL current = FALSE;
+    if (SUCCEEDED(desktops->IsWindowOnCurrentVirtualDesktop(hwnd, &current)) && current) return;
     GUID desktopId{};
-    if (SUCCEEDED(desktops->GetWindowDesktopId(foreground, &desktopId))
-        && !IsEqualGUID(desktopId, GUID_NULL)) {
-        desktops->MoveWindowToDesktop(hwnd, desktopId);
+    const HWND foreground = GetForegroundWindow();
+    if (foreground && foreground != hwnd
+        && SUCCEEDED(desktops->IsWindowOnCurrentVirtualDesktop(foreground, &current)) && current) {
+        if (FAILED(desktops->GetWindowDesktopId(foreground, &desktopId))) desktopId = GUID_NULL;
     }
+    if (IsEqualGUID(desktopId, GUID_NULL)) {
+        // Newly created top-level windows belong to the current desktop. This
+        // invisible, non-activating reference also handles Task View/Explorer
+        // foreground windows, which need not have a usable desktop identifier.
+        HWND probe = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, L"STATIC", L"",
+                                     WS_POPUP, 0, 0, 0, 0, nullptr, nullptr,
+                                     GetModuleHandleW(nullptr), nullptr);
+        if (probe) {
+            if (FAILED(desktops->GetWindowDesktopId(probe, &desktopId))) desktopId = GUID_NULL;
+            DestroyWindow(probe);
+        }
+    }
+    if (!IsEqualGUID(desktopId, GUID_NULL)) desktops->MoveWindowToDesktop(hwnd, desktopId);
 }
+}
+
+void WindowsWindowManager::configureControlWindow(QWindow* window, bool alwaysOnTop)
+{
+    if (!window || QGuiApplication::platformName() != QLatin1String("windows")) return;
+    const HWND hwnd = reinterpret_cast<HWND>(window->winId());
+    if (!IsWindow(hwnd)) return;
+    if (alwaysOnTop) {
+        window->setProperty("mouffetteControlPinRequested", true);
+        return;
+    }
+    if (GetWindowLongPtr(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST)
+        SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    if (!window->property("mouffetteControlPinRequested").toBool()) return;
+    const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    if (SUCCEEDED(com) || com == RPC_E_CHANGED_MODE) {
+        if (setWindowPinned(hwnd, false)) window->setProperty("mouffetteControlPinRequested", false);
+        followCurrentDesktop(hwnd);
+    }
+    if (SUCCEEDED(com)) CoUninitialize();
+}
+
+void WindowsWindowManager::moveToCurrentDesktop(QWindow* window)
+{
+    if (!window || QGuiApplication::platformName() != QLatin1String("windows")) return;
+    const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    if (SUCCEEDED(com) || com == RPC_E_CHANGED_MODE)
+        followCurrentDesktop(reinterpret_cast<HWND>(window->winId()));
+    if (SUCCEEDED(com)) CoUninitialize();
+}
+
+bool WindowsWindowManager::isOnCurrentDesktop(QWindow* window)
+{
+    if (!window || !window->handle()) return false;
+    if (QGuiApplication::platformName() != QLatin1String("windows")) return window->isVisible();
+    const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    BOOL current = FALSE;
+    ComPtr<IVirtualDesktopManager> desktops;
+    if ((SUCCEEDED(com) || com == RPC_E_CHANGED_MODE)
+        && SUCCEEDED(CoCreateInstance(CLSID_VirtualDesktopManager, nullptr, CLSCTX_INPROC_SERVER,
+                                      IID_PPV_ARGS(desktops.GetAddressOf()))))
+        desktops->IsWindowOnCurrentVirtualDesktop(reinterpret_cast<HWND>(window->winId()), &current);
+    desktops.Reset();
+    if (SUCCEEDED(com)) CoUninitialize();
+    return current;
 }
 
 void WindowsWindowManager::keepAboveAndOnAllDesktops(QWindow* window, QWindow* preceding,
@@ -125,7 +181,7 @@ void WindowsWindowManager::keepAboveAndOnAllDesktops(QWindow* window, QWindow* p
 
     const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     if (SUCCEEDED(com) || com == RPC_E_CHANGED_MODE) {
-        if (!pinWindow(hwnd)) {
+        if (!setWindowPinned(hwnd, true)) {
             static bool warned = false;
             if (!warned) {
                 qWarning() << "Window pinning unavailable; following the active virtual desktop instead.";

@@ -297,6 +297,10 @@ WebSocketClient::WebSocketClient(const QString& identityFallbackDirectory,
         m_suspendInclusiveClock = systemSuspendInclusiveMonotonicMs;
     }
     m_processClock.start();
+    m_deviceSnapshotRetryTimer.setSingleShot(true);
+    m_deviceSnapshotRetryTimer.setInterval(100);
+    connect(&m_deviceSnapshotRetryTimer, &QTimer::timeout,
+            this, &WebSocketClient::publishDeviceSnapshots);
     m_heartbeatTimer->setSingleShot(false);
     connect(m_heartbeatTimer, &QTimer::timeout, this, &WebSocketClient::sendHeartbeat);
     m_clockSyncBurstTimer->setInterval(kClockSyncBurstIntervalMs);
@@ -319,6 +323,7 @@ WebSocketClient::WebSocketClient(const QString& identityFallbackDirectory,
     connect(remoteSessionCoordinator(), &RemoteSessionCoordinator::sessionRemoved,
             this, [this](const QString& sessionId) {
         m_receivedCursorSequenceBySession.remove(sessionId);
+        m_publishedDeviceSnapshots.remove(sessionId);
     });
 
     if (!m_identityStore->initialize(&m_identityInitializationError)) {
@@ -733,18 +738,66 @@ void WebSocketClient::registerClient(const QString& machineName, const QString& 
     message["screens"] = screensArray;
     message["systemUI"] = QJsonArray();
 
-    m_registeredTargetSnapshot = QJsonObject{
+    const QJsonObject content{
         {QStringLiteral("screens"), screensArray},
         {QStringLiteral("systemUI"), QJsonArray()},
-        {QStringLiteral("volumePercent"), message.value(QStringLiteral("volumePercent"))},
-        {QStringLiteral("revision"), static_cast<double>(++m_targetSnapshotRevision)},
-        {QStringLiteral("capturedAtEpochMs"),
-         static_cast<double>(QDateTime::currentMSecsSinceEpoch())}
+        {QStringLiteral("volumePercent"), message.value(QStringLiteral("volumePercent"))}
     };
+    // Preserve the shared value on identical captures so cursor gating remains
+    // a cheap comparison and never copies/detaches a topology per mouse tick.
+    if (content != m_registeredDeviceContent) m_registeredDeviceContent = content;
+    m_registeredTargetSnapshot = m_registeredDeviceContent;
+    m_registeredTargetSnapshot.insert(QStringLiteral("revision"), static_cast<double>(++m_targetSnapshotRevision));
+    m_registeredTargetSnapshot.insert(QStringLiteral("capturedAtEpochMs"),
+                                     static_cast<double>(QDateTime::currentMSecsSinceEpoch()));
     
-    sendMessage(message);
-    qDebug() << "Registering device:" << machineName << "(" << platform
-             << ") endpointId:" << m_endpointId << "runtimeId:" << m_runtimeId;
+    m_registeredEndpointSnapshot = message;
+    publishDeviceSnapshots();
+}
+
+void WebSocketClient::invalidateLocalDeviceSnapshot()
+{
+    m_deviceSnapshotRetryTimer.stop();
+    m_registeredTargetSnapshot = {};
+    m_registeredDeviceContent = {};
+    m_registeredEndpointSnapshot = {};
+    m_publishedEndpointSnapshot = {};
+    m_publishedDeviceSnapshots.clear();
+}
+
+void WebSocketClient::publishDeviceSnapshots()
+{
+    m_deviceSnapshotRetryTimer.stop();
+    if (!isConnected() || m_endpointDraining || m_registeredEndpointSnapshot.isEmpty()) return;
+    // Retain just the latest capture. No historical snapshots are queued when
+    // transport backpressure is present; the next retry sends current state.
+    if (m_webSocket->bytesToWrite() > 64 * 1024) {
+        m_deviceSnapshotRetryTimer.start();
+        return;
+    }
+    if (m_publishedEndpointGeneration != m_connectionGeneration
+        || m_publishedEndpointSnapshot != m_registeredEndpointSnapshot) {
+        if (!sendControlMessage(m_registeredEndpointSnapshot)) return;
+        m_publishedEndpointGeneration = m_connectionGeneration;
+        m_publishedEndpointSnapshot = m_registeredEndpointSnapshot;
+    }
+    const QJsonObject& content = m_registeredDeviceContent;
+    const qint64 now = m_processClock.elapsed();
+    for (const auto& binding : remoteSessionCoordinator()->all()) {
+        if (!binding.active || binding.targetEndpointId != m_endpointId
+            || binding.targetConnectionGeneration != m_connectionGeneration) continue;
+        auto& last = m_publishedDeviceSnapshots[binding.remoteSessionId];
+        if (last.generation == binding.generation && last.content == content
+            && last.sentAtMs >= 0 && now - last.sentAtMs < 5000) continue;
+        if (m_webSocket->bytesToWrite() > 64 * 1024) {
+            m_deviceSnapshotRetryTimer.start();
+            break;
+        }
+        if (sendRemoteSessionSnapshot(binding.remoteSessionId, binding.generation,
+                                      m_registeredTargetSnapshot)) {
+            last = {binding.generation, content, now};
+        }
+    }
 }
 
 bool WebSocketClient::sendUploadStart(const QString& remoteSessionId,
@@ -989,8 +1042,6 @@ bool WebSocketClient::acceptRemoteSessionOffer(const QJsonObject& offer)
     QJsonObject snapshot = m_registeredTargetSnapshot;
     snapshot.insert(QStringLiteral("revision"),
                     static_cast<double>(++m_targetSnapshotRevision));
-    snapshot.insert(QStringLiteral("capturedAtEpochMs"),
-                    static_cast<double>(QDateTime::currentMSecsSinceEpoch()));
     return sendControlMessage(QJsonObject{
         {QStringLiteral("type"), QStringLiteral("remote_session_accept")},
         {QStringLiteral("remoteSessionId"), binding.remoteSessionId},
@@ -1014,8 +1065,6 @@ bool WebSocketClient::sendRemoteSessionSnapshot(
     QJsonObject snapshot = targetSnapshot;
     snapshot.insert(QStringLiteral("revision"),
                     static_cast<double>(++m_targetSnapshotRevision));
-    snapshot.insert(QStringLiteral("capturedAtEpochMs"),
-                    static_cast<double>(QDateTime::currentMSecsSinceEpoch()));
     return sendControlMessage(QJsonObject{
         {QStringLiteral("type"), QStringLiteral("remote_session_snapshot")},
         {QStringLiteral("remoteSessionId"), remoteSessionId},
@@ -1037,6 +1086,14 @@ bool WebSocketClient::sendRemoteCursor(const QString& remoteSessionId,
     if (!binding.active || binding.generation != generation
         || binding.targetEndpointId != m_endpointId
         || binding.targetConnectionGeneration != m_connectionGeneration) return false;
+    if (m_registeredTargetSnapshot.isEmpty()) return false;
+    {
+        const QJsonObject& content = m_registeredDeviceContent;
+        const auto last = m_publishedDeviceSnapshots.value(remoteSessionId);
+        if (last.generation != generation || last.content != content
+            || m_publishedEndpointGeneration != m_connectionGeneration
+            || m_publishedEndpointSnapshot != m_registeredEndpointSnapshot) return false;
+    }
     if (visible && (screenId < 0 || screenId > 1000000
         || !std::isfinite(screenPosition.x()) || !std::isfinite(screenPosition.y())
         || screenPosition.x() < 0 || screenPosition.x() >= 100000
@@ -1388,6 +1445,7 @@ void WebSocketClient::onConnected() {
 }
 
 void WebSocketClient::onDisconnected() {
+    m_deviceSnapshotRetryTimer.stop();
     qDebug() << "Control transport disconnected";
     closeUploadChannel();
     m_authenticated = false;
@@ -1654,6 +1712,12 @@ bool WebSocketClient::handleWelcome(const QJsonObject& message) {
         return false;
     }
 
+    // A new authenticated transport must advertise once, including when a
+    // restarted server reuses connection generation 1.
+    m_publishedEndpointSnapshot = {};
+    m_publishedEndpointGeneration = 0;
+    m_publishedDeviceSnapshots.clear();
+    m_deviceSnapshotRetryTimer.stop();
     m_serverBootId = newBootId;
     m_pendingServerBootId.clear();
     m_connectionGeneration = newGeneration;
@@ -2034,6 +2098,7 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
                 nullptr, QStringLiteral("client_disabled"));
             return;
         }
+        emit localDeviceSnapshotRequested();
         emit remoteSessionOfferReceived(message);
         if (!acceptRemoteSessionOffer(message)) {
             qWarning() << "Could not accept RemoteSession offer with a fresh snapshot";
@@ -2130,18 +2195,19 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
                 emit remoteSessionError(failure);
                 return;
             }
-            m_targetSnapshotSequenceBySession.insert(binding.remoteSessionId, 1);
+            if (!m_targetSnapshotSequenceBySession.contains(binding.remoteSessionId))
+                m_targetSnapshotSequenceBySession.insert(binding.remoteSessionId, 1);
+            emit localDeviceSnapshotRequested();
+            publishDeviceSnapshots();
             emit remoteSessionOpened(message);
         }
         else if (type == "remote_session_resumed") {
             const RemoteSessionCoordinator::Binding binding =
                 m_sceneRuns->sessionById(
                     message.value(QStringLiteral("remoteSessionId")).toString());
-            if (binding.targetEndpointId == m_endpointId
-                && !m_registeredTargetSnapshot.isEmpty()) {
-                sendRemoteSessionSnapshot(binding.remoteSessionId,
-                                          binding.generation,
-                                          m_registeredTargetSnapshot);
+            if (binding.targetEndpointId == m_endpointId) {
+                emit localDeviceSnapshotRequested();
+                publishDeviceSnapshots();
             }
             emit remoteSessionResumed(message);
         }

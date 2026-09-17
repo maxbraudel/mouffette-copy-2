@@ -197,12 +197,21 @@ SettingsData readSettings(const QString& root, const QString& path)
         result.inspection = {State::Corrupt, version, QStringLiteral("Invalid settings values: %1").arg(error)};
         return result;
     }
+    const QString onTop = settings.value(QStringLiteral("appAlwaysOnTop"), true)
+                              .toString().trimmed().toLower();
+    if (onTop != QLatin1String("true") && onTop != QLatin1String("false")
+        && onTop != QLatin1String("1") && onTop != QLatin1String("0")) {
+        result.inspection = {State::Corrupt, version, QStringLiteral("Invalid appAlwaysOnTop value")};
+        return result;
+    }
     // Unknown optional keys are forward-compatible; never erase the whole
     // settings store simply because a newer writer added a key.
     for (const QString& key : keys) {
         if (!key.startsWith(QLatin1String("storage/")))
             result.values.insert(key, settings.value(key));
     }
+    result.values.insert(QStringLiteral("appAlwaysOnTop"),
+                         onTop == QLatin1String("true") || onTop == QLatin1String("1"));
     result.values.insert(QStringLiteral("serverUrl"), url);
     result.values.insert(QStringLiteral("autoUploadImportedMedia"),
                          boolean == QLatin1String("true") || boolean == QLatin1String("1"));

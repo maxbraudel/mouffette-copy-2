@@ -448,10 +448,13 @@ bool ProjectManager::updateRemoteSnapshot(
         || snapshotRevision == 0 || snapshotCapturedAtMs < 0) {
         return false;
     }
+    const bool changed = project->savedScreens != screens
+        || project->savedVolumePercent != volumePercent;
     project->savedScreens = screens;
     project->savedVolumePercent = volumePercent;
     project->snapshotRevision = snapshotRevision;
     project->snapshotCapturedAtMs = snapshotCapturedAtMs;
+    if (!changed) return true; // Freshness alone neither edits nor saves a project.
     project->updatedAtMs = atMs >= 0 ? atMs : nowMs();
     scheduleSave();
     emit projectUpdated(project->projectId, targetEndpointId);

@@ -113,6 +113,7 @@ public:
     void stopInlineSpinner();
 
     QList<ScreenInfo> getLocalScreenInfo();
+    bool captureLocalScreenInfo(QList<ScreenInfo>* screens);
     int getSystemVolumePercent();
     QString getMachineName();
     QString getPlatformName();
@@ -174,6 +175,7 @@ signals:
     void applicationPageChanged(int page);
     void activeWorkspaceChanged(const QString& targetEndpointId);
     void qmlRaiseRequested();
+    void qmlToggleRequested();
     void qmlHideRequested();
 
 private slots:
@@ -276,6 +278,7 @@ private:
     SceneActivityModel* m_sceneActivityModel = nullptr;
     SystemMonitor* m_systemMonitor = nullptr;
     QTimer* m_cursorPublishTimer = nullptr;
+    QTimer* m_deviceSnapshotTimer = nullptr;
     QTimer* m_cursorExpiryTimer = nullptr;
     QElapsedTimer m_cursorClock;
     struct PublishedCursor {

@@ -654,6 +654,9 @@ if(BUILD_TESTING)
     target_include_directories(tst_WindowPresentation PRIVATE src)
     target_link_libraries(tst_WindowPresentation PRIVATE Qt6::Quick Qt6::Test)
     if(APPLE)
+        add_executable(tst_FullscreenHost tests/qt/FullscreenTestHost.mm)
+        target_link_libraries(tst_FullscreenHost PRIVATE "-framework AppKit")
+        add_dependencies(tst_WindowPresentation tst_FullscreenHost)
         target_sources(tst_WindowPresentation PRIVATE src/backend/platform/macos/MacWindowManager.mm)
         set_source_files_properties(tests/qt/tst_WindowPresentation.cpp PROPERTIES LANGUAGE OBJCXX)
         target_link_libraries(tst_WindowPresentation PRIVATE "-framework AppKit" "-framework CoreGraphics")
@@ -662,6 +665,24 @@ if(BUILD_TESTING)
         target_link_libraries(tst_WindowPresentation PRIVATE ole32 uuid user32)
     endif()
     add_test(NAME WindowPresentation COMMAND tst_WindowPresentation)
+
+    add_executable(tst_SystemMonitor
+        tests/qt/tst_SystemMonitor.cpp
+        src/backend/managers/system/SystemMonitor.cpp
+        src/backend/platform/LocalScreenTopology.cpp
+        src/backend/domain/models/ClientInfo.cpp
+        src/backend/config/AppConfig.cpp
+        src/backend/runtime/RuntimeProfile.cpp)
+    target_include_directories(tst_SystemMonitor PRIVATE src)
+    target_link_libraries(tst_SystemMonitor PRIVATE Qt6::GuiPrivate Qt6::Network Qt6::Test)
+    if(APPLE)
+        target_sources(tst_SystemMonitor PRIVATE src/backend/platform/macos/MacWindowManager.mm)
+        target_link_libraries(tst_SystemMonitor PRIVATE "-framework AppKit" "-framework CoreGraphics")
+    elseif(WIN32)
+        target_link_libraries(tst_SystemMonitor PRIVATE ole32)
+    endif()
+    add_test(NAME SystemMonitor COMMAND tst_SystemMonitor)
+    set_tests_properties(SystemMonitor PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
     add_executable(tst_MediaBackendBootstrap tests/qt/tst_MediaBackendBootstrap.cpp)
     target_link_libraries(tst_MediaBackendBootstrap PRIVATE MouffetteResidentMedia Qt6::Test)

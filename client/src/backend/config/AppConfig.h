@@ -82,6 +82,7 @@ public:
         MediaRamReserveMinMiB,
         UploadConcurrency,
         AutoUploadImportedMedia,
+        AppAlwaysOnTop,
         QtMediaBackend,
         AllowMultipleInstances,
         CursorDebug,
@@ -197,6 +198,7 @@ public:
     int mediaRamReserveMinMiB() const { return m_mediaRamReserveMinMiB; }
     int uploadConcurrency() const { return m_uploadConcurrency; }
     bool autoUploadImportedMedia() const { return m_autoUploadImportedMedia; }
+    bool appAlwaysOnTop() const { return m_appAlwaysOnTop; }
     QString qtMediaBackend() const { return m_qtMediaBackend; }
     bool allowMultipleInstances() const { return m_allowMultipleInstances; }
     bool cursorDebug() const { return m_cursorDebug; }
@@ -269,6 +271,7 @@ private:
     int m_mediaRamReserveMinMiB = 548;
     int m_uploadConcurrency = 2;
     bool m_autoUploadImportedMedia = false;
+    bool m_appAlwaysOnTop = true;
     QString m_qtMediaBackend = QStringLiteral("ffmpeg");
     bool m_allowMultipleInstances = false;
     bool m_cursorDebug = false;

@@ -13,7 +13,9 @@ class WindowStackingCoordinator final : public QObject, public QAbstractNativeEv
 {
 public:
     static WindowStackingCoordinator& instance();
-    void registerControlWindow(QWindow* window);
+    void registerControlWindow(QWindow* window, bool alwaysOnTop = true);
+    void setControlAlwaysOnTop(QWindow* window, bool enabled);
+    void configureControlWindow(QWindow* window);
     void registerSceneWindow(QWindow* window);
     void setSceneWindowActive(QWindow* window, bool active);
     void unregisterWindow(QWindow* window);
@@ -33,6 +35,7 @@ private:
         bool scene = false;
         bool active = false;
         QMetaObject::Connection destroyed;
+        bool alwaysOnTop = true;
     };
     QList<Entry> m_windows;
     QTimer m_timer;

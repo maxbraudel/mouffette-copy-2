@@ -24,7 +24,7 @@ struct SettingSpec {
     bool boolean;
 };
 
-constexpr std::array<SettingSpec, 64> kSpecs{{
+constexpr std::array<SettingSpec, 65> kSpecs{{
     {Key::ServerUrl, "MOUFFETTE_SERVER_URL", "server-url", "serverUrl", "ws://localhost:8080", false},
     {Key::RemoteSessionHiddenTimeoutMs, "MOUFFETTE_REMOTE_SESSION_HIDDEN_TIMEOUT_MS", "remote-session-hidden-timeout-ms", nullptr, "60000", false},
     {Key::ProjectMediaHiddenTimeoutMs, "MOUFFETTE_PROJECT_MEDIA_HIDDEN_TIMEOUT_MS", "project-media-hidden-timeout-ms", nullptr, "60000", false},
@@ -84,6 +84,7 @@ constexpr std::array<SettingSpec, 64> kSpecs{{
     {Key::MediaRamReserveMinMiB, "MOUFFETTE_MEDIA_RAM_RESERVE_MIN_MIB", "media-ram-reserve-min-mib", nullptr, "548", false},
     {Key::UploadConcurrency, "MOUFFETTE_UPLOAD_CONCURRENCY", "upload-concurrency", nullptr, "2", false},
     {Key::AutoUploadImportedMedia, "MOUFFETTE_AUTO_UPLOAD_IMPORTED_MEDIA", "auto-upload-imported-media", "autoUploadImportedMedia", "false", true},
+    {Key::AppAlwaysOnTop, "MOUFFETTE_APP_ALWAYS_ON_TOP", "app-always-on-top", "appAlwaysOnTop", "true", true},
     {Key::QtMediaBackend, "QT_MEDIA_BACKEND", "media-backend", nullptr, "ffmpeg", false},
     {Key::AllowMultipleInstances, "MOUFFETTE_ALLOW_MULTIPLE_INSTANCES", "allow-multiple-instances", nullptr, "false", true},
     {Key::CursorDebug, "MOUFFETTE_CURSOR_DEBUG", "cursor-debug", nullptr, "false", true},
@@ -429,6 +430,7 @@ void AppConfig::resetToCompiledDefaults() {
     m_mediaRamReserveMinMiB = 548;
     m_uploadConcurrency = 2;
     m_autoUploadImportedMedia = false;
+    m_appAlwaysOnTop = true;
     m_qtMediaBackend = QStringLiteral("ffmpeg");
     m_allowMultipleInstances = false;
     m_cursorDebug = false;
@@ -750,6 +752,9 @@ bool AppConfig::load(const LoadOptions& options, QString* errorMessage) {
     if (!parseBoolean(rawValues.at(Key::AutoUploadImportedMedia),
                       keyName(Key::AutoUploadImportedMedia),
                       candidate.m_autoUploadImportedMedia, errorMessage)
+        || !parseBoolean(rawValues.at(Key::AppAlwaysOnTop),
+                         keyName(Key::AppAlwaysOnTop),
+                         candidate.m_appAlwaysOnTop, errorMessage)
         || !parseBoolean(rawValues.at(Key::AllowMultipleInstances),
                          keyName(Key::AllowMultipleInstances),
                          candidate.m_allowMultipleInstances, errorMessage)

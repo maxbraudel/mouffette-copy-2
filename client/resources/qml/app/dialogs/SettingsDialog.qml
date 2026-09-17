@@ -24,6 +24,7 @@ Dialog {
     onOpened: {
         serverUrl.text = controller.settingsServerUrl
         autoUpload.checked = controller.settingsAutoUpload
+        appAlwaysOnTop.checked = controller.settingsAppAlwaysOnTop
         validationError = ""
     }
 
@@ -57,6 +58,11 @@ Dialog {
             id: autoUpload
             text: "Upload imported media automatically"
         }
+        AppCheckBox {
+            id: appAlwaysOnTop
+            objectName: "settingsAppAlwaysOnTop"
+            text: "App always on top"
+        }
         RowLayout {
             Layout.fillWidth: true
             AppButton {
@@ -75,7 +81,7 @@ Dialog {
                 text: "Save"
                 primary: true
                 onClicked: {
-                    var error = controller.saveSettings(serverUrl.text.trim(), autoUpload.checked)
+                    var error = controller.saveSettings(serverUrl.text.trim(), autoUpload.checked, appAlwaysOnTop.checked)
                     if (error && error.length > 0) {
                         dialog.validationError = error
                         return

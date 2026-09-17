@@ -159,3 +159,9 @@ both endpoints must acknowledge the `media_memory_ready` checklist stage. A new
 report that invalidates a preparing or running scene stops that scene. Transfers
 and memory reports remain independent so completion does not wait for RAM space.
 Version 4 clients are rejected; deploy the client and server version together.
+
+Targets publish full `remote_session_snapshot` updates on change and refresh
+active sessions every five seconds. The relay keeps at most one pending snapshot
+per session when the owner's buffered control traffic exceeds 64 KiB. The lease
+sweep retries the latest replacement; cursor samples wait behind it and use the
+session's most recent screen bounds. Empty display arrays are authoritative.

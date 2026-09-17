@@ -29,6 +29,7 @@ struct Enumeration {
     QList<Screen> result;
     QList<QScreen*> qtScreens;
     bool includeIdentity = true;
+    bool valid = true;
 };
 
 BOOL CALLBACK collectMonitor(HMONITOR monitor, HDC, LPRECT, LPARAM context)
@@ -36,11 +37,13 @@ BOOL CALLBACK collectMonitor(HMONITOR monitor, HDC, LPRECT, LPARAM context)
     auto& enumeration = *reinterpret_cast<Enumeration*>(context);
     MONITORINFOEXW info{};
     info.cbSize = sizeof(info);
-    if (!GetMonitorInfoW(monitor, &info)) return TRUE;
+    if (!GetMonitorInfoW(monitor, &info)) { enumeration.valid = false; return TRUE; }
     Screen entry;
     const RECT& bounds = info.rcMonitor;
     entry.advertisedGeometry = QRect(bounds.left, bounds.top,
                                     bounds.right - bounds.left, bounds.bottom - bounds.top);
+    entry.advertisedAvailableGeometry = QRect(info.rcWork.left, info.rcWork.top,
+        info.rcWork.right - info.rcWork.left, info.rcWork.bottom - info.rcWork.top);
     entry.primary = (info.dwFlags & MONITORINFOF_PRIMARY) != 0;
     entry.nativeWindowsCoordinates = true;
     for (QScreen* screen : enumeration.qtScreens) {
@@ -66,8 +69,13 @@ BOOL CALLBACK collectMonitor(HMONITOR monitor, HDC, LPRECT, LPARAM context)
 #endif
 }
 
-QList<Screen> screens(bool includeIdentity)
+QList<Screen> screens(bool includeIdentity, bool* success)
 {
+    if (success) *success = true;
+#ifdef Q_OS_MACOS
+    if (QGuiApplication::platformName() == QLatin1String("cocoa"))
+        return MacWindowManager::screens(includeIdentity, success);
+#endif
     QList<QScreen*> qtScreens = QGuiApplication::screens();
     qtScreens.removeIf([](QScreen* screen) {
         return !screen || !screen->handle() || screen->handle()->isPlaceholder();
@@ -75,8 +83,10 @@ QList<Screen> screens(bool includeIdentity)
 #ifdef Q_OS_WIN
     if (QGuiApplication::platformName() == QLatin1String("windows")) {
         Enumeration enumeration{{}, qtScreens, includeIdentity};
-        EnumDisplayMonitors(nullptr, nullptr, collectMonitor, reinterpret_cast<LPARAM>(&enumeration));
-        if (!enumeration.result.isEmpty()) return enumeration.result;
+        const bool valid = EnumDisplayMonitors(nullptr, nullptr, collectMonitor,
+            reinterpret_cast<LPARAM>(&enumeration)) && enumeration.valid;
+        if (success) *success = valid;
+        return valid ? enumeration.result : QList<Screen>();
     }
 #endif
     QList<Screen> result;
@@ -86,10 +96,13 @@ QList<Screen> screens(bool includeIdentity)
         if (includeIdentity) entry.identity = serialIdentity(screen);
         entry.geometry = screen->geometry();
         entry.advertisedGeometry = entry.geometry;
+        entry.advertisedAvailableGeometry = screen->availableGeometry();
         entry.primary = screen == QGuiApplication::primaryScreen();
 #ifdef Q_OS_MACOS
         const QString nativeIdentity = includeIdentity ? MacWindowManager::screenIdentity(screen) : QString();
         if (!nativeIdentity.isEmpty()) entry.identity = nativeIdentity;
+        entry.advertisedAvailableGeometry = ScreenCoordinateMapping::scaledScreenGeometry(
+            screen->availableGeometry(), std::max<qreal>(1.0, screen->devicePixelRatio()));
         entry.advertisedGeometry = ScreenCoordinateMapping::scaledScreenGeometry(
             entry.geometry, std::max<qreal>(1.0, screen->devicePixelRatio()));
 #endif
