@@ -1457,10 +1457,9 @@ void MediaOverlayTest::toolbarToolsAndGlobalMemoryUsage()
     auto* memory = findVisualItem(appWindow->contentItem(), QStringLiteral("memoryUsageButton"));
     QVERIFY(memory && memory->isEnabled());
     QCOMPARE(memory->property("text").toString(), QStringLiteral("Usage RAM"));
-    auto* topBar = memory->parentItem();
-    while (topBar && !topBar->property("columns").isValid())
-        topBar = topBar->parentItem();
-    QVERIFY(topBar);
+    auto* topBar = findVisualItem(appWindow->contentItem(), QStringLiteral("topBar"));
+    auto* localStatus = findVisualItem(appWindow->contentItem(), QStringLiteral("localConnectionStatus"));
+    QVERIFY(topBar && localStatus);
     appWindow->resize(900, 650);
     appWindow->showNormal();
     QVERIFY(QTest::qWaitForWindowExposed(appWindow));
@@ -1471,12 +1470,11 @@ void MediaOverlayTest::toolbarToolsAndGlobalMemoryUsage()
 #endif
     QVERIFY(QTest::qWaitForWindowActive(appWindow));
     // First exposure can fit the window to a smaller screen at high DPR.
-    // Establish the same wide size used below. The nested Row/Flow/GridLayout
-    // can still be arranging after exposure or a frame swap, so wait for the
-    // actual wide layout before recording its position and clicking the button.
+    // Establish the same wide size used below and wait for layout before
+    // recording its position and clicking the button.
     appWindow->resize(900, 650);
     QCOMPARE(appWindow->width(), 900);
-    QTRY_COMPARE(topBar->property("columns").toInt(), 2);
+    QTRY_COMPARE(localStatus->y(), 0.0);
     QTRY_COMPARE(memory->mapToScene({0, 0}).y(), topBar->mapToScene({0, 0}).y());
     const qreal toolbarY = memory->mapToScene({0, 0}).y();
     const QPoint memoryCenter = memory->mapToScene({memory->width() / 2, memory->height() / 2}).toPoint();
@@ -1501,16 +1499,34 @@ void MediaOverlayTest::toolbarToolsAndGlobalMemoryUsage()
     QTRY_VERIFY(!memory->property("checked").toBool());
 
     appWindow->resize(480, 650);
-    QTRY_COMPARE(topBar->property("columns").toInt(), 1);
+    QTRY_VERIFY(localStatus->y() >= memory->height());
+    QTRY_COMPARE(localStatus->width(), topBar->width());
+    QTRY_COMPARE(memory->mapToScene({0, 0}).y(), toolbarY);
     QTRY_VERIFY(memory->mapToScene({memory->width(), 0}).x() <= appWindow->width());
     QVERIFY(memory->isVisible() && memory->width() >= memory->implicitWidth());
+    for (const auto* name : {"connectionButton", "historyButton", "settingsButton"}) {
+        auto* button = findVisualItem(topBar, QString::fromLatin1(name));
+        QVERIFY(button && button->isVisible());
+        QCOMPARE(button->mapToScene({0, 0}).y(), toolbarY);
+        QVERIFY(button->mapToScene({0, 0}).x() >= topBar->x());
+        QVERIFY(button->mapToScene({button->width(), 0}).x() <= appWindow->width());
+    }
+    if (!artifactDir.isEmpty()) {
+        QSignalSpy frames(appWindow, &QQuickWindow::frameSwapped);
+        appWindow->update();
+        QTRY_VERIFY(frames.size() > 0);
+        const QString scale = qEnvironmentVariable("QT_SCALE_FACTOR");
+        const QString name = scale.isEmpty() ? "topbar-clients-narrow.png"
+            : "topbar-clients-narrow-scale-" + scale + ".png";
+        QVERIFY(appWindow->grabWindow().save(QDir(artifactDir).filePath(name)));
+    }
     QTest::mouseClick(appWindow, Qt::LeftButton, Qt::NoModifier,
                      memory->mapToScene({memory->width() / 2, memory->height() / 2}).toPoint());
     QTRY_VERIFY(memory->property("checked").toBool());
     QTest::keyClick(appWindow, Qt::Key_Escape);
     QTRY_VERIFY(!memory->property("checked").toBool());
     appWindow->resize(900, 650);
-    QTRY_COMPARE(topBar->property("columns").toInt(), 2);
+    QTRY_COMPARE(localStatus->y(), 0.0);
     QTRY_COMPARE(memory->mapToScene({0, 0}).y(), toolbarY);
 }
 

@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Controls
+import QtQuick.Effects
 import Mouffette.App
 
 AbstractButton {
@@ -9,8 +10,13 @@ AbstractButton {
     property bool destructive: false
     property string unavailableReason: ""
     property alias textVariants: textMetrics.textVariants
+    property url iconSource: ""
+    property bool iconOnly: false
+    readonly property real textWidth: Math.max(Theme.controlMinWidth, textMetrics.maximumWidth + 24)
+    readonly property color foregroundColor: !enabled ? Theme.disabledText
+        : destructive ? Theme.errorText : primary ? Theme.brandBlue : Theme.text
 
-    implicitWidth: Math.max(Theme.controlMinWidth, textMetrics.maximumWidth + 24)
+    implicitWidth: iconOnly ? 32 : textWidth
     implicitHeight: Theme.controlHeight
     hoverEnabled: true
     focusPolicy: Qt.TabFocus
@@ -19,6 +25,9 @@ AbstractButton {
     Accessible.role: Accessible.Button
     Accessible.name: text
     Accessible.description: control.enabled ? "" : unavailableReason
+    ToolTip.visible: iconOnly && (hovered || visualFocus)
+    ToolTip.text: text
+    ToolTip.delay: 400
 
     StateTextMetrics {
         id: textMetrics
@@ -26,21 +35,35 @@ AbstractButton {
         font: label.font
     }
 
-    contentItem: Text {
-        id: label
-        text: control.text
-        color: {
-            if (!control.enabled)
-                return Theme.disabledText
-            if (control.destructive)
-                return Theme.errorText
-            return control.primary ? Theme.brandBlue : Theme.text
+    contentItem: Item {
+        Text {
+            id: label
+            anchors.fill: parent
+            visible: !control.iconOnly
+            text: control.text
+            color: control.foregroundColor
+            font.pixelSize: Theme.controlFontSize
+            font.bold: true
+            horizontalAlignment: Text.AlignHCenter
+            verticalAlignment: Text.AlignVCenter
+            elide: Text.ElideRight
         }
-        font.pixelSize: Theme.controlFontSize
-        font.bold: true
-        horizontalAlignment: Text.AlignHCenter
-        verticalAlignment: Text.AlignVCenter
-        elide: Text.ElideRight
+        Image {
+            anchors.centerIn: parent
+            visible: control.iconOnly
+            width: 16
+            height: 16
+            source: control.iconSource
+            sourceSize: Qt.size(width * 4, height * 4)
+            fillMode: Image.PreserveAspectFit
+            layer.enabled: control.iconOnly
+            layer.effect: MultiEffect {
+                contrast: -1
+                brightness: 0.5
+                colorization: 1
+                colorizationColor: control.foregroundColor
+            }
+        }
     }
 
     background: Rectangle {

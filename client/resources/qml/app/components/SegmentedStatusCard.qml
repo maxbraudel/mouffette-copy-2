@@ -16,7 +16,11 @@ Item {
     property string auxiliaryText: ""
     property bool auxiliaryVisible: auxiliaryText.length > 0
     property bool busy: false
+    readonly property real primaryWidth: Math.max(20, primaryLabel.implicitWidth + Theme.segmentPadding * 2)
     readonly property real statusWidth: statusMetrics.maximumWidth + Theme.segmentPadding * 2
+    readonly property real auxiliaryWidth: auxiliaryVisible
+        ? Math.max(40, auxiliaryMetrics.maximumWidth + Theme.segmentPadding * 2) : 0
+    readonly property real busyWidth: busy ? Theme.controlHeight + Theme.segmentPadding : 0
     readonly property bool availableStatus: statusText.trim().toUpperCase() === "AVAILABLE"
 
     readonly property color statusForeground: availableStatus
@@ -46,7 +50,8 @@ Item {
         font: auxiliaryLabel.font
     }
 
-    implicitWidth: segments.implicitWidth
+    implicitWidth: primaryWidth + 1 + statusWidth
+                   + (auxiliaryVisible ? 1 + auxiliaryWidth : 0) + busyWidth
     implicitHeight: Theme.controlHeight
     height: Theme.controlHeight
 
@@ -58,7 +63,9 @@ Item {
         Rectangle {
             id: primarySegment
             height: root.height
-            width: Math.max(20, primaryLabel.implicitWidth + Theme.segmentPadding * 2)
+            width: Math.max(0, root.width - 1 - root.statusWidth
+                           - (root.auxiliaryVisible ? 1 + root.auxiliaryWidth : 0)
+                           - root.busyWidth)
             color: "transparent"
             topLeftRadius: Theme.controlRadius
             bottomLeftRadius: Theme.controlRadius
@@ -90,8 +97,8 @@ Item {
             height: root.height
             width: root.statusWidth
             color: root.statusBackground
-            topRightRadius: root.auxiliaryVisible ? 0 : Theme.controlRadius
-            bottomRightRadius: root.auxiliaryVisible ? 0 : Theme.controlRadius
+            topRightRadius: root.auxiliaryVisible || root.busy ? 0 : Theme.controlRadius
+            bottomRightRadius: root.auxiliaryVisible || root.busy ? 0 : Theme.controlRadius
 
             Text {
                 id: statusLabel
@@ -119,10 +126,10 @@ Item {
             id: auxiliarySegment
             visible: root.auxiliaryVisible
             height: root.height
-            width: visible ? Math.max(40, auxiliaryMetrics.maximumWidth + Theme.segmentPadding * 2) : 0
+            width: root.auxiliaryWidth
             color: "transparent"
-            topRightRadius: Theme.controlRadius
-            bottomRightRadius: Theme.controlRadius
+            topRightRadius: root.busy ? 0 : Theme.controlRadius
+            bottomRightRadius: root.busy ? 0 : Theme.controlRadius
 
             Text {
                 id: auxiliaryLabel
@@ -155,7 +162,7 @@ Item {
         running: visible
         width: root.height
         height: root.height
-        anchors.left: parent.right
-        anchors.leftMargin: 8
+        anchors.right: parent.right
+        anchors.rightMargin: Theme.segmentPadding / 2
     }
 }
