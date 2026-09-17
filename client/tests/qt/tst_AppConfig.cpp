@@ -88,6 +88,8 @@ void AppConfigTest::loadsEmbeddedDefaults() {
     QCOMPARE(config.projectMediaHiddenTimeoutMs(), qint64(60000));
     QCOMPARE(config.projectHiddenRetentionMs(), qint64(240000));
     QCOMPARE(config.incomingSessionOrphanTimeoutMs(), qint64(3000));
+    QCOMPARE(config.connectionAttemptTimeoutMs(), 10000);
+    QCOMPARE(config.reconnectStableResetMs(), 30000);
     QCOMPARE(config.uploadActionMinIntervalMs(), 300);
     QCOMPARE(config.uploadCancelGuardMs(), 1000);
     QCOMPARE(config.sceneSeekPositionToleranceMs(), 120);

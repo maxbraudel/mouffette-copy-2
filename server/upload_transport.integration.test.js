@@ -48,7 +48,7 @@ function trackedSocket(url) {
 }
 
 function assertEnvelope(message, context) {
-    assert.equal(message.protocolVersion, 5);
+    assert.equal(message.protocolVersion, 6);
     assert.equal(message.serverBootId, context.serverBootId);
     assert.equal(message.connectionGeneration, context.connectionGeneration);
     assert.match(message.messageId,
@@ -76,7 +76,7 @@ async function connectDevice(url, machineName) {
     const endpointId = endpointIdForInstallation(installationId, instanceId);
     peer.ws.send(JSON.stringify({
         type: 'auth_response',
-        protocolVersion: 5,
+        protocolVersion: 6,
         serverBootId: challenge.serverBootId,
         messageId: crypto.randomUUID(),
         runtimeId,
@@ -96,7 +96,7 @@ async function connectDevice(url, machineName) {
     };
     peer.send = (type, body = {}) => peer.ws.send(JSON.stringify({
         type,
-        protocolVersion: 5,
+        protocolVersion: 6,
         serverBootId: peer.context.serverBootId,
         connectionGeneration: peer.context.connectionGeneration,
         messageId: crypto.randomUUID(),
@@ -153,6 +153,11 @@ async function connectDevice(url, machineName) {
             remoteSessionId: opened.remoteSessionId,
             generation: opened.generation,
         };
+        for (const peer of [owner, target]) peer.send('remote_session_state_ack', {
+            ...session, stateRevision: opened.stateRevision,
+        });
+        await owner.next(message => message.type === 'remote_session_lease_state'
+            && message.remoteSessionId === opened.remoteSessionId && message.commandReady === true);
 
         owner.send('request_upload_channel');
         const token = await owner.next(message => message.type === 'upload_channel_token');
@@ -171,7 +176,7 @@ async function connectDevice(url, machineName) {
             mediaIds: ['media-integration-1'],
         };
         const uploadEnvelope = body => ({
-            protocolVersion: 5,
+            protocolVersion: 6,
             serverBootId: owner.context.serverBootId,
             messageId: crypto.randomUUID(),
             connectionGeneration: owner.context.connectionGeneration,
@@ -365,14 +370,14 @@ async function connectDevice(url, machineName) {
             cacheQuarantined: true,
             removedFileCount: 1,
         });
-        await owner.next(message => message.type === 'remote_session_closed');
+        await owner.next(message => message.type === 'remote_session_closed' && message.cleanupState === 'confirmed');
         assert.equal(server.sessionAssets.has(session.remoteSessionId), false);
 
         for (const peer of [owner, target]) {
             const output = peer.ws === owner.ws ? owner : target;
             // A representative post-auth message proves centralized envelopes.
             const clientList = await output.next(message => message.type === 'client_list');
-            assert.equal(clientList.protocolVersion, 5);
+            assert.equal(clientList.protocolVersion, 6);
             assert.equal(clientList.serverBootId, server.serverBootId);
             assert.equal(clientList.connectionGeneration,
                 output.context.connectionGeneration);
@@ -386,7 +391,7 @@ async function connectDevice(url, machineName) {
         await new Promise(resolve => server.wss.close(resolve));
     }
 })().then(() => {
-    console.log('upload transport v5 integration tests passed');
+    console.log('upload transport v6 integration tests passed');
 }).catch(error => {
     console.error(error);
     process.exitCode = 1;

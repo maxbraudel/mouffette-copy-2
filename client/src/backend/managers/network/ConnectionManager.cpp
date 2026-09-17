@@ -11,8 +11,7 @@ ConnectionManager::ConnectionManager(WebSocketClient* wsClient, QObject* parent)
       m_wsClient(wsClient),
       m_reconnectTimer(new QTimer(this)),
       m_attemptTimeoutTimer(new QTimer(this)),
-      m_serverUrl(),
-      m_isManualDisconnect(false)
+      m_serverUrl()
 {
     Q_ASSERT(m_wsClient);
     
@@ -23,6 +22,10 @@ ConnectionManager::ConnectionManager(WebSocketClient* wsClient, QObject* parent)
     
     // Connect WebSocketClient signals to local slots
     connect(m_wsClient, &WebSocketClient::connected, this, &ConnectionManager::onConnected);
+    connect(m_wsClient, &WebSocketClient::transportConnected, this, [this]() {
+        if (m_desiredEnabled && !m_draining && !m_fatalFailure)
+            setState(State::Authenticating);
+    });
     connect(m_wsClient, &WebSocketClient::disconnected, this, &ConnectionManager::onDisconnected);
     connect(m_wsClient, &WebSocketClient::connectionError, this, &ConnectionManager::onConnectionError);
     connect(m_wsClient, &WebSocketClient::fatalError, this, &ConnectionManager::onFatalError);
@@ -35,44 +38,122 @@ ConnectionManager::ConnectionManager(WebSocketClient* wsClient, QObject* parent)
             this, &ConnectionManager::onAttemptTimedOut);
     
     // Forward registration confirmation
-    connect(m_wsClient, &WebSocketClient::registrationConfirmed, 
-            this, &ConnectionManager::registrationConfirmed);
+    connect(m_wsClient, &WebSocketClient::registrationConfirmed, this,
+            [this](const ClientInfo& info) {
+        if (!m_desiredEnabled || m_draining) return;
+        m_registrationReady = true;
+        refreshAuthenticatedState();
+        emit registrationConfirmed(info);
+    });
+    connect(m_wsClient, &WebSocketClient::reconciliationCompleted, this, [this]() {
+        if (!m_desiredEnabled || m_draining) return;
+        m_reconciliationReady = true;
+        refreshAuthenticatedState();
+    });
 }
 
 void ConnectionManager::connectToServer(const QString& serverUrl)
 {
-    if (serverUrl.isEmpty()) {
-        qWarning() << "ConnectionManager: Cannot connect with empty server URL";
+    if (serverUrl.trimmed().isEmpty()) return;
+    if (m_serverUrl != serverUrl && (!m_serverUrl.isEmpty()
+        || m_wsClient->isTransportConnected())) {
+        reconfigureServer(serverUrl);
+        setConnectionEnabled(true);
         return;
     }
-    
     m_serverUrl = serverUrl;
-    m_isManualDisconnect = false;
+    setConnectionEnabled(true);
+}
+
+void ConnectionManager::suspendAttempts()
+{
     m_reconnectTimer->stop();
     m_attemptTimeoutTimer->stop();
-    m_fastRetryAttempt = 0;
-    m_backgroundRetryAttempt = 0;
-    m_wasWithinLease = false;
     m_attemptInProgress = false;
+    m_stableConnection.invalidate();
+}
+
+void ConnectionManager::setConnectionEnabled(bool enabled)
+{
+    const bool changed = m_desiredEnabled != enabled;
+    m_desiredEnabled = enabled;
+    if (changed) emit connectionEnabledChanged(enabled);
+    if (!enabled) {
+        if (!changed && m_state == State::Disconnected && !m_draining) return;
+        suspendAttempts();
+        if (m_draining) return;
+        m_draining = true;
+        ++m_transitionId;
+        setState(State::Disconnecting);
+        emit disconnectRequested(m_transitionId);
+        return;
+    }
+    if (m_draining) return; // The latest intent is replayed after the old drain.
+    if (m_wsClient->isConnected() || m_attemptInProgress
+        || m_reconnectTimer->isActive()) return;
     m_fatalFailure = false;
-    
-    qDebug() << "ConnectionManager: Connecting to server:" << m_serverUrl;
     beginAttempt();
+}
+
+void ConnectionManager::completeDisconnect(quint64 transitionId)
+{
+    if (!m_draining || transitionId != m_transitionId) return;
+    suspendAttempts();
+    m_wsClient->disconnect();
+    m_draining = false;
+    setState(State::Disconnected);
+    if (m_desiredEnabled) {
+        QTimer::singleShot(0, this, [this, transitionId]() {
+            if (transitionId == m_transitionId && m_desiredEnabled && !m_draining) {
+                m_fatalFailure = false;
+                beginAttempt();
+            }
+        });
+    }
+}
+
+void ConnectionManager::reconfigureServer(const QString& serverUrl)
+{
+    if (serverUrl.trimmed().isEmpty() || m_serverUrl == serverUrl) return;
+    m_serverUrl = serverUrl;
+    if (!m_desiredEnabled || m_draining) return;
+    if (!m_wsClient->isTransportConnected() && !m_attemptInProgress
+        && m_state == State::Disconnected) { beginAttempt(); return; }
+    suspendAttempts();
+    m_draining = true;
+    ++m_transitionId;
+    setState(State::Disconnecting);
+    emit disconnectRequested(m_transitionId);
 }
 
 void ConnectionManager::disconnect()
 {
-    m_isManualDisconnect = true;
-    m_reconnectTimer->stop();
-    m_attemptTimeoutTimer->stop();
-    m_attemptInProgress = false;
-    m_fastRetryAttempt = 0;
-    m_backgroundRetryAttempt = 0;
-    
-    if (m_wsClient) {
-        m_wsClient->disconnect();
+    if (m_desiredEnabled) {
+        m_desiredEnabled = false;
+        emit connectionEnabledChanged(false);
     }
-    setStatus(QStringLiteral("Disconnected"));
+    suspendAttempts();
+    ++m_transitionId;
+    m_draining = false;
+    m_wsClient->disconnect();
+    setState(State::Disconnected);
+}
+
+void ConnectionManager::setReceiverReady(bool ready)
+{
+    m_receiverReady = ready;
+    // Quarantine invalidates advertisement; a fresh endpoint snapshot must be
+    // acknowledged before the next Connected state, even on the same socket.
+    if (!ready) m_registrationReady = false;
+    refreshAuthenticatedState();
+}
+
+void ConnectionManager::refreshAuthenticatedState()
+{
+    if (!m_desiredEnabled || m_draining || m_fatalFailure || !m_wsClient->isConnected()) return;
+    if (!m_receiverReady) setState(State::CleanupPending);
+    else if (!m_registrationReady || !m_reconciliationReady) setState(State::Synchronizing);
+    else setState(m_degraded ? State::Degraded : State::Connected);
 }
 
 bool ConnectionManager::isConnected() const
@@ -87,21 +168,32 @@ void ConnectionManager::setServerUrl(const QString& url)
 
 QString ConnectionManager::getConnectionStatus() const
 {
-    return m_status;
+    switch (m_state) {
+    case State::Disconnected: return QStringLiteral("Disconnected");
+    case State::Disconnecting: return QStringLiteral("Disconnecting");
+    case State::Connecting: return QStringLiteral("Connecting");
+    case State::Authenticating: return QStringLiteral("Authenticating");
+    case State::Synchronizing: return QStringLiteral("Synchronizing");
+    case State::Connected: return QStringLiteral("Connected");
+    case State::Degraded: return QStringLiteral("Degraded");
+    case State::Reconnecting: return QStringLiteral("Reconnecting");
+    case State::CleanupPending: return QStringLiteral("Cleanup pending");
+    case State::Failed: return QStringLiteral("Failed");
+    }
+    return QStringLiteral("Disconnected");
 }
 
 void ConnectionManager::onConnected()
 {
+    if (!m_desiredEnabled || m_draining || m_fatalFailure) return;
     qDebug() << "ConnectionManager: Connected successfully";
     m_attemptInProgress = false;
     m_attemptTimeoutTimer->stop();
-    m_fastRetryAttempt = 0;
-    m_backgroundRetryAttempt = 0;
-    m_wasWithinLease = false;
+    m_stableConnection.start();
     m_reconnectTimer->stop();
     
-    emit connected();
-    setStatus(QStringLiteral("Connected"));
+    refreshAuthenticatedState();
+    if (m_desiredEnabled && !m_draining) emit connected();
 }
 
 void ConnectionManager::onDisconnected()
@@ -110,28 +202,36 @@ void ConnectionManager::onDisconnected()
     m_attemptInProgress = false;
     m_attemptTimeoutTimer->stop();
     
+    if (m_stableConnection.isValid()
+        && m_stableConnection.elapsed() >= AppConfig::instance().reconnectStableResetMs()) {
+        m_fastRetryAttempt = 0;
+        m_backgroundRetryAttempt = 0;
+    }
+    m_stableConnection.invalidate();
+    // A disconnected observer may synchronously finish the drain and queue
+    // the latest Enable. That transition already owns the next attempt.
+    const bool wasDraining = m_draining;
     emit disconnected();
-    setStatus(QStringLiteral("Disconnected"));
+    if (wasDraining || m_draining) return;
+    if (m_fatalFailure) { setState(State::Failed); return; }
+    setState(State::Disconnected);
     
     // Schedule reconnect if not manually disconnected
-    if (!m_isManualDisconnect && !m_fatalFailure) {
+    if (m_desiredEnabled && !m_draining && !m_fatalFailure) {
         scheduleReconnect();
     }
 }
 
 void ConnectionManager::onConnectionError(const QString& error)
 {
-    if (m_fatalFailure) return;
+    if (m_fatalFailure || !m_desiredEnabled || m_draining) return;
     qWarning() << "ConnectionManager: Connection error:" << error;
     
     emit connectionError(error);
-    if (!m_wsClient->isConnected()) {
-        setStatus(QStringLiteral("Connection error"));
-    }
     // Socket errors normally lead to disconnected(); cover errors raised after
     // the socket has already reached UnconnectedState without owning a second
     // retry path.
-    if (!m_isManualDisconnect && !m_fatalFailure
+    if (m_desiredEnabled && !m_draining && !m_fatalFailure
         && !m_wsClient->isTransportConnected()) {
         m_attemptInProgress = false;
         m_attemptTimeoutTimer->stop();
@@ -141,13 +241,14 @@ void ConnectionManager::onConnectionError(const QString& error)
 
 void ConnectionManager::onFatalError(const QString& error)
 {
+    if (!m_desiredEnabled || m_draining) return;
     m_fatalFailure = true;
     m_reconnectTimer->stop();
     m_attemptTimeoutTimer->stop();
     m_attemptInProgress = false;
     qCritical() << "ConnectionManager: Fatal transport error:" << error;
     emit connectionError(error);
-    setStatus(QStringLiteral("Unreachable"));
+    setState(State::Failed);
 }
 
 void ConnectionManager::onLeaseExpired(const QString& serverBootId,
@@ -156,7 +257,7 @@ void ConnectionManager::onLeaseExpired(const QString& serverBootId,
     m_fastRetryAttempt = 0;
     m_wasWithinLease = false;
     emit leaseExpired(serverBootId, connectionGeneration);
-    if (!m_isManualDisconnect && !m_fatalFailure && !m_wsClient->isConnected()) {
+    if (m_desiredEnabled && !m_draining && !m_fatalFailure && !m_wsClient->isConnected()) {
         m_reconnectTimer->stop();
         scheduleReconnect();
     }
@@ -164,14 +265,14 @@ void ConnectionManager::onLeaseExpired(const QString& serverBootId,
 
 void ConnectionManager::onTransportHealthChanged(bool degraded)
 {
-    if (m_wsClient->isConnected()) {
-        setStatus(degraded ? QStringLiteral("Degraded") : QStringLiteral("Connected"));
-    }
+    m_degraded = degraded;
+    refreshAuthenticatedState();
 }
 
 void ConnectionManager::scheduleReconnect()
 {
-    if (m_fatalFailure || m_reconnectTimer->isActive()) {
+    if (!m_desiredEnabled || m_draining || m_fatalFailure
+        || m_reconnectTimer->isActive() || m_attemptInProgress) {
         return; // Already scheduled
     }
     
@@ -187,7 +288,7 @@ void ConnectionManager::scheduleReconnect()
     qDebug() << "ConnectionManager: Scheduling reconnect attempt" << (attempt + 1)
              << "in" << delay << "ms";
     
-    setStatus(QStringLiteral("Reconnecting"));
+    setState(State::Reconnecting);
     m_reconnectTimer->start(delay);
 }
 
@@ -215,7 +316,7 @@ int ConnectionManager::retryDelayForAttempt(int attempt, bool withinLease)
 
 void ConnectionManager::attemptReconnect()
 {
-    if (m_isManualDisconnect) {
+    if (!m_desiredEnabled || m_draining || m_fatalFailure) {
         qDebug() << "ConnectionManager: Skipping reconnect (manual disconnect)";
         return;
     }
@@ -225,27 +326,29 @@ void ConnectionManager::attemptReconnect()
 
 void ConnectionManager::beginAttempt()
 {
-    if (m_isManualDisconnect || m_serverUrl.isEmpty() || m_attemptInProgress) return;
+    if (!m_desiredEnabled || m_draining || m_fatalFailure
+        || m_serverUrl.isEmpty() || m_attemptInProgress
+        || m_wsClient->isConnected()) return;
+    m_reconnectTimer->stop();
+    m_registrationReady = false;
+    m_reconciliationReady = false;
+    m_degraded = false;
+    setState(State::Connecting);
     m_attemptInProgress = true;
     qDebug() << "ConnectionManager: Attempting connection to" << m_serverUrl;
     m_wsClient->connectToServer(m_serverUrl);
     if (m_attemptInProgress && !m_wsClient->isConnected()) {
-        const qint64 remainingLease = m_wsClient->leaseRemainingMs();
-        const AppConfig& config = AppConfig::instance();
-        const int timeoutMs = remainingLease > 0
-            ? static_cast<int>(std::clamp<qint64>(
-                  remainingLease,
-                  qMin(config.leaseHealthCheckIntervalMs(),
-                       config.reconnectFastMaxMs()),
-                  config.reconnectFastMaxMs()))
-            : config.connectionAttemptTimeoutMs();
+        // Session recovery expiry is independent of a new TCP/authentication
+        // attempt: never abort a viable handshake merely to fit a grace window.
+        const int timeoutMs = AppConfig::instance().connectionAttemptTimeoutMs();
         m_attemptTimeoutTimer->start(timeoutMs);
     }
 }
 
 void ConnectionManager::onAttemptTimedOut()
 {
-    if (m_isManualDisconnect || !m_attemptInProgress || m_wsClient->isConnected()) return;
+    if (!m_desiredEnabled || m_draining || m_fatalFailure
+        || !m_attemptInProgress || m_wsClient->isConnected()) return;
     m_attemptInProgress = false;
     qWarning() << "ConnectionManager: Connection/authentication attempt timed out after"
                << m_attemptTimeoutTimer->interval() << "ms";
@@ -254,9 +357,10 @@ void ConnectionManager::onAttemptTimedOut()
     scheduleReconnect();
 }
 
-void ConnectionManager::setStatus(const QString& status)
+void ConnectionManager::setState(State state)
 {
-    if (m_status == status) return;
-    m_status = status;
-    emit statusChanged(status);
+    if (m_state == state) return;
+    m_state = state;
+    emit stateChanged(state);
+    emit statusChanged(getConnectionStatus());
 }

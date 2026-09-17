@@ -18,4 +18,9 @@ assert.equal(metrics.value('remote_cache_quarantined_bytes_total'), 4096);
 assert.equal(metrics.value('scene_start_skew_rejected_total'), 1);
 assert.equal(records.every(record => record.event === 'protocol_metric'), true);
 assert.throws(() => metrics.increment('private_key', 1), /unknown_metric/);
+const bounded = new ProtocolMetrics({ logger: () => {}, maximumOnceKeys: 2 });
+for (let index = 0; index < 100; ++index) {
+    bounded.incrementOnce('remote_session_lease_expired_total', `bounded-${index}`);
+}
+assert.equal(bounded.onceKeys.size, 2);
 console.log('protocol metrics tests passed');

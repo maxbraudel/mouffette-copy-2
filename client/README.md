@@ -176,7 +176,7 @@ Images and videos are completely decoded before they become available. Videos
 retain every frame and their decoded audio in RAM. The RAM button beside Settings
 shows loading, memory use and pressure-driven eviction. See
 [media residency](docs/MEDIA_RESIDENCY.md) for the memory policy, playback contract
-and protocol v5 deployment requirements.
+and protocol v6 deployment requirements.
 
 See [scene playback](docs/scene-playback.md) for timing, fades, end actions and
 the editor controls' lifecycle during test and remote scenes.

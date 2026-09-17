@@ -144,7 +144,7 @@ QtObject {
                         textVariants: ["Disable", "Enable"]
                         iconSource: "qrc:/icons/icons/power.svg"
                         iconOnly: topBar.compactButtons
-                        onClicked: root.controller.toggleConnection()
+                        onClicked: root.controller.setConnectionEnabled(!root.controller.connectionEnabled)
                     }
                     AppButton {
                         id: historyButton

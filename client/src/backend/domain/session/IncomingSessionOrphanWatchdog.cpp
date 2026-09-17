@@ -1,3 +1,4 @@
+#include "backend/runtime/SuspendInclusiveClock.h"
 #include "backend/domain/session/IncomingSessionOrphanWatchdog.h"
 
 #include <QDateTime>
@@ -21,7 +22,7 @@ void IncomingSessionOrphanWatchdog::setConfiguredTimeoutMs(qint64 timeoutMs)
 qint64 IncomingSessionOrphanWatchdog::nowMs() const
 {
     return m_nowProvider ? m_nowProvider()
-                         : QDateTime::currentMSecsSinceEpoch();
+                         : MouffetteClock::anchoredEpochMs();
 }
 
 bool IncomingSessionOrphanWatchdog::arm(

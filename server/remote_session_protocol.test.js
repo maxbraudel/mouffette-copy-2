@@ -21,7 +21,7 @@ const { MouffetteServer } = require('./server');
     const signature = crypto.sign(null,
         challengePayload({ ...challenge, runtimeId, instanceId }), keys.privateKey);
     const response = {
-        protocolVersion: 5,
+        protocolVersion: 6,
         serverBootId,
         runtimeId,
         instanceId,
@@ -127,7 +127,7 @@ function addAuthenticationCandidate(server, connectionId, keyPair, runtimeId,
     };
     server.clients.set(connectionId, client);
     const response = {
-        protocolVersion: 5,
+        protocolVersion: 6,
         serverBootId: server.serverBootId,
         runtimeId,
         instanceId,
@@ -424,26 +424,26 @@ function messages(socket, type) {
     addAuthenticatedClient(server, 'clock-target', 'B');
     const session = server.remoteSessions.open(binding()).session;
     server.handleRemoteSessionDeparture(server.clients.get('clock-owner'));
-    assert.equal(session.graceDeadlineAt, 13_000);
-    assert.equal(session.graceDeadlineEpochMs, 1_003_000);
+    assert.equal(session.graceDeadlineAt, 15_000);
+    assert.equal(session.graceDeadlineEpochMs, 1_005_000);
 
     epoch += 24 * 60 * 60 * 1_000;
-    monotonic = 12_999;
+    monotonic = 14_999;
     server.sweepRemoteSessionLeases();
     assert.equal(session.phase, 'Grace',
         'a forward wall-clock jump must not expire the lease early');
-    assert.equal(session.graceDeadlineEpochMs, 1_003_000,
+    assert.equal(session.graceDeadlineEpochMs, 1_005_000,
         'the originally advertised wall deadline is not pushed');
 
     epoch -= 48 * 60 * 60 * 1_000;
-    monotonic = 13_000;
+    monotonic = 15_000;
     server.sweepRemoteSessionLeases();
     assert.equal(session.phase, 'CleanupPending',
         'the exact monotonic boundary stays terminal after a wall-clock rollback');
 }
 
-// Opening against B obeys B's own strict discovery lease. At 2,999 ms the
-// request may bind B; at exactly 3,000 ms B is retired before a session exists.
+// OPEN permits healthy targets before the 1,500 ms suspicion threshold;
+// at 3,000 ms a silent transport is fenced before any new session exists.
 {
     const createOpenServer = () => {
         let monotonic = 10_000;
@@ -467,7 +467,7 @@ function messages(socket, type) {
     };
 
     const early = createOpenServer();
-    early.setMonotonic(12_999);
+    early.setMonotonic(11_499);
     early.server.handleRemoteSessionOpen('open-owner', {
         targetEndpointId: 'open-B', connectionGeneration: 1,
         requestId: 'open-before-boundary',
@@ -700,22 +700,19 @@ function messages(socket, type) {
     assert.equal(opened.session.generation, 3);
     assert.equal(registry.touch(opened.session.remoteSessionId, 'A', 1, clock).error,
         'stale_connection_generation');
-    assert.equal(registry.markGenerationDelivered(
-        opened.session.remoteSessionId, 'A', 3), true);
+    assert.equal(registry.acknowledgeState(opened.session.remoteSessionId,
+        'A', 2, 3, opened.session.stateRevision), true);
     registry.markDisconnected('A', clock);
-    assert.equal(registry.resume({
+    const recoveredOlderObservation = registry.resume({
         remoteSessionId: opened.session.remoteSessionId,
         endpointId: 'A', runtimeId: 'runtime-A',
         resumeToken: opened.session.resumeToken, generation: 2,
         connectionGeneration: 3,
-    }, clock).error, 'stale_remote_session_generation',
-    'a synchronized role cannot roll its RemoteSession generation back');
-    assert.equal(registry.resume({
-        remoteSessionId: opened.session.remoteSessionId,
-        endpointId: 'A', runtimeId: 'runtime-A',
-        resumeToken: opened.session.resumeToken, generation: 3,
-        connectionGeneration: 3,
-    }, clock).ok, true);
+    }, clock);
+    assert.equal(recoveredOlderObservation.ok, true,
+        'authenticated recovery reconciles an older observation without rolling commands back');
+    assert.equal(opened.session.generation, 4);
+
 }
 
 // Resume proof is bound to both the installation role and runtime. At the
@@ -1081,9 +1078,9 @@ function messages(socket, type) {
     });
     assert.equal(context.session.phase, 'Active');
     assert.equal(context.session.generation, 2);
-    assert.equal(context.session.ownerKnownGeneration, 2);
-    assert.equal(context.session.targetKnownGeneration, 2,
-        'the connected peer advances only after resumed state delivery');
+    assert.equal(context.session.ownerKnownGeneration, 1);
+    assert.equal(context.session.targetKnownGeneration, 1,
+        'enqueueing a frame does not acknowledge client application');
     assert.equal(messages(context.targetSocket, 'remote_session_resumed').length, 1);
 
     context.server.remoteSessions.markDisconnected('A');
@@ -1092,9 +1089,8 @@ function messages(socket, type) {
         ...baseResume,
         generation: 1,
     });
-    assert.equal(messages(context.ownerSocket, 'error').at(-1).code,
-        'stale_remote_session_generation');
-    assert.equal(context.session.phase, 'Grace');
+    assert.equal(context.session.phase, 'Active');
+    assert.equal(context.session.generation, 3);
 }
 
 // Explicit close, lost CLOSED delivery, duplicate close, and duplicate cleanup
@@ -1127,16 +1123,16 @@ function messages(socket, type) {
     };
     context.server.handleRemoteSessionTeardownAck('target-connection', ackMessage);
     assert.equal(context.server.remoteSessions.get(context.session.remoteSessionId), null);
-    assert.equal(messages(context.ownerSocket, 'remote_session_closed').length, 1);
+    assert.equal(messages(context.ownerSocket, 'remote_session_closed').length, 2);
 
     // Treat the first CLOSED response as lost and retry both possible source
     // messages. Neither path re-enters teardown or mutates a new session.
     context.server.handleRemoteSessionTeardownAck('target-connection', ackMessage);
-    assert.equal(messages(context.ownerSocket, 'remote_session_closed').length, 2);
+    assert.equal(messages(context.ownerSocket, 'remote_session_closed').length, 3);
     assert.equal(messages(context.ownerSocket, 'remote_session_closed').at(-1).cleanupState,
         'confirmed');
     context.server.handleRemoteSessionClose('owner-connection', closeMessage);
-    assert.equal(messages(context.ownerSocket, 'remote_session_closed').length, 3);
+    assert.equal(messages(context.ownerSocket, 'remote_session_closed').length, 4);
     assert.equal(messages(context.ownerSocket, 'remote_session_closed').at(-1).replay, true);
     assert.equal(context.beginAttempts(), 1);
 
@@ -1797,7 +1793,7 @@ function cursorContext(prefix) {
     }];
     context.cursorMessage = (overrides = {}) => ({
         type: 'remote_session_cursor',
-        protocolVersion: 5,
+        protocolVersion: 6,
         serverBootId: context.server.serverBootId,
         messageId: crypto.randomUUID(),
         connectionGeneration: 1,

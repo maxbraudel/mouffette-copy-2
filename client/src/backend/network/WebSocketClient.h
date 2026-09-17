@@ -123,9 +123,12 @@ public:
                           const QPointF& screenPosition);
     bool resumeRemoteSession(const QString& remoteSessionId);
     void resumeAllRemoteSessions();
+    bool reconcileRemoteSessions();
+    bool canIssueSessionCommands(const QString& remoteSessionId) const;
+    qint64 sessionRecoveryRemainingMs(const QString& remoteSessionId) const;
     // Withdraws this endpoint from discovery and atomically asks the server
     // to terminate all of its RemoteSessions before the socket is closed.
-    bool beginEndpointDisable();
+    bool beginEndpointDisable(const QString& requestId = {});
     bool closeRemoteSession(const QString& remoteSessionId,
                             QString* requestId = nullptr,
                             const QString& reason = QStringLiteral("explicit_disconnect"));
@@ -219,6 +222,11 @@ signals:
                                  qint64 serverOffsetMs,
                                  qint64 uncertaintyMs);
     void leaseExpired(const QString& serverBootId, quint64 connectionGeneration);
+    void sessionsInvalidated(const QString& reason, const QString& serverBootId,
+                             quint64 connectionGeneration);
+    void remoteSessionRecoveryExpired(const QString& remoteSessionId, quint64 generation);
+    void remoteSessionAbsent(const QString& remoteSessionId, quint64 generation);
+    void reconciliationCompleted();
     void serverRestarted(const QString& previousServerBootId,
                          const QString& newServerBootId);
     void reauthenticatedWithinLease(quint64 previousGeneration,
@@ -242,7 +250,8 @@ signals:
     void remoteSessionLeaseStateChanged(const QJsonObject& envelope);
     void remoteSessionTerminating(const QJsonObject& envelope);
     void remoteSessionClosed(const QJsonObject& envelope);
-    void endpointDisableAcknowledged();
+    void remoteSessionLogicallyClosed(const QJsonObject& envelope);
+    void endpointDisableAcknowledged(const QString& requestId, quint64 connectionGeneration);
     // Business/protocol rejection for a RemoteSession command. This must not
     // be interpreted as a transport failure by ConnectionManager.
     void remoteSessionError(const QJsonObject& envelope);
@@ -292,6 +301,33 @@ private:
     bool hasFreshSceneClockSample() const;
     void resetSceneClockEstimate();
     void expireLease();
+    bool acknowledgeSessionState(const QJsonObject& envelope);
+    void updateSessionDeadline(const QJsonObject& envelope);
+    void checkSessionRecoveryDeadlines();
+    void retryExpiredSessionClose(const QString& remoteSessionId, quint64 generation);
+    void refreshSessionProofs(const QJsonObject& heartbeat);
+    struct SessionDeadline {
+        qint64 localDeadlineMs = -1;
+        qint64 serverDeadlineMs = -1;
+        bool expired = false;
+    };
+    struct ExpiredSessionClose {
+        QString requestId;
+        quint64 sessionGeneration = 0;
+        quint64 transportGeneration = 0;
+        qint64 sentAtMs = -1;
+    };
+    QHash<QString, QJsonObject> m_assetRemovalObligations;
+    QHash<QString, ExpiredSessionClose> m_expiredSessionCloses;
+    QHash<QString, SessionDeadline> m_sessionDeadlines;
+    QHash<QString, QString> m_resumeRequestIds;
+    QString m_reconcileRequestId;
+    quint64 m_reconciliationFailureSerial = 0;
+    qint64 m_reconcileSentAtMs = -1;
+    qint64 m_serverClockAnchorMs = -1;
+    qint64 m_authenticationSentAtMs = -1;
+    qint64 m_localClockAnchorMs = -1;
+    qint64 m_previousLeaseCheckMs = -1;
     void sendMessage(const QJsonObject& message);
     bool sendControlMessage(const QJsonObject& message);
     bool sendMessageUpload(const QJsonObject& message);
@@ -299,6 +335,7 @@ private:
     void setConnectionStatus(const QString& status);
     QJsonObject sceneMessage(const QString& sceneRunId, const QString& type) const;
     QSet<QString> m_canceledUploads; // uploadIds that should drop further chunk sends
+    QList<QString> m_canceledUploadOrder;
     std::unique_ptr<DeviceIdentityStore> m_identityStore;
     std::unique_ptr<SceneRunCoordinator> m_sceneRuns;
     
@@ -358,12 +395,16 @@ private:
     // accidental pre-welcome use fail closed instead of duplicating policy.
     int m_heartbeatIntervalMs = 0;
     int m_leaseTimeoutMs = 0;
+    int m_sessionRecoveryTimeoutMs = 0;
+    int m_transportSuspectAfterMs = 0;
     bool m_authenticated = false;
     bool m_hasEstablishedLease = false;
     bool m_leaseExpired = false;
     bool m_degraded = false;
     bool m_disconnectSignalEmitted = false;
     bool m_endpointDraining = false;
+    QString m_endpointDisableRequestId;
+    quint64 m_clientListRevision = 0;
     QString m_identityInitializationError;
     bool m_uploadSessionActive = false;
     int m_uploadSessionRefCount = 0;

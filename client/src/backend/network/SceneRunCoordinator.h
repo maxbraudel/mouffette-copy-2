@@ -54,7 +54,8 @@ public:
     void setLocalEndpointId(const QString& endpointId);
     void setPrepareTimeoutMs(int timeoutMs);
     bool upsertSession(const QJsonObject& sessionEnvelope,
-                       quint64 localConnectionGeneration = 0);
+                       quint64 localConnectionGeneration = 0,
+                       QString* validationError = nullptr);
     bool removeSession(const QJsonObject& closedEnvelope,
                        quint64 localConnectionGeneration = 0);
     // Used only after an authenticated server error proves that the retained
@@ -97,6 +98,7 @@ signals:
     void runChanged(const QString& sceneRunId, SceneRunCoordinator::Phase phase);
 
 private:
+    void rememberFinishedRun(const QString& sceneRunId);
     static bool isOpaqueId(const QString& value);
     static bool isSha256(const QString& value);
     static Phase phaseFromWire(const QString& value, Phase fallback);
@@ -108,6 +110,7 @@ private:
     int m_prepareTimeoutMs = 0;
     RemoteSessionCoordinator* m_remoteSessions = nullptr;
     QHash<QString, Run> m_runsById;
+    QList<QString> m_finishedRunOrder;
 };
 
 Q_DECLARE_METATYPE(SceneRunCoordinator::Phase)

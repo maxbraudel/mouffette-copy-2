@@ -1,3 +1,4 @@
+#include "backend/runtime/SuspendInclusiveClock.h"
 #include "frontend/qml/ClientListModel.h"
 
 #include "backend/config/AppConfig.h"
@@ -35,7 +36,7 @@ QVariant ClientListModel::data(const QModelIndex& index, int role) const
     case EndpointIdRole: return endpointId;
     case PrimaryTextRole: return client.getIdentityDisplayText();
     case SecondaryTextRole:
-        return client.getProjectDeadlineText(QDateTime::currentMSecsSinceEpoch());
+        return client.getProjectDeadlineText(MouffetteClock::anchoredEpochMs());
     case BadgeTextRole: return status;
     case BadgeKindRole: return badgeKind(status);
     case SelectableRole: return true;
@@ -122,7 +123,7 @@ void ClientListModel::refreshCountdowns()
 {
     const QSet<QString> previous = m_countdownEndpointIds;
     const QSet<QString> current = activeCountdownEndpointIds(
-        QDateTime::currentMSecsSinceEpoch());
+        MouffetteClock::anchoredEpochMs());
 
     for (int row = 0; row < m_clients.size(); ++row) {
         const QString endpointId = endpointIdFor(m_clients.at(row));
@@ -140,7 +141,7 @@ void ClientListModel::refreshCountdowns()
 void ClientListModel::updateCountdownTimer()
 {
     m_countdownEndpointIds = activeCountdownEndpointIds(
-        QDateTime::currentMSecsSinceEpoch());
+        MouffetteClock::anchoredEpochMs());
     if (m_countdownEndpointIds.isEmpty()) {
         m_countdownTimer->stop();
     } else if (!m_countdownTimer->isActive()) {

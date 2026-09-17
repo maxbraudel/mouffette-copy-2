@@ -1,3 +1,4 @@
+#include "backend/runtime/SuspendInclusiveClock.h"
 #include "backend/domain/project/ProjectManager.h"
 
 #include "backend/domain/project/ProjectStore.h"
@@ -79,7 +80,7 @@ void ProjectManager::initializeTimers()
 
 qint64 ProjectManager::nowMs() const
 {
-    return m_nowProvider ? m_nowProvider() : QDateTime::currentMSecsSinceEpoch();
+    return m_nowProvider ? m_nowProvider() : MouffetteClock::anchoredEpochMs();
 }
 
 void ProjectManager::setNowProviderForTesting(std::function<qint64()> provider)
@@ -286,7 +287,7 @@ bool ProjectManager::setVisible(const QString& targetEndpointId, qint64 atMs)
     if (project->state == ProjectLifecycleState::Hidden
         && project->hiddenAtMs >= 0
         && current >= project->hiddenAtMs + m_timing.projectHiddenRetentionMs) {
-        removeProjectInternal(targetEndpointId);
+        removeProjectInternal(targetEndpointId, RemovalReason::RetentionExpired);
         return false;
     }
     if (project->state == ProjectLifecycleState::Visible) {
@@ -340,7 +341,7 @@ void ProjectManager::markAllHidden(qint64 atMs)
     }
 }
 
-bool ProjectManager::removeProjectInternal(const QString& targetEndpointId)
+bool ProjectManager::removeProjectInternal(const QString& targetEndpointId, RemovalReason reason)
 {
     const auto it = m_projectsByTarget.constFind(targetEndpointId);
     if (it == m_projectsByTarget.constEnd()) {
@@ -366,6 +367,7 @@ bool ProjectManager::removeProjectInternal(const QString& targetEndpointId)
     m_projectsByTarget.remove(targetEndpointId);
     m_targetByProjectId.remove(snapshot.projectId);
     m_mediaReleaseExpiredTargets.remove(targetEndpointId);
+    emit projectRemoved(snapshot.projectId, targetEndpointId, reason);
     emit projectDeleted(snapshot.projectId, targetEndpointId);
     emit projectsChanged();
     return true;
@@ -518,7 +520,7 @@ void ProjectManager::processDeadlines(qint64 atMs)
         // Commit before exposing each deletion. If storage is temporarily
         // unavailable, retain this and the remaining projects for the next
         // deadline poll instead of losing them from memory.
-        if (!removeProjectInternal(target)) {
+        if (!removeProjectInternal(target, RemovalReason::RetentionExpired)) {
             break;
         }
     }
@@ -555,11 +557,10 @@ QList<ProjectClientEntry> ProjectManager::mergeDiscoveredClients(const QList<Cli
             continue;
         }
         seen.insert(endpointId);
-        client.setOnline(true);
 
         ProjectClientEntry entry;
         entry.endpointId = endpointId;
-        entry.online = true;
+        entry.online = client.isOnline();
         if (ProjectRecord* project = mutableProjectForTarget(endpointId)) {
             const ProjectTargetReference fresh = mergeTargetPresentation(
                 project->target,

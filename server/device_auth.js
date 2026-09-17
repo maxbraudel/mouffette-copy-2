@@ -2,7 +2,7 @@
 
 const crypto = require('node:crypto');
 
-const PROTOCOL_VERSION = 5;
+const PROTOCOL_VERSION = 6;
 const RUNTIME_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const INSTANCE_ID_PATTERN = /^(?:primary|[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/i;
 const BASE64URL_PATTERN = /^[A-Za-z0-9_-]+$/;

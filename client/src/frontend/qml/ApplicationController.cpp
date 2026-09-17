@@ -353,7 +353,12 @@ void ApplicationController::showHistory()
 
 void ApplicationController::toggleConnection()
 {
-    if (m_runtime) m_runtime->toggleConnectionEnabled();
+    setConnectionEnabled(!connectionEnabled());
+}
+
+void ApplicationController::setConnectionEnabled(bool enabled)
+{
+    if (m_runtime) m_runtime->setConnectionEnabled(enabled);
 }
 
 void ApplicationController::requestDeleteProject()
@@ -410,7 +415,6 @@ QString ApplicationController::saveSettings(const QString& serverUrl,
     settings->setAppAlwaysOnTop(appAlwaysOnTop);
     settings->saveSettings();
     if (reconnect) {
-        m_runtime->setUserDisconnected(false);
         m_runtime->connectToServer();
     }
     emit settingsChanged();
@@ -561,6 +565,10 @@ ApplicationController::connectionStateFromStatus(const QString& status)
         return ConnectionState::Connected;
     }
     if (normalized.contains(QStringLiteral("CONNECTING"))
+        || normalized == QLatin1String("SYNCHRONIZING")
+        || normalized == QLatin1String("AUTHENTICATING")
+        || normalized == QLatin1String("DEGRADED")
+        || normalized == QLatin1String("CLEANUP PENDING")
         || normalized == QLatin1String("ERROR")) {
         return ConnectionState::Transitional;
     }

@@ -58,6 +58,10 @@ public:
     bool isFromMemory() const { return m_fromMemory; }
     void setFromMemory(bool fromMemory) { m_fromMemory = fromMemory; }
     bool isOnline() const { return m_isOnline; }
+    bool canAcceptSession() const { return m_isOnline && m_canAcceptSession; }
+    void setCanAcceptSession(bool value) { m_canAcceptSession = value; }
+    QString presenceReason() const { return m_presenceReason; }
+    qint64 lastSeenAt() const { return m_lastSeenAt; }
     void setOnline(bool online) { m_isOnline = online; }
     QString installationId() const { return m_installationId; }
     QString endpointId() const { return m_endpointId; }
@@ -111,6 +115,9 @@ private:
     int m_volumePercent = -1; // 0-100, -1 when unknown
     bool m_fromMemory = false;
     bool m_isOnline = true;
+    bool m_canAcceptSession = true;
+    QString m_presenceReason;
+    qint64 m_lastSeenAt = -1;
     QString m_installationId;
     QString m_endpointId;
     QString m_instanceId;

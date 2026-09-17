@@ -73,8 +73,10 @@ public:
     const ClientInfo& selectedClient() const { return m_selectedClient; }
     QList<ClientInfo> displayClients() const { return m_displayClients; }
 
-    bool isUserDisconnected() const { return m_userDisconnected; }
-    void setUserDisconnected(bool disconnected) { m_userDisconnected = disconnected; }
+    bool isUserDisconnected() const;
+    bool isConnectionDraining() const { return m_controlledDisconnectInProgress; }
+    void setConnectionEnabled(bool enabled);
+    void setUserDisconnected(bool disconnected) { setConnectionEnabled(!disconnected); }
     bool cleanShutdownInProgress() const { return m_cleanShutdownPrepared; }
     bool isApplicationSuspended() const { return m_applicationSuspended; }
     QString activeWorkspaceEndpointId() const { return m_activeWorkspaceEndpointId; }
@@ -212,7 +214,8 @@ private:
     bool wantsForegroundRemoteSession(const QString& targetEndpointId) const;
     void reconcileForegroundRemoteSession();
     void terminateProjectRemoteSession(const QString& targetEndpointId,
-                                       bool attemptRemote);
+                                       bool attemptRemote,
+                                       const QString& reason = QStringLiteral("inactivity_timeout"));
     bool hasPendingOutgoingSessionClose(
         const QString& targetEndpointId,
         const QString& remoteSessionId = QString()) const;
@@ -259,7 +262,9 @@ private:
     void prepareCleanShutdown();
     void finishCleanShutdownIncomingCacheTeardownIfReady();
     void finishCleanShutdown();
-    void beginControlledDisconnect();
+    void beginControlledDisconnect(quint64 transitionId);
+    void handleTerminalTransportLoss(const QString& reason, const QString& bootId,
+                                     quint64 generation, bool notify);
     void finishControlledDisconnect();
     void finishControlledDisconnectIfReady();
     QList<ProjectMediaReference> collectProjectMediaReferences(
@@ -308,7 +313,6 @@ private:
     ICanvasHost* m_activeCanvas = nullptr;
 
     IncomingSessionOrphanWatchdog* m_incomingSessionOrphanWatchdog = nullptr;
-    QTimer* m_controlledDisconnectTimer = nullptr;
     QSet<QString> m_controlledDisconnectPendingSessionIds;
     bool m_controlledDisconnectAcknowledged = false;
     bool m_controlledDisconnectInProgress = false;
@@ -317,7 +321,12 @@ private:
     QString m_activeWorkspaceEndpointId;
     ClientInfo m_thisClient;
     ClientInfo m_selectedClient;
-    bool m_userDisconnected = false;
+    QString m_selectionEndpointId;
+    ClientInfo m_selectionClient;
+    bool m_intentionalTransportClose = false;
+    quint64 m_controlledDisconnectTransition = 0;
+    QString m_controlledDisconnectRequestId;
+    quint64 m_controlledDisconnectGeneration = 0;
     bool m_transportOutageNotified = false;
     bool m_ignoreSelectionChange = false;
     bool m_uploadSignalsConnected = false;
@@ -342,6 +351,10 @@ private:
     QSet<QString> m_restoredProjectIds;
     QHash<QString, QString> m_remoteSessionOpenTargetByRequestId;
     QSet<QString> m_automaticRemoteSessionOpenRequestIds;
+    QHash<QString, qint64> m_remoteSessionRetryAtMs;
+    QHash<QString, int> m_remoteSessionRetryAttempts;
+    QHash<QString, qint64> m_pendingOpenRetryAtMs;
+    QHash<QString, int> m_pendingOpenRetryAttempts;
     // Validation/permanent failures require a new explicit selection. Ordinary
     // peer/transport loss must not block activity-driven foreground recovery.
     QSet<QString> m_remoteSessionAutoOpenBlockedTargets;
@@ -409,6 +422,7 @@ private:
     QSet<QString> m_terminalIncomingSessionFilter;
     QString m_terminalIncomingCleanupReason;
     bool m_terminalIncomingCleanupActive = false;
+    bool m_terminalIncomingCleanupAll = false;
     bool m_terminalIncomingCacheTeardownStarted = false;
     QSet<QString> m_cleanShutdownRendererPendingSessionIds;
     bool m_cleanShutdownIncomingCacheTeardownStarted = false;

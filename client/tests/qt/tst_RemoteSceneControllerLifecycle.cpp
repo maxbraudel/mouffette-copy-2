@@ -1,6 +1,7 @@
 #include "backend/media/MediaResidencyManager.h"
 #include "backend/media/ResidentVideoPlayer.h"
 #include "backend/network/UploadManager.h"
+#include "backend/network/WebSocketClient.h"
 #include <QApplication>
 #include <QAudioOutput>
 #include <QDateTime>
@@ -1045,6 +1046,57 @@ private slots:
         QVERIFY(unrelatedQueuedCallbackRan);
         files.removeReceivedFileMapping(fileId);
         residency.release(residentOwner);
+    }
+
+    void liveSceneSurvivesTransportGraceAndStopsOnlyForItsOwnDeadline()
+    {
+        QTemporaryDir identity;
+        QVERIFY(identity.isValid());
+        WebSocketClient socket(identity.path(), false);
+        RemoteSceneController controller(nullptr, &socket);
+        // Build the renderer fixture with the same local test policy used by
+        // the other lifecycle tests; retain the real transport signal wiring.
+        controller.m_ws = nullptr;
+        controller.onRemoteSceneStart(QStringLiteral("grace-owner"), textScene());
+        QTRY_VERIFY_WITH_TIMEOUT(controller.m_sceneActivationRequested, 2000);
+        controller.activateScene();
+        QVERIFY(controller.m_sceneActivated);
+        controller.m_ws = &socket;
+        controller.m_pendingRemoteSessionId = QStringLiteral("grace-session");
+        QPointer<QQuickWindow> window = findRemoteWindow();
+        QVERIFY(window);
+        QSignalSpy settled(&controller, &RemoteSceneController::teardownSettled);
+
+        emit socket.transportHealthChanged(true);
+        emit socket.disconnected();
+        emit socket.remoteSessionRecoveryExpired(QStringLiteral("other-session"), 1);
+        QCoreApplication::processEvents();
+        QVERIFY(window);
+        QVERIFY(!controller.m_screenWindows.isEmpty());
+        QCOMPARE(settled.count(), 0);
+
+        emit socket.remoteSessionRecoveryExpired(QStringLiteral("grace-session"), 1);
+        QTRY_VERIFY_WITH_TIMEOUT(window.isNull(), 2000);
+        QVERIFY(controller.m_screenWindows.isEmpty());
+    }
+
+    void queuedActivationCannotStartWithoutAnUnexpiredSessionProof()
+    {
+        QTemporaryDir identity;
+        WebSocketClient socket(identity.path(), false);
+        RemoteSceneController controller(nullptr, &socket);
+        controller.m_ws = nullptr;
+        controller.onRemoteSceneStart(QStringLiteral("expired-owner"), textScene());
+        QPointer<QQuickWindow> window = findRemoteWindow();
+        QVERIFY(window);
+        controller.m_ws = &socket;
+        controller.m_pendingRemoteSessionId = QStringLiteral("expired-session");
+        QCOMPARE(socket.sessionRecoveryRemainingMs(controller.m_pendingRemoteSessionId), qint64(0));
+        // Simulate the scheduled callback running before the watchdog after
+        // wake: no command authority remains, so no first frame can be started.
+        controller.activateScene();
+        QVERIFY(!controller.m_sceneActivated);
+        QTRY_VERIFY_WITH_TIMEOUT(window.isNull(), 2000);
     }
 
     void emptySessionTeardownIsAsynchronousAndIdempotent()

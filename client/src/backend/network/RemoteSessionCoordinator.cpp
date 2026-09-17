@@ -107,10 +107,20 @@ void RemoteSessionCoordinator::setLocalEndpointId(const QString& endpointId)
 }
 
 bool RemoteSessionCoordinator::upsert(const QJsonObject& envelope,
-                                      quint64 localConnectionGeneration)
+                                      quint64 localConnectionGeneration,
+                                      QString* validationError)
 {
+    if (validationError) validationError->clear();
     Binding binding;
     binding.remoteSessionId = envelope.value(QStringLiteral("remoteSessionId")).toString();
+    const bool versioned = envelope.contains(QStringLiteral("protocolVersion"));
+    if (versioned && !readPositiveGeneration(envelope.value(QStringLiteral("stateRevision")),
+                                             &binding.stateRevision)) return false;
+    if (!versioned) readPositiveGeneration(envelope.value(QStringLiteral("stateRevision")),
+                                           &binding.stateRevision);
+    const QJsonValue deadline = envelope.value(QStringLiteral("validUntilServerMonotonicMs"));
+    if (deadline.isDouble() && isBoundedInteger(deadline, 0, 9007199254740991LL))
+        binding.validUntilServerMonotonicMs = static_cast<qint64>(deadline.toDouble());
     if (!readPositiveGeneration(envelope.value(QStringLiteral("generation")),
                                 &binding.generation)
         || !readPositiveGeneration(
@@ -129,10 +139,14 @@ bool RemoteSessionCoordinator::upsert(const QJsonObject& envelope,
     // Grace keeps the binding and its resume token alive, but it is not an
     // admissible command state. New scene/upload commands must wait until the
     // signed resume has moved the session back to Active.
-    binding.active = binding.phase == QLatin1String("Active");
+    binding.degraded = envelope.value(QStringLiteral("degraded")).toBool()
+        || envelope.value(QStringLiteral("state")).toString() == QLatin1String("Degraded");
+    binding.active = binding.phase == QLatin1String("Active") && !binding.degraded;
+    binding.commandReady = envelope.value(QStringLiteral("commandReady")).toBool(!versioned);
     const bool terminalPhase = binding.phase == QLatin1String("Terminating")
         || binding.phase == QLatin1String("CleanupPending")
         || binding.phase == QLatin1String("Closed");
+    if (versioned && !terminalPhase && binding.validUntilServerMonotonicMs < 0) return false;
     if (!isOpaqueId(binding.remoteSessionId)
         || m_closedSessionIds.contains(binding.remoteSessionId)
         || !isEndpointId(binding.ownerEndpointId) || !isEndpointId(binding.targetEndpointId)
@@ -159,6 +173,7 @@ bool RemoteSessionCoordinator::upsert(const QJsonObject& envelope,
         if (previous->ownerEndpointId != binding.ownerEndpointId
             || previous->targetEndpointId != binding.targetEndpointId
             || previous->generation > binding.generation
+            || (binding.stateRevision && previous->stateRevision > binding.stateRevision)
             || (!previous->resumeToken.isEmpty() && !binding.resumeToken.isEmpty()
                 && previous->resumeToken != binding.resumeToken)) {
             return false;
@@ -207,14 +222,14 @@ bool RemoteSessionCoordinator::upsert(const QJsonObject& envelope,
             // on a newer authenticated transport. Skipped intermediate
             // envelopes are acceptable, but neither transport generation may
             // move backwards and at least one must advance.
-            if (previous->phase == QLatin1String("Terminating")
+            if ((!terminalPhase && (previous->phase == QLatin1String("Terminating")
                 || previous->phase == QLatin1String("CleanupPending")
-                || previous->phase == QLatin1String("Closed")
+                || previous->phase == QLatin1String("Closed")))
                 || binding.ownerConnectionGeneration
                     < previous->ownerConnectionGeneration
                 || binding.targetConnectionGeneration
                     < previous->targetConnectionGeneration
-                || (binding.ownerConnectionGeneration
+                || (!terminalPhase && binding.ownerConnectionGeneration
                         == previous->ownerConnectionGeneration
                     && binding.targetConnectionGeneration
                         == previous->targetConnectionGeneration)) {
@@ -241,7 +256,23 @@ bool RemoteSessionCoordinator::upsert(const QJsonObject& envelope,
     QHash<QString, QString>& directionalIndex = localIsOwner
         ? m_outgoingIdByPeer : m_incomingIdByPeer;
     const QString existingForPeer = directionalIndex.value(peer);
-    if (!existingForPeer.isEmpty() && existingForPeer != binding.remoteSessionId) {
+    if (!terminalPhase && !existingForPeer.isEmpty() && existingForPeer != binding.remoteSessionId) {
+        const Binding indexed = m_byId.value(existingForPeer);
+        if (indexed.phase != QLatin1String("Terminating")
+            && indexed.phase != QLatin1String("CleanupPending")
+            && indexed.phase != QLatin1String("Closed")) return false;
+    }
+    // Snapshot validation comes after the complete identity/transition checks,
+    // but before the binding becomes observable or command-capable.
+    const QString envelopeType = envelope.value(QStringLiteral("type")).toString();
+    const bool requiresOwnerSnapshot = binding.ownerEndpointId == m_localEndpointId
+        && (envelopeType == QLatin1String("remote_session_opened")
+            || (envelopeType == QLatin1String("remote_session_resumed")
+                && (previous == m_byId.cend() || envelope.contains(QStringLiteral("snapshot")))));
+    if (versioned && requiresOwnerSnapshot
+        && (!validateSnapshot(envelope.value(QStringLiteral("snapshot")).toObject())
+            || !isBoundedInteger(envelope.value(QStringLiteral("snapshotSequence")), 1, 9007199254740991LL))) {
+        if (validationError) *validationError = QStringLiteral("invalid_initial_snapshot");
         return false;
     }
     if (!terminalPhase && binding.resumeToken.isEmpty()
@@ -251,14 +282,33 @@ bool RemoteSessionCoordinator::upsert(const QJsonObject& envelope,
     if (binding.teardownId.isEmpty() && previous != m_byId.cend()) {
         binding.teardownId = previous->teardownId;
     }
+    // Readiness is monotonic within a revision: an idempotent replay of the
+    // pre-ACK OPEN/RESUME cannot revoke an already applied two-party barrier.
+    if (previous != m_byId.cend() && binding.stateRevision > 0
+        && binding.stateRevision == previous->stateRevision
+        && binding.generation == previous->generation && binding.phase == previous->phase
+        && binding.ownerConnectionGeneration == previous->ownerConnectionGeneration
+        && binding.targetConnectionGeneration == previous->targetConnectionGeneration
+        && previous->commandReady && !binding.degraded)
+        binding.commandReady = true;
+    if (previous != m_byId.cend() && binding.stateRevision > 0
+        && binding.stateRevision == previous->stateRevision
+        && binding.generation == previous->generation && binding.phase == previous->phase
+        && binding.ownerConnectionGeneration == previous->ownerConnectionGeneration
+        && binding.targetConnectionGeneration == previous->targetConnectionGeneration
+        && binding.validUntilServerMonotonicMs == previous->validUntilServerMonotonicMs
+        && binding.degraded == previous->degraded
+        && binding.commandReady == previous->commandReady) return true;
     m_byId.insert(binding.remoteSessionId, binding);
-    directionalIndex.insert(peer, binding.remoteSessionId);
+    if (!terminalPhase || existingForPeer.isEmpty() || existingForPeer == binding.remoteSessionId)
+        directionalIndex.insert(peer, binding.remoteSessionId);
     emit sessionChanged(binding.remoteSessionId, binding.generation, binding.phase);
     return true;
 }
 
 bool RemoteSessionCoordinator::acceptSnapshot(
-    const QJsonObject& envelope, quint64 localConnectionGeneration)
+    const QJsonObject& envelope, quint64 localConnectionGeneration,
+    bool allowInitialReplay)
 {
     const QString remoteSessionId =
         envelope.value(QStringLiteral("remoteSessionId")).toString();
@@ -273,13 +323,31 @@ bool RemoteSessionCoordinator::acceptSnapshot(
         || generation != binding.generation
         || !readPositiveGeneration(
             envelope.value(QStringLiteral("snapshotSequence")), &sequence)
-        || sequence <= m_lastSnapshotSequenceBySession.value(remoteSessionId, 0)
+
         || (localConnectionGeneration != 0
             && binding.ownerConnectionGeneration != localConnectionGeneration)
         || !snapshotValue.isObject()) {
         return false;
     }
     const QJsonObject snapshot = snapshotValue.toObject();
+    if (!validateSnapshot(snapshot)) return false;
+    const quint64 snapshotRevision = static_cast<quint64>(snapshot.value(QStringLiteral("revision")).toDouble());
+    if (sequence <= m_lastSnapshotSequenceBySession.value(remoteSessionId, 0)
+        || snapshotRevision <= m_lastSnapshotRevisionBySession.value(remoteSessionId, 0)) {
+        return allowInitialReplay && (snapshot == m_initialSnapshotBySession.value(remoteSessionId)
+            || (sequence == m_lastSnapshotSequenceBySession.value(remoteSessionId)
+                && snapshot == m_latestSnapshotBySession.value(remoteSessionId)));
+    }
+    if (!m_initialSnapshotBySession.contains(remoteSessionId))
+        m_initialSnapshotBySession.insert(remoteSessionId, snapshot);
+    m_latestSnapshotBySession.insert(remoteSessionId, snapshot);
+    m_lastSnapshotSequenceBySession.insert(remoteSessionId, sequence);
+    m_lastSnapshotRevisionBySession.insert(remoteSessionId, snapshotRevision);
+    return true;
+}
+
+bool RemoteSessionCoordinator::validateSnapshot(const QJsonObject& snapshot)
+{
     const QJsonValue screens = snapshot.value(QStringLiteral("screens"));
     const QJsonValue systemUI = snapshot.value(QStringLiteral("systemUI"));
     const QJsonValue volume = snapshot.value(QStringLiteral("volumePercent"));
@@ -296,8 +364,6 @@ bool RemoteSessionCoordinator::acceptSnapshot(
         || systemUI.toArray().size() > 64
         || !readPositiveGeneration(snapshot.value(QStringLiteral("revision")),
                                    &snapshotRevision)
-        || snapshotRevision
-            <= m_lastSnapshotRevisionBySession.value(remoteSessionId, 0)
         || !readPositiveGeneration(
             snapshot.value(QStringLiteral("capturedAtEpochMs")), &capturedAt)
         || !(volume.isNull()
@@ -311,9 +377,29 @@ bool RemoteSessionCoordinator::acceptSnapshot(
     for (const QJsonValue& zone : systemUI.toArray()) {
         if (!isValidUiZone(zone)) return false;
     }
-    m_lastSnapshotSequenceBySession.insert(remoteSessionId, sequence);
-    m_lastSnapshotRevisionBySession.insert(remoteSessionId, snapshotRevision);
     return true;
+}
+
+void RemoteSessionCoordinator::suspend(const QString& remoteSessionId)
+{
+    auto it = m_byId.find(remoteSessionId);
+    if (it == m_byId.end() || (it->phase != QLatin1String("Active")
+        && it->phase != QLatin1String("Grace"))) return;
+    it->active = false;
+    it->degraded = true;
+    emit sessionChanged(remoteSessionId, it->generation, it->phase);
+}
+
+bool RemoteSessionCoordinator::isClosedDuplicate(const QJsonObject& envelope) const
+{
+    const auto found = m_closedBindings.constFind(envelope.value(QStringLiteral("remoteSessionId")).toString());
+    if (found == m_closedBindings.cend()) return false;
+    quint64 generation = 0;
+    return readPositiveGeneration(envelope.value(QStringLiteral("generation")), &generation)
+        && generation == found->generation
+        && envelope.value(QStringLiteral("ownerEndpointId")).toString() == found->ownerEndpointId
+        && envelope.value(QStringLiteral("targetEndpointId")).toString() == found->targetEndpointId
+        && envelope.value(QStringLiteral("teardownId")).toString() == found->teardownId;
 }
 
 bool RemoteSessionCoordinator::canClose(
@@ -360,6 +446,10 @@ bool RemoteSessionCoordinator::canClose(
         return false;
     }
 
+    quint64 revision = 0;
+    const bool revisionPresent = readPositiveGeneration(envelope.value(QStringLiteral("stateRevision")), &revision);
+    if (envelope.contains(QStringLiteral("protocolVersion")) && !revisionPresent) return false;
+
     // A restarted owner may receive the committed Closed tombstone before any
     // terminal state replay. It owns no receiver cache, so accepting this
     // complete authenticated tuple merely resolves stale local UI/state.
@@ -368,9 +458,12 @@ bool RemoteSessionCoordinator::canClose(
     }
 
     const Binding& binding = iterator.value();
+    if (revisionPresent && revision < binding.stateRevision) return false;
+    if (generation != binding.generation
+        && (!revisionPresent || revision <= binding.stateRevision)) return false;
     if (ownerEndpointId != binding.ownerEndpointId
         || targetEndpointId != binding.targetEndpointId
-        || generation != binding.generation) {
+        || generation < binding.generation) {
         return false;
     }
     if (!localIsOwner) {
@@ -378,8 +471,8 @@ bool RemoteSessionCoordinator::canClose(
                 || binding.phase == QLatin1String("CleanupPending"))
             && teardownId == binding.teardownId
             && !binding.teardownId.isEmpty()
-            && ownerConnectionGeneration == binding.ownerConnectionGeneration
-            && targetConnectionGeneration == binding.targetConnectionGeneration;
+            && ownerConnectionGeneration >= binding.ownerConnectionGeneration
+            && targetConnectionGeneration == envelopeLocalConnectionGeneration;
     }
 
     const bool terminalOrMissedTerminal =
@@ -396,13 +489,34 @@ bool RemoteSessionCoordinator::canClose(
             && ownerConnectionGeneration == localConnectionGeneration);
     return terminalOrMissedTerminal && teardownMatches
         && ownerTransportMatches
-        && targetConnectionGeneration == binding.targetConnectionGeneration;
+        && targetConnectionGeneration >= binding.targetConnectionGeneration;
 }
 
-void RemoteSessionCoordinator::remove(const QString& remoteSessionId)
+void RemoteSessionCoordinator::remove(const QString& remoteSessionId, const QJsonObject& finalEnvelope)
 {
-    if (isOpaqueId(remoteSessionId)) m_closedSessionIds.insert(remoteSessionId);
-    const Binding binding = m_byId.take(remoteSessionId);
+    Binding binding = m_byId.take(remoteSessionId);
+    if (!finalEnvelope.isEmpty()) {
+        binding.remoteSessionId = remoteSessionId;
+        binding.ownerEndpointId = finalEnvelope.value(QStringLiteral("ownerEndpointId")).toString();
+        binding.targetEndpointId = finalEnvelope.value(QStringLiteral("targetEndpointId")).toString();
+        binding.teardownId = finalEnvelope.value(QStringLiteral("teardownId")).toString();
+        readPositiveGeneration(finalEnvelope.value(QStringLiteral("generation")), &binding.generation);
+        readPositiveGeneration(finalEnvelope.value(QStringLiteral("stateRevision")), &binding.stateRevision);
+        binding.phase = QStringLiteral("Closed");
+        binding.active = false;
+    }
+    if (isOpaqueId(remoteSessionId) && !m_closedSessionIds.contains(remoteSessionId)) {
+        m_closedSessionIds.insert(remoteSessionId);
+        m_closedSessionOrder.append(remoteSessionId);
+        m_closedBindings.insert(remoteSessionId, binding);
+        while (m_closedSessionOrder.size() > 2048) {
+            const QString oldest = m_closedSessionOrder.takeFirst();
+            m_closedSessionIds.remove(oldest);
+            m_closedBindings.remove(oldest);
+        }
+    }
+    m_initialSnapshotBySession.remove(remoteSessionId);
+    m_latestSnapshotBySession.remove(remoteSessionId);
     m_lastSnapshotSequenceBySession.remove(remoteSessionId);
     m_lastSnapshotRevisionBySession.remove(remoteSessionId);
     if (binding.remoteSessionId.isEmpty()) return;
@@ -426,6 +540,10 @@ void RemoteSessionCoordinator::clear()
     m_lastSnapshotSequenceBySession.clear();
     m_lastSnapshotRevisionBySession.clear();
     m_closedSessionIds.clear();
+    m_closedSessionOrder.clear();
+    m_closedBindings.clear();
+    m_initialSnapshotBySession.clear();
+    m_latestSnapshotBySession.clear();
     for (const QString& id : ids) emit sessionRemoved(id);
 }
 

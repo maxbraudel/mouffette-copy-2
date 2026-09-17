@@ -9,6 +9,10 @@ const METRICS = new Set([
     'remote_session_cleanup_pending',
     'remote_cache_quarantined_bytes_total',
     'remote_session_cleanup_error_total',
+    'remote_session_cleanup_oldest_age_ms',
+    'remote_session_reconcile_total',
+    'remote_session_rejected_total',
+    'server_event_loop_delay_ms',
 ]);
 
 class ProtocolMetrics {
@@ -16,6 +20,7 @@ class ProtocolMetrics {
         this.logger = options.logger === undefined ? console.log : options.logger;
         this.values = new Map();
         this.onceKeys = new Set();
+        this.maximumOnceKeys = options.maximumOnceKeys || 32768;
     }
 
     increment(name, amount = 1, correlationId = '') {
@@ -31,6 +36,9 @@ class ProtocolMetrics {
         const key = `${name}:${String(correlationId || '')}`;
         if (this.onceKeys.has(key)) return this.values.get(name) || 0;
         this.onceKeys.add(key);
+        while (this.onceKeys.size > this.maximumOnceKeys) {
+            this.onceKeys.delete(this.onceKeys.values().next().value);
+        }
         return this.increment(name, amount, correlationId);
     }
 

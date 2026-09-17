@@ -252,6 +252,96 @@ private slots:
         QVERIFY(sessions.acceptSnapshot(envelope, 1));
     }
 
+    void replayedInitialSnapshotDoesNotRollBackNewerTopology()
+    {
+        RemoteSessionCoordinator sessions;
+        sessions.setLocalEndpointId(kOwner);
+        QVERIFY(sessions.upsert(sessionEnvelope(), 1));
+        QJsonObject snapshot{{"screens", QJsonArray{}}, {"systemUI", QJsonArray{}},
+            {"volumePercent", 50}, {"revision", 1}, {"capturedAtEpochMs", 1}};
+        QJsonObject first{{"remoteSessionId", "remote_session_1"},
+            {"generation", 1}, {"snapshotSequence", 1}, {"snapshot", snapshot}};
+        QVERIFY(sessions.acceptSnapshot(first, 1, true));
+        QVERIFY(sessions.acceptSnapshot(first, 1, true));
+        auto latest = first;
+        snapshot.insert("volumePercent", 75);
+        snapshot.insert("revision", 2);
+        latest.insert("snapshot", snapshot);
+        latest.insert("snapshotSequence", 2);
+        QVERIFY(sessions.acceptSnapshot(latest, 1));
+        QVERIFY(sessions.acceptSnapshot(first, 1, true));
+        QVERIFY(sessions.acceptSnapshot(latest, 1, true));
+        QVERIFY(!sessions.acceptSnapshot(latest, 1));
+        snapshot.insert("volumePercent", 1);
+        first.insert("snapshot", snapshot);
+        QVERIFY(!sessions.acceptSnapshot(first, 1, true));
+    }
+
+    void versionSixRejectsMalformedSnapshotBeforeInstallingBinding()
+    {
+        RemoteSessionCoordinator sessions;
+        sessions.setLocalEndpointId(kOwner);
+        auto opened = sessionEnvelope();
+        opened.insert("protocolVersion", 6);
+        opened.insert("stateRevision", 1);
+        opened.insert("validUntilServerMonotonicMs", 5000);
+        opened.insert("snapshotSequence", 1);
+        opened.insert("snapshot", QJsonObject{{"screens", QJsonArray{}}});
+        QVERIFY(!sessions.upsert(opened, 1));
+        QVERIFY(sessions.all().isEmpty());
+        auto recovered = opened;
+        recovered.insert("type", "remote_session_resumed");
+        recovered.insert("reconciled", true);
+        QVERIFY(!sessions.upsert(recovered, 1));
+        recovered.remove("snapshot");
+        QVERIFY(!sessions.upsert(recovered, 1));
+        QVERIFY(sessions.all().isEmpty());
+        opened.insert("snapshot", QJsonObject{{"screens", QJsonArray{}},
+            {"systemUI", QJsonArray{}}, {"volumePercent", 50},
+            {"revision", 1}, {"capturedAtEpochMs", 1}});
+        QVERIFY(sessions.upsert(opened, 1));
+        opened.insert("stateRevision", 0);
+        QVERIFY(!sessions.upsert(opened, 1));
+        QCOMPARE(sessions.byId("remote_session_1").stateRevision, quint64(1));
+    }
+
+    void terminalCatchupMayAdvanceMissedGenerationWithoutGrantingCommands()
+    {
+        SceneRunCoordinator coordinator;
+        coordinator.setLocalEndpointId(kTarget);
+        QVERIFY(coordinator.upsertSession(sessionEnvelope(), 1));
+        auto terminal = sessionEnvelope(3, "CleanupPending", "remote_session_terminating");
+        terminal.insert("protocolVersion", 6);
+        terminal.insert("stateRevision", 8);
+        terminal.insert("teardownId", "missed_generation_cleanup");
+        QVERIFY(coordinator.upsertSession(terminal, 3));
+        const auto binding = coordinator.sessionById("remote_session_1");
+        QCOMPARE(binding.generation, quint64(3));
+        QVERIFY(!binding.active);
+        auto closed = terminal;
+        closed.insert("type", "remote_session_closed");
+        closed.insert("phase", "Closed");
+        closed.insert("cleanupState", "confirmed");
+        closed.insert("stateRevision", 9);
+        QVERIFY(coordinator.removeSession(closed, 3));
+        QVERIFY(coordinator.remoteSessions()->isClosedDuplicate(closed));
+        QVERIFY(!coordinator.upsertSession(sessionEnvelope(4), 4));
+    }
+
+    void degradedStateNeverAuthorizesSceneCommands()
+    {
+        SceneRunCoordinator coordinator;
+        coordinator.setLocalEndpointId(kOwner);
+        QVERIFY(coordinator.upsertSession(sessionEnvelope(), 1));
+        auto degraded = sessionEnvelope(1, "Active", "remote_session_lease_state");
+        degraded.insert("degraded", true);
+        QVERIFY(coordinator.upsertSession(degraded, 1));
+        QVERIFY(!coordinator.sessionById("remote_session_1").active);
+        SceneRunCoordinator::Run run;
+        QString error;
+        QVERIFY(!coordinator.createOutgoingRun(kTarget, 1, manifest(), scene(), &run, &error));
+    }
+
     void immutableRunRejectsWrongDigestAndIllegalTransitions()
     {
         SceneRunCoordinator coordinator;
@@ -486,6 +576,29 @@ private slots:
         SceneRunCoordinator restartedTarget;
         restartedTarget.setLocalEndpointId(kTarget);
         QVERIFY(!restartedTarget.removeSession(closed, 1));
+    }
+
+    void commandReadinessRequiresBothPartiesAndFinishedHistoryIsBounded()
+    {
+        SceneRunCoordinator coordinator;
+        coordinator.setLocalEndpointId(kOwner);
+        coordinator.setPrepareTimeoutMs(15000);
+        QJsonObject envelope = sessionEnvelope();
+        envelope.insert(QStringLiteral("commandReady"), false);
+        QVERIFY(coordinator.upsertSession(envelope, 1));
+        SceneRunCoordinator::Run run;
+        QString error;
+        QVERIFY(!coordinator.createOutgoingRun(kTarget, 1, manifest(), scene(), &run, &error));
+        envelope.insert(QStringLiteral("commandReady"), true);
+        QVERIFY(coordinator.upsertSession(envelope, 1));
+        QString oldest;
+        for (int i = 0; i < 520; ++i) {
+            QVERIFY(coordinator.createOutgoingRun(kTarget, 1, manifest(), scene(), &run, &error));
+            if (i == 0) oldest = run.sceneRunId;
+            coordinator.finishRun(run.sceneRunId, false);
+        }
+        QVERIFY(coordinator.run(oldest).sceneRunId.isEmpty());
+        QCOMPARE(coordinator.run(run.sceneRunId).phase, SceneRunCoordinator::Phase::Stopped);
     }
 
     void protocolIntegersMustBeExactAndSafeBeforeMutation()

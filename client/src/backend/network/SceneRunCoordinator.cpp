@@ -95,8 +95,10 @@ void SceneRunCoordinator::setPrepareTimeoutMs(int timeoutMs)
 }
 
 bool SceneRunCoordinator::upsertSession(const QJsonObject& envelope,
-                                        quint64 localConnectionGeneration)
+                                        quint64 localConnectionGeneration,
+                                        QString* validationError)
 {
+    if (validationError) validationError->clear();
     const QString type = envelope.value(QStringLiteral("type")).toString();
     const QString remoteSessionId =
         envelope.value(QStringLiteral("remoteSessionId")).toString();
@@ -136,7 +138,7 @@ bool SceneRunCoordinator::upsertSession(const QJsonObject& envelope,
             return false;
         }
     } else if (type == QLatin1String("remote_session_resumed")) {
-        if (existing.remoteSessionId.isEmpty()
+        if ((existing.remoteSessionId.isEmpty() && !envelope.value(QStringLiteral("reconciled")).toBool())
             || generation < existing.generation
             || (phase != QLatin1String("Active")
                 && phase != QLatin1String("Grace"))) {
@@ -162,7 +164,7 @@ bool SceneRunCoordinator::upsertSession(const QJsonObject& envelope,
                 envelope.value(QStringLiteral("teardownId")).toString());
         if ((!recoveryTeardown && existing.remoteSessionId.isEmpty())
             || (!existing.remoteSessionId.isEmpty()
-                && generation != existing.generation)
+                && generation < existing.generation)
             || (phase != QLatin1String("Terminating")
                 && phase != QLatin1String("CleanupPending"))) {
             return false;
@@ -171,7 +173,7 @@ bool SceneRunCoordinator::upsertSession(const QJsonObject& envelope,
         return false;
     }
 
-    if (!m_remoteSessions->upsert(envelope, localConnectionGeneration)) return false;
+    if (!m_remoteSessions->upsert(envelope, localConnectionGeneration, validationError)) return false;
     const SessionBinding binding = m_remoteSessions->byId(
         remoteSessionId);
     for (auto it = m_runsById.begin(); it != m_runsById.end(); ++it) {
@@ -194,7 +196,7 @@ bool SceneRunCoordinator::removeSession(const QJsonObject& envelope,
     }
     const QString remoteSessionId =
         envelope.value(QStringLiteral("remoteSessionId")).toString();
-    m_remoteSessions->remove(remoteSessionId);
+    m_remoteSessions->remove(remoteSessionId, envelope);
     for (auto it = m_runsById.begin(); it != m_runsById.end();) {
         if (it->remoteSessionId == remoteSessionId) it = m_runsById.erase(it);
         else ++it;
@@ -224,6 +226,7 @@ void SceneRunCoordinator::clearSessions()
 {
     m_remoteSessions->clear();
     m_runsById.clear();
+    m_finishedRunOrder.clear();
 }
 
 SceneRunCoordinator::SessionBinding SceneRunCoordinator::sessionForPeer(
@@ -263,7 +266,7 @@ bool SceneRunCoordinator::createOutgoingRun(const QString& peerEndpointId,
         return false;
     }
     const SessionBinding binding = m_remoteSessions->outgoingForPeer(peerEndpointId);
-    if (!binding.active || m_localEndpointId != binding.ownerEndpointId) {
+    if (!binding.active || !binding.commandReady || m_localEndpointId != binding.ownerEndpointId) {
         if (errorMessage) *errorMessage = QStringLiteral("No active outgoing remote session for this device");
         return false;
     }
@@ -330,7 +333,7 @@ bool SceneRunCoordinator::acceptInboundEnvelope(const QJsonObject& envelope,
     }
     const bool terminalDelivery = type == QLatin1String("stop")
         || type == QLatin1String("stopped");
-    if ((!binding.active && !terminalDelivery) || !isOpaqueId(sceneRunId)
+    if (((!binding.active || !binding.commandReady) && !terminalDelivery) || !isOpaqueId(sceneRunId)
         || generation != binding.generation
         || ownerEndpointId != binding.ownerEndpointId
         || targetEndpointId != binding.targetEndpointId
@@ -437,6 +440,7 @@ bool SceneRunCoordinator::acceptInboundEnvelope(const QJsonObject& envelope,
         current.startServerMonotonicMs = scheduledServerMonotonicMs;
     }
     current.phase = next;
+    if (next == Phase::Stopped || next == Phase::Failed) rememberFinishedRun(sceneRunId);
     emit runChanged(sceneRunId, next);
     return true;
 }
@@ -445,8 +449,23 @@ void SceneRunCoordinator::finishRun(const QString& sceneRunId, bool failed)
 {
     auto iterator = m_runsById.find(sceneRunId);
     if (iterator == m_runsById.end()) return;
-    iterator->phase = failed ? Phase::Failed : Phase::Stopped;
-    emit runChanged(sceneRunId, iterator->phase);
+    const Phase terminal = failed ? Phase::Failed : Phase::Stopped;
+    iterator->phase = terminal;
+    rememberFinishedRun(sceneRunId);
+    emit runChanged(sceneRunId, terminal);
+}
+
+void SceneRunCoordinator::rememberFinishedRun(const QString& sceneRunId)
+{
+    if (m_finishedRunOrder.contains(sceneRunId)) return;
+    m_finishedRunOrder.append(sceneRunId);
+    while (m_finishedRunOrder.size() > 512) {
+        const QString oldest = m_finishedRunOrder.takeFirst();
+        const auto run = m_runsById.constFind(oldest);
+        if (run != m_runsById.cend()
+            && (run->phase == Phase::Stopped || run->phase == Phase::Failed))
+            m_runsById.remove(oldest);
+    }
 }
 
 QJsonArray SceneRunCoordinator::normalizeManifest(const QJsonArray& manifest,

@@ -1,10 +1,13 @@
 #include "backend/network/RemoteCacheStore.h"
+#include "backend/network/RemoteCacheHistory.h"
 #include "backend/files/PathSafety.h"
 #include "backend/runtime/RuntimeProfile.h"
+#include "backend/runtime/SuspendInclusiveClock.h"
 
 #include <QCryptographicHash>
 #include <QByteArrayView>
 #include <QDateTime>
+#include <QDebug>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -477,7 +480,8 @@ struct RemoteCacheStore::DeleteResult {
     QString errorCode;
 };
 
-RemoteCacheStore::RemoteCacheStore(QString rootPath, QObject* parent)
+RemoteCacheStore::RemoteCacheStore(QString rootPath, QObject* parent,
+                                 std::shared_ptr<RemoteCacheHistory> history)
     : QObject(parent)
     , m_rootPath(normalizedPath(rootPath))
     , m_statePath(QDir(m_rootPath).filePath(QLatin1String(kStateDirectory)))
@@ -490,6 +494,11 @@ RemoteCacheStore::RemoteCacheStore(QString rootPath, QObject* parent)
           QDir(m_statePath).filePath(QLatin1String(kAssetRemovalTombstoneDirectory)))
     , m_quarantinePath(QDir(m_rootPath).filePath(QLatin1String(kQuarantineDirectory)))
 {
+    m_history = history ? std::move(history) : std::make_shared<RemoteCacheHistory>();
+    m_transactionPool.setMaxThreadCount(1);
+    m_cleanupSweepTimer.setSingleShot(true);
+    m_cleanupSweepTimer.setInterval(1000);
+    connect(&m_cleanupSweepTimer, &QTimer::timeout, this, &RemoteCacheStore::requestCleanupSweep);
 }
 
 RemoteCacheStore::~RemoteCacheStore() = default;
@@ -754,11 +763,48 @@ bool RemoteCacheStore::initialize(QString* errorCode)
         || !sweepQuarantine(errorCode)) {
         return false;
     }
+    collectExpiredHistory();
+    if (!m_backgroundTransaction && m_history->size() > 0 && !m_cleanupSweepTimer.isActive())
+        m_cleanupSweepTimer.start(60000);
+    return true;
+}
+
+bool RemoteCacheStore::requestRecovery()
+{
+    if (m_recoveryPending || !m_pendingTransactions.isEmpty() || m_pendingAssetRemovalCount > 0) return false;
+    m_recoveryPending = true;
+    using RecoveryResult = QPair<bool, QString>;
+    auto* watcher = new QFutureWatcher<RecoveryResult>(this);
+    connect(watcher, &QFutureWatcher<RecoveryResult>::finished, this, [this, watcher]() {
+        const auto result = watcher->result();
+        watcher->deleteLater();
+        m_recoveryPending = false;
+        m_initialized = result.first;
+        m_lastErrorCode = result.second;
+        if (result.first) requestCleanupSweep();
+        emit recoveryFinished(result.first, result.second);
+    });
+    watcher->setFuture(QtConcurrent::run(&m_transactionPool, [root = m_rootPath, history = m_history]() {
+        RemoteCacheStore disk(root);
+        disk.m_history = history;
+        disk.m_backgroundTransaction = true;
+        QString error;
+        const bool ready = disk.initialize(&error) && disk.receiverAdvertisementSafe(&error);
+        return RecoveryResult(ready, error);
+    }));
     return true;
 }
 
 bool RemoteCacheStore::ensureSession(const Scope& scope, QString* errorCode)
 {
+    if (m_recoveryPending) {
+        setError(QStringLiteral("cache_recovery_pending"), errorCode);
+        return false;
+    }
+    if (m_transactionFences.contains(scope.remoteSessionId)) {
+        setError(QStringLiteral("session_terminal"), errorCode);
+        return false;
+    }
     m_lastErrorCode.clear();
     if (!m_initialized) {
         setError(QStringLiteral("cache_store_not_initialized"), errorCode);
@@ -780,6 +826,12 @@ bool RemoteCacheStore::ensureSession(const Scope& scope, QString* errorCode)
 
     const QString senderDirectory = QDir(m_rootPath).filePath(scope.senderEndpointId);
     const QString sessionDirectory = scopeDirectory(scope);
+    if (!QFileInfo::exists(sessionDirectory)
+        && retainedScopeCount() >= m_history->capacity()) {
+        setError(QStringLiteral("cache_history_saturated"), errorCode);
+        if (!m_backgroundTransaction) requestCleanupSweep();
+        return false;
+    }
     if (!isDirectChild(m_rootPath, senderDirectory)
         || !isDirectChild(senderDirectory, sessionDirectory)
         || !ensurePrivateDirectory(senderDirectory, errorCode)
@@ -822,6 +874,10 @@ bool RemoteCacheStore::rebindSessionGeneration(const Scope& currentScope,
                                                quint64 newGeneration,
                                                QString* errorCode)
 {
+    if (m_recoveryPending || m_transactionFences.contains(currentScope.remoteSessionId)) {
+        setError(QStringLiteral("session_terminal"), errorCode);
+        return false;
+    }
     m_lastErrorCode.clear();
     if (!m_initialized) {
         setError(QStringLiteral("cache_store_not_initialized"), errorCode);
@@ -848,10 +904,14 @@ bool RemoteCacheStore::rebindSessionGeneration(const Scope& currentScope,
         || descriptor.value(QStringLiteral("schemaVersion")).toInt(-1)
             != MetadataSchemaVersion
         || !parseScope(descriptor, &storedScope)
-        || !(storedScope == currentScope)) {
+        || storedScope.senderEndpointId != currentScope.senderEndpointId
+        || storedScope.remoteSessionId != currentScope.remoteSessionId
+        || (storedScope.generation != currentScope.generation
+            && storedScope.generation != newGeneration)) {
         setError(QStringLiteral("remote_session_generation_conflict"), errorCode);
         return false;
     }
+    if (storedScope.generation == newGeneration) return true;
     descriptor.insert(QStringLiteral("generation"),
                       generationString(newGeneration));
     descriptor.insert(QStringLiteral("generationUpdatedAt"), utcNow());
@@ -970,6 +1030,31 @@ QString RemoteCacheStore::stagingAssetPath(const Scope& scope,
     return result;
 }
 
+bool RemoteCacheStore::requestAssetRemoval(const Scope& scope,
+    const AssetRemovalDescriptor& descriptor, std::function<void(AssetRemovalResult)> completion)
+{
+    if (m_recoveryPending || m_pendingTransactions.size() + m_pendingAssetRemovalCount >= 64)
+        return false;
+    ++m_pendingAssetRemovalCount;
+    auto* watcher = new QFutureWatcher<AssetRemovalResult>(this);
+    connect(watcher, &QFutureWatcher<AssetRemovalResult>::finished, this,
+            [this, watcher, completion = std::move(completion)]() {
+        const auto result = watcher->result();
+        watcher->deleteLater();
+        --m_pendingAssetRemovalCount;
+        if (result.acknowledgementSafe()) requestCleanupSweep();
+        completion(result);
+    });
+    watcher->setFuture(QtConcurrent::run(&m_transactionPool, [root = m_rootPath, history = m_history, scope, descriptor]() {
+        RemoteCacheStore disk(root);
+        disk.m_history = history;
+        disk.m_initialized = true;
+        disk.m_backgroundTransaction = true;
+        return disk.removeValidatedAsset(scope, descriptor);
+    }));
+    return true;
+}
+
 RemoteCacheStore::AssetRemovalResult
 RemoteCacheStore::removeValidatedAsset(const Scope& scope,
                                        const AssetRemovalDescriptor& descriptor)
@@ -1013,6 +1098,22 @@ RemoteCacheStore::removeValidatedAsset(const Scope& scope,
     }
 
     const QString replayPath = assetRemovalTombstonePath(command.removalId);
+    QSet<QString> retainedRemovalKeys;
+    if (!QFileInfo::exists(replayPath) && !QFileInfo::exists(assetRemovalIntentPath(command.removalId))) {
+        for (const auto& directory : {m_assetRemovalTombstonesPath, m_assetRemovalIntentsPath}) {
+            for (const auto& record : QDir(directory).entryInfoList(
+                     {QStringLiteral("*.json")}, QDir::Files | QDir::NoSymLinks))
+                retainedRemovalKeys.insert(record.completeBaseName());
+        }
+    }
+    if (!QFileInfo::exists(replayPath)
+        && !QFileInfo::exists(assetRemovalIntentPath(command.removalId))
+        && retainedRemovalKeys.size() >= m_history->capacity()) {
+        result.outcome = CommitOutcome::CleanupError;
+        result.errorCode = QStringLiteral("cache_history_saturated");
+        setError(result.errorCode);
+        return result;
+    }
     if (QFileInfo::exists(replayPath)) {
         QJsonObject replay;
         Scope replayScope;
@@ -1316,17 +1417,8 @@ RemoteCacheStore::removeValidatedAsset(const Scope& scope,
         syncDirectory(m_assetRemovalIntentsPath);
     }
 
-    // The server also keeps a bounded replay tombstone. Bound the local side
-    // independently so repeated sessions cannot grow metadata without limit.
-    constexpr qsizetype kMaximumAssetRemovalTombstones = 4096;
-    const QFileInfoList removalTombstones =
-        QDir(m_assetRemovalTombstonesPath).entryInfoList(
-            {QStringLiteral("*.json")}, QDir::Files | QDir::NoSymLinks,
-            QDir::Time);
-    for (qsizetype index = kMaximumAssetRemovalTombstones;
-         index < removalTombstones.size(); ++index) {
-        QFile::remove(removalTombstones.at(index).absoluteFilePath());
-    }
+    // Never evict a replay proof merely to make room. Admission is bounded;
+    // a background collector retires only completed proofs past the horizon.
 
     result.outcome = CommitOutcome::Committed;
     if (quarantineExists) {
@@ -1363,6 +1455,11 @@ bool RemoteCacheStore::beginTeardownInternal(const Scope& scope,
                                              const QString& reasonCode,
                                              QString* errorCode)
 {
+    if (!QFileInfo::exists(scopeDirectory(scope)) && !QFileInfo::exists(intentPath(scope))
+        && !QFileInfo::exists(tombstonePath(scope)) && retainedScopeCount() >= m_history->capacity()) {
+        setError(QStringLiteral("cache_history_saturated"), errorCode);
+        return false;
+    }
     m_lastErrorCode.clear();
     if (!m_initialized) {
         setError(QStringLiteral("cache_store_not_initialized"), errorCode);
@@ -1536,6 +1633,139 @@ bool RemoteCacheStore::persistCleanupError(const Scope& scope,
         ? scopeKey(scope) + QStringLiteral(".json")
         : quarantineEntry + QStringLiteral(".json");
     return writeJsonAtomically(QDir(m_cleanupErrorsPath).filePath(name), record, &ignored);
+}
+
+bool RemoteCacheStore::teardownPending(const QString& sessionId) const
+{
+    if (sessionId.isEmpty()) return !m_pendingTransactions.isEmpty();
+    for (const Scope& scope : m_pendingTransactions)
+        if (scope.remoteSessionId == sessionId) return true;
+    return false;
+}
+
+RemoteCacheStore::CommitResult RemoteCacheStore::teardownResult(
+    const Scope& scope, const QString& teardownId) const
+{
+    CommitResult pending;
+    pending.outcome = CommitOutcome::Pending;
+    pending.teardownId = teardownId;
+    return m_completedTransactions.value(scopeKey(scope) + QLatin1Char(':')
+        + QString::number(scope.generation) + QLatin1Char(':') + teardownId, pending);
+}
+
+RemoteCacheStore::CommitResult RemoteCacheStore::requestTeardown(
+    const Scope& scope, const QString& teardownId, const QString& provisionalReason)
+{
+    CommitResult result;
+    result.teardownId = teardownId;
+    QString validationError;
+    if (!m_initialized || !validateScope(scope, &validationError)
+        || !isValidTeardownId(teardownId)) {
+        result.errorCode = !m_initialized ? QStringLiteral("cache_store_not_initialized")
+            : (validationError.isEmpty() ? QStringLiteral("invalid_teardown_id") : validationError);
+        return result;
+    }
+    const QString key = scopeKey(scope) + QLatin1Char(':')
+        + QString::number(scope.generation) + QLatin1Char(':') + teardownId;
+    if (m_completedTransactions.contains(key)) {
+        result = m_completedTransactions.value(key);
+        if (result.acknowledgementSafe()) {
+            result.outcome = CommitOutcome::AlreadyCommitted;
+            return result;
+        }
+        if (MouffetteClock::nowMs() < m_transactionRetryAt.value(key)) return result;
+        m_completedTransactions.remove(key); // a transient disk failure may be retried
+    }
+    result.outcome = CommitOutcome::Pending;
+    if (m_pendingTransactions.contains(key)) return result;
+    if (teardownPending(scope.remoteSessionId)) return result;
+    while (m_completedTransactions.size() + m_pendingTransactions.size() >= 4096) {
+        auto evictable = m_completedTransactions.end();
+        for (auto it = m_completedTransactions.begin(); it != m_completedTransactions.end(); ++it) {
+            if (it->acknowledgementSafe()) { evictable = it; break; }
+        }
+        if (evictable == m_completedTransactions.end()) {
+            result.outcome = CommitOutcome::CleanupError;
+            result.errorCode = QStringLiteral("cleanup_history_saturated");
+            return result;
+        }
+        m_completedTransactions.erase(evictable); // durable replay proof remains on disk
+    }
+    if (m_pendingTransactions.size() + m_pendingAssetRemovalCount >= 64
+        || (m_transactionFences.size() >= 4096 && !m_transactionFences.contains(scope.remoteSessionId))) {
+        if (m_transactionFences.size() < 4096) m_transactionFences.insert(scope.remoteSessionId);
+        result.outcome = CommitOutcome::CleanupError;
+        result.errorCode = QStringLiteral("cleanup_queue_full");
+        return result;
+    }
+    m_transactionFences.insert(scope.remoteSessionId);
+    m_pendingTransactions.insert(key, scope);
+    m_transactionStartedAt.insert(key, MouffetteClock::nowMs());
+    const QString root = m_rootPath;
+    auto* watcher = new QFutureWatcher<CommitResult>(this);
+    connect(watcher, &QFutureWatcher<CommitResult>::finished, this,
+            [this, watcher, scope, teardownId, key]() {
+        const CommitResult completed = watcher->result();
+        watcher->deleteLater();
+        m_pendingTransactions.remove(key);
+        const qint64 ageMs = qMax<qint64>(0, MouffetteClock::nowMs() - m_transactionStartedAt.take(key));
+        if (m_completedTransactions.size() >= 4096) {
+            for (auto it = m_completedTransactions.begin(); it != m_completedTransactions.end(); ++it) {
+                if (it->acknowledgementSafe()) {
+                    m_completedTransactions.erase(it);
+                    break;
+                }
+            }
+        }
+        m_completedTransactions.insert(key, completed);
+        if (completed.acknowledgementSafe()) {
+            m_transactionFailures.remove(key);
+            m_transactionRetryAt.remove(key);
+            m_transactionFences.remove(scope.remoteSessionId);
+            emit logicalCommitCompleted(scope.senderEndpointId, scope.remoteSessionId,
+                                         scope.generation, completed.teardownId,
+                                         completed.quarantinedBytes);
+            QJsonObject record;
+            QString ignored;
+            const auto stored = tombstone(scope);
+            if (stored && loadJsonObject(tombstonePath(scope), &record, &ignored))
+                schedulePhysicalCleanup(*stored, record.value(QStringLiteral("quarantineEntry")).toString());
+        } else {
+            const int attempt = qMin(6, m_transactionFailures.value(key));
+            m_transactionFailures[key] = attempt + 1;
+            m_transactionRetryAt[key] = MouffetteClock::nowMs() + qMin(30000, 500 << attempt);
+        }
+        qInfo().noquote() << QJsonDocument(QJsonObject{
+            {QStringLiteral("event"), QStringLiteral("cache_quarantine_completed")},
+            {QStringLiteral("session"), scope.remoteSessionId},
+            {QStringLiteral("generation"), QString::number(scope.generation)},
+            {QStringLiteral("requestId"), teardownId},
+            {QStringLiteral("ageMs"), ageMs},
+            {QStringLiteral("pendingCount"), m_pendingTransactions.size()},
+            {QStringLiteral("committed"), completed.acknowledgementSafe()},
+            {QStringLiteral("cause"), completed.errorCode}
+        }).toJson(QJsonDocument::Compact);
+        emit teardownFinished(scope.senderEndpointId, scope.remoteSessionId,
+                              scope.generation, teardownId);
+    });
+    watcher->setFuture(QtConcurrent::run(&m_transactionPool,
+        [root, history = m_history, scope, teardownId, provisionalReason]() {
+            // This isolated instance touches only the fenced scope. Startup
+            // recovery must not run here: unrelated live sessions remain live.
+            RemoteCacheStore disk(root);
+            disk.m_history = history;
+            disk.m_initialized = true;
+            disk.m_backgroundTransaction = true;
+            QString error;
+            const bool begun = provisionalReason.isEmpty()
+                ? disk.beginTeardown(scope, teardownId, &error)
+                : disk.beginProvisionalTeardown(scope, teardownId, provisionalReason, &error);
+            auto committed = disk.commitTeardown(scope, teardownId);
+            if (!begun && !committed.acknowledgementSafe() && committed.errorCode.isEmpty())
+                committed.errorCode = error;
+            return committed;
+        }));
+    return result;
 }
 
 RemoteCacheStore::CommitResult RemoteCacheStore::commitTeardown(
@@ -1861,7 +2091,8 @@ RemoteCacheStore::SessionState RemoteCacheStore::state(const Scope& scope) const
 
 bool RemoteCacheStore::acceptsCommands(const Scope& scope) const
 {
-    return state(scope) == SessionState::Open;
+    return !m_recoveryPending && !m_transactionFences.contains(scope.remoteSessionId)
+        && state(scope) == SessionState::Open;
 }
 
 bool RemoteCacheStore::ownsPath(const Scope& scope, const QString& candidatePath) const
@@ -2453,28 +2684,129 @@ bool RemoteCacheStore::sweepQuarantine(QString* errorCode)
     return true;
 }
 
+qsizetype RemoteCacheStore::retainedScopeCount() const
+{
+    // Reserve a history slot when a namespace is first admitted. The same
+    // scope may have a live directory, an intent and a tombstone during a
+    // transaction: count their union so cleanup never needs a second slot.
+    QSet<QString> keys;
+    for (const auto& directory : {m_tombstonesPath, m_intentsPath}) {
+        for (const auto& record : QDir(directory).entryInfoList(
+                 {QStringLiteral("*.json")}, QDir::Files | QDir::NoSymLinks))
+            keys.insert(record.completeBaseName());
+    }
+    for (const auto& sender : QDir(m_rootPath).entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot | QDir::NoSymLinks)) {
+        if (!isValidEndpointId(sender.fileName())) continue;
+        for (const auto& session : QDir(sender.absoluteFilePath()).entryInfoList(
+                 QDir::Dirs | QDir::NoDotAndDotDot | QDir::NoSymLinks)) {
+            if (isValidSessionId(session.fileName()))
+                keys.insert(scopeKey({sender.fileName(), session.fileName(), 1}));
+        }
+    }
+    return keys.size();
+}
+
+void RemoteCacheStore::collectExpiredHistory()
+{
+    for (const QString& directory : {m_tombstonesPath, m_assetRemovalTombstonesPath}) {
+        const bool sessionHistory = directory == m_tombstonesPath;
+        const auto records = QDir(directory).entryInfoList(
+            {QStringLiteral("*.json")}, QDir::Files | QDir::NoSymLinks, QDir::Name);
+        bool changed = false;
+        for (const auto& record : records) {
+            QJsonObject object;
+            Scope scope;
+            QString ignored;
+            const QString path = record.absoluteFilePath();
+            if (!loadJsonObject(path, &object, &ignored)
+                || object.value(QStringLiteral("schemaVersion")).toInt(-1) != MetadataSchemaVersion
+                || !parseScope(object, &scope)) continue;
+            const QString entry = object.value(QStringLiteral("quarantineEntry")).toString();
+            const QString quarantine = quarantinePath(entry);
+            if (!entry.isEmpty() && (!isDirectChild(m_quarantinePath, quarantine)
+                || QFileInfo::exists(quarantine) || QFileInfo(quarantine).isSymLink())) continue;
+            if (sessionHistory) {
+                const auto stored = tombstone(scope);
+                if (object.value(QStringLiteral("cleanupState")).toString() != QLatin1String("deleted")
+                    || object.value(QStringLiteral("provisional")).toBool()
+                    || !stored || stored->state != SessionState::Closed
+                    || !isValidTeardownId(object.value(QStringLiteral("teardownId")).toString())
+                    || record.completeBaseName() != scopeKey(scope)
+                    || QFileInfo::exists(intentPath(scope))
+                    || QFileInfo(intentPath(scope)).isSymLink()
+                    || QFileInfo::exists(scopeDirectory(scope))
+                    || QFileInfo(scopeDirectory(scope)).isSymLink()) continue;
+            } else {
+                const QString id = object.value(QStringLiteral("removalId")).toString();
+                AssetRemovalDescriptor descriptor;
+                qint64 bytes = -1;
+                if (!isValidTeardownId(id) || !parseAssetRemovalDescriptor(object, &descriptor)
+                    || assetRemovalTombstonePath(id) != path
+                    || entry != assetQuarantineName(scope, descriptor.assetId, id)
+                    || !parseCanonicalNonNegativeInteger(object.value(QStringLiteral("quarantinedBytes")), &bytes)
+                    || bytes != descriptor.size
+                    || QFileInfo::exists(assetRemovalIntentPath(id))
+                    || QFileInfo(assetRemovalIntentPath(id)).isSymLink()) continue;
+            }
+            const auto fingerprint = QCryptographicHash::hash(
+                QJsonDocument(object).toJson(QJsonDocument::Compact), QCryptographicHash::Sha256);
+            if (m_history->eligible(path, fingerprint) && QFile::remove(path)) {
+                m_history->forget(path);
+                changed = true;
+            }
+        }
+        if (changed) syncDirectory(directory);
+    }
+    bool removedDirectory = false;
+    for (const auto& sender : QDir(m_rootPath).entryInfoList(
+             QDir::Dirs | QDir::NoDotAndDotDot | QDir::NoSymLinks)) {
+        if (isValidEndpointId(sender.fileName()) && QDir(sender.absoluteFilePath()).isEmpty()
+            && QDir(m_rootPath).rmdir(sender.fileName())) removedDirectory = true;
+    }
+    if (removedDirectory) syncDirectory(m_rootPath);
+}
+
+void RemoteCacheStore::requestCleanupSweep()
+{
+    if (m_backgroundTransaction || m_cleanupSweepPending || m_recoveryPending) return;
+    m_cleanupSweepPending = true;
+    using CleanupBatch = QPair<QList<QPair<Tombstone, QString>>, QStringList>;
+    auto* watcher = new QFutureWatcher<CleanupBatch>(this);
+    connect(watcher, &QFutureWatcher<CleanupBatch>::finished, this, [this, watcher]() {
+        const auto batch = watcher->result();
+        watcher->deleteLater();
+        m_cleanupSweepPending = false;
+        for (const auto& job : batch.first) schedulePhysicalCleanup(job.first, job.second);
+        for (const auto& entry : batch.second) scheduleOrphanCleanup(entry);
+        if (batch.first.isEmpty() && batch.second.isEmpty() && m_history->size() > 0)
+            m_cleanupSweepTimer.start(60000);
+    });
+    watcher->setFuture(QtConcurrent::run(&m_transactionPool, [root = m_rootPath, history = m_history]() {
+        RemoteCacheStore disk(root);
+        disk.m_history = history;
+        disk.m_backgroundTransaction = true;
+        QString ignored;
+        disk.sweepQuarantine(&ignored);
+        disk.collectExpiredHistory();
+        return CleanupBatch(disk.m_collectedPhysicalDeletes, disk.m_collectedOrphanDeletes);
+    }));
+}
+
 void RemoteCacheStore::schedulePhysicalCleanup(const Tombstone& tombstoneValue,
                                                const QString& quarantineEntry)
 {
-    if (quarantineEntry.isEmpty() || m_scheduledEntries.contains(quarantineEntry)) {
-        return;
-    }
+    if (quarantineEntry.isEmpty() || m_scheduledEntries.contains(quarantineEntry)) return;
     const QString path = quarantinePath(quarantineEntry);
-    if (!isDirectChild(m_quarantinePath, path)) {
+    if (!isDirectChild(m_quarantinePath, path)) return;
+    if (m_backgroundTransaction) {
+        if (m_collectedPhysicalDeletes.size() + m_collectedOrphanDeletes.size() < 64)
+            m_collectedPhysicalDeletes.append({tombstoneValue, quarantineEntry});
         return;
     }
-    if (!QFileInfo::exists(path) && !QFileInfo(path).isSymLink()) {
-        QJsonObject object;
-        QString ignored;
-        if (loadJsonObject(tombstonePath(tombstoneValue.scope), &object, &ignored)) {
-            object.insert(QStringLiteral("cleanupState"), QStringLiteral("deleted"));
-            object.insert(QStringLiteral("cleanupCompletedAt"), utcNow());
-            object.remove(QStringLiteral("errorCode"));
-            writeJsonAtomically(tombstonePath(tombstoneValue.scope), object, &ignored);
-        }
-        return;
+    if (m_scheduledEntries.size() >= 64) {
+        if (!m_cleanupSweepTimer.isActive()) m_cleanupSweepTimer.start();
+        return; // durable tombstone retains the obligation for the next sweep
     }
-
     m_scheduledEntries.insert(quarantineEntry);
     DeleteResult work;
     work.tombstone = tombstoneValue;
@@ -2486,11 +2818,12 @@ void RemoteCacheStore::schedulePhysicalCleanup(const Tombstone& tombstoneValue,
         watcher->deleteLater();
         finishPhysicalCleanup(result);
     });
-    watcher->setFuture(QtConcurrent::run([work, path]() mutable {
-        work.success = deleteTreeWithoutFollowingLinks(path,
-                                                       &work.bytesRemoved,
-                                                       &work.errorCode);
-        return work;
+    watcher->setFuture(QtConcurrent::run(&m_transactionPool, [work, path, root = m_rootPath, history = m_history]() mutable {
+        work.success = deleteTreeWithoutFollowingLinks(path, &work.bytesRemoved, &work.errorCode);
+        RemoteCacheStore disk(root);
+        disk.m_history = history;
+        disk.m_backgroundTransaction = true;
+        return disk.commitPhysicalCleanup(work);
     }));
 }
 
@@ -2498,11 +2831,16 @@ void RemoteCacheStore::scheduleOrphanCleanup(const QString& quarantineEntry)
 {
     static const QRegularExpression safeEntry(QStringLiteral("^[A-Za-z0-9_-]{1,128}$"));
     if (!safeEntry.match(quarantineEntry).hasMatch()
-        || m_scheduledEntries.contains(quarantineEntry)) {
+        || m_scheduledEntries.contains(quarantineEntry)) return;
+    const QString path = quarantinePath(quarantineEntry);
+    if (!isDirectChild(m_quarantinePath, path)) return;
+    if (m_backgroundTransaction) {
+        if (m_collectedPhysicalDeletes.size() + m_collectedOrphanDeletes.size() < 64)
+            m_collectedOrphanDeletes.append(quarantineEntry);
         return;
     }
-    const QString path = quarantinePath(quarantineEntry);
-    if (!isDirectChild(m_quarantinePath, path)) {
+    if (m_scheduledEntries.size() >= 64) {
+        if (!m_cleanupSweepTimer.isActive()) m_cleanupSweepTimer.start();
         return;
     }
     m_scheduledEntries.insert(quarantineEntry);
@@ -2510,31 +2848,33 @@ void RemoteCacheStore::scheduleOrphanCleanup(const QString& quarantineEntry)
     work.orphan = true;
     work.quarantineEntry = quarantineEntry;
     work.cleanupErrorFile = QDir(m_cleanupErrorsPath)
-                                .filePath(quarantineEntry + QStringLiteral(".json"));
+        .filePath(quarantineEntry + QStringLiteral(".json"));
     auto* watcher = new QFutureWatcher<DeleteResult>(this);
     connect(watcher, &QFutureWatcher<DeleteResult>::finished, this, [this, watcher]() {
         const DeleteResult result = watcher->result();
         watcher->deleteLater();
         finishPhysicalCleanup(result);
     });
-    watcher->setFuture(QtConcurrent::run([work, path]() mutable {
-        work.success = deleteTreeWithoutFollowingLinks(path,
-                                                       &work.bytesRemoved,
-                                                       &work.errorCode);
-        return work;
+    watcher->setFuture(QtConcurrent::run(&m_transactionPool, [work, path, root = m_rootPath, history = m_history]() mutable {
+        work.success = deleteTreeWithoutFollowingLinks(path, &work.bytesRemoved, &work.errorCode);
+        RemoteCacheStore disk(root);
+        disk.m_history = history;
+        disk.m_backgroundTransaction = true;
+        return disk.commitPhysicalCleanup(work);
     }));
 }
 
-void RemoteCacheStore::finishPhysicalCleanup(const DeleteResult& result)
+RemoteCacheStore::DeleteResult RemoteCacheStore::commitPhysicalCleanup(DeleteResult result)
 {
-    m_scheduledEntries.remove(result.quarantineEntry);
     if (result.orphan) {
         if (result.success) {
-            QFile::remove(result.cleanupErrorFile);
-            syncDirectory(m_cleanupErrorsPath);
-            return;
+            if (QFileInfo::exists(result.cleanupErrorFile)) {
+                QFile::remove(result.cleanupErrorFile);
+                syncDirectory(m_cleanupErrorsPath);
+            }
+            return result;
         }
-        QJsonObject errorObject {
+        const QJsonObject errorObject {
             {QStringLiteral("schemaVersion"), MetadataSchemaVersion},
             {QStringLiteral("quarantineEntry"), result.quarantineEntry},
             {QStringLiteral("state"), QStringLiteral("cleanup_error")},
@@ -2543,46 +2883,46 @@ void RemoteCacheStore::finishPhysicalCleanup(const DeleteResult& result)
         };
         QString ignored;
         writeJsonAtomically(result.cleanupErrorFile, errorObject, &ignored);
-        return;
+        return result;
     }
-
     QJsonObject object;
-    QString ignored;
-    if (!loadJsonObject(result.tombstoneFile, &object, &ignored)) {
-        return;
+    QString error;
+    if (!loadJsonObject(result.tombstoneFile, &object, &error)) {
+        result.success = false;
+        result.errorCode = error;
+        return result;
     }
-    object.insert(QStringLiteral("cleanupState"),
-                  result.success ? QStringLiteral("deleted") : QStringLiteral("error"));
+    object.insert(QStringLiteral("cleanupState"), result.success ? QStringLiteral("deleted") : QStringLiteral("error"));
     object.insert(QStringLiteral("cleanupCompletedAt"), utcNow());
-    if (result.success) {
-        object.remove(QStringLiteral("errorCode"));
-    } else {
-        object.insert(QStringLiteral("errorCode"), result.errorCode);
+    if (result.success) object.remove(QStringLiteral("errorCode"));
+    else object.insert(QStringLiteral("errorCode"), result.errorCode);
+    if (!writeJsonAtomically(result.tombstoneFile, object, &error)) {
+        result.success = false;
+        result.errorCode = error;
+        return result;
     }
-    if (!writeJsonAtomically(result.tombstoneFile, object, &ignored)) {
-        return;
-    }
+    // Adoption of an official teardown may have happened while deletion was
+    // queued. Report the durable identity, never the old provisional one.
+    parseScope(object, &result.tombstone.scope);
+    result.tombstone.teardownId = object.value(QStringLiteral("teardownId")).toString();
+    return result;
+}
 
-    Scope closedScope;
-    if (!parseScope(object, &closedScope)) {
-        return;
+void RemoteCacheStore::finishPhysicalCleanup(const DeleteResult& result)
+{
+    m_scheduledEntries.remove(result.quarantineEntry);
+    const auto& scope = result.tombstone.scope;
+    if (!result.orphan) {
+        if (result.success)
+            emit physicalCleanupCompleted(scope.senderEndpointId, scope.remoteSessionId,
+                scope.generation, result.tombstone.teardownId, result.bytesRemoved);
+        else
+            emit physicalCleanupFailed(scope.senderEndpointId, scope.remoteSessionId,
+                scope.generation, result.tombstone.teardownId, result.errorCode);
     }
-    const QString currentTeardownId =
-        object.value(QStringLiteral("teardownId")).toString();
-    if (!isValidTeardownId(currentTeardownId)) {
-        return;
-    }
-    if (result.success) {
-        emit physicalCleanupCompleted(closedScope.senderEndpointId,
-                                      closedScope.remoteSessionId,
-                                      closedScope.generation,
-                                      currentTeardownId,
-                                      result.bytesRemoved);
-    } else {
-        emit physicalCleanupFailed(closedScope.senderEndpointId,
-                                   closedScope.remoteSessionId,
-                                   closedScope.generation,
-                                   currentTeardownId,
-                                   result.errorCode);
-    }
+    // A bounded disk sweep supplies subsequent batches and retries failed
+    // physical deletions without requiring another connection or restart.
+    m_cleanupSweepTimer.setInterval(result.success ? 1000
+        : qMin(30000, m_cleanupSweepTimer.interval() * 2));
+    if (!m_cleanupSweepTimer.isActive()) m_cleanupSweepTimer.start();
 }

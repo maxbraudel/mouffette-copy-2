@@ -221,6 +221,7 @@ bool FileManager::rebindReceivedFileScope(const RemoteCacheStore::Scope& oldScop
     }
     auto scopeIt = m_receivedFilesByScope.find(receivedScopeKey(oldScope));
     if (scopeIt == m_receivedFilesByScope.end()) return true;
+    if (scopeIt->scope == newScope) return true;
     if (!(scopeIt->scope == oldScope)) return false;
     for (const QString& fileId : scopeIt->pathsByFileId.keys()) {
         releaseReceivedFileMemory(oldScope, fileId);

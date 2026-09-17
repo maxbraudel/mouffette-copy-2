@@ -304,6 +304,16 @@ RemoteSceneController::RemoteSceneController(FileManager* fileManager, WebSocket
                         sendFirstFramePresented();
                     }
                 });
+        connect(m_ws, &WebSocketClient::sessionsInvalidated, this,
+                [this](const QString&, const QString&, quint64) { onConnectionLost(); });
+        connect(m_ws, &WebSocketClient::remoteSessionAbsent, this,
+                [this](const QString& id, quint64) {
+            if (id == m_pendingRemoteSessionId) onConnectionLost();
+        });
+        connect(m_ws, &WebSocketClient::remoteSessionRecoveryExpired, this,
+                [this](const QString& id, quint64) {
+            if (id == m_pendingRemoteSessionId) onConnectionLost();
+        });
         connect(m_ws, &WebSocketClient::leaseExpired,
                 this, &RemoteSceneController::onConnectionLost,
                 Qt::UniqueConnection);
@@ -2968,6 +2978,14 @@ void RemoteSceneController::finalizeLivePlaybackStart(const std::shared_ptr<Remo
 }
 
 void RemoteSceneController::activateScene() {
+    // A queued activation timer can run before the lease watchdog after wake.
+    // Validate the authority deadline at the side-effect boundary itself.
+    if (m_ws && !m_pendingRemoteSessionId.isEmpty()
+        && m_ws->sessionRecoveryRemainingMs(m_pendingRemoteSessionId) <= 0) {
+        onConnectionLost();
+        return;
+    }
+
     if (m_sceneActivated || !m_sceneActivationRequested) return;
 	const quint64 activationEpoch = m_sceneEpoch;
 	bool activationGraphReady = remoteRenderGraphsReady();

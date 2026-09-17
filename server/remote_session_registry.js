@@ -7,11 +7,11 @@ const TERMINAL_PHASES = new Set(['Terminating', 'CleanupPending', 'Closed']);
 class RemoteSessionRegistry {
     constructor(options = {}) {
         this.leaseTimeoutMs = Number.isSafeInteger(options.leaseTimeoutMs)
-            && options.leaseTimeoutMs > 0 ? options.leaseTimeoutMs : 3000;
+            && options.leaseTimeoutMs > 0 ? options.leaseTimeoutMs : 5000;
         this.tombstoneTtlMs = Number.isSafeInteger(options.tombstoneTtlMs)
             && options.tombstoneTtlMs > 0 ? options.tombstoneTtlMs : 5 * 60 * 1000;
         this.openTimeoutMs = Number.isSafeInteger(options.openTimeoutMs)
-            && options.openTimeoutMs > 0 ? options.openTimeoutMs : 3000;
+            && options.openTimeoutMs > 0 ? options.openTimeoutMs : 5000;
         this.openRequestTtlMs = Number.isSafeInteger(options.openRequestTtlMs)
             && options.openRequestTtlMs > 0
             ? options.openRequestTtlMs : this.tombstoneTtlMs;
@@ -36,6 +36,10 @@ class RemoteSessionRegistry {
         this.epochNow = options.epochNow || options.now || (() => Date.now());
         this.idFactory = options.idFactory || (() => randomUUID());
         this.sessions = new Map();
+        // Logically closed sessions retain only their unresolved cleanup proof.
+        // Admission is bounded before OPEN, so obligations are never discarded.
+        this.cleanupJobs = new Map();
+        this.maximumSessions = options.maximumSessions || 4096;
         this.incomingByTarget = new Map(); // targetEndpointId -> Set(remoteSessionId)
         this.outgoingByOwner = new Map();
         this.sessionByOwnerTarget = new Map(); // ownerEndpointId -> Map(targetEndpointId -> id)
@@ -117,6 +121,9 @@ class RemoteSessionRegistry {
             return { ok: true, replay: true, pairReplay: true, session: existing };
         }
 
+        if (this.sessions.size + this.cleanupJobs.size >= this.maximumSessions) {
+            return { ok: false, error: 'session_capacity_exceeded' };
+        }
         const remoteSessionId = this.idFactory();
         const awaitingTargetAcceptance = binding.awaitTargetAcceptance === true;
         const session = {
@@ -124,6 +131,10 @@ class RemoteSessionRegistry {
             resumeToken: this.idFactory(),
             phase: awaitingTargetAcceptance ? 'Opening' : 'Active',
             generation: 1,
+            stateRevision: 1,
+            appliedStateByEndpoint: new Map(),
+            requiresAppliedAck: awaitingTargetAcceptance,
+            resumeResults: new Map(),
             ownerKnownGeneration: 1,
             targetKnownGeneration: 1,
             ownerEndpointId: binding.ownerEndpointId,
@@ -178,7 +189,41 @@ class RemoteSessionRegistry {
     }
 
     get(remoteSessionId) {
-        return this.sessions.get(remoteSessionId) || null;
+        return this.sessions.get(remoteSessionId) || this.cleanupJobs.get(remoteSessionId) || null;
+    }
+
+    validUntil(session) {
+        return Math.min(...[session.ownerEndpointId, session.targetEndpointId]
+            .map(id => (session.lastContact.get(id) ?? session.createdAt) + this.leaseTimeoutMs));
+    }
+
+    acknowledgeState(remoteSessionId, endpointId, connectionGeneration, generation, revision) {
+        const session = this.get(remoteSessionId) || this.getTombstone(remoteSessionId);
+        if (!session || !this.#role(session, endpointId)
+            || generation !== session.generation || revision !== session.stateRevision) return false;
+        session.appliedStateByEndpoint.set(endpointId, { connectionGeneration, generation, revision });
+        if (endpointId === session.ownerEndpointId) session.ownerKnownGeneration = generation;
+        else session.targetKnownGeneration = generation;
+        return true;
+    }
+
+    stateApplied(session, client) {
+        const applied = session.appliedStateByEndpoint.get(client.endpointId);
+        return !!applied && applied.connectionGeneration === client.connectionGeneration
+            && applied.generation === session.generation && applied.revision === session.stateRevision;
+    }
+
+    commandReady(session) {
+        if (!session || session.phase !== 'Active' || session.degradedEndpoints.size > 0) return false;
+        if (!session.requiresAppliedAck) return true; // Explicit internal/test bindings.
+        return [[session.ownerEndpointId, session.ownerConnectionGeneration],
+            [session.targetEndpointId, session.targetConnectionGeneration]]
+            .every(([endpointId, connectionGeneration]) => {
+                const applied = session.appliedStateByEndpoint.get(endpointId);
+                return applied && applied.connectionGeneration === connectionGeneration
+                    && applied.generation === session.generation
+                    && applied.revision === session.stateRevision;
+            });
     }
 
     getTombstone(remoteSessionId) {
@@ -233,6 +278,7 @@ class RemoteSessionRegistry {
             };
         }
         session.phase = 'Active';
+        ++session.stateRevision;
         session.openingDeadlineAt = null;
         session.snapshotSequence = 1;
         session.lastContact.set(targetEndpointId, now);
@@ -285,6 +331,7 @@ class RemoteSessionRegistry {
         }
         session.lastContact.set(endpointId, now);
         const recovered = session.degradedEndpoints.delete(endpointId);
+        if (recovered) ++session.stateRevision;
         session.updatedAt = now;
         return { ok: true, session, healthChanged: recovered, degraded: false };
     }
@@ -300,9 +347,11 @@ class RemoteSessionRegistry {
                 const known = session.degradedEndpoints.has(endpointId);
                 if (degraded && !known) {
                     session.degradedEndpoints.add(endpointId);
+                    ++session.stateRevision;
                     transitions.push({ session, endpointId, degraded: true });
                 } else if (!degraded && known) {
                     session.degradedEndpoints.delete(endpointId);
+                    ++session.stateRevision;
                     transitions.push({ session, endpointId, degraded: false });
                 }
             }
@@ -323,6 +372,7 @@ class RemoteSessionRegistry {
                 changed.push(this.terminate(session.remoteSessionId, 'lease_expired', now).session);
                 continue;
             }
+            if (session.phase !== 'Grace' || !session.graceEndpoints.has(endpointId)) ++session.stateRevision;
             session.phase = 'Grace';
             session.graceEndpoints.add(endpointId);
             session.degradedEndpoints.add(endpointId);
@@ -334,9 +384,9 @@ class RemoteSessionRegistry {
     }
 
     resume({ remoteSessionId, endpointId, runtimeId, resumeToken, generation,
-             connectionGeneration }, now = this.now()) {
+             connectionGeneration, requestId }, now = this.now()) {
         const session = this.get(remoteSessionId);
-        if (!session || session.phase !== 'Grace') return { ok: false, error: 'session_not_resumable' };
+        if (!session || TERMINAL_PHASES.has(session.phase)) return { ok: false, error: 'session_not_resumable' };
         if (this.#leaseExpired(session, now)) {
             const terminated = this.terminate(remoteSessionId, 'lease_expired', now);
             return {
@@ -348,15 +398,12 @@ class RemoteSessionRegistry {
         }
         const role = this.#role(session, endpointId);
         if (!role) return { ok: false, error: 'not_a_session_party' };
-        if (!session.graceEndpoints.has(endpointId)) {
-            return { ok: false, error: 'party_not_in_grace' };
-        }
         const expectedRuntime = role === 'owner' ? session.ownerRuntimeId : session.targetRuntimeId;
         if (runtimeId !== expectedRuntime || resumeToken !== session.resumeToken) {
             return { ok: false, error: 'invalid_resume_proof' };
         }
         if (!Number.isSafeInteger(generation) || generation < 1
-            || generation !== this.knownGenerationFor(session, endpointId)) {
+            || generation > session.generation) {
             return { ok: false, error: 'stale_remote_session_generation' };
         }
         if (!Number.isSafeInteger(connectionGeneration) || connectionGeneration <= 0) {
@@ -364,6 +411,14 @@ class RemoteSessionRegistry {
         }
         const previousConnectionGeneration = role === 'owner'
             ? session.ownerConnectionGeneration : session.targetConnectionGeneration;
+        const replayKey = `${endpointId}:${connectionGeneration}:${requestId || ''}`;
+        if (requestId && session.resumeResults.has(replayKey)
+            && connectionGeneration === previousConnectionGeneration) {
+            return { ok: true, replay: true, session };
+        }
+        if (session.phase !== 'Grace' || !session.graceEndpoints.has(endpointId)) {
+            return { ok: false, error: 'party_not_in_grace' };
+        }
         if (connectionGeneration <= previousConnectionGeneration) {
             return { ok: false, error: 'stale_connection_generation' };
         }
@@ -380,8 +435,12 @@ class RemoteSessionRegistry {
             this.#refreshGraceDeadline(session, now);
         }
         session.generation += 1;
-        if (role === 'owner') session.ownerKnownGeneration = session.generation;
-        else session.targetKnownGeneration = session.generation;
+        session.requiresAppliedAck = true;
+        ++session.stateRevision;
+        if (requestId) {
+            session.resumeResults.set(replayKey, true);
+            while (session.resumeResults.size > 32) session.resumeResults.delete(session.resumeResults.keys().next().value);
+        }
         session.updatedAt = now;
         return { ok: true, session };
     }
@@ -425,6 +484,7 @@ class RemoteSessionRegistry {
         }
         if (TERMINAL_PHASES.has(session.phase)) return { ok: true, replay: true, session };
         session.phase = 'Terminating';
+        ++session.stateRevision;
         session.teardownId = this.idFactory();
         session.teardownReason = String(reason || 'closed').slice(0, 128);
         session.teardownDispatchStarted = false;
@@ -447,7 +507,11 @@ class RemoteSessionRegistry {
             || (session.phase !== 'Terminating' && session.phase !== 'CleanupPending')) {
             return { ok: false, error: 'invalid_teardown' };
         }
+        if (session.phase !== 'CleanupPending') ++session.stateRevision;
         session.phase = 'CleanupPending';
+        session.logicallyClosedAt = now;
+        this.sessions.delete(remoteSessionId);
+        this.cleanupJobs.set(remoteSessionId, session);
         session.updatedAt = now;
         return { ok: true, session };
     }
@@ -476,7 +540,7 @@ class RemoteSessionRegistry {
 
     dueCleanupRetries(now = this.now()) {
         const due = [];
-        for (const session of this.sessions.values()) {
+        for (const session of this.cleanupJobs.values()) {
             if ((session.phase !== 'Terminating' && session.phase !== 'CleanupPending')
                 || !session.teardownId
                 || !Number.isSafeInteger(session.cleanupDispatchAttempts)
@@ -510,12 +574,14 @@ class RemoteSessionRegistry {
         }
         if (!this.#isCommittedCleanup(result)) {
             session.phase = 'CleanupPending';
+            ++session.stateRevision;
             session.cleanupError = result && typeof result.errorCode === 'string'
                 ? result.errorCode.slice(0, 128) : 'cleanup_error';
             session.updatedAt = now;
             return { ok: false, error: 'cleanup_not_committed', session };
         }
         session.phase = 'Closed';
+        ++session.stateRevision;
         session.closedAt = now;
         session.cleanupResult = { ...result };
         delete session.cleanupError;
@@ -538,6 +604,7 @@ class RemoteSessionRegistry {
             }
         }
         this.sessions.delete(remoteSessionId);
+        this.cleanupJobs.delete(remoteSessionId);
         this.tombstones.set(remoteSessionId, session);
         this.#trimTombstones(now);
         return { ok: true, replay: false, session };

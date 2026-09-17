@@ -760,6 +760,21 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME ConnectionManager COMMAND tst_ConnectionManager)
 
+    add_executable(tst_RemoteSessionIntegration
+        tests/qt/tst_RemoteSessionIntegration.cpp
+        "$<FILTER:$<TARGET_OBJECTS:MouffetteClient>,EXCLUDE,/src/main[.]cpp[.](o|obj)$>"
+    )
+    target_include_directories(tst_RemoteSessionIntegration PRIVATE
+        "$<TARGET_PROPERTY:MouffetteClient,INCLUDE_DIRECTORIES>")
+    target_compile_definitions(tst_RemoteSessionIntegration PRIVATE
+        "$<TARGET_PROPERTY:MouffetteClient,COMPILE_DEFINITIONS>"
+        MOUFFETTE_RELAY_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/remote-session-relay.js")
+    target_link_libraries(tst_RemoteSessionIntegration PRIVATE
+        "$<TARGET_PROPERTY:MouffetteClient,LINK_LIBRARIES>" Qt6::Test)
+    add_test(NAME RemoteSessionIntegration COMMAND tst_RemoteSessionIntegration)
+    set_tests_properties(RemoteSessionIntegration PROPERTIES TIMEOUT 180
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_CONTROLS_STYLE=Basic")
+
     add_executable(tst_ScreenCoordinateMapping
         tests/qt/tst_ScreenCoordinateMapping.cpp
         src/backend/managers/system/ScreenCoordinateMapping.h
@@ -1147,6 +1162,11 @@ if(BUILD_TESTING)
     target_link_libraries(tst_RemoteCacheStore PRIVATE
         Qt6::Core Qt6::Concurrent Qt6::Test)
     add_test(NAME RemoteCacheStore COMMAND tst_RemoteCacheStore)
+
+    add_executable(tst_RemoteCacheHistory tests/qt/tst_RemoteCacheHistory.cpp)
+    target_include_directories(tst_RemoteCacheHistory PRIVATE src)
+    target_link_libraries(tst_RemoteCacheHistory PRIVATE Qt6::Core Qt6::Test)
+    add_test(NAME RemoteCacheHistory COMMAND tst_RemoteCacheHistory)
 
     add_test(NAME QmlArchitectureGate
         COMMAND ${CMAKE_COMMAND}

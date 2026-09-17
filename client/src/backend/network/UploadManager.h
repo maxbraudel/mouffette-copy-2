@@ -3,6 +3,7 @@
 
 #include "backend/network/RemoteCacheStore.h"
 #include "backend/network/UploadScheduler.h"
+#include "backend/runtime/SuspendInclusiveClock.h"
 
 #include <QObject>
 #include <QJsonArray>
@@ -14,6 +15,7 @@
 #include <QStringList>
 #include <QVector>
 #include <QTimer>
+#include <QThreadPool>
 #include <QUuid>
 #include <functional>
 #include <atomic>
@@ -50,6 +52,10 @@ struct IncomingUploadSession {
     QHash<QString, QString> assetIdToExtension;
     qint64 totalSize = 0;
     qint64 received = 0;
+    QHash<QString, qint64> queuedByFile; // accepted bytes, not yet durably acknowledged
+    std::shared_ptr<std::atomic_bool> writeCancelled;
+    quint64 writeEpoch = 0;
+    QJsonObject deferredResume;
     qint64 lastProgressBytesReported = 0;
     int totalFiles = 0;
     bool suspendedForResume = false;
@@ -86,13 +92,14 @@ public:
         int discoveredScopes = 0;
         int committedScopes = 0;
         int cleanupErrorScopes = 0;
+        int pendingScopes = 0;
         int removedFileMappings = 0;
         qint64 quarantinedBytes = 0;
         QString errorCode;
 
         bool allLogicallyCommitted() const
         {
-            return cleanupErrorScopes == 0 && errorCode.isEmpty();
+            return cleanupErrorScopes == 0 && pendingScopes == 0 && errorCode.isEmpty();
         }
     };
 
@@ -243,7 +250,7 @@ public slots:
 
 private:
     struct OutgoingAsset {
-        QString assetId;       // content SHA-256 used by protocol v5
+        QString assetId;       // content SHA-256 used by protocol v6
         QString sha256;
         QString path;
         QString name;
@@ -279,7 +286,7 @@ private:
         quint64 sourceConnectionGeneration = 0;
         QString uploadId;
         QJsonArray assets;
-        qint64 expiresAtEpochMs = 0;
+        qint64 expiresAtMonotonicMs = 0;
     };
 
     // Every queued or active transfer owns a fully independent context. All
@@ -311,7 +318,7 @@ private:
         QTimer* startAckTimer = nullptr;
         QTimer* ackTimer = nullptr;
         QTimer* cancelTimer = nullptr;
-        QElapsedTimer stateAge;
+        MouffetteClock::ElapsedTimer stateAge;
         int totalFiles = 0;
         int localPercent = 0;
         int remotePercent = 0;
@@ -413,7 +420,7 @@ private:
         const QString& remoteSessionId,
         quint64 generation,
         quint64 sourceConnectionGeneration);
-    void pruneIncomingUploadCompletions(qint64 nowEpochMs);
+    void pruneIncomingUploadCompletions(qint64 nowMonotonicMs);
     void forgetIncomingUploadCompletions(const QString& remoteSessionId);
     void emitIncomingResponse(const QString& type,
                               const QString& senderEndpointId,
@@ -522,6 +529,17 @@ private:
     QHash<QString, QHash<QString, CommittedRemoteAsset>>
         m_committedAssetsByTarget; // targetEndpointId -> assetId -> metadata
     QHash<QString, PendingAssetRemoval> m_pendingAssetRemovals; // removalId -> request
+    QThreadPool m_incomingWritePool;
+    qint64 m_queuedIncomingWriteBytes = 0;
+    QHash<QString, int> m_teardownRemovedMappings;
+    struct PendingCacheTeardown {
+        RemoteCacheStore::Scope scope;
+        QString teardownId;
+        QString reason;
+    };
+    QHash<QString, PendingCacheTeardown> m_terminalCacheTeardowns;
+    QTimer m_receiverCleanupRetryTimer;
+    QHash<QString, QJsonObject> m_pendingDiskRemovals;
 
     FileManager* m_fileManager = nullptr;
     RemoteCacheStore* m_remoteCacheStore = nullptr;
@@ -547,8 +565,8 @@ private:
 
     // Anti-spam protection. State, rather than a short-lived boolean lock, is
     // authoritative; timing only filters accidental double-clicks.
-    QElapsedTimer m_lastAcceptedAction;
-    QElapsedTimer m_outgoingStateAge;
+    MouffetteClock::ElapsedTimer m_lastAcceptedAction;
+    MouffetteClock::ElapsedTimer m_outgoingStateAge;
 };
 
 #endif // UPLOADMANAGER_H

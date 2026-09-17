@@ -103,7 +103,7 @@ void ClientListEventHandler::onClientListReceived(const QList<ClientInfo>& clien
             } else {
                 // Discovery loss does not delete the local project/canvas and
                 // does not itself purge uploads. The RemoteSession lease owns
-                // that terminal decision after its exact three-second limit.
+                // that terminal decision after its negotiated recovery deadline.
                 RemoteSessionCoordinator* coordinator = m_webSocketClient
                     ? m_webSocketClient->remoteSessionCoordinator() : nullptr;
                 const RemoteSessionCoordinator::Binding binding = coordinator

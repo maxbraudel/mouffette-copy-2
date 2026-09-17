@@ -304,16 +304,26 @@ private slots:
 
         QSignalSpy aboutSpy(&manager, &ProjectManager::projectAboutToDelete);
         QSignalSpy deletedSpy(&manager, &ProjectManager::projectDeleted);
+        QSignalSpy removedSpy(&manager, &ProjectManager::projectRemoved);
         manager.processDeadlines(200'000);
         QCOMPARE(manager.projectCount(), 1);
         manager.processDeadlines(300'100);
         QCOMPARE(aboutSpy.count(), 1);
         QCOMPARE(deletedSpy.count(), 1);
         QCOMPARE(manager.projectCount(), 0);
+        QCOMPARE(removedSpy.count(), 1);
+        QCOMPARE(removedSpy.last().at(2).value<ProjectManager::RemovalReason>(),
+                 ProjectManager::RemovalReason::RetentionExpired);
 
         QList<ProjectRecord> persisted;
         QVERIFY(store.load(&persisted));
         QVERIFY(persisted.isEmpty());
+        createProject(manager, target(QStringLiteral("device-a"), QStringLiteral("Studio A")),
+                      ProjectLifecycleState::Visible, 400'000);
+        QVERIFY(manager.deleteProject(QStringLiteral("device-a")));
+        QCOMPARE(removedSpy.count(), 2);
+        QCOMPARE(removedSpy.last().at(2).value<ProjectManager::RemovalReason>(),
+                 ProjectManager::RemovalReason::UserDeleted);
     }
 
     void mediaDeadlineIsExactPerProjectAndNeverExtended()

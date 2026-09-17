@@ -1,3 +1,4 @@
+#include "backend/runtime/SuspendInclusiveClock.h"
 #include "backend/runtime/ApplicationActivityMonitor.h"
 
 #include <QDateTime>
@@ -39,7 +40,7 @@ void ApplicationActivityMonitor::setNowProviderForTesting(
 qint64 ApplicationActivityMonitor::nowMs() const
 {
     return m_nowProvider ? m_nowProvider()
-                         : QDateTime::currentMSecsSinceEpoch();
+                         : MouffetteClock::anchoredEpochMs();
 }
 
 void ApplicationActivityMonitor::reconcile()

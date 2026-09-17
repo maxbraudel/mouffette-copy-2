@@ -4,6 +4,7 @@
 #include <QObject>
 #include <QTimer>
 #include <QString>
+#include "backend/runtime/SuspendInclusiveClock.h"
 
 class WebSocketClient;
 class ClientInfo;
@@ -23,6 +24,17 @@ class ConnectionManager : public QObject {
     Q_OBJECT
 
 public:
+    enum class State { Disconnected, Disconnecting, Connecting, Authenticating, Synchronizing,
+                       Connected, Degraded, Reconnecting, CleanupPending, Failed };
+    Q_ENUM(State)
+    State state() const { return m_state; }
+    bool connectionEnabled() const { return m_desiredEnabled; }
+    bool disconnectInProgress() const { return m_draining; }
+    quint64 transitionId() const { return m_transitionId; }
+    void setConnectionEnabled(bool enabled);
+    void completeDisconnect(quint64 transitionId);
+    void reconfigureServer(const QString& serverUrl);
+    void setReceiverReady(bool ready);
     /**
      * @brief Construct a ConnectionManager
      * @param wsClient The WebSocketClient instance to manage
@@ -70,6 +82,9 @@ public:
     static int retryDelayForAttempt(int attempt, bool withinLease);
 
 signals:
+    void stateChanged(ConnectionManager::State state);
+    void connectionEnabledChanged(bool enabled);
+    void disconnectRequested(quint64 transitionId);
     /**
      * @brief Emitted when successfully connected to the server
      */
@@ -112,17 +127,26 @@ private slots:
 private:
     void scheduleReconnect();
     void beginAttempt();
-    void setStatus(const QString& status);
+    void setState(State state);
+    void suspendAttempts();
+    void refreshAuthenticatedState();
     
     WebSocketClient* m_wsClient;
     QTimer* m_reconnectTimer;
     QTimer* m_attemptTimeoutTimer;
     QString m_serverUrl;
-    QString m_status = QStringLiteral("Disconnected");
+    State m_state = State::Disconnected;
+    bool m_desiredEnabled = true;
+    bool m_draining = false;
+    bool m_receiverReady = true;
+    bool m_registrationReady = false;
+    bool m_reconciliationReady = false;
+    bool m_degraded = false;
+    quint64 m_transitionId = 0;
+    MouffetteClock::ElapsedTimer m_stableConnection;
     int m_fastRetryAttempt = 0;
     int m_backgroundRetryAttempt = 0;
     bool m_wasWithinLease = false;
-    bool m_isManualDisconnect = false;
     bool m_attemptInProgress = false;
     bool m_fatalFailure = false;
 };

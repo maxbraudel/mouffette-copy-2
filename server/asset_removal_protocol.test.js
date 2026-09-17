@@ -65,7 +65,7 @@ function setup() {
 
 function envelope(context, extra = {}) {
     return {
-        protocolVersion: 5,
+        protocolVersion: 6,
         serverBootId: context.server.serverBootId,
         messageId: crypto.randomUUID(),
         remoteSessionId: context.session.remoteSessionId,
@@ -370,4 +370,36 @@ function messages(ws, type) {
     assert.equal(messages(context.target, 'remote_session_terminating').length, 1);
 }
 
-console.log('asset removal protocol v5 tests passed');
+// A disk worker can finish after a resume. Its immutable operation proof must
+// settle on the new authenticated transport without pretending to apply the
+// new session epoch; duplicate proof remains valid after logical closure.
+{
+    const context = setup();
+    const { server, session } = context;
+    const request = removalRequest(context);
+    server.handleMessage('owner-connection', request);
+    const originalAck = removalAck(context, request);
+    ++session.generation;
+    server.clients.get('target-connection').connectionGeneration = 2;
+    session.targetConnectionGeneration = 2;
+    server.rebindSessionGeneration(session);
+    server.handleMessage('target-connection', { ...originalAck, connectionGeneration: 2 });
+    assert.equal(server.pendingAssetRemovals.size, 0);
+    assert.equal(server.sessionAssets.has(session.remoteSessionId), false);
+    assert.equal(messages(context.owner, 'upload_removed').at(-1).success, true);
+    assert.equal(messages(context.owner, 'upload_removed').at(-1).generation, session.generation);
+
+    server.remoteSessions.terminate(session.remoteSessionId, 'test_closed');
+    server.beginRemoteSessionTeardown(session);
+    server.handleMessage('target-connection', {
+        ...originalAck, connectionGeneration: 2, messageId: crypto.randomUUID(),
+    });
+    assert.equal(messages(context.owner, 'upload_removed').at(-1).replay, true);
+    const before = messages(context.owner, 'upload_removed').length;
+    server.handleMessage('target-connection', { ...originalAck, messageId: crypto.randomUUID() });
+    assert.equal(messages(context.target, 'error').at(-1).code, 'stale_connection_generation');
+    server.handleMessage('attacker-connection', { ...originalAck, messageId: crypto.randomUUID() });
+    assert.equal(messages(context.owner, 'upload_removed').length, before);
+}
+
+console.log('asset removal protocol v6 tests passed');

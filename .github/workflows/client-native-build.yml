@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - 'client/**'
+      - 'server/**'
       - '.github/workflows/client-native-build.yml'
   push:
     branches:
@@ -11,6 +12,7 @@ on:
       - master
     paths:
       - 'client/**'
+      - 'server/**'
       - '.github/workflows/client-native-build.yml'
   workflow_dispatch:
 
@@ -36,6 +38,21 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Node.js for protocol integration tests
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+
+      - name: Install protocol test dependencies
+        working-directory: server
+        run: npm ci
+
+      - name: Test server protocol
+        working-directory: server
+        run: npm test
 
       - name: Install toolchain
         run: brew install qt openssl@3 cmake ninja ffmpeg pkg-config
@@ -84,6 +101,21 @@ jobs:
 
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Node.js for protocol integration tests
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+
+      - name: Install protocol test dependencies
+        working-directory: server
+        run: npm ci
+
+      - name: Test server protocol
+        working-directory: server
+        run: npm test
 
       - name: Install MSYS2 UCRT64 toolchain
         id: msys2

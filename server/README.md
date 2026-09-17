@@ -1,6 +1,6 @@
 # Mouffette Server
 
-Node.js WebSocket coordinator for Mouffette protocol v5.
+Node.js WebSocket coordinator for Mouffette protocol v6.
 
 ## Run and test
 
@@ -16,7 +16,7 @@ override it. Invalid critical values fail startup.
 ## Protocol envelope
 
 The server sends `auth_challenge` first. The client signs
-`mouffette-v5\n<serverBootId>\n<nonce>\n<runtimeId>\n<instanceId>` with its
+`mouffette-v6\n<serverBootId>\n<nonce>\n<runtimeId>\n<instanceId>` with its
 Ed25519 installation key and returns the SPKI public key and signature as
 base64url. The SHA-256 of the SPKI key is the stable `installationId`; the
 server domain-separates and hashes `installationId + instanceId` to derive and
@@ -40,49 +40,84 @@ never authoritative.
 
 ## Remote sessions
 
-An owner opens `remote_session_open` with `targetEndpointId`. The server returns a
-`remoteSessionId`, generation, and same-runtime resume token. A target has one
-incoming session at most. Heartbeats maintain a strict 3-second lease; a resume
-at or after the deadline is terminal. Session teardown remains pending until the
-target confirms that its scene stopped, uploads aborted, and cache was
-quarantined. Until that acknowledgement is committed, the server retains the
-session binding and replays the same teardown transaction to the target with a
-bounded exponential backoff.
+An owner opens `remote_session_open` with `targetEndpointId` and a stable
+`requestId`. Multiple incoming sessions and outgoing sessions may coexist on the
+same endpoint. An existing scene, another controller, or local UI activity does
+not make the endpoint unavailable for another session.
 
-Configuration enforces that the retained OPEN-request window never exceeds the
-terminal-tombstone window. Production also gives terminal tombstones at least
-the same cardinality budget as retained OPEN requests. Tombstones referenced by
-retained requests are pinned against expiry and capacity eviction, so
-idempotent request replay cannot outlive its terminal evidence.
+The v6 welcome policy separates three clocks:
 
-Session messages are `remote_session_open`, `remote_session_resume`,
-`remote_session_close`, and `remote_session_teardown_ack`. Server results are
-`remote_session_opened`, `remote_session_resumed`, `remote_session_lease_state`,
-`remote_session_terminating`, and `remote_session_closed`.
+- `heartbeatIntervalMs`: 750 ms; `transportSuspectAfterMs`: 1,500 ms.
+- `leaseTimeoutMs`: 3,000 ms, retained as the **transport** timeout field. A lost
+  transport is fenced and replaced while the session remains in Grace.
+- `sessionRecoveryTimeoutMs`: **5,000 ms total since the last pertinent contact**
+  (configured with `MOUFFETTE_REMOTE_SESSION_RECOVERY_TIMEOUT_MS=5000`)
+  from either party, using the earlier deadline. This is not an extra five
+  seconds after detecting a disconnect. `remoteSessionOpenTimeoutMs` is 5,000 ms;
+  authentication allows 10,000 ms but never extends an existing session budget.
 
-Active targets also publish `remote_session_cursor` with a session generation,
-increasing sequence and screen-local coordinates. The server validates the
-target and advertised screen bounds, and forwards only to that session's owner.
-Samples are transient and dropped when the owner's socket is congested. Deploy
-this server update before or together with the updated clients to restore the
-canvas mouse indicator; see [remote cursor](../client/docs/remote-cursor.md).
+Each nonterminal session state carries `generation`, `stateRevision`,
+`serverMonotonicMs`, and `validUntilServerMonotonicMs`. Heartbeat acknowledgements
+carry `sessionStates` so both parties know their absolute deadline before a
+network failure. The connected party cannot extend the disconnected party's
+lease. A scene already Live may continue within that lease; pre-start scenes are
+cancelled on transport loss. New commands wait for successful recovery. STOP,
+CLOSE and cleanup acknowledgements remain admissible during recovery or cleanup.
+Clients must also enforce the deadline locally with a suspend-inclusive clock.
 
-An authenticated replacement transport from the same endpoint and runtime may
-close the exact live session generation without first resuming it. This advances
-only terminal-state delivery to the current connection generation; it never
-rebinds command authority. A different runtime or an older transport generation
-is rejected.
+On Linux, `process.hrtime` excludes system suspend. The relay bridges it with
+the kernel `/proc/uptime` counter, sampling at most every 100 ms for ordinary
+reads and forcing a fresh sample before messages and authority deadline sweeps.
+Its 10 ms quantization is covered by shortening internal recovery/open budgets
+by 10 ms; the absolute deadline on the wire includes this conservative margin.
+Civil clock changes never renew a lease. Linux requires readable `/proc/uptime`;
+modern macOS uses libuv's `mach_continuous_time`, and Windows uses its native
+suspend-inclusive performance counter. No native addon is required.
 
-Replaying an OPEN request also never migrates command authority. `Grace`
-requires the proof-bearing Resume path; an `Opening` stranded on an older owner
-transport is moved into cleanup instead of being re-offered with a stale
-transport tuple.
+`remote_session_resume` has a stable request ID for a session/transport attempt.
+The same authenticated runtime and resume proof can reconcile an older observed
+generation; commands always require the current fenced generation. Replaying the
+same resume does not advance it again. The server never treats `ws.send()` as a
+client receipt. Clients send `remote_session_state_ack` only after applying a
+state. `commandReady` becomes true only after both parties applied the current
+state/generation; its notification retains that revision to avoid an ACK loop.
 
-After an authenticated `endpoint_snapshot` is accepted, its
-`endpoint_snapshot_applied` response and every replayable terminal session state
-are enqueued before the following `client_list` on that same WebSocket. That
-ordered list is a terminal-reconciliation barrier, not a session inventory:
-discovery remains presence-only.
+`remote_session_reconcile` accepts `{requestId, sessions: [{remoteSessionId,
+generation, stateRevision}]}`. Its `remote_session_reconciled` result contains
+full typed session states, `complete: true`, and `absentSessionIds` for the
+caller's obsolete bindings. Active states include the current snapshot and
+sequence. Duplicate OPEN or ACCEPT never resets that snapshot. Metadata refreshes
+via `endpoint_snapshot` do not replay historical closes. Initial registration on
+a new transport catches up terminal obligations; later reconciliation is explicit.
+
+Session closure revokes command authority immediately and emits
+`remote_session_closed` with `cleanupState: pending`. Cleanup obligations live
+outside the active-session registry and retry with bounded exponential backoff.
+A target's committed teardown acknowledgement proves renderer stop, upload reader
+settlement and cache quarantine; the server then emits `cleanupState: confirmed`.
+Failures remain visible as `cleanupState: error`. Physical deletion after
+quarantine is not part of admission. Pending cleanup fences only the same
+owner/target pair, never another controller's independent session. Capacity is
+bounded at 4,096 active sessions plus unresolved obligations; saturation rejects
+new admission explicitly rather than forgetting cleanup proof. Terminal results
+and idempotency records are separately bounded and retained together.
+
+`endpoint_disable` and `endpoint_disable_started` echo the same `requestId` on
+the current connection generation. Disable is monotonic on that transport,
+idempotent, immediately hides command availability, and rejects new outgoing as
+well as incoming sessions. Re-enable authenticates a new transport.
+
+Discovery remains presence-only. `client_list` includes an increasing `revision`,
+an observation timestamp, and each endpoint's `status`, `lastSeenAt`,
+`canAcceptSession` and `reason`. States distinguish Available, Degraded,
+Reconnecting and Disconnected; disabled endpoints report Disconnected with reason
+`disabled`. Recent unavailable endpoints are retained for up to five minutes in
+a bounded 4,096-entry presence cache. Pair cleanup and scene ownership remain
+private and do not label an endpoint Busy.
+
+Protocol v6 is a coordinated client/server cut-over. Older versions receive an
+explicit protocol-version rejection; the server does not silently translate
+lease or cleanup semantics. Run `npm test` before deploying both artifacts.
 
 ## Uploads
 
@@ -97,7 +132,11 @@ offset for each asset. `upload_resume` rewinds the relay to that durable offset.
 `upload_complete` enters final validation only after every asset's durable offset
 equals its declared size; bytes merely queued or relayed stay behind this barrier.
 The server permits two concurrent outgoing uploads per endpoint and one per remote
-session. Only an exact target `upload_finished` acknowledgement enters the
+session. Each sender has a 1 MiB durable-ACK window. Eight relay slots per target
+bound its outstanding bytes to 8 MiB. Additional transfers wait before receiver
+allocation and receive periodic `upload_resume_ready` capacity-wait receipts;
+they do not consume a receiver timer or fail merely because another transfer is
+active. A slot is released when bytes become fully durable, or on abort. Only an exact target `upload_finished` acknowledgement enters the
 session asset inventory.
 
 ## Scene runs
@@ -130,18 +169,18 @@ clock. `MOUFFETTE_SCENE_ACTIVATION_LEAD_MS` is the base presentation margin
 (500 ms by default); the run adds twice the largest uncertainty reported by its
 two endpoints so the COMMIT itself has time to cross the network, capped at the
 protocol's 10-second maximum. The welcome policy advertises that maximum
-possible lead for compatibility with older clients, while each COMMIT carries
+possible lead, while each COMMIT carries
 its exact effective lead. Both endpoints confirm the first presented frame with
 `started` within five seconds of that deadline. Real compositor presentation
 may differ by up to 750 ms before the run is considered unsafe. A run becomes
 live only after both confirmations.
 
-The remaining v4 scene messages are `prepare_progress`, `state_snapshot`, `stop`, and
+Scene messages include `prepare_progress`, `state_snapshot`, `stop`, and
 `stopped`. The server derives both endpoints from the session, bounds payloads,
 rejects stale generations, and preserves terminal tombstones for idempotent
 retries. Removed `remote_scene_*` message routes do not exist.
 
-## Fully resident media (v5)
+## Fully resident media (v6)
 
 Upload validation only confirms the durable file identity. The target then decodes
 all image pixels, or validates the entire video/audio while retaining the original
@@ -158,10 +197,33 @@ States are `analysing`, `queued`, `decoding`, `ready`, `waiting_for_memory`,
 both endpoints must acknowledge the `media_memory_ready` checklist stage. A new
 report that invalidates a preparing or running scene stops that scene. Transfers
 and memory reports remain independent so completion does not wait for RAM space.
-Version 4 clients are rejected; deploy the client and server version together.
+Clients using a protocol version other than 6 are rejected; deploy the client
+and server version together.
 
 Targets publish full `remote_session_snapshot` updates on change and refresh
 active sessions every five seconds. The relay keeps at most one pending snapshot
 per session when the owner's buffered control traffic exceeds 64 KiB. The lease
 sweep retries the latest replacement; cursor samples wait behind it and use the
 session's most recent screen bounds. Empty display arrays are authoritative.
+
+## Recovery diagnostics and verification
+
+Structured state/rejection records include endpoint/session IDs, expected and
+observed generations, revision and reason without resume tokens. Heartbeats are
+aggregated. Metrics track lease expiry, resumed/rejected/reconciled sessions,
+unresolved cleanup count/age and event-loop delays. A delayed event loop is
+observable; it cannot revive a terminal session. Metric deduplication is bounded.
+
+`connection_recovery_v6.test.js` covers the 3/5-second boundaries, lost RESUME
+results, applied-ACK readiness, terminal replay suppression, disable races,
+independent incoming sessions, bounded obligations and STOP acknowledgements
+after logical closure. `upload_transport.integration.test.js` exercises real
+WebSockets and authentication; upload tests include the 8 × 1 MiB relay limit.
+
+`connection_recovery_soak.test.js` uses a fixed seed for 600 session cycles with
+single/double partitions, lost state/cleanup ACKs, duplicate recovery commands,
+late STOP ACKs, exact expiry boundaries and wall-clock jumps. It asserts the
+configured history limits and empty live registries after every cleanup. Its
+separate cache exercise uses real files across 128 cleanup cycles, four restarts
+and injected deletion failures, then verifies empty work/data directories and
+at most eight durable proofs for its eight reused cache scopes.

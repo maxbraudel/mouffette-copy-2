@@ -17,6 +17,8 @@ public:
     struct Binding {
         QString remoteSessionId;
         quint64 generation = 0;
+        quint64 stateRevision = 0;
+        qint64 validUntilServerMonotonicMs = -1;
         quint64 ownerConnectionGeneration = 0;
         quint64 targetConnectionGeneration = 0;
         QString ownerEndpointId;
@@ -25,6 +27,8 @@ public:
         QString teardownId;
         QString phase;
         bool active = false;
+        bool commandReady = false;
+        bool degraded = false;
     };
 
     explicit RemoteSessionCoordinator(QObject* parent = nullptr);
@@ -32,12 +36,17 @@ public:
     void setLocalEndpointId(const QString& endpointId);
     QString localEndpointId() const { return m_localEndpointId; }
     bool upsert(const QJsonObject& envelope,
-                quint64 localConnectionGeneration = 0);
+                quint64 localConnectionGeneration = 0,
+                QString* validationError = nullptr);
     bool acceptSnapshot(const QJsonObject& envelope,
-                        quint64 localConnectionGeneration = 0);
+                        quint64 localConnectionGeneration = 0,
+                        bool allowInitialReplay = false);
+    static bool validateSnapshot(const QJsonObject& snapshot);
+    bool isClosedDuplicate(const QJsonObject& envelope) const;
+    void suspend(const QString& remoteSessionId);
     bool canClose(const QJsonObject& envelope,
                   quint64 localConnectionGeneration = 0) const;
-    void remove(const QString& remoteSessionId);
+    void remove(const QString& remoteSessionId, const QJsonObject& finalEnvelope = {});
     void clear();
 
     // A device can simultaneously be the target of our outgoing session and
@@ -70,4 +79,8 @@ private:
     QHash<QString, quint64> m_lastSnapshotSequenceBySession;
     QHash<QString, quint64> m_lastSnapshotRevisionBySession;
     QSet<QString> m_closedSessionIds;
+    QList<QString> m_closedSessionOrder;
+    QHash<QString, Binding> m_closedBindings;
+    QHash<QString, QJsonObject> m_initialSnapshotBySession;
+    QHash<QString, QJsonObject> m_latestSnapshotBySession;
 };

@@ -41,7 +41,7 @@ function messages(ws, type) {
 
 function envelope(session, extra = {}) {
     return {
-        protocolVersion: 5,
+        protocolVersion: 6,
         serverBootId: session.serverBootId,
         messageId: crypto.randomUUID(),
         remoteSessionId: session.remoteSessionId,
@@ -266,9 +266,7 @@ const checklist = Object.freeze([
     assert.equal(liveReplay.run.startServerMonotonicMs, scheduledStart);
 }
 
-// A transport departure only puts the RemoteSession in Grace. A prepared or
-// scheduled graph is not destroyed before the fixed lease/prepare deadline,
-// and the same runtime may resume it at 2,999 ms.
+// Grace cancels pre-start graphs while retaining the resumable session.
 {
     let now = 100_000;
     let sequence = 0;
@@ -306,9 +304,9 @@ const checklist = Object.freeze([
     assert.equal(server.handleRemoteSessionDeparture(
         server.clients.get('grace-owner'), now), true);
     assert.equal(session.phase, 'Grace');
-    assert.equal(run.phase, SCENE_PHASES.PREPARING);
-    assert.equal(messages(owner, 'stop').length, 0,
-        'Grace must not stop a pre-start SceneRun');
+    assert.equal(run.phase, SCENE_PHASES.STOPPING);
+    assert.equal(messages(owner, 'stop').length, 1,
+        'Grace must prevent a delayed start');
 
     now = 102_999;
     server.clients.get('grace-owner').connectionGeneration = 2;
@@ -322,7 +320,7 @@ const checklist = Object.freeze([
     assert.equal(resumed.ok, true);
     server.rebindSessionGeneration(resumed.session);
     assert.equal(resumed.session.phase, 'Active');
-    assert.equal(run.phase, SCENE_PHASES.PREPARING);
+    assert.equal(run.phase, SCENE_PHASES.STOPPING);
     assert.equal(run.generation, resumed.session.generation);
 }
 
@@ -695,7 +693,7 @@ for (const invalidCase of [
     assert.equal(messages(owner, 'stopped').at(-1).success, true);
 
     server.handleMessage('owner-connection', {
-        protocolVersion: 5, serverBootId: server.serverBootId,
+        protocolVersion: 6, serverBootId: server.serverBootId,
         messageId: crypto.randomUUID(),
         type: 'remote_scene_start',
     });
@@ -833,7 +831,7 @@ for (const [overrides, accepted] of [
     }
 }
 
-console.log('scene protocol v5 tests passed');
+console.log('scene protocol v6 tests passed');
 
 // Residency is a separate, authenticated barrier; upload completion never implies it.
 {

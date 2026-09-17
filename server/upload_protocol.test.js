@@ -49,7 +49,7 @@ function setup() {
 
 function envelope(session, extra = {}) {
     return {
-        protocolVersion: 5,
+        protocolVersion: 6,
         serverBootId: session.serverBootId,
         messageId: crypto.randomUUID(),
         remoteSessionId: session.remoteSessionId,
@@ -87,6 +87,52 @@ function startUpload(context, uploadId, asset = file(), transport = socket()) {
 }
 
 const uploadId = 'upload-1';
+
+// Eight 1 MiB durable-ACK windows bound total incoming bytes. Further senders
+// wait before target allocation and are granted fairly when a slot is released.
+{
+    const server = new MouffetteServer({ port: 0, metricLogger: () => {}, protocolLogger: () => {} });
+    const target = addClient(server, 'bounded-target', 'B');
+    const senders = [];
+    const asset = { ...file(), size: 2 * 1024 * 1024 };
+    for (let index = 0; index < 9; ++index) {
+        const id = `bounded-owner-${index}`;
+        const owner = addClient(server, id, `A-${index}`);
+        const session = server.remoteSessions.open({
+            ownerEndpointId: owner.client.endpointId, targetEndpointId: 'B',
+            ownerRuntimeId: owner.client.runtimeId, targetRuntimeId: 'runtime-B',
+        }).session;
+        session.serverBootId = server.serverBootId;
+        const transport = socket();
+        server.handleMessage(id, envelope(session, { type: 'upload_start',
+            uploadId: `bounded-upload-${index}`, files: [asset] }), transport);
+        senders.push({ id, owner, session, transport, uploadId: `bounded-upload-${index}` });
+    }
+    assert.equal(messages(target.ws, 'upload_start').length, 8);
+    assert.equal(messages(senders[8].owner.ws, 'upload_resume_ready').at(-1).waitingForCapacity, true);
+    server.cleanupStalledUploads(Date.now() + 5000);
+    assert.equal(server.uploads.size, 9, 'accepted capacity waits are not idle failures');
+    const first = senders[0];
+    server.handleMessage('bounded-target', envelope(first.session, { type: 'upload_ready',
+        uploadId: first.uploadId, assets: [assetState(asset)] }));
+    const chunk = Buffer.alloc(128 * 1024).toString('base64');
+    for (let index = 0; index < 8; ++index) {
+        server.handleMessage(first.id, envelope(first.session, { type: 'upload_chunk',
+            uploadId: first.uploadId, assetId: asset.assetId, sha256: asset.sha256,
+            offset: index * 128 * 1024, size: 128 * 1024, data: chunk }), first.transport);
+    }
+    assert.equal(server.uploads.get(first.uploadId).relayedBytes, 1024 * 1024);
+    server.handleMessage('bounded-target', envelope(first.session, { type: 'upload_progress',
+        uploadId: first.uploadId, assets: [assetState(asset, 1024 * 1024)] }));
+    server.handleMessage(first.id, envelope(first.session, { type: 'upload_chunk',
+        uploadId: first.uploadId, assetId: asset.assetId, sha256: asset.sha256,
+        offset: 1024 * 1024, size: 128 * 1024, data: chunk }), first.transport);
+    assert.equal(server.uploads.get(first.uploadId).relayedBytes, 1152 * 1024,
+        'durable progress reopens credit without failing the transfer');
+    server.removeUpload(server.uploads.get(first.uploadId));
+    assert.equal(messages(target.ws, 'upload_start').length, 9);
+    assert.equal(server.uploads.get(senders[8].uploadId).relaySlotGranted, true);
+}
 
 // Validated upload is scoped to the exact session generation and creates the
 // only inventory that scene_prepare may consume.
@@ -548,4 +594,4 @@ const uploadId = 'upload-1';
         'the recipient generation must not overwrite the upload owner/source generation');
 }
 
-console.log('upload protocol v5 tests passed');
+console.log('upload protocol v6 tests passed');

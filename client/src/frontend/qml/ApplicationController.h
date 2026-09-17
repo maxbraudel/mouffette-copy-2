@@ -125,6 +125,7 @@ public:
     Q_INVOKABLE void goBack();
     Q_INVOKABLE void showHistory();
     Q_INVOKABLE void toggleConnection();
+    Q_INVOKABLE void setConnectionEnabled(bool enabled);
     Q_INVOKABLE void requestDeleteProject();
     Q_INVOKABLE void requestClearHistory();
     Q_INVOKABLE void acceptDialog();

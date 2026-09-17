@@ -1,3 +1,4 @@
+#include "backend/runtime/SuspendInclusiveClock.h"
 #include "backend/domain/models/ClientInfo.h"
 #include <QDateTime>
 #include <QJsonArray>
@@ -85,6 +86,9 @@ QJsonObject ClientInfo::toJson() const {
     obj["machineName"] = m_machineName;
     obj["platform"] = m_platform;
     obj["status"] = m_status;
+    obj["canAcceptSession"] = canAcceptSession();
+    obj["reason"] = m_presenceReason;
+    if (m_lastSeenAt >= 0) obj["lastSeenAt"] = m_lastSeenAt;
     if (m_volumePercent >= 0) obj["volumePercent"] = m_volumePercent;
     
     QJsonArray screensArray;
@@ -129,7 +133,11 @@ ClientInfo ClientInfo::fromJson(const QJsonObject& json) {
     client.m_status = json.value("status").toString(QStringLiteral("Available"));
     client.m_volumePercent = json.contains("volumePercent") ? json["volumePercent"].toInt(-1) : -1;
     client.m_fromMemory = false;
-    client.m_isOnline = true;
+    client.m_isOnline = client.m_status != QLatin1String("Disconnected");
+    client.m_canAcceptSession = json.value("canAcceptSession").toBool(
+        client.m_status == QLatin1String("Available"));
+    client.m_presenceReason = json.value("reason").toString();
+    client.m_lastSeenAt = json.value("lastSeenAt").toInteger(-1);
     client.m_availabilityStatus = client.m_status;
     
     QJsonArray screensArray = json["screens"].toArray();
@@ -185,6 +193,9 @@ QString ClientInfo::availabilityBadgeText() const
             || value.compare(QStringLiteral("active"), Qt::CaseInsensitive) == 0) {
             return QStringLiteral("Connected");
         }
+        if (value.compare(QStringLiteral("degraded"), Qt::CaseInsensitive) == 0) {
+            return QStringLiteral("Degraded");
+        }
         if (value.compare(QStringLiteral("reconnecting"), Qt::CaseInsensitive) == 0
             || value.compare(QStringLiteral("grace"), Qt::CaseInsensitive) == 0) {
             return QStringLiteral("Reconnecting");
@@ -227,7 +238,7 @@ QString ClientInfo::getProjectDeadlineText(qint64 nowMs) const
         return {};
     }
 
-    const qint64 current = nowMs >= 0 ? nowMs : QDateTime::currentMSecsSinceEpoch();
+    const qint64 current = nowMs >= 0 ? nowMs : MouffetteClock::anchoredEpochMs();
     QStringList parts;
     if (m_projectMediaReleaseAtMs >= current && m_projectMediaReleaseAtMs > 0) {
         parts.append(QStringLiteral("Free RAM in %1")

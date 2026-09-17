@@ -17,6 +17,7 @@
 #include "backend/domain/media/CanvasMedia.h"
 #include "backend/files/FileManager.h"
 #include "backend/network/SceneRunCoordinator.h"
+#include "backend/network/RemoteSessionCoordinator.h"
 #include "backend/network/WebSocketClient.h"
 #include "backend/security/DeviceIdentityStore.h"
 #include "frontend/rendering/canvas/QuickCanvasController.h"
@@ -39,6 +40,91 @@ private slots:
     {
         MediaResidencyManager::instance().clearMemorySnapshotForTesting();
     }
+    void transportTimeoutPreservesSessionUntilItsFiveSecondProofDeadline()
+    {
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        QWebSocketServer server(QStringLiteral("v6-recovery-boundary"), QWebSocketServer::NonSecureMode);
+        QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+        qint64 continuousNow = 0;
+        WebSocketClient client(directory.path(), false, nullptr, [&] { return continuousNow; });
+        const QString boot = QUuid::createUuid().toString(QUuid::WithoutBraces);
+        const QString target(43, QLatin1Char('B'));
+        QPointer<QWebSocket> peer;
+        QJsonObject opened;
+        int closeCommands = 0;
+        auto send = [&](QJsonObject message) {
+            message.insert("protocolVersion", WebSocketClient::ProtocolVersion);
+            message.insert("serverBootId", boot);
+            message.insert("messageId", QUuid::createUuid().toString(QUuid::WithoutBraces));
+            peer->sendTextMessage(QString::fromUtf8(QJsonDocument(message).toJson(QJsonDocument::Compact)));
+        };
+        connect(&server, &QWebSocketServer::newConnection, this, [&] {
+            peer = server.nextPendingConnection();
+            peer->setParent(&server);
+            send({{"type", "auth_challenge"}, {"issuedAt", 1},
+                {"nonce", QString::fromLatin1(QByteArray(32, 'n').toBase64(
+                    QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals))}});
+            connect(peer, &QWebSocket::textMessageReceived, this, [&](const QString& encoded) {
+                const auto message = QJsonDocument::fromJson(encoded.toUtf8()).object();
+                const QString type = message.value("type").toString();
+                if (type == QLatin1String("remote_session_close")) ++closeCommands;
+                if (type != QLatin1String("auth_response")) return;
+                const QString owner = DeviceIdentityStore::endpointIdForInstallation(
+                    message.value("installationId").toString(), message.value("instanceId").toString());
+                send({{"type", "welcome"},
+                    {"connectionId", QUuid::createUuid().toString(QUuid::WithoutBraces)},
+                    {"installationId", message.value("installationId")}, {"endpointId", owner},
+                    {"instanceId", message.value("instanceId")}, {"runtimeId", message.value("runtimeId")},
+                    {"connectionGeneration", 1}, {"serverMonotonicMs", 0},
+                    {"policy", QJsonObject{{"policyVersion", 1}, {"heartbeatIntervalMs", 750},
+                        {"leaseTimeoutMs", 3000}, {"transportSuspectAfterMs", 1500},
+                        {"sessionRecoveryTimeoutMs", 5000}, {"scenePrepareTimeoutMs", 15000},
+                        {"sceneActivationLeadMs", 500}, {"sceneMaxClockSkewMs", 50},
+                        {"sceneStartedAckTimeoutMs", 5000}, {"sceneMaxStartSkewMs", 750},
+                        {"sceneStopTimeoutMs", 5000}, {"uploadIdleTimeoutMs", 45000},
+                        {"uploadTargetAckTimeoutMs", 30000}, {"removalAckTimeoutMs", 30000}}}});
+                opened = {{"type", "remote_session_opened"}, {"remoteSessionId", "recovery-session"},
+                    {"generation", 1}, {"commandReady", true}, {"stateRevision", 2}, {"validUntilServerMonotonicMs", 5000},
+                    {"ownerConnectionGeneration", 1}, {"targetConnectionGeneration", 1},
+                    {"ownerEndpointId", owner}, {"targetEndpointId", target},
+                    {"resumeToken", "recovery-proof"}, {"phase", "Active"}, {"snapshotSequence", 1},
+                    {"snapshot", QJsonObject{{"screens", QJsonArray{}}, {"systemUI", QJsonArray{}},
+                        {"volumePercent", 50}, {"revision", 1}, {"capturedAtEpochMs", 1}}}};
+                send(opened);
+            });
+        });
+        QSignalSpy ready(&client, &WebSocketClient::remoteSessionOpened);
+        QSignalSpy expired(&client, &WebSocketClient::remoteSessionRecoveryExpired);
+        QSignalSpy globalExpired(&client, &WebSocketClient::leaseExpired);
+        QSignalSpy invalidated(&client, &WebSocketClient::sessionsInvalidated);
+        client.connectToServer(QStringLiteral("ws://127.0.0.1:%1").arg(server.serverPort()));
+        QTRY_COMPARE_WITH_TIMEOUT(ready.size(), 1, 2000);
+        QVERIFY(client.canIssueSessionCommands("recovery-session"));
+        send(opened); // exact idempotent OPEN replay must not close/reinitialize.
+        QTest::qWait(20);
+        QCOMPARE(ready.size(), 1);
+        QCOMPARE(closeCommands, 0);
+        continuousNow = 3000;
+        QVERIFY(QMetaObject::invokeMethod(&client, "checkLeaseHealth", Qt::DirectConnection));
+        QCOMPARE(expired.size(), 0);
+        QVERIFY(!client.remoteSessionCoordinator()->byId("recovery-session").remoteSessionId.isEmpty());
+        QVERIFY(!client.canIssueSessionCommands("recovery-session"));
+        continuousNow = 4999;
+        QVERIFY(QMetaObject::invokeMethod(&client, "checkLeaseHealth", Qt::DirectConnection));
+        QCOMPARE(expired.size(), 0);
+        continuousNow = 5000;
+        QVERIFY(QMetaObject::invokeMethod(&client, "checkLeaseHealth", Qt::DirectConnection));
+        QCOMPARE(expired.size(), 1);
+        QCOMPARE(expired.first().first().toString(), QStringLiteral("recovery-session"));
+        QVERIFY(!client.remoteSessionCoordinator()->byId("recovery-session").active);
+        QVERIFY(QMetaObject::invokeMethod(&client, "checkLeaseHealth", Qt::DirectConnection));
+        QCOMPARE(expired.size(), 1);
+        client.disconnect();
+        QCOMPARE(invalidated.size(), 1);
+        QCOMPARE(globalExpired.size(), 0);
+    }
+
     void pendingMetadataImportBlocksReadyCanvasWithoutAutoLaunching()
     {
         QTemporaryDir directory;
@@ -188,8 +274,23 @@ private slots:
         int preparedCount = 0;
         int progressCount = 0;
         int stopCount = 0;
+        QJsonObject fixtureSessionState;
         auto send = [&](QWebSocket* peer, QJsonObject message) {
-            message.insert(QStringLiteral("protocolVersion"), 5);
+            message.insert(QStringLiteral("protocolVersion"), WebSocketClient::ProtocolVersion);
+            if (message.contains(QStringLiteral("remoteSessionId"))) {
+                message.insert(QStringLiteral("stateRevision"), 1);
+                message.insert(QStringLiteral("commandReady"), true);
+                message.insert(QStringLiteral("validUntilServerMonotonicMs"), 20000);
+                if (message.value(QStringLiteral("phase")).toString() == QLatin1String("Active"))
+                    fixtureSessionState = message;
+            }
+            if (message.value(QStringLiteral("type")).toString() == QLatin1String("heartbeat_ack")
+                && !fixtureSessionState.isEmpty()) {
+                auto proof = fixtureSessionState;
+                proof.insert(QStringLiteral("validUntilServerMonotonicMs"),
+                    message.value(QStringLiteral("serverMonotonicMs")).toDouble() + 20000);
+                message.insert(QStringLiteral("sessionStates"), QJsonArray{proof});
+            }
             message.insert(QStringLiteral("serverBootId"), bootId);
             message.insert(QStringLiteral("messageId"),
                            QUuid::createUuid().toString(QUuid::WithoutBraces));
@@ -222,6 +323,7 @@ private slots:
                         {"connectionGeneration", 1}, {"serverMonotonicMs", 10},
                         {"policy", QJsonObject{
                             {"policyVersion", 1}, {"heartbeatIntervalMs", 250},
+                            {"transportSuspectAfterMs", 500}, {"sessionRecoveryTimeoutMs", 20000},
                             {"leaseTimeoutMs", 3000}, {"scenePrepareTimeoutMs", 1000},
                             {"sceneActivationLeadMs", 500}, {"sceneMaxClockSkewMs", 50},
                             {"sceneStartedAckTimeoutMs", 5000}, {"sceneMaxStartSkewMs", 750},
@@ -480,8 +582,23 @@ private slots:
         const QString bootId = QUuid::createUuid().toString(QUuid::WithoutBraces);
         const QString targetId(43, QLatin1Char('B'));
         int scenePrepareCount = 0;
+        QJsonObject fixtureSessionState;
         auto send = [&](QWebSocket* peer, QJsonObject message) {
-            message.insert(QStringLiteral("protocolVersion"), 5);
+            message.insert(QStringLiteral("protocolVersion"), WebSocketClient::ProtocolVersion);
+            if (message.contains(QStringLiteral("remoteSessionId"))) {
+                message.insert(QStringLiteral("stateRevision"), 1);
+                message.insert(QStringLiteral("commandReady"), true);
+                message.insert(QStringLiteral("validUntilServerMonotonicMs"), 20000);
+                if (message.value(QStringLiteral("phase")).toString() == QLatin1String("Active"))
+                    fixtureSessionState = message;
+            }
+            if (message.value(QStringLiteral("type")).toString() == QLatin1String("heartbeat_ack")
+                && !fixtureSessionState.isEmpty()) {
+                auto proof = fixtureSessionState;
+                proof.insert(QStringLiteral("validUntilServerMonotonicMs"),
+                    message.value(QStringLiteral("serverMonotonicMs")).toDouble() + 20000);
+                message.insert(QStringLiteral("sessionStates"), QJsonArray{proof});
+            }
             message.insert(QStringLiteral("serverBootId"), bootId);
             message.insert(QStringLiteral("messageId"),
                            QUuid::createUuid().toString(QUuid::WithoutBraces));
@@ -513,6 +630,7 @@ private slots:
                         {"connectionGeneration", 1}, {"serverMonotonicMs", 10},
                         {"policy", QJsonObject{
                             {"policyVersion", 1}, {"heartbeatIntervalMs", 250},
+                            {"transportSuspectAfterMs", 500}, {"sessionRecoveryTimeoutMs", 20000},
                             {"leaseTimeoutMs", 3000}, {"scenePrepareTimeoutMs", 5000},
                             {"sceneActivationLeadMs", 500}, {"sceneMaxClockSkewMs", 50},
                             {"sceneStartedAckTimeoutMs", 5000}, {"sceneMaxStartSkewMs", 750},
@@ -623,8 +741,23 @@ private slots:
         int clockRepliesAfterBarrier = 0;
         int armedCount = 0;
         int stopCount = 0;
+        QJsonObject fixtureSessionState;
         auto send = [&](QWebSocket* peer, QJsonObject message) {
-            message.insert(QStringLiteral("protocolVersion"), 5);
+            message.insert(QStringLiteral("protocolVersion"), WebSocketClient::ProtocolVersion);
+            if (message.contains(QStringLiteral("remoteSessionId"))) {
+                message.insert(QStringLiteral("stateRevision"), 1);
+                message.insert(QStringLiteral("commandReady"), true);
+                message.insert(QStringLiteral("validUntilServerMonotonicMs"), 20000);
+                if (message.value(QStringLiteral("phase")).toString() == QLatin1String("Active"))
+                    fixtureSessionState = message;
+            }
+            if (message.value(QStringLiteral("type")).toString() == QLatin1String("heartbeat_ack")
+                && !fixtureSessionState.isEmpty()) {
+                auto proof = fixtureSessionState;
+                proof.insert(QStringLiteral("validUntilServerMonotonicMs"),
+                    message.value(QStringLiteral("serverMonotonicMs")).toDouble() + 20000);
+                message.insert(QStringLiteral("sessionStates"), QJsonArray{proof});
+            }
             message.insert(QStringLiteral("serverBootId"), bootId);
             message.insert(QStringLiteral("messageId"),
                            QUuid::createUuid().toString(QUuid::WithoutBraces));
@@ -656,6 +789,7 @@ private slots:
                         {"connectionGeneration", 1}, {"serverMonotonicMs", 10},
                         {"policy", QJsonObject{
                             {"policyVersion", 1}, {"heartbeatIntervalMs", 250},
+                            {"transportSuspectAfterMs", 500}, {"sessionRecoveryTimeoutMs", 20000},
                             {"leaseTimeoutMs", 10000}, {"scenePrepareTimeoutMs", 5000},
                             {"sceneActivationLeadMs", 1000}, {"sceneMaxClockSkewMs", 50},
                             {"sceneStartedAckTimeoutMs", 5000}, {"sceneMaxStartSkewMs", 750},
@@ -789,8 +923,23 @@ private slots:
         QJsonArray preparedChecklist;
         int armedCount = 0;
         QJsonObject startedMessage;
+        QJsonObject fixtureSessionState;
         auto send = [&](QWebSocket* socket, QJsonObject message) {
-            message.insert(QStringLiteral("protocolVersion"), 5);
+            message.insert(QStringLiteral("protocolVersion"), WebSocketClient::ProtocolVersion);
+            if (message.contains(QStringLiteral("remoteSessionId"))) {
+                message.insert(QStringLiteral("stateRevision"), 1);
+                message.insert(QStringLiteral("commandReady"), true);
+                message.insert(QStringLiteral("validUntilServerMonotonicMs"), 20000);
+                if (message.value(QStringLiteral("phase")).toString() == QLatin1String("Active"))
+                    fixtureSessionState = message;
+            }
+            if (message.value(QStringLiteral("type")).toString() == QLatin1String("heartbeat_ack")
+                && !fixtureSessionState.isEmpty()) {
+                auto proof = fixtureSessionState;
+                proof.insert(QStringLiteral("validUntilServerMonotonicMs"),
+                    message.value(QStringLiteral("serverMonotonicMs")).toDouble() + 20000);
+                message.insert(QStringLiteral("sessionStates"), QJsonArray{proof});
+            }
             message.insert(QStringLiteral("serverBootId"), bootId);
             message.insert(QStringLiteral("messageId"),
                            QUuid::createUuid().toString(QUuid::WithoutBraces));
@@ -822,6 +971,7 @@ private slots:
                         {"connectionGeneration", 1}, {"serverMonotonicMs", 10},
                         {"policy", QJsonObject{
                             {"policyVersion", 1}, {"heartbeatIntervalMs", 250},
+                            {"transportSuspectAfterMs", 500}, {"sessionRecoveryTimeoutMs", 20000},
                             {"leaseTimeoutMs", 10000}, {"scenePrepareTimeoutMs", 8000},
                             {"sceneActivationLeadMs", 500}, {"sceneMaxClockSkewMs", 50},
                             {"sceneStartedAckTimeoutMs", 1000}, {"sceneMaxStartSkewMs", 750},

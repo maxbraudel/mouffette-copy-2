@@ -1,5 +1,6 @@
 #include "backend/network/WebSocketClient.h"
 #include "backend/config/AppConfig.h"
+#include "backend/runtime/SuspendInclusiveClock.h"
 #include "backend/network/SceneRunCoordinator.h"
 #include "backend/security/DeviceIdentityStore.h"
 #include "MediaFormatContract.h"
@@ -14,63 +15,10 @@
 #include <limits>
 #include <utility>
 
-#if defined(Q_OS_MACOS)
-#include <mach/mach_time.h>
-#elif defined(Q_OS_WIN)
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <windows.h>
-#elif defined(Q_OS_LINUX)
-#include <time.h>
-#endif
-
 namespace {
 constexpr int kClockSyncBurstProbeCount = 5;
 constexpr int kClockSyncBurstIntervalMs = 100;
 constexpr int kClockSyncBurstCooldownMs = 1000;
-
-qint64 systemSuspendInclusiveMonotonicMs()
-{
-#if defined(Q_OS_MACOS)
-    static mach_timebase_info_data_t timebase = [] {
-        mach_timebase_info_data_t value{};
-        mach_timebase_info(&value);
-        return value;
-    }();
-    if (timebase.denom == 0) return -1;
-    const __uint128_t nanoseconds =
-        static_cast<__uint128_t>(mach_continuous_time()) * timebase.numer
-        / timebase.denom;
-    const __uint128_t milliseconds = nanoseconds / 1'000'000U;
-    if (milliseconds
-        > static_cast<__uint128_t>(std::numeric_limits<qint64>::max())) {
-        return std::numeric_limits<qint64>::max();
-    }
-    return static_cast<qint64>(milliseconds);
-#elif defined(Q_OS_WIN)
-    return static_cast<qint64>(GetTickCount64());
-#elif defined(Q_OS_LINUX) && defined(CLOCK_BOOTTIME)
-    timespec value{};
-    if (clock_gettime(CLOCK_BOOTTIME, &value) != 0) return -1;
-    if (value.tv_sec < 0 || value.tv_nsec < 0) return -1;
-    constexpr qint64 millisecondsPerSecond = 1000;
-    if (value.tv_sec
-        > std::numeric_limits<qint64>::max() / millisecondsPerSecond) {
-        return std::numeric_limits<qint64>::max();
-    }
-    return static_cast<qint64>(value.tv_sec) * millisecondsPerSecond
-        + static_cast<qint64>(value.tv_nsec / 1'000'000L);
-#else
-    // Fail-closed fallback for an unsupported platform. Wall-clock rollback is
-    // treated as an expired lease by leaseElapsedMs(); a forward jump expires
-    // early rather than extending remote control past the server deadline.
-    return QDateTime::currentMSecsSinceEpoch();
-#endif
-}
 
 QByteArray base64UrlDecode(const QString& value) {
     return QByteArray::fromBase64(
@@ -294,7 +242,7 @@ WebSocketClient::WebSocketClient(const QString& identityFallbackDirectory,
     , m_instanceOrdinal(instanceOrdinal)
 {
     if (!m_suspendInclusiveClock) {
-        m_suspendInclusiveClock = systemSuspendInclusiveMonotonicMs;
+        m_suspendInclusiveClock = MouffetteClock::nowMs;
     }
     m_processClock.start();
     m_deviceSnapshotRetryTimer.setSingleShot(true);
@@ -324,6 +272,9 @@ WebSocketClient::WebSocketClient(const QString& identityFallbackDirectory,
             this, [this](const QString& sessionId) {
         m_receivedCursorSequenceBySession.remove(sessionId);
         m_publishedDeviceSnapshots.remove(sessionId);
+        m_sessionDeadlines.remove(sessionId);
+        m_resumeRequestIds.remove(sessionId);
+        m_expiredSessionCloses.remove(sessionId);
     });
 
     if (!m_identityStore->initialize(&m_identityInitializationError)) {
@@ -488,7 +439,20 @@ void WebSocketClient::connectToServer(const QString& serverUrl) {
 }
 
 void WebSocketClient::disconnect() {
-    expireLease();
+    m_endpointDraining = true;
+    m_pendingServerBootId.clear();
+    m_endpointDisableRequestId.clear();
+    if (m_hasEstablishedLease) {
+        emit sessionsInvalidated(QStringLiteral("user_disabled"), m_serverBootId, m_connectionGeneration);
+        if (m_sceneRuns) m_sceneRuns->clearSessions();
+    }
+    m_sessionDeadlines.clear();
+    m_expiredSessionCloses.clear();
+    m_resumeRequestIds.clear();
+    m_reconcileRequestId.clear();
+    m_hasEstablishedLease = false;
+    m_leaseExpired = true;
+    m_leaseHealthTimer->stop();
     m_authenticated = false;
     m_heartbeatTimer->stop();
     m_clockSyncBurstTimer->stop();
@@ -506,6 +470,7 @@ void WebSocketClient::disconnect() {
 }
 
 void WebSocketClient::abortConnectionAttempt() {
+    m_pendingServerBootId.clear();
     m_authenticated = false;
     m_heartbeatTimer->stop();
     if (m_webSocket && m_webSocket->state() != QAbstractSocket::UnconnectedState) {
@@ -563,7 +528,8 @@ bool WebSocketClient::isTransportConnected() const {
 bool WebSocketClient::hasUnexpiredLease() const {
     return m_leaseTimeoutMs > 0 && m_hasEstablishedLease && !m_leaseExpired
         && m_lastServerContactContinuousMs >= 0
-        && leaseElapsedMs() < m_leaseTimeoutMs;
+        && leaseElapsedMs() < (m_sessionRecoveryTimeoutMs > 0
+            ? m_sessionRecoveryTimeoutMs : m_leaseTimeoutMs);
 }
 
 qint64 WebSocketClient::leaseRemainingMs() const {
@@ -571,7 +537,8 @@ qint64 WebSocketClient::leaseRemainingMs() const {
         || m_lastServerContactContinuousMs < 0) {
         return 0;
     }
-    return std::max<qint64>(0, static_cast<qint64>(m_leaseTimeoutMs)
+    return std::max<qint64>(0, static_cast<qint64>(m_sessionRecoveryTimeoutMs > 0
+                                      ? m_sessionRecoveryTimeoutMs : m_leaseTimeoutMs)
                                   - leaseElapsedMs());
 }
 
@@ -811,6 +778,7 @@ bool WebSocketClient::sendUploadStart(const QString& remoteSessionId,
     if (!binding.active || binding.generation != generation
         || binding.ownerEndpointId != m_endpointId) return false;
     m_canceledUploads.remove(uploadId);
+    m_canceledUploadOrder.removeAll(uploadId);
 
     QJsonObject msg{
         {QStringLiteral("type"), QStringLiteral("upload_start")},
@@ -901,7 +869,12 @@ bool WebSocketClient::sendUploadAbort(const QString& remoteSessionId,
         m_sceneRuns->sessionById(remoteSessionId);
     if (binding.remoteSessionId.isEmpty() || binding.generation != generation
         || binding.ownerEndpointId != m_endpointId) return false;
-    m_canceledUploads.insert(uploadId);
+    if (!m_canceledUploads.contains(uploadId)) {
+        m_canceledUploads.insert(uploadId);
+        m_canceledUploadOrder.append(uploadId);
+        while (m_canceledUploadOrder.size() > 4096)
+            m_canceledUploads.remove(m_canceledUploadOrder.takeFirst());
+    }
 
     QJsonObject msg{
         {QStringLiteral("type"), QStringLiteral("upload_abort")},
@@ -990,17 +963,42 @@ bool WebSocketClient::sendUploadProtocolResponse(const QJsonObject& response) {
     }
     const SceneRunCoordinator::SessionBinding binding =
         m_sceneRuns->sessionById(remoteSessionId);
-    if (binding.remoteSessionId.isEmpty() || binding.generation != generation
-        || binding.targetEndpointId != m_endpointId) return false;
+    if (type == QLatin1String("upload_removed")) {
+        // Quarantine may finish after resume or logical close. Its authority
+        // comes from the exact authenticated removal instruction we accepted,
+        // independently of the current command-capable session generation.
+        const auto obligation = m_assetRemovalObligations.constFind(
+            message.value(QStringLiteral("removalId")).toString());
+        if (obligation == m_assetRemovalObligations.cend()
+            || obligation->value(QStringLiteral("serverBootId")).toString() != m_serverBootId
+            || !obligation->value(QStringLiteral("acceptedGenerations")).toArray().contains(
+                QJsonValue(static_cast<double>(generation)))) return false;
+        static const QStringList identityFields = {
+            QStringLiteral("remoteSessionId"),
+            QStringLiteral("removalId"), QStringLiteral("uploadId"),
+            QStringLiteral("assetId"), QStringLiteral("offset"), QStringLiteral("size"),
+            QStringLiteral("sha256"), QStringLiteral("fileId"), QStringLiteral("extension")
+        };
+        for (const auto& field : identityFields)
+            if (message.value(field) != obligation->value(field)) return false;
+    } else {
+        if (binding.remoteSessionId.isEmpty() || binding.generation != generation
+            || binding.targetEndpointId != m_endpointId) return false;
+        if ((type == QLatin1String("upload_ready") || type == QLatin1String("upload_progress")
+             || type == QLatin1String("upload_finished")) && !canIssueSessionCommands(remoteSessionId)) return false;
+    }
     message.remove(QStringLiteral("ownerEndpointId"));
     message.remove(QStringLiteral("targetEndpointId"));
-    return sendControlMessage(message);
+    const bool sent = sendControlMessage(message);
+    if (sent && type == QLatin1String("upload_removed"))
+        m_assetRemovalObligations.remove(message.value(QStringLiteral("removalId")).toString());
+    return sent;
 }
 
 bool WebSocketClient::openRemoteSession(const QString& targetEndpointId,
                                         QString* requestId)
 {
-    if (!isConnected() || targetEndpointId.isEmpty() || targetEndpointId == m_endpointId) return false;
+    if (!isConnected() || m_endpointDraining || targetEndpointId.isEmpty() || targetEndpointId == m_endpointId) return false;
     const QString correlationId = QUuid::createUuid().toString(QUuid::WithoutBraces);
     if (!replayRemoteSessionOpen(targetEndpointId, correlationId)) return false;
     if (requestId) *requestId = correlationId;
@@ -1011,7 +1009,7 @@ bool WebSocketClient::replayRemoteSessionOpen(
     const QString& targetEndpointId,
     const QString& requestId)
 {
-    if (!isConnected() || targetEndpointId.isEmpty()
+    if (!isConnected() || m_endpointDraining || targetEndpointId.isEmpty()
         || targetEndpointId == m_endpointId
         || !isCanonicalUuid(requestId)) {
         return false;
@@ -1026,7 +1024,7 @@ bool WebSocketClient::replayRemoteSessionOpen(
 
 bool WebSocketClient::acceptRemoteSessionOffer(const QJsonObject& offer)
 {
-    if (!isConnected() || !m_sceneRuns || m_registeredTargetSnapshot.isEmpty()) {
+    if (!isConnected() || m_endpointDraining || !m_sceneRuns || m_registeredTargetSnapshot.isEmpty()) {
         return false;
     }
     const QString remoteSessionId =
@@ -1114,13 +1112,18 @@ bool WebSocketClient::sendRemoteCursor(const QString& remoteSessionId,
 
 bool WebSocketClient::resumeRemoteSession(const QString& remoteSessionId)
 {
-    if (!isConnected() || !m_sceneRuns) return false;
+    if (!isConnected() || m_endpointDraining || !m_sceneRuns) return false;
     const SceneRunCoordinator::SessionBinding binding =
         m_sceneRuns->sessionById(remoteSessionId);
     if (binding.remoteSessionId.isEmpty() || binding.resumeToken.isEmpty()
-        || binding.generation == 0) return false;
+        || binding.generation == 0 || m_sessionDeadlines.value(remoteSessionId).expired
+        || (m_sessionDeadlines.contains(remoteSessionId)
+            && sessionRecoveryRemainingMs(remoteSessionId) <= 0)) return false;
+    if (!m_resumeRequestIds.contains(remoteSessionId))
+        m_resumeRequestIds.insert(remoteSessionId, QUuid::createUuid().toString(QUuid::WithoutBraces));
     QJsonObject message{
         {QStringLiteral("type"), QStringLiteral("remote_session_resume")},
+        {QStringLiteral("requestId"), m_resumeRequestIds.value(remoteSessionId)},
         {QStringLiteral("remoteSessionId"), binding.remoteSessionId},
         {QStringLiteral("generation"), static_cast<double>(binding.generation)},
         {QStringLiteral("resumeToken"), binding.resumeToken}
@@ -1133,22 +1136,207 @@ void WebSocketClient::resumeAllRemoteSessions()
     if (!m_sceneRuns) return;
     // A client can have several outgoing and incoming sessions. Do not derive
     // this list from discovery: an offline project may still own
-    // a resumable session during the strict three-second grace window.
+    // a resumable session during the bounded session recovery window.
     const QList<SceneRunCoordinator::SessionBinding> bindings = m_sceneRuns->sessions();
     for (const SceneRunCoordinator::SessionBinding& binding : bindings) {
         if (!binding.resumeToken.isEmpty()) resumeRemoteSession(binding.remoteSessionId);
     }
 }
 
-bool WebSocketClient::beginEndpointDisable()
+qint64 WebSocketClient::sessionRecoveryRemainingMs(const QString& remoteSessionId) const
+{
+    const auto it = m_sessionDeadlines.constFind(remoteSessionId);
+    if (it == m_sessionDeadlines.cend()) {
+        const auto binding = remoteSessionCoordinator()->byId(remoteSessionId);
+        // Versionless coordinator fixtures may use the transport clock. Every
+        // real v6 session needs its own installed proof before authorizing work.
+        return !binding.remoteSessionId.isEmpty() && binding.stateRevision == 0
+            ? leaseRemainingMs() : 0;
+    }
+    if (it->expired) return 0;
+    const qint64 now = suspendInclusiveNowMs();
+    return now >= 0 ? std::max<qint64>(0, it->localDeadlineMs - now) : 0;
+}
+
+bool WebSocketClient::canIssueSessionCommands(const QString& remoteSessionId) const
+{
+    if (!isConnected() || m_endpointDraining || m_degraded || !hasUnexpiredLease()
+        || sessionRecoveryRemainingMs(remoteSessionId) <= 0 || !m_sceneRuns) return false;
+    const auto binding = m_sceneRuns->sessionById(remoteSessionId);
+    if (!binding.active || !binding.commandReady) return false;
+    const quint64 localGeneration = binding.ownerEndpointId == m_endpointId
+        ? binding.ownerConnectionGeneration : binding.targetConnectionGeneration;
+    return localGeneration == m_connectionGeneration;
+}
+
+bool WebSocketClient::reconcileRemoteSessions()
 {
     if (!isConnected() || m_endpointDraining) return false;
+    const qint64 now = suspendInclusiveNowMs();
+    if (m_reconcileSentAtMs >= 0 && now - m_reconcileSentAtMs < 1000) return false;
+    if (m_reconcileRequestId.isEmpty())
+        m_reconcileRequestId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    QJsonArray sessions;
+    for (const auto& binding : remoteSessionCoordinator()->all()) {
+        sessions.append(QJsonObject{
+            {QStringLiteral("remoteSessionId"), binding.remoteSessionId},
+            {QStringLiteral("generation"), static_cast<double>(binding.generation)},
+            {QStringLiteral("stateRevision"), static_cast<double>(binding.stateRevision)}
+        });
+    }
     if (!sendControlMessage(QJsonObject{
-            {QStringLiteral("type"), QStringLiteral("endpoint_disable")}
+        {QStringLiteral("type"), QStringLiteral("remote_session_reconcile")},
+        {QStringLiteral("requestId"), m_reconcileRequestId},
+        {QStringLiteral("sessions"), sessions}
+    })) return false;
+    m_reconcileSentAtMs = now;
+    return true;
+}
+
+bool WebSocketClient::acknowledgeSessionState(const QJsonObject& envelope)
+{
+    quint64 generation = 0, revision = 0;
+    if (!readPositiveSafeJsonInteger(envelope.value(QStringLiteral("generation")), &generation)
+        || !readPositiveSafeJsonInteger(envelope.value(QStringLiteral("stateRevision")), &revision)) return false;
+    return sendControlMessage(QJsonObject{
+        {QStringLiteral("type"), QStringLiteral("remote_session_state_ack")},
+        {QStringLiteral("remoteSessionId"), envelope.value(QStringLiteral("remoteSessionId"))},
+        {QStringLiteral("generation"), static_cast<double>(generation)},
+        {QStringLiteral("stateRevision"), static_cast<double>(revision)}
+    });
+}
+
+void WebSocketClient::updateSessionDeadline(const QJsonObject& envelope)
+{
+    const QString id = envelope.value(QStringLiteral("remoteSessionId")).toString();
+    const QString phase = envelope.value(QStringLiteral("phase")).toString();
+    if (phase == QLatin1String("Terminating") || phase == QLatin1String("CleanupPending")
+        || phase == QLatin1String("Closed")) {
+        m_expiredSessionCloses.remove(id);
+        m_sessionDeadlines.remove(id);
+        return;
+    }
+    const qint64 deadline = boundedInteger(
+        envelope.value(QStringLiteral("validUntilServerMonotonicMs")), 0, 9007199254740991LL);
+    if (id.isEmpty() || deadline < 0 || m_localClockAnchorMs < 0 || m_serverClockAnchorMs < 0) return;
+    auto& tracked = m_sessionDeadlines[id];
+    if (tracked.expired) return;
+    const qint64 now = suspendInclusiveNowMs();
+    if (tracked.localDeadlineMs >= 0 && now >= tracked.localDeadlineMs) {
+        checkSessionRecoveryDeadlines();
+        return;
+    }
+    const qint64 estimatedServerNow = m_serverClockAnchorMs + now - m_localClockAnchorMs;
+    const qint64 remaining = std::clamp<qint64>(deadline - estimatedServerNow, 0,
+        std::max(1, m_sessionRecoveryTimeoutMs));
+    const qint64 localDeadline = now + remaining;
+    // A replay, reauthentication or clock re-estimate cannot extend the same
+    // proof. Only a later absolute server deadline renews this session.
+    if (tracked.localDeadlineMs < 0 || deadline > tracked.serverDeadlineMs) {
+        tracked.localDeadlineMs = localDeadline;
+        tracked.serverDeadlineMs = deadline;
+    } else {
+        tracked.localDeadlineMs = std::min(tracked.localDeadlineMs, localDeadline);
+    }
+}
+
+void WebSocketClient::checkSessionRecoveryDeadlines()
+{
+    if (!m_sceneRuns) return;
+    const qint64 now = suspendInclusiveNowMs();
+    for (const QString& id : m_sessionDeadlines.keys()) {
+        auto it = m_sessionDeadlines.find(id);
+        if (it == m_sessionDeadlines.end()
+            || (!it->expired && now >= 0 && now < it->localDeadlineMs)) continue;
+        const auto binding = m_sceneRuns->sessionById(id);
+        if (binding.remoteSessionId.isEmpty()) continue;
+        if (!it->expired) {
+            it->expired = true;
+            remoteSessionCoordinator()->suspend(id);
+            emit remoteSessionRecoveryExpired(id, binding.generation);
+        }
+        retryExpiredSessionClose(id, binding.generation);
+    }
+}
+
+void WebSocketClient::retryExpiredSessionClose(const QString& id, quint64 generation)
+{
+    if (!isConnected() || !hasUnexpiredLease() || generation == 0) return;
+    auto& pending = m_expiredSessionCloses[id];
+    generation = std::max(generation, pending.sessionGeneration);
+    const qint64 now = suspendInclusiveNowMs();
+    if (pending.sessionGeneration != generation) {
+        pending.requestId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+        pending.sessionGeneration = generation;
+        pending.sentAtMs = -1;
+    }
+    if (pending.transportGeneration == m_connectionGeneration && pending.sentAtMs >= 0
+        && now - pending.sentAtMs < 1000) return;
+    if (sendControlMessage(QJsonObject{
+            {QStringLiteral("type"), QStringLiteral("remote_session_close")},
+            {QStringLiteral("requestId"), pending.requestId},
+            {QStringLiteral("remoteSessionId"), id},
+            {QStringLiteral("generation"), static_cast<double>(generation)},
+            {QStringLiteral("reason"), QStringLiteral("session_recovery_expired")}
+        })) {
+        pending.transportGeneration = m_connectionGeneration;
+        pending.sentAtMs = now;
+    }
+}
+
+void WebSocketClient::refreshSessionProofs(const QJsonObject& heartbeat)
+{
+    const QJsonValue states = heartbeat.value(QStringLiteral("sessionStates"));
+    if (!states.isArray() || states.toArray().size() > 4096) return;
+    bool reconcile = false;
+    for (const QJsonValue& value : states.toArray()) {
+        if (!value.isObject()) continue;
+        const QJsonObject state = value.toObject();
+        const QString id = state.value(QStringLiteral("remoteSessionId")).toString();
+        const auto binding = remoteSessionCoordinator()->byId(id);
+        quint64 generation = 0, revision = 0, ownerTransport = 0, targetTransport = 0;
+        if (!readPositiveSafeJsonInteger(state.value(QStringLiteral("generation")), &generation)
+            || !readPositiveSafeJsonInteger(state.value(QStringLiteral("stateRevision")), &revision)) continue;
+        if (binding.remoteSessionId.isEmpty() || generation != binding.generation
+            || !readPositiveSafeJsonInteger(state.value(QStringLiteral("ownerConnectionGeneration")), &ownerTransport)
+            || !readPositiveSafeJsonInteger(state.value(QStringLiteral("targetConnectionGeneration")), &targetTransport)
+            || ownerTransport != binding.ownerConnectionGeneration || targetTransport != binding.targetConnectionGeneration
+            || state.value(QStringLiteral("ownerEndpointId")).toString() != binding.ownerEndpointId
+            || state.value(QStringLiteral("targetEndpointId")).toString() != binding.targetEndpointId
+            || revision != binding.stateRevision || state.value(QStringLiteral("phase")).toString() != binding.phase
+            || state.value(QStringLiteral("commandReady")).toBool() != binding.commandReady
+            || (state.value(QStringLiteral("degraded")).toBool()
+                || state.value(QStringLiteral("state")).toString() == QLatin1String("Degraded")) != binding.degraded) {
+            reconcile = true;
+            continue;
+        }
+        const quint64 localGeneration = binding.ownerEndpointId == m_endpointId
+            ? binding.ownerConnectionGeneration : binding.targetConnectionGeneration;
+        if (localGeneration != m_connectionGeneration) continue;
+        updateSessionDeadline(state);
+        // A lost applied-state ACK must not leave both healthy transports
+        // permanently waiting. The heartbeat repeats authoritative state, so
+        // retry its idempotent ACK until the two-party barrier is confirmed.
+        if (!binding.commandReady && binding.phase == QLatin1String("Active")
+            && !m_sessionDeadlines.value(id).expired) acknowledgeSessionState(state);
+    }
+    if (reconcile || !m_reconcileRequestId.isEmpty()) reconcileRemoteSessions();
+}
+
+bool WebSocketClient::beginEndpointDisable(const QString& requestId)
+{
+    if (!isConnected() || m_endpointDraining) return false;
+    const QString correlation = requestId.isEmpty()
+        ? QUuid::createUuid().toString(QUuid::WithoutBraces) : requestId;
+    if (!isUploadOpaqueId(correlation)) return false;
+    if (!sendControlMessage(QJsonObject{
+            {QStringLiteral("type"), QStringLiteral("endpoint_disable")},
+            {QStringLiteral("requestId"), correlation}
         })) {
         return false;
     }
     m_endpointDraining = true;
+    m_endpointDisableRequestId = correlation;
     return true;
 }
 
@@ -1274,6 +1462,11 @@ bool WebSocketClient::sendScenePrepare(const QString& targetEndpointId,
 {
     if (!isConnected() || !m_sceneRuns) {
         if (errorMessage) *errorMessage = QStringLiteral("Server connection is not active");
+        return false;
+    }
+    const auto outgoing = remoteSessionCoordinator()->outgoingForPeer(targetEndpointId);
+    if (!canIssueSessionCommands(outgoing.remoteSessionId)) {
+        if (errorMessage) *errorMessage = QStringLiteral("Remote session is recovering");
         return false;
     }
     SceneRunCoordinator::Run run;
@@ -1437,6 +1630,10 @@ RemoteSessionCoordinator* WebSocketClient::remoteSessionCoordinator() const
 }
 
 void WebSocketClient::onConnected() {
+    if (m_endpointDraining) {
+        abortConnectionAttempt();
+        return;
+    }
     qDebug() << "Control transport connected; waiting for signed authentication challenge";
     m_authenticated = false;
     resetSceneClockEstimate();
@@ -1479,6 +1676,7 @@ void WebSocketClient::onTextMessageReceived(const QString& message) {
 }
 
 void WebSocketClient::onError(QAbstractSocket::SocketError error) {
+    if (m_endpointDraining && !m_authenticated) return;
     QString errorString;
 
     switch (error) {
@@ -1533,40 +1731,39 @@ void WebSocketClient::sendHeartbeat() {
 }
 
 void WebSocketClient::checkLeaseHealth() {
-    if (m_leaseTimeoutMs <= 0 || !m_hasEstablishedLease || m_leaseExpired) {
-        return;
-    }
-    if (m_lastServerContactContinuousMs < 0) {
-        expireLease();
-        if (isTransportConnected()) {
-            setConnectionStatus("Connection lease clock unavailable");
-            abortConnectionAttempt();
-        }
-        return;
-    }
+    const qint64 now = suspendInclusiveNowMs();
+    const qint64 lag = m_previousLeaseCheckMs >= 0
+        ? now - m_previousLeaseCheckMs - m_leaseHealthTimer->interval() : 0;
+    m_previousLeaseCheckMs = now;
+    if (lag > 250) qWarning() << "Network event loop delayed" << "lagMs" << lag;
+    checkSessionRecoveryDeadlines();
+    // A replacement transport authenticates independently of its predecessor.
+    // Retained session deadlines still run, but the old transport watchdog
+    // must never abort this new socket before welcome establishes its lease.
+    if (!m_authenticated || m_leaseTimeoutMs <= 0 || !m_hasEstablishedLease || m_leaseExpired) return;
     const qint64 elapsed = leaseElapsedMs();
     if (elapsed >= m_leaseTimeoutMs) {
-        expireLease();
+        if (!m_degraded) {
+            m_degraded = true;
+            emit transportHealthChanged(true);
+        }
         if (isTransportConnected()) {
-            setConnectionStatus("Connection lease expired");
+            setConnectionStatus("Reconnecting");
             abortConnectionAttempt();
         }
         return;
     }
-    const bool degraded = elapsed >= std::max(1, m_leaseTimeoutMs / 2);
+    const bool degraded = elapsed >= (m_transportSuspectAfterMs > 0
+        ? m_transportSuspectAfterMs : std::max(1, m_leaseTimeoutMs / 2));
     if (m_degraded != degraded) {
         m_degraded = degraded;
         emit transportHealthChanged(degraded);
-        if (degraded && isConnected()) {
-            setConnectionStatus("Degraded");
-        } else if (!degraded && isConnected()) {
-            setConnectionStatus("Connected");
-        }
+        if (isConnected()) setConnectionStatus(degraded ? "Degraded" : "Connected");
     }
 }
 
 bool WebSocketClient::handleAuthChallenge(const QJsonObject& message) {
-    if (m_authenticated || !m_pendingServerBootId.isEmpty()
+    if (m_endpointDraining || m_authenticated || !m_pendingServerBootId.isEmpty()
         || !isTransportConnected()) return false;
     if (boundedInteger(message.value(QStringLiteral("protocolVersion")),
                        ProtocolVersion, ProtocolVersion) != ProtocolVersion) {
@@ -1613,6 +1810,7 @@ bool WebSocketClient::handleAuthChallenge(const QJsonObject& message) {
     response["installationId"] = m_installationId;
     response["publicKey"] = base64UrlEncode(m_identityStore->publicKeyDer());
     response["signature"] = base64UrlEncode(signature);
+    m_authenticationSentAtMs = suspendInclusiveNowMs();
     return sendRawControlMessage(response);
 }
 
@@ -1623,6 +1821,8 @@ bool WebSocketClient::validateServerPolicy(const QJsonObject& policy,
         {"policyVersion", 1, 1000000},
         {"heartbeatIntervalMs", 250, 5000},
         {"leaseTimeoutMs", 1000, 30000},
+        {"transportSuspectAfterMs", 250, 30000},
+        {"sessionRecoveryTimeoutMs", 1000, 300000},
         {"scenePrepareTimeoutMs", 1000, 120000},
         {"sceneActivationLeadMs", 500, 10000},
         {"sceneMaxClockSkewMs", 0, 250},
@@ -1646,7 +1846,9 @@ bool WebSocketClient::validateServerPolicy(const QJsonObject& policy,
         }
         values.insert(QString::fromLatin1(rule.name), value);
     }
-    if (values.value("leaseTimeoutMs") < values.value("heartbeatIntervalMs") * 4
+    if (values.value("sessionRecoveryTimeoutMs") < values.value("leaseTimeoutMs")
+        || values.value("transportSuspectAfterMs") >= values.value("leaseTimeoutMs")
+        || values.value("leaseTimeoutMs") < values.value("heartbeatIntervalMs") * 4
         || values.value("sceneMaxClockSkewMs") >= values.value("sceneActivationLeadMs")
         || values.value("sceneMaxClockSkewMs") * 2
             > values.value("sceneMaxStartSkewMs")
@@ -1659,6 +1861,7 @@ bool WebSocketClient::validateServerPolicy(const QJsonObject& policy,
 }
 
 bool WebSocketClient::handleWelcome(const QJsonObject& message) {
+    if (m_endpointDraining || !isTransportConnected() || m_pendingServerBootId.isEmpty()) return false;
     if (m_authenticated
         || boundedInteger(message.value(QStringLiteral("protocolVersion")),
                           ProtocolVersion, ProtocolVersion) != ProtocolVersion
@@ -1700,10 +1903,12 @@ bool WebSocketClient::handleWelcome(const QJsonObject& message) {
     const bool withinLease = m_hasEstablishedLease && sameBoot && hasUnexpiredLease();
 
     if (!previousBootId.isEmpty() && previousBootId != newBootId) {
+        m_clientListRevision = 0;
+        m_assetRemovalObligations.clear();
         expireLease();
         emit serverRestarted(previousBootId, newBootId);
-    } else if (m_hasEstablishedLease && !hasUnexpiredLease()) {
-        expireLease();
+    } else {
+        checkSessionRecoveryDeadlines();
     }
     if (!previousBootId.isEmpty() && previousBootId == newBootId
         && previousGeneration > 0 && newGeneration <= previousGeneration) {
@@ -1721,10 +1926,21 @@ bool WebSocketClient::handleWelcome(const QJsonObject& message) {
     m_serverBootId = newBootId;
     m_pendingServerBootId.clear();
     m_connectionGeneration = newGeneration;
+    m_resumeRequestIds.clear();
+    m_reconcileRequestId.clear();
+    m_reconcileSentAtMs = -1;
+    // Bound the unknown one-way delay by the whole authentication round trip.
+    // Session expiry must never be extended by network transit or a clock fit.
+    m_serverClockAnchorMs = serverMonotonicMs
+        + (m_authenticationSentAtMs >= 0
+           ? std::max<qint64>(0, suspendInclusiveNowMs() - m_authenticationSentAtMs) : 0);
+    m_localClockAnchorMs = suspendInclusiveNowMs();
     m_socketClientId = message.value("connectionId").toString();
     m_serverPolicy = policy;
     m_heartbeatIntervalMs = policy.value("heartbeatIntervalMs").toInt();
     m_leaseTimeoutMs = policy.value("leaseTimeoutMs").toInt();
+    m_sessionRecoveryTimeoutMs = policy.value("sessionRecoveryTimeoutMs").toInt();
+    m_transportSuspectAfterMs = policy.value("transportSuspectAfterMs").toInt();
     if (m_sceneRuns) {
         m_sceneRuns->setPrepareTimeoutMs(policy.value("scenePrepareTimeoutMs").toInt());
     }
@@ -1740,10 +1956,13 @@ bool WebSocketClient::handleWelcome(const QJsonObject& message) {
     emit serverPolicyReceived(m_serverPolicy);
     emit transportHealthChanged(false);
     emit connected();
-    if (withinLease && previousGeneration > 0) {
-        emit reauthenticatedWithinLease(previousGeneration, newGeneration);
+    if (sameBoot && previousGeneration > 0) {
+        if (withinLease) emit reauthenticatedWithinLease(previousGeneration, newGeneration);
+        // The transport lease is deliberately shorter than session recovery.
+        // Each binding retains its own immutable proof deadline across welcome.
         QTimer::singleShot(0, this, &WebSocketClient::resumeAllRemoteSessions);
     }
+    QTimer::singleShot(0, this, &WebSocketClient::reconcileRemoteSessions);
     sendHeartbeat();
     return true;
 }
@@ -1793,9 +2012,14 @@ void WebSocketClient::expireLease() {
     // invalidation, render teardown). Clear only after synchronous delivery.
     emit leaseExpired(m_serverBootId, m_connectionGeneration);
     if (m_sceneRuns) m_sceneRuns->clearSessions();
+    m_sessionDeadlines.clear();
+    m_expiredSessionCloses.clear();
+    m_resumeRequestIds.clear();
+    m_reconcileRequestId.clear();
 }
 
 void WebSocketClient::handleMessage(const QJsonObject& message) {
+    if (m_endpointDraining && !m_authenticated) return;
     QString type = message["type"].toString();
     if (type == "auth_challenge") {
         handleAuthChallenge(message);
@@ -1823,13 +2047,14 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
         return;
     }
     if (!isCanonicalUuid(message.value(QStringLiteral("messageId")).toString())) {
-        qWarning() << "Rejected protocol v5 message without a canonical messageId";
+        qWarning() << "Rejected message without a canonical messageId";
         return;
     }
     if (isRemovedWireType(type) || containsRemovedWireField(message)) {
         qWarning() << "Rejected removed protocol message type or field" << type;
         return;
     }
+    checkSessionRecoveryDeadlines();
     // The first socket event after system wake must observe the absolute lease
     // boundary before it can refresh lastContact. At exactly timeout the old
     // RemoteSession is terminal and this packet is never dispatched.
@@ -1840,7 +2065,7 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
     noteServerContact();
     // Suppress noisy logs for high-frequency message types
     if (type != "upload_progress" && type != "upload_chunk"
-        && type != "remote_session_cursor") {
+        && type != "heartbeat_ack" && type != "remote_session_cursor") {
         qDebug() << "Received message type:" << type;
     }
     
@@ -1929,6 +2154,9 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
                 m_clockUncertaintyMs = best->uncertaintyMs;
                 m_selectedClockSampleReceivedAtMs = best->receivedAtMs;
             }
+            m_serverClockAnchorMs = serverAt + rtt;
+            m_localClockAnchorMs = suspendInclusiveNowMs();
+            refreshSessionProofs(message);
             emit heartbeatSampleReceived(sequence, rtt, offset, uncertainty);
         }
     }
@@ -1987,7 +2215,9 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
                 == QLatin1String("remote_session")
             || isRemoteSessionBusinessError(code)) {
             qWarning() << "RemoteSession command rejected:" << code;
-            emit remoteSessionError(message);
+            QJsonObject remoteError = message;
+            remoteError.remove(QStringLiteral("identityValid"));
+            emit remoteSessionError(remoteError);
             return;
         }
         const QString err = message.value("message").toString();
@@ -2037,6 +2267,10 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
         }
     }
     else if (type == "client_list") {
+        quint64 revision = 0;
+        if (!readPositiveSafeJsonInteger(message.value(QStringLiteral("revision")), &revision)
+            || revision <= m_clientListRevision) return;
+        m_clientListRevision = revision;
         QJsonArray clientsArray = message["clients"].toArray();
         QList<ClientInfo> clients;
         
@@ -2081,14 +2315,70 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
             && message.value(QStringLiteral("targetEndpointId")).toString()
                 == binding.targetEndpointId;
         if (!isUploadOpaqueId(uploadId) || (!correlated && !unboundStartRejection)) {
-            qWarning() << "Rejected stale or malformed protocol v5 upload envelope";
+            qWarning() << "Rejected stale or malformed upload envelope";
             return;
+        }
+        if (type == QLatin1String("upload_remove") && binding.targetEndpointId == m_endpointId) {
+            const QString removalId = message.value(QStringLiteral("removalId")).toString();
+            if (!isCanonicalUuid(removalId)) return;
+            const auto rejectInstruction = [this, &message](const QString& reason) {
+                QJsonObject response = message;
+                response.remove(QStringLiteral("messageId"));
+                response.remove(QStringLiteral("ownerEndpointId"));
+                response.remove(QStringLiteral("targetEndpointId"));
+                response.insert(QStringLiteral("type"), QStringLiteral("upload_removed"));
+                response.insert(QStringLiteral("success"), false);
+                response.insert(QStringLiteral("cacheQuarantined"), false);
+                response.insert(QStringLiteral("result"), QStringLiteral("cleanup_error"));
+                response.insert(QStringLiteral("errorCode"), reason);
+                response.insert(QStringLiteral("reason"), reason);
+                response.insert(QStringLiteral("removedFileCount"), 0);
+                response.insert(QStringLiteral("quarantinedBytes"), 0);
+                sendControlMessage(response);
+            };
+            auto obligation = m_assetRemovalObligations.find(removalId);
+            if (obligation == m_assetRemovalObligations.end()) {
+                // Pending asynchronous work must never be evicted to make room.
+                if (m_assetRemovalObligations.size() >= 4096) {
+                    rejectInstruction(QStringLiteral("removal_capacity_exceeded"));
+                    return;
+                }
+                QJsonObject accepted = message;
+                accepted.insert(QStringLiteral("acceptedGenerations"), QJsonArray{static_cast<double>(generation)});
+                m_assetRemovalObligations.insert(removalId, accepted);
+            } else {
+                static const QStringList immutableFields = {
+                    QStringLiteral("remoteSessionId"), QStringLiteral("removalId"),
+                    QStringLiteral("uploadId"), QStringLiteral("assetId"),
+                    QStringLiteral("offset"), QStringLiteral("size"), QStringLiteral("sha256"),
+                    QStringLiteral("fileId"), QStringLiteral("extension"),
+                    QStringLiteral("ownerEndpointId"), QStringLiteral("targetEndpointId"),
+                    QStringLiteral("serverBootId")
+                };
+                for (const auto& field : immutableFields) {
+                    if (message.value(field) != obligation->value(field)) {
+                        rejectInstruction(QStringLiteral("removal_identity_conflict"));
+                        return;
+                    }
+                }
+                QJsonArray generations = obligation->value(QStringLiteral("acceptedGenerations")).toArray();
+                const QJsonValue dispatchGeneration(static_cast<double>(generation));
+                if (!generations.contains(dispatchGeneration)) {
+                    if (generations.size() >= 64) {
+                        rejectInstruction(QStringLiteral("removal_generation_capacity_exceeded"));
+                        return;
+                    }
+                    generations.append(dispatchGeneration);
+                    obligation->insert(QStringLiteral("acceptedGenerations"), generations);
+                }
+            }
         }
         emit uploadMessageReceived(message);
     }
     else if (type == "remote_session_offer") {
         if (!m_sceneRuns
             || !m_sceneRuns->upsertSession(message, m_connectionGeneration)) {
+            ++m_reconciliationFailureSerial;
             qWarning() << "Rejected stale or malformed RemoteSession offer";
             return;
         }
@@ -2098,6 +2388,8 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
                 nullptr, QStringLiteral("client_disabled"));
             return;
         }
+        updateSessionDeadline(message);
+        acknowledgeSessionState(message);
         emit localDeviceSnapshotRequested();
         emit remoteSessionOfferReceived(message);
         if (!acceptRemoteSessionOffer(message)) {
@@ -2160,12 +2452,62 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
              || type == "remote_session_resumed"
              || type == "remote_session_lease_state"
              || type == "remote_session_terminating") {
-        if (!m_sceneRuns
-            || !m_sceneRuns->upsertSession(message, m_connectionGeneration)) {
-            qWarning() << "Rejected stale or malformed RemoteSession envelope" << type;
+        const QString sessionId = message.value(QStringLiteral("remoteSessionId")).toString();
+        const auto previousBinding = remoteSessionCoordinator()->byId(sessionId);
+        if (remoteSessionCoordinator() && remoteSessionCoordinator()->isClosedDuplicate(message)) {
+            acknowledgeSessionState(message);
             return;
         }
+        if (type != QLatin1String("remote_session_terminating")
+            && m_sessionDeadlines.value(sessionId).expired) {
+            ++m_reconciliationFailureSerial;
+            quint64 generation = 0, localGeneration = 0, revision = 0;
+            const QString localGenerationField = previousBinding.ownerEndpointId == m_endpointId
+                ? QStringLiteral("ownerConnectionGeneration") : QStringLiteral("targetConnectionGeneration");
+            if (message.value(QStringLiteral("ownerEndpointId")).toString() == previousBinding.ownerEndpointId
+                && message.value(QStringLiteral("targetEndpointId")).toString() == previousBinding.targetEndpointId
+                && readPositiveSafeJsonInteger(message.value(QStringLiteral("generation")), &generation)
+                && generation >= previousBinding.generation
+                && readPositiveSafeJsonInteger(message.value(QStringLiteral("stateRevision")), &revision)
+                && revision >= previousBinding.stateRevision
+                && readPositiveSafeJsonInteger(message.value(localGenerationField), &localGeneration)
+                && localGeneration == m_connectionGeneration) retryExpiredSessionClose(sessionId, generation);
+            reconcileRemoteSessions();
+            return;
+        }
+        QString stateValidationError;
+        if (!m_sceneRuns
+            || !m_sceneRuns->upsertSession(message, m_connectionGeneration, &stateValidationError)) {
+            ++m_reconciliationFailureSerial;
+            if (stateValidationError == QLatin1String("invalid_initial_snapshot")) {
+                const quint64 generation = static_cast<quint64>(message.value(QStringLiteral("generation")).toDouble());
+                closeRemoteSessionByIdentity(sessionId, generation, nullptr, stateValidationError);
+                QJsonObject failure{
+                    {QStringLiteral("scope"), QStringLiteral("remote_session")},
+                    {QStringLiteral("code"), stateValidationError},
+                    {QStringLiteral("identityValid"), true},
+                    {QStringLiteral("message"), QStringLiteral("The remote client returned an invalid initial snapshot")},
+                    {QStringLiteral("requestId"), message.value(QStringLiteral("requestId"))},
+                    {QStringLiteral("remoteSessionId"), sessionId},
+                    {QStringLiteral("generation"), static_cast<double>(generation)},
+                    {QStringLiteral("ownerEndpointId"), message.value(QStringLiteral("ownerEndpointId"))},
+                    {QStringLiteral("targetEndpointId"), message.value(QStringLiteral("targetEndpointId"))}
+                };
+                emit remoteSessionError(failure);
+                return;
+            }
+            qWarning() << "Rejected RemoteSession state" << type << sessionId
+                       << "cause" << "identity_or_transition_mismatch"
+                       << "expectedGeneration" << previousBinding.generation
+                       << "receivedGeneration" << message.value(QStringLiteral("generation"))
+                       << "expectedRevision" << previousBinding.stateRevision
+                       << "receivedRevision" << message.value(QStringLiteral("stateRevision"));
+            reconcileRemoteSessions();
+            return;
+        }
+        updateSessionDeadline(message);
         if (type == "remote_session_opening") {
+            acknowledgeSessionState(message);
             emit messageReceived(message);
             return;
         }
@@ -2176,7 +2518,8 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
             if (binding.ownerEndpointId == m_endpointId
                 && (!remoteSessionCoordinator()
                     || !remoteSessionCoordinator()->acceptSnapshot(
-                        message, m_connectionGeneration))) {
+                        message, m_connectionGeneration, true))) {
+                ++m_reconciliationFailureSerial;
                 closeRemoteSession(binding.remoteSessionId, nullptr,
                                    QStringLiteral("invalid_initial_snapshot"));
                 QJsonObject failure{
@@ -2195,6 +2538,10 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
                 emit remoteSessionError(failure);
                 return;
             }
+            acknowledgeSessionState(message);
+            if (previousBinding.phase == QLatin1String("Active")
+                && previousBinding.generation == binding.generation
+                && previousBinding.stateRevision == binding.stateRevision) return;
             if (!m_targetSnapshotSequenceBySession.contains(binding.remoteSessionId))
                 m_targetSnapshotSequenceBySession.insert(binding.remoteSessionId, 1);
             emit localDeviceSnapshotRequested();
@@ -2205,43 +2552,139 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
             const RemoteSessionCoordinator::Binding binding =
                 m_sceneRuns->sessionById(
                     message.value(QStringLiteral("remoteSessionId")).toString());
+            if (binding.ownerEndpointId == m_endpointId && binding.active
+                && message.contains(QStringLiteral("snapshot"))
+                && !remoteSessionCoordinator()->acceptSnapshot(message, m_connectionGeneration, true)) {
+                ++m_reconciliationFailureSerial;
+                reconcileRemoteSessions();
+                return;
+            }
+            acknowledgeSessionState(message);
             if (binding.targetEndpointId == m_endpointId) {
                 emit localDeviceSnapshotRequested();
                 publishDeviceSnapshots();
             }
             emit remoteSessionResumed(message);
         }
-        else if (type == "remote_session_lease_state") emit remoteSessionLeaseStateChanged(message);
-        else emit remoteSessionTerminating(message);
+        else if (type == "remote_session_lease_state") {
+            acknowledgeSessionState(message);
+            const auto binding = remoteSessionCoordinator()->byId(sessionId);
+            if (binding.commandReady && !previousBinding.commandReady
+                && binding.targetEndpointId == m_endpointId) {
+                emit localDeviceSnapshotRequested();
+                publishDeviceSnapshots();
+            }
+            emit remoteSessionLeaseStateChanged(message);
+        } else {
+            acknowledgeSessionState(message);
+            emit remoteSessionTerminating(message);
+        }
         emit messageReceived(message);
     }
     else if (type == "remote_session_closed") {
-        if (!m_sceneRuns
-            || !m_sceneRuns->removeSession(message, m_connectionGeneration)) {
-            qWarning() << "Rejected stale, unknown, or malformed RemoteSession close";
+        if (!m_sceneRuns) return;
+        const QString sessionId = message.value(QStringLiteral("remoteSessionId")).toString();
+        if (remoteSessionCoordinator()->isClosedDuplicate(message)) {
+            acknowledgeSessionState(message);
             return;
         }
+        const QString cleanup = message.value(QStringLiteral("cleanupState")).toString();
+        if (cleanup == QLatin1String("pending") || cleanup == QLatin1String("error")) {
+            QJsonObject terminal = message;
+            terminal.insert(QStringLiteral("type"), QStringLiteral("remote_session_terminating"));
+            terminal.insert(QStringLiteral("phase"), QStringLiteral("CleanupPending"));
+            if (!m_sceneRuns->upsertSession(terminal, m_connectionGeneration)) {
+                ++m_reconciliationFailureSerial;
+                reconcileRemoteSessions();
+                return;
+            }
+            m_sessionDeadlines.remove(sessionId);
+            m_expiredSessionCloses.remove(sessionId);
+            emit remoteSessionTerminating(terminal);
+            emit remoteSessionLogicallyClosed(message);
+            acknowledgeSessionState(message);
+            return;
+        }
+        if (!m_sceneRuns->removeSession(message, m_connectionGeneration)) {
+            ++m_reconciliationFailureSerial;
+            qWarning() << "Rejected RemoteSession close" << sessionId << cleanup;
+            reconcileRemoteSessions();
+            return;
+        }
+        acknowledgeSessionState(message);
+        m_sessionDeadlines.remove(sessionId);
+        m_resumeRequestIds.remove(sessionId);
         emit remoteSessionClosed(message);
-        m_targetSnapshotSequenceBySession.remove(
-            message.value(QStringLiteral("remoteSessionId")).toString());
-        m_receivedCursorSequenceBySession.remove(
-            message.value(QStringLiteral("remoteSessionId")).toString());
+        m_targetSnapshotSequenceBySession.remove(sessionId);
+        m_receivedCursorSequenceBySession.remove(sessionId);
         emit messageReceived(message);
+    }
+    else if (type == "remote_session_reconciled") {
+        if (m_reconcileRequestId.isEmpty()
+            || message.value(QStringLiteral("requestId")).toString() != m_reconcileRequestId
+            || !message.value(QStringLiteral("complete")).toBool()
+            || !message.value(QStringLiteral("sessions")).isArray()
+            || message.value(QStringLiteral("sessions")).toArray().size() > 4096
+            || message.value(QStringLiteral("absentSessionIds")).toArray().size() > 4096) return;
+        m_reconcileRequestId.clear();
+        const quint64 failureSerial = m_reconciliationFailureSerial;
+        const QJsonArray states = message.value(QStringLiteral("sessions")).toArray();
+        for (const QJsonValue& value : states) {
+            if (!value.isObject()) { ++m_reconciliationFailureSerial; continue; }
+            QJsonObject state = value.toObject();
+            const QString nestedType = state.value(QStringLiteral("type")).toString();
+            if (nestedType == QLatin1String("remote_session_reconciled")) { ++m_reconciliationFailureSerial; continue; }
+            if (nestedType != QLatin1String("remote_session_opened")
+                && nestedType != QLatin1String("remote_session_opening")
+                && nestedType != QLatin1String("remote_session_offer")
+                && nestedType != QLatin1String("remote_session_resumed")
+                && nestedType != QLatin1String("remote_session_lease_state")
+                && nestedType != QLatin1String("remote_session_terminating")
+                && nestedType != QLatin1String("remote_session_closed")) { ++m_reconciliationFailureSerial; continue; }
+            state.insert(QStringLiteral("reconciled"), true);
+            state.insert(QStringLiteral("protocolVersion"), ProtocolVersion);
+            state.insert(QStringLiteral("serverBootId"), m_serverBootId);
+            if (!isCanonicalUuid(state.value(QStringLiteral("messageId")).toString()))
+                state.insert(QStringLiteral("messageId"), QUuid::createUuid().toString(QUuid::WithoutBraces));
+            handleMessage(state);
+        }
+        for (const QJsonValue& value : message.value(QStringLiteral("absentSessionIds")).toArray()) {
+            const QString id = value.toString();
+            const auto binding = remoteSessionCoordinator()->byId(id);
+            if (binding.remoteSessionId.isEmpty()) continue;
+            emit remoteSessionAbsent(id, binding.generation);
+            discardRemoteSessionAfterAuthoritativeRejection(id);
+            m_sessionDeadlines.remove(id);
+            m_resumeRequestIds.remove(id);
+        }
+        if (failureSerial == m_reconciliationFailureSerial && m_reconcileRequestId.isEmpty()) {
+            emit reconciliationCompleted();
+        } else {
+            if (m_reconcileRequestId.isEmpty())
+                m_reconcileRequestId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+            QTimer::singleShot(1000, this, &WebSocketClient::reconcileRemoteSessions);
+        }
     }
     else if (type == "endpoint_disable_started") {
         if (!m_endpointDraining) {
             qWarning() << "Rejected unsolicited endpoint disable acknowledgement";
             return;
         }
-        emit endpointDisableAcknowledged();
+        quint64 acknowledgedGeneration = 0;
+        if (message.value(QStringLiteral("requestId")).toString() != m_endpointDisableRequestId
+            || !readPositiveSafeJsonInteger(message.value(QStringLiteral("connectionGeneration")), &acknowledgedGeneration)
+            || acknowledgedGeneration != m_connectionGeneration) return;
+        emit endpointDisableAcknowledged(m_endpointDisableRequestId, acknowledgedGeneration);
     }
     else if (type == "scene_prepare" || type == "prepare_progress"
              || type == "prepared" || type == "armed" || type == "commit"
              || type == "started" || type == "state_snapshot"
              || type == "stop" || type == "stopped") {
+        if (type != QLatin1String("stop") && type != QLatin1String("stopped")
+            && !canIssueSessionCommands(message.value(QStringLiteral("remoteSessionId")).toString())) return;
         QString validationError;
         if (!m_sceneRuns || !m_sceneRuns->acceptInboundEnvelope(message, &validationError)) {
-            qWarning() << "Rejected protocol v5 scene message:" << validationError;
+            qWarning() << "Rejected scene message:" << validationError;
             return;
         }
         if (type == "scene_prepare") emit scenePrepareReceived(message);
@@ -2291,8 +2734,19 @@ bool WebSocketClient::sendControlMessage(const QJsonObject& message) {
         qWarning() << "Cannot send message: connection lease expired";
         return false;
     }
+    const QString sessionId = message.value(QStringLiteral("remoteSessionId")).toString();
+    const QString commandType = message.value(QStringLiteral("type")).toString();
+    static const QSet<QString> sessionCommands = {
+        QStringLiteral("upload_start"), QStringLiteral("upload_resume"), QStringLiteral("upload_chunk"),
+        QStringLiteral("upload_complete"), QStringLiteral("scene_prepare"), QStringLiteral("armed"),
+        QStringLiteral("prepared"), QStringLiteral("prepare_progress"), QStringLiteral("started"),
+        QStringLiteral("state_snapshot"), QStringLiteral("remote_session_cursor"),
+        QStringLiteral("remote_session_snapshot"), QStringLiteral("media_residency")
+    };
+    if (!sessionId.isEmpty() && sessionCommands.contains(commandType)
+        && !canIssueSessionCommands(sessionId)) return false;
     if (containsRemovedWireField(message)) {
-        qWarning() << "Refusing protocol v5 message containing a removed wire field";
+        qWarning() << "Refusing message containing a removed wire field";
         return false;
     }
 
@@ -2300,6 +2754,8 @@ bool WebSocketClient::sendControlMessage(const QJsonObject& message) {
 }
 
 bool WebSocketClient::sendMessageUpload(const QJsonObject& message) {
+    const QString sessionId = message.value(QStringLiteral("remoteSessionId")).toString();
+    if (!sessionId.isEmpty() && !canIssueSessionCommands(sessionId)) return false;
     if (!m_uploadSessionActive) {
         qWarning() << "Cannot send upload payload before the session transport is locked";
         return false;

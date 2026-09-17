@@ -25,14 +25,13 @@ QList<ClientInfo> ClientListBuilder::buildDisplayClientList(
             continue;
         }
         client.setEndpointId(targetEndpointId);
-        client.setOnline(true);
 
         if (ApplicationRuntime::ClientWorkspace* workspace =
                 mainWindow->findWorkspace(targetEndpointId)) {
             workspace->lastClientInfo = client;
             workspace->lastClientInfo.setEndpointId(targetEndpointId);
             workspace->lastClientInfo.setFromMemory(true);
-            workspace->lastClientInfo.setOnline(true);
+            workspace->lastClientInfo.setOnline(client.isOnline());
             workspace->remoteContentClearedOnDisconnect = false;
             
             if (workspace->canvas) {

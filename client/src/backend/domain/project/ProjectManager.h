@@ -20,6 +20,8 @@ class ProjectManager final : public QObject {
     Q_OBJECT
 
 public:
+    enum class RemovalReason { UserDeleted, RetentionExpired };
+    Q_ENUM(RemovalReason)
     struct TimingPolicy {
         qint64 projectHiddenRetentionMs = 300'000;
         qint64 projectMediaHiddenTimeoutMs = 60'000;
@@ -101,6 +103,8 @@ signals:
     void projectMediaReleaseDue(const QString& projectId, const QString& targetEndpointId);
     void projectAboutToDelete(const ProjectRecord& project);
     void projectDeleted(const QString& projectId, const QString& targetEndpointId);
+    void projectRemoved(const QString& projectId, const QString& targetEndpointId,
+                        ProjectManager::RemovalReason reason);
     void projectsChanged();
     void persistenceError(const QString& message);
 
@@ -111,7 +115,8 @@ private:
     bool persistProjects(const QList<ProjectRecord>& projects);
     QList<ProjectRecord> sortedProjects() const;
     ProjectRecord* mutableProjectForTarget(const QString& targetEndpointId);
-    bool removeProjectInternal(const QString& targetEndpointId);
+    bool removeProjectInternal(const QString& targetEndpointId,
+                               RemovalReason reason = RemovalReason::UserDeleted);
     void releaseProjectMediaIfDue(const QString& targetEndpointId, qint64 atMs);
 
     std::unique_ptr<ProjectStore> m_ownedStore;

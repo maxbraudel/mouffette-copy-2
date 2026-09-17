@@ -6,8 +6,15 @@
 #include <QList>
 #include <QSet>
 #include <QString>
+#include <QHash>
+#include <QThreadPool>
+#include <QTimer>
 
 #include <optional>
+#include <functional>
+#include <memory>
+
+class RemoteCacheHistory;
 #include "backend/runtime/storage/StorageVersions.h"
 
 /**
@@ -60,6 +67,7 @@ public:
     };
 
     enum class CommitOutcome {
+        Pending,
         Committed,
         AlreadyCommitted,
         InvalidRequest,
@@ -118,7 +126,8 @@ public:
     };
 
     explicit RemoteCacheStore(QString rootPath = defaultRootPath(),
-                              QObject* parent = nullptr);
+                              QObject* parent = nullptr,
+                              std::shared_ptr<RemoteCacheHistory> history = {});
     ~RemoteCacheStore() override;
 
     static QString defaultRootPath();
@@ -127,6 +136,10 @@ public:
     // interrupted commit/deletion.  Any live cache found during startup is
     // terminally quarantined because a process restart invalidates its lease.
     bool initialize(QString* errorCode = nullptr);
+    // Runtime recovery runs on the same serialized disk queue as quarantine.
+    // The caller must have stopped every renderer and incoming file reader.
+    bool requestRecovery();
+    bool recoveryPending() const { return m_recoveryPending; }
 
     QString rootPath() const { return m_rootPath; }
     QString lastErrorCode() const { return m_lastErrorCode; }
@@ -175,6 +188,8 @@ public:
     AssetRemovalResult removeValidatedAsset(
         const Scope& scope,
         const AssetRemovalDescriptor& descriptor);
+    bool requestAssetRemoval(const Scope& scope, const AssetRemovalDescriptor& descriptor,
+                             std::function<void(AssetRemovalResult)> completion);
 
     // Persists the first terminal reason and blocks all subsequent asset calls.
     // Repeating the same tuple is successful; another teardown/generation is a
@@ -195,6 +210,13 @@ public:
     // replay result before scheduling physical deletion.
     CommitResult commitTeardown(const Scope& scope, const QString& teardownId);
 
+    // Runtime variant: a bounded, serialized disk transaction. The scope is
+    // fenced synchronously; retries poll the exact result without repeating it.
+    CommitResult requestTeardown(const Scope& scope, const QString& teardownId,
+                                 const QString& provisionalReason = {});
+    bool teardownPending(const QString& sessionId = {}) const;
+    CommitResult teardownResult(const Scope& scope, const QString& teardownId) const;
+
     SessionState state(const Scope& scope) const;
     std::optional<Tombstone> tombstone(const Scope& scope) const;
     bool acceptsCommands(const Scope& scope) const;
@@ -210,6 +232,11 @@ public:
     bool receiverAdvertisementSafe(QString* errorCode = nullptr) const;
 
 signals:
+    void recoveryFinished(bool ready, const QString& errorCode);
+    void teardownFinished(const QString& senderEndpointId,
+                          const QString& remoteSessionId,
+                          quint64 generation,
+                          const QString& teardownId);
     void logicalCommitCompleted(const QString& senderEndpointId,
                                 const QString& remoteSessionId,
                                 quint64 generation,
@@ -269,6 +296,10 @@ private:
                                  const QString& quarantineEntry);
     void scheduleOrphanCleanup(const QString& quarantineEntry);
     void finishPhysicalCleanup(const DeleteResult& result);
+    DeleteResult commitPhysicalCleanup(DeleteResult result);
+    void requestCleanupSweep();
+    void collectExpiredHistory();
+    qsizetype retainedScopeCount() const;
     void setError(const QString& code, QString* output = nullptr) const;
 
     QString m_rootPath;
@@ -282,6 +313,21 @@ private:
     mutable QString m_lastErrorCode;
     bool m_initialized = false;
     QSet<QString> m_scheduledEntries;
+    QThreadPool m_transactionPool;
+    QHash<QString, Scope> m_pendingTransactions;
+    QHash<QString, CommitResult> m_completedTransactions;
+    QHash<QString, qint64> m_transactionRetryAt;
+    QHash<QString, int> m_transactionFailures;
+    QHash<QString, qint64> m_transactionStartedAt;
+    QSet<QString> m_transactionFences;
+    bool m_backgroundTransaction = false;
+    bool m_recoveryPending = false;
+    bool m_cleanupSweepPending = false;
+    int m_pendingAssetRemovalCount = 0;
+    QList<QPair<Tombstone, QString>> m_collectedPhysicalDeletes;
+    QStringList m_collectedOrphanDeletes;
+    QTimer m_cleanupSweepTimer;
+    std::shared_ptr<RemoteCacheHistory> m_history;
 };
 
 #endif // REMOTECACHESTORE_H

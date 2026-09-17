@@ -1,6 +1,7 @@
 #include <QtTest>
 
 #include "backend/network/RemoteCacheStore.h"
+#include "backend/network/RemoteCacheHistory.h"
 
 #include <QCryptographicHash>
 #include <QDir>
@@ -17,6 +18,11 @@ class RemoteCacheStoreTest final : public QObject {
 private slots:
     void strictIdentifiersAndGenerationBinding();
     void teardownIsAtomicAndIdempotent();
+    void queuedTeardownFencesOnlyItsScopeAndCommitsOnce();
+    void physicalCleanupRetriesWithoutReconnect();
+    void transactionQueueIsBoundedAndCanDrain();
+    void historyCollectionRetainsYoungAndProvisionalProofs();
+    void historyCapacityReservesExistingScopesForCleanup();
     void teardownNeverReplacesDestination();
     void targetedAssetRemovalKeepsSessionOpenAndReplays();
     void targetedAssetRemovalNeverReplacesDestination();
@@ -297,6 +303,122 @@ void RemoteCacheStoreTest::teardownIsAtomicAndIdempotent()
     QCOMPARE(conflict.outcome, RemoteCacheStore::CommitOutcome::Conflict);
     QVERIFY(!conflict.acknowledgementSafe());
     QCOMPARE(conflict.teardownId, kTeardown);
+}
+
+void RemoteCacheStoreTest::physicalCleanupRetriesWithoutReconnect()
+{
+#ifdef Q_OS_WIN
+    QSKIP("Creating a symlink requires privileges not guaranteed on Windows CI");
+#else
+    QTemporaryDir temporary;
+    QVERIFY(temporary.isValid());
+    RemoteCacheStore store(QDir(temporary.path()).filePath(QStringLiteral("Uploads")));
+    QVERIFY(store.initialize());
+    QVERIFY(store.ensureSession(scope()));
+    const QString asset = store.assetPath(scope(), kAsset, RemoteCacheStore::AssetArea::Validated);
+    QVERIFY(writeBytes(asset, QByteArrayLiteral("payload")));
+    const QString outside = QDir(temporary.path()).filePath(QStringLiteral("outside"));
+    QVERIFY(writeBytes(outside, QByteArrayLiteral("preserve")));
+    QString obstruction;
+    connect(&store, &RemoteCacheStore::logicalCommitCompleted, &store, [&] {
+        const QString record = findOnlyJson(QDir(store.rootPath()).filePath(
+            QStringLiteral(".remote-cache-state/tombstones")));
+        const QString entry = readObject(record).value(QStringLiteral("quarantineEntry")).toString();
+        obstruction = QDir(store.rootPath()).filePath(QStringLiteral(".quarantine/")
+            + entry + QStringLiteral("/obstruction"));
+        QVERIFY(QFile::link(outside, obstruction));
+    });
+    QSignalSpy failures(&store, &RemoteCacheStore::physicalCleanupFailed);
+    QSignalSpy successes(&store, &RemoteCacheStore::physicalCleanupCompleted);
+    QCOMPARE(store.requestTeardown(scope(), kTeardown).outcome, RemoteCacheStore::CommitOutcome::Pending);
+    QTRY_COMPARE_WITH_TIMEOUT(failures.size(), 1, 5000);
+    QVERIFY(store.teardownResult(scope(), kTeardown).acknowledgementSafe());
+    QVERIFY(store.receiverAdvertisementSafe());
+    QVERIFY(QFile::remove(obstruction));
+    QTRY_COMPARE_WITH_TIMEOUT(successes.size(), 1, 7000);
+    QCOMPARE(store.state(scope()), RemoteCacheStore::SessionState::Closed);
+    QVERIFY(QFileInfo::exists(outside));
+#endif
+}
+
+void RemoteCacheStoreTest::transactionQueueIsBoundedAndCanDrain()
+{
+    QTemporaryDir temporary;
+    QVERIFY(temporary.isValid());
+    RemoteCacheStore store(QDir(temporary.path()).filePath(QStringLiteral("Uploads")));
+    QVERIFY(store.initialize());
+    QList<RemoteCacheStore::Scope> scopes;
+    for (int i = 0; i < 65; ++i) {
+        scopes.append({kSender, QStringLiteral("bounded_session_%1").arg(i), 1});
+        QVERIFY(store.ensureSession(scopes.last()));
+    }
+    for (int i = 0; i < 64; ++i)
+        QCOMPARE(store.requestTeardown(scopes[i], kTeardown).outcome, RemoteCacheStore::CommitOutcome::Pending);
+    const auto saturated = store.requestTeardown(scopes.last(), kTeardown);
+    QCOMPARE(saturated.outcome, RemoteCacheStore::CommitOutcome::CleanupError);
+    QCOMPARE(saturated.errorCode, QStringLiteral("cleanup_queue_full"));
+    // Rejecting admission leaves the obligation visible and retryable.
+    QVERIFY(!store.acceptsCommands(scopes.last()));
+    QTRY_VERIFY_WITH_TIMEOUT(!store.teardownPending(), 10000);
+    QCOMPARE(store.requestTeardown(scopes.last(), kTeardown).outcome, RemoteCacheStore::CommitOutcome::Pending);
+    QTRY_VERIFY_WITH_TIMEOUT(!store.teardownPending(), 5000);
+    QVERIFY(store.teardownResult(scopes.last(), kTeardown).acknowledgementSafe());
+}
+
+void RemoteCacheStoreTest::historyCollectionRetainsYoungAndProvisionalProofs()
+{
+    QTemporaryDir temporary;
+    QVERIFY(temporary.isValid());
+    std::atomic<qint64> now{1000};
+    auto history = std::make_shared<RemoteCacheHistory>([&now] { return now.load(); }, 100);
+    RemoteCacheStore store(QDir(temporary.path()).filePath(QStringLiteral("Uploads")), nullptr, history);
+    QVERIFY(store.initialize());
+    QVERIFY(store.ensureSession(scope()));
+    const RemoteCacheStore::Scope provisional{kSender, QStringLiteral("provisional_history"), 1};
+    QVERIFY(store.ensureSession(provisional));
+    QVERIFY(store.beginTeardown(scope(), kTeardown));
+    QVERIFY(store.commitTeardown(scope(), kTeardown).acknowledgementSafe());
+    QVERIFY(store.beginProvisionalTeardown(provisional, kOtherTeardown, QStringLiteral("lease_expired")));
+    QVERIFY(store.commitTeardown(provisional, kOtherTeardown).acknowledgementSafe());
+    QTRY_COMPARE_WITH_TIMEOUT(store.state(scope()), RemoteCacheStore::SessionState::Closed, 5000);
+    QTRY_COMPARE_WITH_TIMEOUT(store.state(provisional), RemoteCacheStore::SessionState::Closed, 5000);
+    QSignalSpy recovered(&store, &RemoteCacheStore::recoveryFinished);
+    QVERIFY(store.requestRecovery());
+    QTRY_COMPARE_WITH_TIMEOUT(recovered.size(), 1, 5000);
+    QVERIFY(store.tombstone(scope()).has_value());
+    now.store(1099);
+    QVERIFY(store.requestRecovery());
+    QTRY_COMPARE_WITH_TIMEOUT(recovered.size(), 2, 5000);
+    QVERIFY(store.tombstone(scope()).has_value());
+    now.store(1100);
+    QVERIFY(store.requestRecovery());
+    QTRY_COMPARE_WITH_TIMEOUT(recovered.size(), 3, 5000);
+    QVERIFY(!store.tombstone(scope()).has_value());
+    QVERIFY(store.tombstone(provisional).has_value());
+    QVERIFY(store.tombstone(provisional)->provisional);
+}
+
+void RemoteCacheStoreTest::historyCapacityReservesExistingScopesForCleanup()
+{
+    QTemporaryDir temporary;
+    QVERIFY(temporary.isValid());
+    auto history = std::make_shared<RemoteCacheHistory>([] { return 1000; }, 100, 2);
+    RemoteCacheStore store(QDir(temporary.path()).filePath(QStringLiteral("Uploads")), nullptr, history);
+    QVERIFY(store.initialize());
+    const RemoteCacheStore::Scope second{kSender, QStringLiteral("second_scope"), 1};
+    const RemoteCacheStore::Scope excess{kSender, QStringLiteral("excess_scope"), 1};
+    QVERIFY(store.ensureSession(scope()));
+    QVERIFY(store.ensureSession(second));
+    QString error;
+    QVERIFY(!store.ensureSession(excess, &error));
+    QCOMPARE(error, QStringLiteral("cache_history_saturated"));
+    // Both admitted namespaces already reserved their eventual terminal slot.
+    QVERIFY(store.beginTeardown(scope(), kTeardown));
+    QVERIFY(store.commitTeardown(scope(), kTeardown).acknowledgementSafe());
+    QVERIFY(store.beginTeardown(second, kOtherTeardown));
+    QVERIFY(store.commitTeardown(second, kOtherTeardown).acknowledgementSafe());
+    QVERIFY(!store.ensureSession(excess, &error));
+    QCOMPARE(error, QStringLiteral("cache_history_saturated"));
 }
 
 void RemoteCacheStoreTest::teardownNeverReplacesDestination()
@@ -824,6 +946,40 @@ void RemoteCacheStoreTest::symlinkIsRefusedAndCleanupErrorPersists()
     QVERIFY(outsideFile.open(QIODevice::ReadOnly));
     QCOMPARE(outsideFile.readAll(), QByteArrayLiteral("must-survive"));
 #endif
+}
+
+void RemoteCacheStoreTest::queuedTeardownFencesOnlyItsScopeAndCommitsOnce()
+{
+    QTemporaryDir root;
+    RemoteCacheStore store(root.path());
+    QString error;
+    QVERIFY2(store.initialize(&error), qPrintable(error));
+    const auto first = scope();
+    const RemoteCacheStore::Scope other{kSender,
+        QStringLiteral("44444444-4444-4444-8444-444444444444"), 1};
+    QVERIFY(store.ensureSession(first, &error));
+    QVERIFY(store.ensureSession(other, &error));
+    const QString firstPath = store.assetPath(first, kAsset,
+        RemoteCacheStore::AssetArea::Staging, {}, &error);
+    QVERIFY(writeBytes(firstPath, QByteArray(1024 * 1024, 'x')));
+    QSignalSpy commits(&store, &RemoteCacheStore::logicalCommitCompleted);
+    QSignalSpy finished(&store, &RemoteCacheStore::teardownFinished);
+    QCOMPARE(store.requestTeardown(first, kTeardown).outcome,
+             RemoteCacheStore::CommitOutcome::Pending);
+    QVERIFY(!store.acceptsCommands(first));
+    QVERIFY(!store.ensureSession(first));
+    QVERIFY(!store.rebindSessionGeneration(first, first.generation + 1));
+    QVERIFY(store.acceptsCommands(other));
+    QCOMPARE(store.requestTeardown(first, kTeardown).outcome,
+             RemoteCacheStore::CommitOutcome::Pending);
+    QTRY_COMPARE_WITH_TIMEOUT(finished.count(), 1, 5000);
+    QVERIFY(store.teardownResult(first, kTeardown).acknowledgementSafe());
+    QVERIFY(!store.teardownPending());
+    QVERIFY(!QFileInfo::exists(firstPath));
+    QVERIFY(store.acceptsCommands(other));
+    QCOMPARE(store.requestTeardown(first, kTeardown).outcome,
+             RemoteCacheStore::CommitOutcome::AlreadyCommitted);
+    QCOMPARE(commits.count(), 1);
 }
 
 QTEST_GUILESS_MAIN(RemoteCacheStoreTest)

@@ -43,7 +43,7 @@ function addClient(server, connectionId, endpointId, options = {}) {
 function envelope(server, type, extra = {}) {
     return {
         type,
-        protocolVersion: 5,
+        protocolVersion: 6,
         serverBootId: server.serverBootId,
         messageId: crypto.randomUUID(),
         connectionGeneration: 1,
@@ -118,7 +118,7 @@ function containsRemovedWireKey(value, forbidden) {
         connectionGeneration: 99,
     }));
     const outbound = lastMessage(recipient.ws, 'test_outbound');
-    assert.equal(outbound.protocolVersion, 5);
+    assert.equal(outbound.protocolVersion, 6);
     assert.equal(outbound.serverBootId, server.serverBootId);
     assert.equal(outbound.connectionGeneration, 99);
     assert.match(outbound.messageId,
@@ -143,7 +143,7 @@ function containsRemovedWireKey(value, forbidden) {
     });
     const mismatch = lastMessage(old.ws, 'error');
     assert.equal(mismatch.code, 'protocol_version_mismatch');
-    assert.equal(mismatch.protocolVersion, 5);
+    assert.equal(mismatch.protocolVersion, 6);
     assert.equal(mismatch.serverBootId, server.serverBootId);
     assert.equal(typeof mismatch.messageId, 'string');
     assert.deepEqual(old.ws.closes, [{ code: 1002, reason: 'Protocol version mismatch' }]);
@@ -178,7 +178,7 @@ function containsRemovedWireKey(value, forbidden) {
     assert.equal(list.clients.some(device => device.endpointId === 'B'), true);
     assert.equal(Object.hasOwn(list.clients.find(device => device.endpointId === 'B'), 'id'), false);
     assert.deepEqual(Object.keys(list.clients.find(device => device.endpointId === 'B')).sort(),
-        ['endpointId', 'lastSeenAt', 'machineName', 'platform', 'status']);
+        ['canAcceptSession', 'endpointId', 'lastSeenAt', 'machineName', 'platform', 'reason', 'status']);
     assert.equal(list.clients.find(device => device.endpointId === 'B').status, 'Available');
     const forbiddenOutputFields = new Set([
         'clientId', 'persistentClientId', 'persistentId', 'deviceId', 'sessionId',
@@ -447,7 +447,7 @@ function containsRemovedWireKey(value, forbidden) {
     }).session;
 
     server.handleMessage('target-connection',
-        envelope(server, 'endpoint_disable'));
+        envelope(server, 'endpoint_disable', { requestId: 'disable-test' }));
     assert.equal(target.client.draining, true);
     assert.ok(lastMessage(target.ws, 'endpoint_disable_started'));
     assert.ok(['Terminating', 'CleanupPending'].includes(session.phase));
@@ -456,7 +456,7 @@ function containsRemovedWireKey(value, forbidden) {
     server.handleMessage('owner-connection',
         envelope(server, 'request_client_list'));
     assert.equal(lastMessage(owner.ws, 'client_list').clients
-        .some(client => client.endpointId === 'B'), false);
+        .some(client => client.endpointId === 'B' && client.canAcceptSession), false);
 
     server.handleMessage('owner-connection',
         envelope(server, 'remote_session_open', {
@@ -465,4 +465,4 @@ function containsRemovedWireKey(value, forbidden) {
     assert.equal(lastMessage(owner.ws, 'error').code, 'target_offline');
 }
 
-console.log('protocol v5 cut-over tests passed');
+console.log('protocol v6 cut-over tests passed');

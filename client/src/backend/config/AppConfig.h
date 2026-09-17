@@ -35,6 +35,7 @@ public:
         ReconnectBaseMs,
         ReconnectMaxMs,
         ReconnectJitterPercent,
+        ReconnectStableResetMs,
         LeaseHealthCheckIntervalMs,
         SessionDeadlinePollIntervalMs,
         ProjectAutosaveDelayMs,
@@ -144,6 +145,7 @@ public:
     qint64 incomingSessionOrphanTimeoutMs() const { return m_incomingSessionOrphanTimeoutMs; }
     int uploadIdleTimeoutMs() const { return m_uploadIdleTimeoutMs; }
     int connectionAttemptTimeoutMs() const { return m_connectionAttemptTimeoutMs; }
+    int reconnectStableResetMs() const { return m_reconnectStableResetMs; }
     int reconnectFastStepMs() const { return m_reconnectFastStepMs; }
     int reconnectFastMaxMs() const { return m_reconnectFastMaxMs; }
     int reconnectBaseMs() const { return m_reconnectBaseMs; }
@@ -218,7 +220,8 @@ private:
     qint64 m_projectHiddenRetentionMs = 300000;
     qint64 m_incomingSessionOrphanTimeoutMs = 3000;
     int m_uploadIdleTimeoutMs = 45000;
-    int m_connectionAttemptTimeoutMs = 3000;
+    int m_connectionAttemptTimeoutMs = 10000;
+    int m_reconnectStableResetMs = 30000;
     int m_reconnectFastStepMs = 250;
     int m_reconnectFastMaxMs = 750;
     int m_reconnectBaseMs = 1000;

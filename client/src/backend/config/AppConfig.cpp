@@ -24,18 +24,19 @@ struct SettingSpec {
     bool boolean;
 };
 
-constexpr std::array<SettingSpec, 65> kSpecs{{
+constexpr std::array<SettingSpec, 66> kSpecs{{
     {Key::ServerUrl, "MOUFFETTE_SERVER_URL", "server-url", "serverUrl", "ws://localhost:8080", false},
     {Key::RemoteSessionHiddenTimeoutMs, "MOUFFETTE_REMOTE_SESSION_HIDDEN_TIMEOUT_MS", "remote-session-hidden-timeout-ms", nullptr, "60000", false},
     {Key::ProjectMediaHiddenTimeoutMs, "MOUFFETTE_PROJECT_MEDIA_HIDDEN_TIMEOUT_MS", "project-media-hidden-timeout-ms", nullptr, "60000", false},
     {Key::ProjectHiddenRetentionMs, "MOUFFETTE_PROJECT_HIDDEN_RETENTION_MS", "project-hidden-retention-ms", nullptr, "300000", false},
     {Key::IncomingSessionOrphanTimeoutMs, "MOUFFETTE_INCOMING_SESSION_ORPHAN_TIMEOUT_MS", "incoming-session-orphan-timeout-ms", nullptr, "3000", false},
     {Key::UploadIdleTimeoutMs, "MOUFFETTE_UPLOAD_IDLE_TIMEOUT_MS", "upload-idle-timeout-ms", nullptr, "45000", false},
-    {Key::ConnectionAttemptTimeoutMs, "MOUFFETTE_CONNECTION_ATTEMPT_TIMEOUT_MS", "connection-attempt-timeout-ms", nullptr, "3000", false},
+    {Key::ConnectionAttemptTimeoutMs, "MOUFFETTE_CONNECTION_ATTEMPT_TIMEOUT_MS", "connection-attempt-timeout-ms", nullptr, "10000", false},
     {Key::ReconnectFastStepMs, "MOUFFETTE_RECONNECT_FAST_STEP_MS", "reconnect-fast-step-ms", nullptr, "250", false},
     {Key::ReconnectFastMaxMs, "MOUFFETTE_RECONNECT_FAST_MAX_MS", "reconnect-fast-max-ms", nullptr, "750", false},
     {Key::ReconnectBaseMs, "MOUFFETTE_RECONNECT_BASE_MS", "reconnect-base-ms", nullptr, "1000", false},
     {Key::ReconnectMaxMs, "MOUFFETTE_RECONNECT_MAX_MS", "reconnect-max-ms", nullptr, "30000", false},
+    {Key::ReconnectStableResetMs, "MOUFFETTE_RECONNECT_STABLE_RESET_MS", "reconnect-stable-reset-ms", nullptr, "30000", false},
     {Key::ReconnectJitterPercent, "MOUFFETTE_RECONNECT_JITTER_PERCENT", "reconnect-jitter-percent", nullptr, "20", false},
     {Key::LeaseHealthCheckIntervalMs, "MOUFFETTE_LEASE_HEALTH_CHECK_INTERVAL_MS", "lease-health-check-interval-ms", nullptr, "100", false},
     {Key::SessionDeadlinePollIntervalMs, "MOUFFETTE_SESSION_DEADLINE_POLL_INTERVAL_MS", "session-deadline-poll-interval-ms", nullptr, "250", false},
@@ -377,7 +378,8 @@ void AppConfig::resetToCompiledDefaults() {
     m_projectHiddenRetentionMs = 300000;
     m_incomingSessionOrphanTimeoutMs = 3000;
     m_uploadIdleTimeoutMs = 45000;
-    m_connectionAttemptTimeoutMs = 3000;
+    m_connectionAttemptTimeoutMs = 10000;
+    m_reconnectStableResetMs = 30000;
     m_reconnectFastStepMs = 250;
     m_reconnectFastMaxMs = 750;
     m_reconnectBaseMs = 1000;
@@ -650,6 +652,8 @@ bool AppConfig::load(const LoadOptions& options, QString* errorMessage) {
                             &candidate.m_reconnectBaseMs)
         || !parseIntSetting(Key::ReconnectMaxMs, 50, 600000,
                             &candidate.m_reconnectMaxMs)
+        || !parseIntSetting(Key::ReconnectStableResetMs, 1000, 600000,
+                            &candidate.m_reconnectStableResetMs)
         || !parseIntSetting(Key::ReconnectJitterPercent, 0, 50,
                             &candidate.m_reconnectJitterPercent)
         || !parseIntSetting(Key::LeaseHealthCheckIntervalMs, 10, 5000,

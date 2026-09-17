@@ -9,9 +9,10 @@ const DECLARATIONS = Object.freeze({
     MOUFFETTE_AUTH_CHALLENGE_TIMEOUT_MS: { type: 'int', default: 10000, min: 1000, max: 120000 },
     MOUFFETTE_PEER_HEARTBEAT_INTERVAL_MS: { type: 'int', default: 750, min: 250, max: 5000 },
     MOUFFETTE_PEER_LEASE_TIMEOUT_MS: { type: 'int', default: 3000, min: 1000, max: 30000 },
+    MOUFFETTE_REMOTE_SESSION_RECOVERY_TIMEOUT_MS: { type: 'int', default: 5000, min: 2000, max: 60000 },
     MOUFFETTE_REMOTE_SESSION_DEGRADED_AFTER_MS: { type: 'int', default: 1500, min: 250, max: 29999 },
     MOUFFETTE_SESSION_LEASE_SWEEP_INTERVAL_MS: { type: 'int', default: 100, min: 25, max: 5000 },
-    MOUFFETTE_REMOTE_SESSION_OPEN_TIMEOUT_MS: { type: 'int', default: 3000, min: 250, max: 30000 },
+    MOUFFETTE_REMOTE_SESSION_OPEN_TIMEOUT_MS: { type: 'int', default: 5000, min: 250, max: 30000 },
     MOUFFETTE_REMOTE_SESSION_OPEN_REQUEST_TTL_MS: { type: 'int', default: 300000, min: 1000, max: 86400000 },
     MOUFFETTE_REMOTE_SESSION_TOMBSTONE_TTL_MS: { type: 'int', default: 300000, min: 1000, max: 86400000 },
     MOUFFETTE_REMOTE_SESSION_TEARDOWN_RETRY_INITIAL_MS: { type: 'int', default: 500, min: 100, max: 60000 },
@@ -127,6 +128,9 @@ function loadServerConfig(options = {}) {
         < values.MOUFFETTE_PEER_HEARTBEAT_INTERVAL_MS * 4) {
         throw new Error('MOUFFETTE_PEER_LEASE_TIMEOUT_MS must be at least 4x the heartbeat interval');
     }
+    if (values.MOUFFETTE_REMOTE_SESSION_RECOVERY_TIMEOUT_MS <= values.MOUFFETTE_PEER_LEASE_TIMEOUT_MS) {
+        throw new Error('MOUFFETTE_REMOTE_SESSION_RECOVERY_TIMEOUT_MS must exceed the transport lease timeout');
+    }
     if (values.MOUFFETTE_REMOTE_SESSION_DEGRADED_AFTER_MS
         < values.MOUFFETTE_PEER_HEARTBEAT_INTERVAL_MS
         || values.MOUFFETTE_REMOTE_SESSION_DEGRADED_AFTER_MS
@@ -185,6 +189,7 @@ function loadServerConfig(options = {}) {
         authChallengeTimeoutMs: values.MOUFFETTE_AUTH_CHALLENGE_TIMEOUT_MS,
         heartbeatIntervalMs: values.MOUFFETTE_PEER_HEARTBEAT_INTERVAL_MS,
         leaseTimeoutMs: values.MOUFFETTE_PEER_LEASE_TIMEOUT_MS,
+        sessionRecoveryTimeoutMs: values.MOUFFETTE_REMOTE_SESSION_RECOVERY_TIMEOUT_MS,
         remoteSessionDegradedAfterMs: values.MOUFFETTE_REMOTE_SESSION_DEGRADED_AFTER_MS,
         sessionLeaseSweepIntervalMs: values.MOUFFETTE_SESSION_LEASE_SWEEP_INTERVAL_MS,
         remoteSessionOpenTimeoutMs: values.MOUFFETTE_REMOTE_SESSION_OPEN_TIMEOUT_MS,
@@ -210,7 +215,7 @@ function loadServerConfig(options = {}) {
         assetRemovalTombstoneTtlMs: values.MOUFFETTE_ASSET_REMOVAL_TOMBSTONE_TTL_MS,
         statsIntervalMs: values.MOUFFETTE_STATS_INTERVAL_MS,
         cursorDebug: values.MOUFFETTE_CURSOR_DEBUG,
-        policyVersion: 2,
+        policyVersion: 3,
         values: Object.freeze(values),
         provenance: Object.freeze(provenance),
         warnings: Object.freeze(warnings),

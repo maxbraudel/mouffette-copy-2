@@ -28,17 +28,16 @@ void WebSocketMessageHandler::setupConnections(WebSocketClient* client)
 
 void WebSocketMessageHandler::onConnected()
 {
-    if (!m_mainWindow) return;
+    if (!m_mainWindow || m_mainWindow->isUserDisconnected()
+        || m_mainWindow->isConnectionDraining()) return;
 
     UploadManager* uploads = m_mainWindow->getUploadManager();
     if (uploads && !uploads->receiverReadyForAdvertisement()
         && !uploads->retryReceiverAdvertisementCleanup()) {
-        m_mainWindow->setLocalNetworkStatus(QStringLiteral("Cleanup error"));
         emit connectionStateChanged(false);
         return;
     }
 
-    m_mainWindow->setLocalNetworkStatus(QStringLiteral("Connected"));
     if (m_mainWindow->getWorkspaceManager()
         && m_mainWindow->getWebSocketClient()) {
         const QString endpointId =
@@ -52,6 +51,5 @@ void WebSocketMessageHandler::onConnected()
 void WebSocketMessageHandler::onDisconnected()
 {
     if (!m_mainWindow) return;
-    m_mainWindow->setLocalNetworkStatus(QStringLiteral("Reconnecting"));
     emit connectionStateChanged(false);
 }

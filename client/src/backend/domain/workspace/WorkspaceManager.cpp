@@ -1,3 +1,4 @@
+#include "backend/runtime/SuspendInclusiveClock.h"
 #include "backend/domain/workspace/WorkspaceManager.h"
 
 #include "backend/config/AppConfig.h"
@@ -35,7 +36,7 @@ ClientInfo mergeClientPresentation(const ClientInfo& previous,
 
 qint64 currentEpochMs(const std::function<qint64()>& provider)
 {
-    return provider ? provider() : QDateTime::currentMSecsSinceEpoch();
+    return provider ? provider() : MouffetteClock::anchoredEpochMs();
 }
 }
 

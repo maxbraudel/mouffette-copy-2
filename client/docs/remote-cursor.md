@@ -17,7 +17,7 @@ The v4/v5 session migration removed the former screen-watch/cursor transport.
 `RemoteCursor.qml` and the canvas cursor state survived. The remaining QML
 loader also tied cursor visibility to editing permission.
 
-The replacement is an additive v5 session message, `remote_session_cursor`:
+The replacement is a generation-fenced v6 session message, `remote_session_cursor`:
 
 1. `SystemMonitor` samples the target's desktop mouse position.
 2. `ApplicationRuntime` publishes only for active incoming remote sessions.
