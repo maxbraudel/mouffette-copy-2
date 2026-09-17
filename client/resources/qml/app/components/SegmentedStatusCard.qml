@@ -62,14 +62,42 @@ Item {
         spacing: 0
 
         Rectangle {
+            id: statusSegment
+            objectName: "statusSegment"
+            height: root.height
+            width: root.statusWidth
+            color: root.statusBackground
+            topLeftRadius: Theme.controlRadius
+            bottomLeftRadius: Theme.controlRadius
+
+            Text {
+                id: statusLabel
+                anchors.fill: parent
+                anchors.leftMargin: Theme.segmentPadding
+                anchors.rightMargin: Theme.segmentPadding
+                text: root.statusText
+                color: root.statusForeground
+                font.pixelSize: Theme.controlFontSize
+                font.bold: true
+                verticalAlignment: Text.AlignVCenter
+                horizontalAlignment: Text.AlignHCenter
+                elide: Text.ElideRight
+            }
+        }
+
+        Rectangle {
+            width: 1
+            height: root.height
+            color: Theme.border
+        }
+
+        Rectangle {
             id: primarySegment
             height: root.height
             width: Math.max(0, root.width - 1 - root.statusWidth
                            - (root.auxiliaryVisible ? 1 + root.auxiliaryWidth : 0)
                            - root.busyWidth)
             color: "transparent"
-            topLeftRadius: Theme.controlRadius
-            bottomLeftRadius: Theme.controlRadius
 
             Text {
                 id: primaryLabel
@@ -87,7 +115,8 @@ Item {
         }
 
         Rectangle {
-            width: 1
+            visible: root.auxiliaryVisible
+            width: visible ? 1 : 0
             height: root.height
             color: Theme.border
         }
@@ -134,36 +163,6 @@ Item {
             }
         }
 
-        Rectangle {
-            visible: root.auxiliaryVisible
-            width: visible ? 1 : 0
-            height: root.height
-            color: Theme.border
-        }
-
-        Rectangle {
-            id: statusSegment
-            objectName: "statusSegment"
-            height: root.height
-            width: root.statusWidth
-            color: root.statusBackground
-            topRightRadius: root.busy ? 0 : Theme.controlRadius
-            bottomRightRadius: root.busy ? 0 : Theme.controlRadius
-
-            Text {
-                id: statusLabel
-                anchors.fill: parent
-                anchors.leftMargin: Theme.segmentPadding
-                anchors.rightMargin: Theme.segmentPadding
-                text: root.statusText
-                color: root.statusForeground
-                font.pixelSize: Theme.controlFontSize
-                font.bold: true
-                verticalAlignment: Text.AlignVCenter
-                horizontalAlignment: Text.AlignHCenter
-                elide: Text.ElideRight
-            }
-        }
     }
 
     // Painted last. Segment fills can never erase or shorten this border.
