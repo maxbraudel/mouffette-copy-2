@@ -49,6 +49,7 @@ class ApplicationController final : public QObject
 
     Q_PROPERTY(QString settingsServerUrl READ settingsServerUrl NOTIFY settingsChanged)
     Q_PROPERTY(bool settingsAutoUpload READ settingsAutoUpload NOTIFY settingsChanged)
+    Q_PROPERTY(bool clearingStorage READ clearingStorage NOTIFY clearingStorageChanged)
 
     Q_PROPERTY(QString dialogTitle READ dialogTitle NOTIFY dialogChanged)
     Q_PROPERTY(QString dialogMessage READ dialogMessage NOTIFY dialogChanged)
@@ -98,6 +99,7 @@ public:
 
     QString settingsServerUrl() const;
     bool settingsAutoUpload() const;
+    bool clearingStorage() const { return m_clearingStorage; }
 
     QString dialogTitle() const { return m_dialogTitle; }
     QString dialogMessage() const { return m_dialogMessage; }
@@ -119,6 +121,7 @@ public:
     Q_INVOKABLE void acceptDialog();
     Q_INVOKABLE void rejectDialog();
     Q_INVOKABLE QString saveSettings(const QString& serverUrl, bool autoUpload);
+    Q_INVOKABLE void clearStorageAndClose();
     Q_INVOKABLE void hideWindow();
     Q_INVOKABLE void setWindowVisible(bool visible);
     Q_INVOKABLE void setPointerInside(bool inside);
@@ -135,6 +138,8 @@ signals:
     void activeWorkspaceChanged();
     void presentationChanged();
     void settingsChanged();
+    void clearingStorageChanged();
+    void clearStorageOnExitRequested();
     void dialogChanged();
     void dialogRequested();
     void raiseRequested();
@@ -165,6 +170,7 @@ private:
     bool m_bootstrapStarted = false;
     bool m_multimediaBootstrapPending = false;
     bool m_ready = false;
+    bool m_clearingStorage = false;
     QString m_bootstrapTitle = QStringLiteral("Starting Mouffette");
     QString m_bootstrapDetail = QStringLiteral("Preparing local storage…");
     QString m_bootstrapPrimaryText = QStringLiteral("Continue");

@@ -135,6 +135,9 @@ private slots:
     void lockContentionAndUnsafePaths();
     void externalLinksAreNotFollowed();
     void inaccessibleStorageIsNotReset();
+    void clearProfileRemovesWholeDirectory_data();
+    void clearProfileRemovesWholeDirectory();
+    void clearProfileRejectsUnsafeRoots();
 };
 
 void RuntimeStorageBootstrapTest::freshProfileAndLegacyManifestAreSilent()
@@ -513,6 +516,62 @@ void RuntimeStorageBootstrapTest::inaccessibleStorageIsNotReset()
     QVERIFY(QFile::setPermissions(parent, QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner));
     QCOMPARE(written.failure, Failure::IoError);
     QCOMPARE(readBytes(path), before);
+#endif
+}
+
+void RuntimeStorageBootstrapTest::clearProfileRemovesWholeDirectory_data()
+{
+    QTest::addColumn<QString>("channel");
+    QTest::newRow("development") << QStringLiteral("development");
+    QTest::newRow("production") << QStringLiteral("production");
+}
+
+void RuntimeStorageBootstrapTest::clearProfileRemovesWholeDirectory()
+{
+    QFETCH(QString, channel);
+    QTemporaryDir directory;
+    const QString otherChannel = channel == QLatin1String("development")
+        ? QStringLiteral("production") : QStringLiteral("development");
+    const auto other = temporaryContext(RuntimeProfile::persistentRoot(directory.path(), otherChannel), otherChannel);
+    const auto active = temporaryContext(RuntimeProfile::persistentRoot(directory.path(), channel), channel);
+    QVERIFY(RuntimeStorageBootstrap(other).run().succeeded());
+    const auto otherBefore = snapshots(other);
+    QVERIFY(RuntimeStorageBootstrap(active).run().succeeded());
+    QVERIFY(seedData());
+    QVERIFY(writeBytes(QDir(active.rootPath).filePath("unknown/.hidden/file"), "also remove me"));
+    const QString external = directory.filePath("external");
+    const QString externalKey = QDir(external).filePath("device-identity-v2.pk8");
+    QVERIFY(writeBytes(externalKey, "never remove external data"));
+#ifndef Q_OS_WIN
+    QVERIFY(QDir(QDir(active.rootPath).filePath("identity")).removeRecursively());
+    QVERIFY(QFile::link(external, QDir(active.rootPath).filePath("identity")));
+    QVERIFY(QFile::link(external, QDir(active.rootPath).filePath("cache/Uploads/external")));
+#endif
+    const auto removed = clearProfileStorage(active);
+    QVERIFY2(removed.succeeded(), qPrintable(removed.reason));
+    QVERIFY(!QFileInfo::exists(active.rootPath));
+    QCOMPARE(snapshots(other), otherBefore);
+    QCOMPARE(readBytes(externalKey), QByteArray("never remove external data"));
+    QVERIFY(clearProfileStorage(active).succeeded()); // Idempotent; no recreation.
+    QVERIFY(!QFileInfo::exists(active.rootPath));
+    const auto nextBoot = RuntimeStorageBootstrap(active).run();
+    QVERIFY(nextBoot.succeeded());
+    for (const Report& report : nextBoot.components) QCOMPARE(report.action, Action::Initialized);
+}
+
+void RuntimeStorageBootstrapTest::clearProfileRejectsUnsafeRoots()
+{
+    QVERIFY(!clearProfileStorage(temporaryContext(QString())).succeeded());
+    QVERIFY(!clearProfileStorage(temporaryContext(QDir::rootPath())).succeeded());
+    QVERIFY(!clearProfileStorage(temporaryContext(QStringLiteral("relative"))).succeeded());
+#ifndef Q_OS_WIN
+    QTemporaryDir directory;
+    const QString external = directory.filePath("external");
+    QVERIFY(writeBytes(QDir(external).filePath("sentinel"), "keep"));
+    const QString link = directory.filePath("runtime");
+    QVERIFY(QFile::link(external, link));
+    QVERIFY(!clearProfileStorage(temporaryContext(link)).succeeded());
+    QCOMPARE(readBytes(QDir(external).filePath("sentinel")), QByteArray("keep"));
 #endif
 }
 

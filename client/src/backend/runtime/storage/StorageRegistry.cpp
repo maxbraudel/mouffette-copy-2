@@ -7,6 +7,7 @@
 #include "backend/security/DeviceIdentityStore.h"
 
 #include <QDir>
+#include <QFileInfo>
 #include <QJsonArray>
 
 namespace RuntimeStorage {
@@ -113,6 +114,35 @@ Operation purgeReceivedMedia(const RuntimeProfileContext& context)
     operation = removeOwned(context.rootPath, uploads);
     if (!operation.succeeded()) return operation;
     return ensureDirectory(context.rootPath, uploads);
+}
+
+Operation clearProfileStorage(const RuntimeProfileContext& context)
+{
+    const QString root = QDir::cleanPath(context.rootPath);
+    const QFileInfo info(root);
+    if (context.rootPath.trimmed().isEmpty() || !info.isAbsolute()
+        || QDir(root).isRoot() || info.isSymLink()
+        || (info.exists() && !info.isDir())
+        || (context.channel != QLatin1String("development")
+            && context.channel != QLatin1String("production"))) {
+        return {Failure::IoError, QStringLiteral("Refusing to clear an invalid runtime root: %1").arg(root)};
+    }
+    if (info.exists()) {
+        // Remove the owned directory first. Even a substituted identity/
+        // symlink must never let DeviceIdentityStore::reset follow its parent
+        // to delete an external fallback key.
+        const Operation removed = removeOwned(root, identityDirectory(context));
+        if (!removed.succeeded()) return removed;
+    }
+    DeviceIdentityStore identity(identityDirectory(context), context.isPersistent(), context.identityNamespace());
+    QString identityError;
+    const bool identityCleared = identity.reset(&identityError);
+    // The entire selected root is removed, including unregistered/obsolete
+    // files. No sibling channel or external source is part of this operation.
+    const Operation removed = info.exists() ? removeOwned(info.absolutePath(), root) : Operation{};
+    if (!removed.succeeded()) return removed;
+    if (!identityCleared) return {Failure::IoError, identityError};
+    return {};
 }
 
 QList<Component> components(const RuntimeProfileContext& context)

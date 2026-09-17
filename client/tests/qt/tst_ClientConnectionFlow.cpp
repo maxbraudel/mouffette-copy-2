@@ -8,6 +8,11 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QPointer>
+#include <QProcess>
+#include <QApplication>
+#include <QQmlApplicationEngine>
+#include <QQuickStyle>
+#include <QThreadPool>
 #include <QTemporaryDir>
 #include <QTimer>
 #include <QUuid>
@@ -19,6 +24,8 @@
 #include "backend/runtime/ApplicationActivityMonitor.h"
 #include "backend/runtime/RuntimeProfile.h"
 #include "backend/runtime/RuntimeStorageBootstrap.h"
+#include "backend/runtime/storage/StorageRegistry.h"
+#include "backend/domain/project/ProjectStore.h"
 #include "backend/domain/canvas/CanvasDocument.h"
 #include "backend/domain/media/CanvasMedia.h"
 #include "backend/domain/models/ClientInfo.h"
@@ -28,6 +35,8 @@
 #include "backend/network/WebSocketClient.h"
 #include "backend/security/DeviceIdentityStore.h"
 #include "frontend/qml/ApplicationController.h"
+#include "frontend/qml/QmlRuntime.h"
+#include "frontend/rendering/canvas/CanvasQmlTypes.h"
 #include "frontend/qml/ClientListModel.h"
 #include "frontend/qml/ClientWorkspaceViewModel.h"
 #include "frontend/rendering/navigation/ScreenNavigationManager.h"
@@ -3252,6 +3261,47 @@ private slots:
         runtime.handleApplicationAboutToQuit();
     }
 
+    void settingsClearStorageAndClose_data()
+    {
+        QTest::addColumn<QString>("channel");
+        QTest::newRow("development") << QStringLiteral("development");
+        QTest::newRow("production") << QStringLiteral("production");
+    }
+
+    void settingsClearStorageAndClose()
+    {
+        QFETCH(QString, channel);
+        QTemporaryDir directory;
+        const QString root = RuntimeProfile::persistentRoot(directory.path(), channel);
+        const QString otherChannel = channel == QLatin1String("development")
+            ? QStringLiteral("production") : QStringLiteral("development");
+        const QString otherRoot = RuntimeProfile::persistentRoot(directory.path(), otherChannel);
+        QVERIFY(QDir().mkpath(otherRoot));
+        const QString sentinelPath = QDir(otherRoot).filePath(QStringLiteral("keep"));
+        {
+            QFile sentinel(sentinelPath);
+            QVERIFY(sentinel.open(QIODevice::WriteOnly));
+            QCOMPARE(sentinel.write("other channel"), qint64(13));
+        }
+        QProcess worker;
+        worker.start(QCoreApplication::applicationFilePath(),
+                     {QStringLiteral("--clear-storage-worker"), root, channel});
+        QVERIFY(worker.waitForStarted(5000));
+        QVERIFY2(worker.waitForFinished(15000), qPrintable(worker.errorString()));
+        QCOMPARE(worker.exitStatus(), QProcess::NormalExit);
+        const QByteArray diagnostics = worker.readAllStandardError();
+        QVERIFY2(worker.exitCode() == 0, diagnostics.constData());
+        QVERIFY2(!diagnostics.contains("TypeError:")
+                     && !diagnostics.contains("ReferenceError:"),
+                 diagnostics.constData());
+        // Check after process destruction, including all QObject destructors:
+        // no settings/project/cache writer may resurrect the directory.
+        QVERIFY(!QFileInfo::exists(root));
+        QFile sentinel(sentinelPath);
+        QVERIFY(sentinel.open(QIODevice::ReadOnly));
+        QCOMPARE(sentinel.readAll(), QByteArray("other channel"));
+    }
+
     void storageBootstrapDoesNotRequestRecoveryAcknowledgement_data()
     {
         QTest::addColumn<bool>("corrupt");
@@ -3572,5 +3622,76 @@ private slots:
     }
 };
 
-QTEST_MAIN(ClientConnectionFlowTest)
+int main(int argc, char** argv)
+{
+    QApplication app(argc, argv);
+    const QStringList args = app.arguments();
+    if (args.size() == 4 && args.at(1) == QLatin1String("--clear-storage-worker")) {
+        app.setQuitOnLastWindowClosed(false);
+        RuntimeProfileContext profile;
+        profile.rootPath = args.at(2);
+        profile.channel = args.at(3);
+        profile.persistent = false;
+        if (!RuntimeStorageBootstrap(profile).run().succeeded()) return 10;
+        ProjectRecord project;
+        project.projectId = QStringLiteral("shutdown-write");
+        project.targetEndpointId = project.target.endpointId = QStringLiteral("target");
+        project.createdAtMs = project.updatedAtMs = project.snapshotCapturedAtMs = 1000;
+        project.snapshotRevision = 1;
+        project.state = ProjectLifecycleState::Visible;
+        if (!ProjectStore().save({project})) return 11;
+        QQuickStyle::setStyle(QStringLiteral("Basic"));
+        registerCanvasQmlTypes();
+        int requests = 0;
+        int code = 0;
+        {
+            QQmlApplicationEngine engine;
+            QmlRuntime::setEngine(&engine);
+            ApplicationController controller(profile,
+                {QStringLiteral("storage-clear-test"), QStringLiteral("--server-url=ws://127.0.0.1:1")});
+            engine.setInitialProperties({
+                {QStringLiteral("controller"), QVariant::fromValue(&controller)}
+            });
+            // Load the complete shipped shell, including BootstrapWindow:
+            // a standalone SettingsDialog misses controller lifetime errors.
+            engine.loadFromModule(QStringLiteral("Mouffette.App"), QStringLiteral("Main"));
+            if (engine.rootObjects().isEmpty()) return 12;
+            QObject* shell = engine.rootObjects().constFirst();
+            QObject::connect(&controller, &ApplicationController::clearStorageOnExitRequested,
+                             &app, [&] { ++requests; });
+            QObject::connect(&app, &QCoreApplication::aboutToQuit,
+                             &controller, &ApplicationController::handleApplicationAboutToQuit);
+            QObject::connect(&controller, &ApplicationController::readyChanged, &app, [&] {
+                if (!controller.ready()) return;
+                QTimer::singleShot(0, &controller, [&] {
+                    QObject* button = shell->findChild<QObject*>(QStringLiteral("clearStorageAndCloseButton"));
+                    if (!button || button->property("text").toString() != QLatin1String("Clear storage and close")
+                        || !button->property("destructive").toBool() || !button->property("enabled").toBool()) {
+                        app.exit(13);
+                        return;
+                    }
+                    // Exercise the shipped QML action without depending on
+                    // native window activation. Pending invalid edits must not
+                    // route the clear action through Save validation.
+                    if (QObject* field = shell->findChild<QObject*>(QStringLiteral("settingsServerUrl")))
+                        field->setProperty("text", QStringLiteral("invalid unsaved URL"));
+                    if (!QMetaObject::invokeMethod(button, "clicked")) { app.exit(14); return; }
+                    controller.clearStorageAndClose(); // Duplicate delivery is ignored.
+                });
+            });
+            QTimer::singleShot(10000, &app, [&] { app.exit(15); });
+            controller.start();
+            code = app.exec();
+            // Match main: shell, controller (including its windows), then engine.
+            qDeleteAll(engine.rootObjects());
+        }
+        QThreadPool::globalInstance()->waitForDone();
+        if (code != 0 || requests != 1) return code != 0 ? code : 16;
+        const auto cleared = RuntimeStorage::clearProfileStorage(profile);
+        if (!cleared.succeeded()) { qWarning().noquote() << cleared.reason; return 17; }
+        return 0;
+    }
+    ClientConnectionFlowTest test;
+    return QTest::qExec(&test, argc, argv);
+}
 #include "tst_ClientConnectionFlow.moc"

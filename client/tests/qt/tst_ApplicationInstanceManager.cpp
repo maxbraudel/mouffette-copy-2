@@ -28,6 +28,7 @@ private slots:
     void singleInstanceLaunchRequestsActivation();
     void cleansOnlyAbandonedTemporaryProfiles();
     void redirectsSecondaryWritableState();
+    void releasesProfileLockWithoutReleasingInstanceSlot();
 };
 
 void ApplicationInstanceManagerTest::allocatesAndReusesUnboundedSlots()
@@ -241,6 +242,22 @@ void ApplicationInstanceManagerTest::redirectsSecondaryWritableState()
     settings->sync();
     QCOMPARE(RuntimeProfile::readSettings().value(QStringLiteral("serverUrl")).toString(),
              QStringLiteral("ws://localhost:8080"));
+}
+
+void ApplicationInstanceManagerTest::releasesProfileLockWithoutReleasingInstanceSlot()
+{
+    QTemporaryDir root;
+    ApplicationInstanceManager primary(QStringLiteral("clear-profile"), true, root.path());
+    QString error;
+    QCOMPARE(primary.start(&error), ApplicationInstanceManager::StartResult::Started);
+    QLockFile profileLock(QDir(primary.profile().rootPath).filePath(QStringLiteral("active.lock")));
+    QVERIFY(!profileLock.tryLock(0));
+    primary.releaseProfileLockForRemoval();
+    QVERIFY(profileLock.tryLock(0));
+    profileLock.unlock();
+    ApplicationInstanceManager secondary(QStringLiteral("clear-profile"), true, root.path());
+    QCOMPARE(secondary.start(&error), ApplicationInstanceManager::StartResult::Started);
+    QCOMPARE(secondary.profile().ordinal, 2);
 }
 
 int main(int argc, char** argv)

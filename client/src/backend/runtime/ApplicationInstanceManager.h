@@ -28,6 +28,9 @@ public:
 
     StartResult start(QString* errorMessage = nullptr);
     RuntimeProfileContext profile() const { return m_profile; }
+    // Shutdown only: all profile consumers must already be destroyed. The
+    // instance slot and activation server remain owned until this destructor.
+    void releaseProfileLockForRemoval();
     QString coordinationRoot() const { return m_coordinationRoot; }
 
 signals:

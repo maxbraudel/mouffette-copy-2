@@ -4,3 +4,8 @@ SettingsManager writes settings/settings.ini, including the central settings sch
 
 See the [central storage architecture and migration guide](../../runtime/storage/README.md) for the
 version inventory, ownership boundaries, upgrade procedure and tests.
+
+The settings dialog also exposes **Clear storage and close**. Its request goes
+through `ApplicationController` to the process shutdown owner in `main`, which
+removes the active profile after all services and QML have been destroyed.
+SettingsManager must never delete the runtime while writers are still alive.

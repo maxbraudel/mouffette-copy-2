@@ -36,6 +36,7 @@ Dialog {
 
     contentItem: ColumnLayout {
         spacing: 12
+        enabled: !controller.clearingStorage
         Text {
             text: "Server URL"
             color: Theme.text
@@ -58,6 +59,13 @@ Dialog {
         }
         RowLayout {
             Layout.fillWidth: true
+            AppButton {
+                objectName: "clearStorageAndCloseButton"
+                text: "Clear storage and close"
+                destructive: true
+                enabled: controller.ready && !controller.clearingStorage
+                onClicked: controller.clearStorageAndClose()
+            }
             Item { Layout.fillWidth: true }
             AppButton {
                 text: "Cancel"

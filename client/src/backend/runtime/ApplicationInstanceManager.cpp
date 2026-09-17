@@ -63,6 +63,11 @@ ApplicationInstanceManager::~ApplicationInstanceManager()
     }
 }
 
+void ApplicationInstanceManager::releaseProfileLockForRemoval()
+{
+    m_profileLock.reset();
+}
+
 bool ApplicationInstanceManager::prepareCoordinationRoot(QString* errorMessage)
 {
     if (!m_requestedCoordinationRoot.isEmpty()) {

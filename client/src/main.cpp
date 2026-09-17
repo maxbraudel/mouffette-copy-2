@@ -7,6 +7,7 @@
 #include <QQmlApplicationEngine>
 #include <QQuickStyle>
 #include <QMediaFormat>
+#include <QThreadPool>
 #include <cstdio>
 #include "AppBuildConfig.h"
 #include "backend/config/AppConfig.h"
@@ -15,6 +16,7 @@
 #include "backend/runtime/ApplicationInstanceManager.h"
 #include "backend/runtime/RuntimeProfile.h"
 #include "backend/runtime/RuntimeStorageBootstrap.h"
+#include "backend/runtime/storage/StorageRegistry.h"
 #include "frontend/qml/ApplicationController.h"
 #include "frontend/qml/QmlRuntime.h"
 #include "frontend/rendering/canvas/CanvasQmlTypes.h"
@@ -112,42 +114,60 @@ int main(int argc, char *argv[]) {
     QQuickStyle::setStyle(QStringLiteral("Basic"));
     registerCanvasQmlTypes();
 
-    QQmlApplicationEngine engine;
-    QmlRuntime::setEngine(&engine);
-    // The controller is deliberately constructed after the engine. It is then
-    // destroyed first, allowing all controller-owned QQuickWindows to retire
-    // before their shared QQmlEngine.
-    ApplicationController controller(runtimeProfile, arguments);
-    engine.setInitialProperties({
-        { QStringLiteral("controller"), QVariant::fromValue(&controller) }
-    });
-    QObject::connect(&engine, &QQmlApplicationEngine::objectCreationFailed,
-                     &app, []() { QCoreApplication::exit(5); },
-                     Qt::QueuedConnection);
-    engine.loadFromModule(QStringLiteral("Mouffette.App"),
-                          QStringLiteral("Main"));
-    if (engine.rootObjects().isEmpty()) {
-        return 5;
-    }
+    bool clearStorageOnExit = false;
+    int exitCode = 0;
+    {
+        QQmlApplicationEngine engine;
+        QmlRuntime::setEngine(&engine);
+        // Keep the shared engine alive until controller-owned QQuickWindows
+        // retire. The application shell must be destroyed before the controller
+        // so its QML bindings never observe a destroyed controller.
+        ApplicationController controller(runtimeProfile, arguments);
+        QObject::connect(&controller, &ApplicationController::clearStorageOnExitRequested,
+                         &app, [&clearStorageOnExit] { clearStorageOnExit = true; });
+        engine.setInitialProperties({
+            { QStringLiteral("controller"), QVariant::fromValue(&controller) }
+        });
+        QObject::connect(&engine, &QQmlApplicationEngine::objectCreationFailed,
+                         &app, []() { QCoreApplication::exit(5); },
+                         Qt::QueuedConnection);
+        engine.loadFromModule(QStringLiteral("Mouffette.App"),
+                              QStringLiteral("Main"));
+        if (engine.rootObjects().isEmpty()) {
+            return 5;
+        }
 
-    QObject::connect(&instanceManager,
-                     &ApplicationInstanceManager::activationRequested,
-                     &controller,
-                     &ApplicationController::raiseRequested);
-    SystemLifecycleMonitor systemLifecycleMonitor;
-    QObject::connect(&app, &QGuiApplication::applicationStateChanged,
-                     &controller, &ApplicationController::handleApplicationStateChanged);
-    QObject::connect(&systemLifecycleMonitor,
-                     &SystemLifecycleMonitor::systemSuspendedChanged,
-                     &controller,
-                     &ApplicationController::handleNativeSystemSuspendedChanged);
-    systemLifecycleMonitor.startNativeMonitoring();
-    QObject::connect(&app, &QCoreApplication::aboutToQuit,
-                     &controller, &ApplicationController::handleApplicationAboutToQuit,
-                     Qt::DirectConnection);
-    QObject::connect(&controller, &ApplicationController::readyChanged, &app, [&controller] {
-        if (controller.ready()) logRuntimeDiagnostics();
-    });
-    controller.start();
-    return app.exec();
+        QObject::connect(&instanceManager,
+                         &ApplicationInstanceManager::activationRequested,
+                         &controller,
+                         &ApplicationController::raiseRequested);
+        SystemLifecycleMonitor systemLifecycleMonitor;
+        QObject::connect(&app, &QGuiApplication::applicationStateChanged,
+                         &controller, &ApplicationController::handleApplicationStateChanged);
+        QObject::connect(&systemLifecycleMonitor,
+                         &SystemLifecycleMonitor::systemSuspendedChanged,
+                         &controller,
+                         &ApplicationController::handleNativeSystemSuspendedChanged);
+        systemLifecycleMonitor.startNativeMonitoring();
+        QObject::connect(&app, &QCoreApplication::aboutToQuit,
+                         &controller, &ApplicationController::handleApplicationAboutToQuit,
+                         Qt::DirectConnection);
+        QObject::connect(&controller, &ApplicationController::readyChanged, &app, [&controller] {
+            if (controller.ready()) logRuntimeDiagnostics();
+        });
+        controller.start();
+        exitCode = app.exec();
+        qDeleteAll(engine.rootObjects());
+    } // Runtime services and QML finish their last writes before removal.
+    if (clearStorageOnExit) {
+        QThreadPool::globalInstance()->waitForDone();
+        instanceManager.releaseProfileLockForRemoval();
+        const auto cleared = RuntimeStorage::clearProfileStorage(runtimeProfile);
+        if (!cleared.succeeded()) {
+            std::fprintf(stderr, "Mouffette storage removal failed: %s\n",
+                         cleared.reason.toLocal8Bit().constData());
+            return 6;
+        }
+    }
+    return exitCode;
 }

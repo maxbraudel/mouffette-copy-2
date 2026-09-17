@@ -103,6 +103,24 @@ fresh on this rollout. Vault namespaces include `<channel>:<profileId>` and
 instance coordination includes the compiled channel. Secondary development
 instances retain separate temporary roots and identities.
 
+## Explicit full removal
+
+Settings offers **Clear storage and close**, without confirmation. This is an
+explicit user action, separate from component upgrades. The controller marks
+the request once and asks the application to quit through its normal reader/
+renderer shutdown barrier. `main` first destroys the QML application shell while
+its controller is still alive, then the controller/runtime services and their
+windows, then the shared QML engine. It waits for background workers, releases
+the profile file lock, then invokes
+`clearProfileStorage` before returning from the process. The instance slot stays
+locked through removal so another launch cannot recreate the profile midway.
+
+Removal deletes the entire active profile directory, including hidden and
+unregistered files, and its channel/profile-specific native identity. Other
+channels, other instances and external media are untouched. The next launch is
+a fresh initialization. Failures are written to stderr and exit with code 6;
+there is no success notification, backup or settings-save validation.
+
 ## Changing a format
 
 1. Find its owner in the table and update its current reader/writer together.

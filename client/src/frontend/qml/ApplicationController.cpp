@@ -371,6 +371,7 @@ void ApplicationController::rejectDialog()
 QString ApplicationController::saveSettings(const QString& serverUrl,
                                             bool autoUpload)
 {
+    if (m_clearingStorage) return QStringLiteral("The application is closing.");
     if (!m_runtime || !m_runtime->getSettingsManager()) {
         return QStringLiteral("Settings are not ready yet.");
     }
@@ -391,6 +392,17 @@ QString ApplicationController::saveSettings(const QString& serverUrl,
     }
     emit settingsChanged();
     return {};
+}
+
+void ApplicationController::clearStorageAndClose()
+{
+    if (!m_ready || m_clearingStorage) return;
+    m_clearingStorage = true;
+    emit clearingStorageChanged();
+    // main owns the removal: it must run after runtime/QML destruction, while
+    // the instance slot still prevents another process opening this profile.
+    emit clearStorageOnExitRequested();
+    QCoreApplication::quit();
 }
 
 void ApplicationController::hideWindow()
