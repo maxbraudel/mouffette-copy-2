@@ -66,7 +66,9 @@ Business stores serialize/validate their current representations. They do not
 run migrations or silently delete incompatible data. Their load errors retain
 an I/O/content distinction for the bootstrap adapters. Settings use Qt's INI
 parser on a fresh snapshot so its process-local filename/type cache cannot hide
-what is actually on disk. Versioned whole-file writes use `QSaveFile` with direct
+what is actually on disk. INI snapshots use unique temporary directories and
+closed files so `QSettings` can read or atomically create them on Windows.
+Versioned whole-file writes use `QSaveFile` with direct
 write fallback disabled; ordinary `QSettings::sync()` updates also preserve the
 version key and use Qt's atomic synchronization.
 
@@ -105,9 +107,11 @@ instances retain separate temporary roots and identities.
 
 ## Explicit full removal
 
-Settings offers **Clear storage and close**, without confirmation. This is an
-explicit user action, separate from component upgrades. The controller marks
-the request once and asks the application to quit through its normal reader/
+Settings and the startup window after a profile storage/settings failure offer
+**Clear storage and close**, without confirmation. Media startup failures do not
+offer it. This is an explicit user action, separate from component upgrades.
+The controller marks the request once and asks the application to quit through
+its normal reader/
 renderer shutdown barrier. `main` first destroys the QML application shell while
 its controller is still alive, then the controller/runtime services and their
 windows, then the shared QML engine. It waits for background workers, releases

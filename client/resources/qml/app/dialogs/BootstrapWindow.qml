@@ -45,15 +45,28 @@ Window {
         RowLayout {
             Layout.fillWidth: true
             visible: root.controller.bootstrapDecisionRequired
+            AppButton {
+                objectName: "bootstrapClearStorageAndCloseButton"
+                text: "Clear storage and close"
+                destructive: true
+                visible: root.controller.bootstrapCanClearStorage
+                enabled: root.controller.bootstrapCanClearStorage
+                         && !root.controller.clearingStorage
+                onClicked: root.controller.clearStorageAndClose()
+            }
             Item { Layout.fillWidth: true }
             AppButton {
-                text: "Quit"
+                objectName: "bootstrapCloseButton"
+                text: "Close"
+                enabled: !root.controller.clearingStorage
                 onClicked: root.controller.quitBootstrap()
             }
             AppButton {
+                objectName: "bootstrapRetryButton"
                 text: root.controller.bootstrapPrimaryText
                 textVariants: ["Retry", "Continue"]
                 primary: true
+                enabled: !root.controller.clearingStorage
                 onClicked: root.controller.acceptBootstrapDecision()
             }
         }

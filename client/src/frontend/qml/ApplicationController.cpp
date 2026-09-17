@@ -20,14 +20,18 @@
 #include <QFutureWatcher>
 #include <QTimer>
 #include <QUrl>
+#include <utility>
 
 ApplicationController::ApplicationController(RuntimeProfileContext runtimeProfile,
                                              QStringList arguments,
-                                             QObject* parent)
+                                             QObject* parent,
+                                             MediaBootstrapFunction mediaBootstrap)
     : QObject(parent)
     , m_runtimeProfile(std::move(runtimeProfile))
     , m_arguments(std::move(arguments))
     , m_storageBootstrap(m_runtimeProfile)
+    , m_mediaBootstrap(mediaBootstrap ? std::move(mediaBootstrap)
+                                      : MediaBackendBootstrap::initialize)
     , m_clientsModel(new ClientListModel(this))
     , m_sceneActivitiesModel(new SceneActivityListModel(this))
     , m_historyModel(new HistoryListModel(this))
@@ -141,8 +145,10 @@ void ApplicationController::start()
 
 void ApplicationController::runBootstrap()
 {
+    if (m_clearingStorage) return;
     m_bootstrapDecision = BootstrapDecision::None;
     m_bootstrapDecisionRequired = false;
+    m_bootstrapCanClearStorage = false;
     m_bootstrapTitle = QStringLiteral("Starting Mouffette");
     m_bootstrapDetail = QStringLiteral("Preparing local storage…");
     emit bootstrapChanged();
@@ -152,6 +158,8 @@ void ApplicationController::runBootstrap()
     if (!m_bootstrapResult.succeeded()) {
         m_bootstrapDecision = BootstrapDecision::Retry;
         m_bootstrapDecisionRequired = true;
+        m_bootstrapCanClearStorage = m_bootstrapResult.code.endsWith(
+            QStringLiteral("_storage_failed"));
         m_bootstrapTitle = QStringLiteral("Mouffette could not start");
         m_bootstrapDetail = m_bootstrapResult.cause.isEmpty()
             ? m_bootstrapResult.code : m_bootstrapResult.cause;
@@ -165,6 +173,7 @@ void ApplicationController::runBootstrap()
             m_arguments, RuntimeProfile::readSettings(), &configError)) {
         m_bootstrapDecision = BootstrapDecision::Retry;
         m_bootstrapDecisionRequired = true;
+        m_bootstrapCanClearStorage = true;
         m_bootstrapTitle = QStringLiteral("Invalid runtime configuration");
         m_bootstrapDetail = configError;
         m_bootstrapPrimaryText = QStringLiteral("Retry");
@@ -177,7 +186,11 @@ void ApplicationController::runBootstrap()
 
 void ApplicationController::acceptBootstrapDecision()
 {
-    if (m_bootstrapDecision == BootstrapDecision::Retry) {
+    if (!m_clearingStorage && m_bootstrapDecision == BootstrapDecision::Retry) {
+        m_bootstrapDecision = BootstrapDecision::None;
+        m_bootstrapDecisionRequired = false;
+        m_bootstrapCanClearStorage = false;
+        emit bootstrapChanged();
         QTimer::singleShot(0, this, &ApplicationController::runBootstrap);
         return;
     }
@@ -193,6 +206,7 @@ void ApplicationController::finishBootstrap()
     if (m_multimediaBootstrapPending || m_ready) return;
     m_bootstrapDecision = BootstrapDecision::None;
     m_bootstrapDecisionRequired = false;
+    m_bootstrapCanClearStorage = false;
     m_bootstrapDetail = QStringLiteral("Preparing audio and video…");
     m_multimediaBootstrapPending = true;
     emit bootstrapChanged();
@@ -205,6 +219,7 @@ void ApplicationController::finishBootstrap()
         if (!result.ready) {
             m_bootstrapDecision = BootstrapDecision::Retry;
             m_bootstrapDecisionRequired = true;
+            m_bootstrapCanClearStorage = false;
             m_bootstrapTitle = QStringLiteral("Mouffette could not start");
             m_bootstrapDetail = result.error;
             m_bootstrapPrimaryText = QStringLiteral("Retry");
@@ -213,7 +228,7 @@ void ApplicationController::finishBootstrap()
         }
         initializeBackend();
     });
-    watcher->setFuture(MediaBackendBootstrap::initialize());
+    watcher->setFuture(m_mediaBootstrap());
 }
 
 void ApplicationController::initializeBackend()
@@ -396,7 +411,8 @@ QString ApplicationController::saveSettings(const QString& serverUrl,
 
 void ApplicationController::clearStorageAndClose()
 {
-    if (!m_ready || m_clearingStorage) return;
+    if ((!m_ready && !(m_bootstrapDecisionRequired && m_bootstrapCanClearStorage))
+        || m_clearingStorage) return;
     m_clearingStorage = true;
     emit clearingStorageChanged();
     // main owns the removal: it must run after runtime/QML destruction, while

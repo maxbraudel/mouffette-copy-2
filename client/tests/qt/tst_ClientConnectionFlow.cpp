@@ -9,6 +9,7 @@
 #include <QJsonObject>
 #include <QPointer>
 #include <QProcess>
+#include <QPromise>
 #include <QApplication>
 #include <QQmlApplicationEngine>
 #include <QQuickStyle>
@@ -3268,6 +3269,58 @@ private slots:
         QTest::newRow("production") << QStringLiteral("production");
     }
 
+    void startupFailureActions_data()
+    {
+        QTest::addColumn<QString>("action");
+        QTest::newRow("retry") << QStringLiteral("retry");
+        QTest::newRow("close") << QStringLiteral("close");
+        QTest::newRow("clear") << QStringLiteral("clear");
+        QTest::newRow("media") << QStringLiteral("media");
+    }
+
+    void startupFailureActions()
+    {
+        QFETCH(QString, action);
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        const QString root = RuntimeProfile::persistentRoot(
+            directory.path(), QStringLiteral("development"));
+        const QString otherRoot = RuntimeProfile::persistentRoot(
+            directory.path(), QStringLiteral("production"));
+        QVERIFY(QDir().mkpath(root));
+        QVERIFY(QDir().mkpath(otherRoot));
+        const QString blockerPath = QDir(root).filePath(QStringLiteral("settings"));
+        const QString sentinelPath = QDir(otherRoot).filePath(QStringLiteral("keep"));
+        {
+            if (action != QLatin1String("media")) {
+                QFile blocker(blockerPath);
+                QVERIFY(blocker.open(QIODevice::WriteOnly));
+                QCOMPARE(blocker.write("blocked"), qint64(7));
+            }
+            QFile sentinel(sentinelPath);
+            QVERIFY(sentinel.open(QIODevice::WriteOnly));
+            QCOMPARE(sentinel.write("other channel"), qint64(13));
+        }
+        QProcess worker;
+        worker.start(QCoreApplication::applicationFilePath(),
+                     {QStringLiteral("--startup-failure-worker"), root, action});
+        QVERIFY(worker.waitForStarted(5000));
+        QVERIFY2(worker.waitForFinished(20000), qPrintable(worker.errorString()));
+        QCOMPARE(worker.exitStatus(), QProcess::NormalExit);
+        const QByteArray diagnostics = worker.readAllStandardError();
+        QVERIFY2(worker.exitCode() == 0, diagnostics.constData());
+        QVERIFY2(!diagnostics.contains("TypeError:")
+                     && !diagnostics.contains("ReferenceError:"),
+                 diagnostics.constData());
+        QCOMPARE(QFileInfo::exists(root), action != QLatin1String("clear"));
+        QCOMPARE(QFileInfo(blockerPath).isFile(), action == QLatin1String("close"));
+        if (action == QLatin1String("retry") || action == QLatin1String("media"))
+            QVERIFY(QFileInfo(QDir(blockerPath).filePath(QStringLiteral("settings.ini"))).isFile());
+        QFile sentinel(sentinelPath);
+        QVERIFY(sentinel.open(QIODevice::ReadOnly));
+        QCOMPARE(sentinel.readAll(), QByteArray("other channel"));
+    }
+
     void settingsClearStorageAndClose()
     {
         QFETCH(QString, channel);
@@ -3626,6 +3679,122 @@ int main(int argc, char** argv)
 {
     QApplication app(argc, argv);
     const QStringList args = app.arguments();
+    if (args.size() == 4 && args.at(1) == QLatin1String("--startup-failure-worker")) {
+        app.setQuitOnLastWindowClosed(false);
+        RuntimeProfileContext profile;
+        profile.rootPath = args.at(2);
+        profile.channel = QStringLiteral("development");
+        profile.persistent = false;
+        const QString action = args.at(3);
+        const QString blockerPath = QDir(profile.rootPath).filePath(QStringLiteral("settings"));
+        ApplicationController::MediaBootstrapFunction mediaBootstrap;
+        if (action == QLatin1String("media")) {
+            mediaBootstrap = [] {
+                QPromise<MediaBackendBootstrap::Result> promise;
+                promise.start();
+                promise.addResult({false, QStringLiteral("Simulated media failure")});
+                promise.finish();
+                return promise.future();
+            };
+        }
+        QQuickStyle::setStyle(QStringLiteral("Basic"));
+        registerCanvasQmlTypes();
+        int requests = 0;
+        int code = 0;
+        bool handled = false;
+        bool ready = false;
+        {
+            QQmlApplicationEngine engine;
+            QmlRuntime::setEngine(&engine);
+            ApplicationController controller(profile,
+                {QStringLiteral("startup-failure-test"), QStringLiteral("--server-url=ws://127.0.0.1:1")},
+                nullptr, mediaBootstrap);
+            engine.setInitialProperties({
+                {QStringLiteral("controller"), QVariant::fromValue(&controller)}
+            });
+            engine.loadFromModule(QStringLiteral("Mouffette.App"), QStringLiteral("Main"));
+            if (engine.rootObjects().isEmpty()) return 20;
+            QObject* shell = engine.rootObjects().constFirst();
+            QObject::connect(&controller, &ApplicationController::clearStorageOnExitRequested,
+                             &app, [&] { ++requests; });
+            QObject::connect(&app, &QCoreApplication::aboutToQuit,
+                             &controller, &ApplicationController::handleApplicationAboutToQuit);
+            QObject::connect(&controller, &ApplicationController::readyChanged,
+                             &app, [&] {
+                if (controller.ready()) {
+                    ready = true;
+                    app.quit();
+                }
+            });
+            QObject::connect(&controller, &ApplicationController::bootstrapChanged,
+                             &app, [&] {
+                if (handled || !controller.bootstrapDecisionRequired()) return;
+                handled = true;
+                QTimer::singleShot(0, &controller, [&] {
+                    QObject* clear = shell->findChild<QObject*>(
+                        QStringLiteral("bootstrapClearStorageAndCloseButton"));
+                    QObject* close = shell->findChild<QObject*>(
+                        QStringLiteral("bootstrapCloseButton"));
+                    QObject* retry = shell->findChild<QObject*>(
+                        QStringLiteral("bootstrapRetryButton"));
+                    const bool canClear = action != QLatin1String("media");
+                    if (controller.bootstrapCanClearStorage() != canClear || !clear || !close || !retry
+                        || clear->property("text").toString() != QLatin1String("Clear storage and close")
+                        || !clear->property("destructive").toBool()
+                        || clear->property("visible").toBool() != canClear
+                        || clear->property("enabled").toBool() != canClear
+                        || close->property("text").toString() != QLatin1String("Close")
+                        || !close->property("enabled").toBool()
+                        || retry->property("text").toString() != QLatin1String("Retry")
+                        || !retry->property("enabled").toBool()) {
+                        app.exit(21);
+                        return;
+                    }
+                    if (action == QLatin1String("retry")) {
+                        if (!QFile::remove(blockerPath)
+                            || !QMetaObject::invokeMethod(retry, "clicked")
+                            || controller.bootstrapDecisionRequired()
+                            || controller.bootstrapCanClearStorage()) {
+                            app.exit(22);
+                        }
+                    } else if (action == QLatin1String("close")
+                               || action == QLatin1String("media")) {
+                        if (action == QLatin1String("media")) {
+                            controller.clearStorageAndClose();
+                            if (controller.clearingStorage() || requests != 0) {
+                                app.exit(32);
+                                return;
+                            }
+                        }
+                        if (!QMetaObject::invokeMethod(close, "clicked")) app.exit(23);
+                    } else if (action == QLatin1String("clear")) {
+                        if (!QMetaObject::invokeMethod(clear, "clicked")) {
+                            app.exit(24);
+                            return;
+                        }
+                        controller.clearStorageAndClose(); // A second request is ignored.
+                        if (!controller.clearingStorage()) app.exit(25);
+                    } else {
+                        app.exit(26);
+                    }
+                });
+            });
+            QTimer::singleShot(15000, &app, [&] { app.exit(27); });
+            controller.start();
+            code = app.exec();
+            qDeleteAll(engine.rootObjects());
+        }
+        QThreadPool::globalInstance()->waitForDone();
+        if (code != 0 || !handled) return code != 0 ? code : 28;
+        if (action == QLatin1String("clear")) {
+            if (requests != 1) return 29;
+            const auto cleared = RuntimeStorage::clearProfileStorage(profile);
+            if (!cleared.succeeded()) { qWarning().noquote() << cleared.reason; return 30; }
+        } else if (requests != 0 || (action == QLatin1String("retry") && !ready)) {
+            return 31;
+        }
+        return 0;
+    }
     if (args.size() == 4 && args.at(1) == QLatin1String("--clear-storage-worker")) {
         app.setQuitOnLastWindowClosed(false);
         RuntimeProfileContext profile;

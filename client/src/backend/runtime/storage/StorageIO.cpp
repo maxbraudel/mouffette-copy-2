@@ -9,7 +9,7 @@
 #include <QJsonParseError>
 #include <QSaveFile>
 #include <QSettings>
-#include <QTemporaryFile>
+#include <QTemporaryDir>
 #include <cmath>
 #include <limits>
 
@@ -150,12 +150,20 @@ SettingsData readSettings(const QString& root, const QString& path)
     // Parse a snapshot: QSettings caches values by filename across instances.
     // A fresh temporary name ensures validation observes disk, including after
     // an atomic migration, rather than an in-process QVariant cache.
-    QTemporaryFile snapshot;
-    if (!snapshot.open() || snapshot.write(bytes) != bytes.size() || !snapshot.flush()) {
+    QTemporaryDir snapshotDir;
+    if (!snapshotDir.isValid()) {
+        result.inspection = {State::IoError, -1, snapshotDir.errorString()};
+        return result;
+    }
+    const QString snapshotPath = snapshotDir.filePath(QStringLiteral("settings.ini"));
+    QFile snapshot(snapshotPath);
+    if (!snapshot.open(QIODevice::WriteOnly) || snapshot.write(bytes) != bytes.size()
+        || !snapshot.flush()) {
         result.inspection = {State::IoError, -1, snapshot.errorString()};
         return result;
     }
-    QSettings settings(snapshot.fileName(), QSettings::IniFormat);
+    snapshot.close();
+    QSettings settings(snapshotPath, QSettings::IniFormat);
     settings.setFallbacksEnabled(false);
     const QStringList keys = settings.allKeys();
     if (settings.status() != QSettings::NoError) {
@@ -206,10 +214,9 @@ SettingsData readSettings(const QString& root, const QString& path)
 Operation writeSettings(const QString& root, const QString& path,
                         const QVariantMap& values, int version)
 {
-    QTemporaryFile snapshot;
-    if (!snapshot.open()) return {Failure::IoError, snapshot.errorString()};
-    const QString temporaryPath = snapshot.fileName();
-    snapshot.close();
+    QTemporaryDir snapshotDir;
+    if (!snapshotDir.isValid()) return {Failure::IoError, snapshotDir.errorString()};
+    const QString temporaryPath = snapshotDir.filePath(QStringLiteral("settings.ini"));
     {
         QSettings settings(temporaryPath, QSettings::IniFormat);
         settings.setAtomicSyncRequired(true);

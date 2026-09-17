@@ -5,8 +5,10 @@
 #include <QObject>
 #include <QPointer>
 #include <QStringList>
+#include <functional>
 #include <memory>
 
+#include "backend/media/MediaBackendBootstrap.h"
 #include "backend/runtime/RuntimeProfile.h"
 #include "backend/runtime/RuntimeStorageBootstrap.h"
 
@@ -26,6 +28,7 @@ class ApplicationController final : public QObject
     Q_PROPERTY(QString bootstrapDetail READ bootstrapDetail NOTIFY bootstrapChanged)
     Q_PROPERTY(QString bootstrapPrimaryText READ bootstrapPrimaryText NOTIFY bootstrapChanged)
     Q_PROPERTY(bool bootstrapDecisionRequired READ bootstrapDecisionRequired NOTIFY bootstrapChanged)
+    Q_PROPERTY(bool bootstrapCanClearStorage READ bootstrapCanClearStorage NOTIFY bootstrapChanged)
 
     Q_PROPERTY(ApplicationPage applicationPage READ applicationPage NOTIFY applicationPageChanged)
     Q_PROPERTY(QString pageTitle READ pageTitle NOTIFY applicationPageChanged)
@@ -59,6 +62,8 @@ class ApplicationController final : public QObject
     Q_PROPERTY(bool dialogShowReject READ dialogShowReject NOTIFY dialogChanged)
 
 public:
+    using MediaBootstrapFunction = std::function<QFuture<MediaBackendBootstrap::Result>()>;
+
     enum class ApplicationPage { Clients = 0, Canvas = 1, History = 2 };
     Q_ENUM(ApplicationPage)
     enum class ConnectionState { Connected = 0, Transitional = 1, Disconnected = 2 };
@@ -68,7 +73,8 @@ public:
 
     ApplicationController(RuntimeProfileContext runtimeProfile,
                           QStringList arguments,
-                          QObject* parent = nullptr);
+                          QObject* parent = nullptr,
+                          MediaBootstrapFunction mediaBootstrap = {});
     ~ApplicationController() override;
 
     bool ready() const { return m_ready; }
@@ -76,6 +82,7 @@ public:
     QString bootstrapDetail() const { return m_bootstrapDetail; }
     QString bootstrapPrimaryText() const { return m_bootstrapPrimaryText; }
     bool bootstrapDecisionRequired() const { return m_bootstrapDecisionRequired; }
+    bool bootstrapCanClearStorage() const { return m_bootstrapCanClearStorage; }
 
     ApplicationPage applicationPage() const { return m_applicationPage; }
     QString pageTitle() const;
@@ -165,6 +172,7 @@ private:
     RuntimeProfileContext m_runtimeProfile;
     QStringList m_arguments;
     RuntimeStorageBootstrap m_storageBootstrap;
+    MediaBootstrapFunction m_mediaBootstrap;
     RuntimeStorageBootstrap::Result m_bootstrapResult;
     BootstrapDecision m_bootstrapDecision = BootstrapDecision::None;
     bool m_bootstrapStarted = false;
@@ -175,6 +183,7 @@ private:
     QString m_bootstrapDetail = QStringLiteral("Preparing local storage…");
     QString m_bootstrapPrimaryText = QStringLiteral("Continue");
     bool m_bootstrapDecisionRequired = false;
+    bool m_bootstrapCanClearStorage = false;
 
     ApplicationPage m_applicationPage = ApplicationPage::Clients;
     DialogKind m_dialogKind = DialogKind::None;
