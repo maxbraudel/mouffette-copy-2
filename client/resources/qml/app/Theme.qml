@@ -104,7 +104,8 @@ QtObject {
     readonly property color selectionHandle: elevatedBackground
     readonly property color snapGuide: accent
     readonly property color uiZoneFill: withAlpha(elevatedBackground, 0.70)
-    readonly property color uiZoneSystemFill: withAlpha(elevatedBackground, 0.95)
+    // System bars deepen the screen's blue while following the same palette.
+    readonly property color uiZoneSystemFill: mix(bluePigment, canvasPrimaryScreenBackground, 0.75)
     readonly property color mediaPlaceholder: mix(text, canvasBackground, 0.20)
     // The remote pointer must stay legible on arbitrary authored content.
     readonly property color remoteCursorFill: "#ffffff"

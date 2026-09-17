@@ -174,7 +174,7 @@ QtObject {
                         id: deleteButton
                         objectName: "deleteProjectButton"
                         visible: root.controller.applicationPage === 1 && root.controller.hasProject
-                        text: "Delete project..."
+                        text: "Delete project"
                         iconSource: "qrc:/icons/icons/delete.svg"
                         iconOnly: topBar.compactButtons
                         enabled: root.controller.canDeleteProject
