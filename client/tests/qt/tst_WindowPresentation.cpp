@@ -14,6 +14,7 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
+#include <windowsx.h>
 #endif
 
 class WindowPresentationTest : public QObject
@@ -39,6 +40,51 @@ private slots:
         QFETCH(QMargins, margins);
         QFETCH(QRect, expected);
         QCOMPARE(WindowPresentation::openingGeometry(available, margins), expected);
+    }
+
+    void nativeTitleBarRemainsMovable()
+    {
+        QWindow window;
+        WindowPresentation presentation;
+        presentation.setWindow(&window);
+        // Adding only WindowStaysOnTopHint bypasses Qt's default Windows title
+        // bar hints: the resize border survives, but there is no drag surface.
+        QVERIFY(window.flags().testFlag(Qt::WindowTitleHint));
+        QVERIFY(window.flags().testFlag(Qt::WindowSystemMenuHint));
+        QVERIFY(window.flags().testFlag(Qt::WindowMinimizeButtonHint));
+        QVERIFY(window.flags().testFlag(Qt::WindowMaximizeButtonHint));
+        QVERIFY(window.flags().testFlag(Qt::WindowCloseButtonHint));
+        QVERIFY(window.flags().testFlag(Qt::WindowStaysOnTopHint));
+
+#ifdef Q_OS_WIN
+        if (QGuiApplication::platformName() != QLatin1String("windows")) {
+            QSKIP("Native caption hit testing requires Windows");
+        }
+        presentation.open();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        const HWND hwnd = reinterpret_cast<HWND>(window.winId());
+        const LONG_PTR style = GetWindowLongPtr(hwnd, GWL_STYLE);
+        QCOMPARE(style & WS_CAPTION, LONG_PTR(WS_CAPTION));
+        QVERIFY(style & WS_THICKFRAME);
+        QVERIFY(style & WS_SYSMENU);
+        const HMENU menu = GetSystemMenu(hwnd, FALSE);
+        QVERIFY(menu);
+        const UINT moveState = GetMenuState(menu, SC_MOVE, MF_BYCOMMAND);
+        QVERIFY(moveState != UINT(-1));
+        QVERIFY(!(moveState & (MF_DISABLED | MF_GRAYED)));
+
+        // Use native screen pixels, so this also exercises scaled displays.
+        TITLEBARINFO titleBar{};
+        titleBar.cbSize = sizeof(titleBar);
+        QVERIFY(GetTitleBarInfo(hwnd, &titleBar));
+        const POINT caption = {
+            (titleBar.rcTitleBar.left + titleBar.rcTitleBar.right) / 2,
+            (titleBar.rcTitleBar.top + titleBar.rcTitleBar.bottom) / 2
+        };
+        QCOMPARE(SendMessage(hwnd, WM_NCHITTEST, 0, MAKELPARAM(caption.x, caption.y)),
+                 LRESULT(HTCAPTION));
+        window.hide();
+#endif
     }
 
     void qmlBindingAndReopen()
@@ -74,10 +120,16 @@ private slots:
             screen->availableGeometry(), window->frameMargins()));
         QCOMPARE(window->windowState(), Qt::WindowNoState);
 
-        // Raising an already open window should preserve the user's resizing.
+        // Neither priority enforcement nor raising an open window should undo
+        // the user's movement/resizing. Wait across an enforcement tick.
         window->resize(520, 360);
+        const QPoint movedPosition = window->position() + QPoint(12, 8);
+        window->setPosition(movedPosition);
+        QTest::qWait(650);
+        QCOMPARE(window->position(), movedPosition);
         presentation->open();
         QCOMPARE(window->size(), QSize(520, 360));
+        QCOMPARE(window->position(), movedPosition);
 
         window->hide();
         QTest::qWait(650);

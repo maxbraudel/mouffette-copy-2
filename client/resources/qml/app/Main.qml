@@ -21,7 +21,6 @@ QtObject {
         height: 500
         minimumWidth: 480
         visible: false
-        flags: Qt.Window | Qt.WindowStaysOnTopHint
         title: "Mouffette"
         color: Theme.windowBackground
         palette: Theme.controlPalette

@@ -39,7 +39,14 @@ void WindowPresentation::setWindow(QWindow* window)
     }
     m_window = window;
     if (window) {
-        window->setFlag(Qt::WindowStaysOnTopHint, true);
+        // Qt's Windows plugin supplies default decorations only for a bare
+        // window type. Adding StaysOnTop alone leaves a resize frame without a
+        // caption (and therefore without the native title-bar drag surface).
+        // Keep the complete control-window policy here instead of replacing
+        // these hints with a separate QML flags binding.
+        window->setFlags(window->flags() | Qt::WindowTitleHint
+                         | Qt::WindowSystemMenuHint | Qt::WindowMinMaxButtonsHint
+                         | Qt::WindowCloseButtonHint | Qt::WindowStaysOnTopHint);
         window->installEventFilter(this);
         connect(window, &QWindow::visibilityChanged, this,
                 &WindowPresentation::updateEnforcement);

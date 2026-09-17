@@ -1257,6 +1257,8 @@ void MediaOverlayTest::activationDuringBootstrapKeepsMainWindowHidden()
     auto* bootstrap = qobject_cast<QWindow*>(root->property("bootstrap").value<QObject*>());
     auto* window = qobject_cast<QWindow*>(root->property("window").value<QObject*>());
     QVERIFY(bootstrap && window);
+    QVERIFY(window->flags().testFlag(Qt::WindowTitleHint));
+    QVERIFY(window->flags().testFlag(Qt::WindowStaysOnTopHint));
     QVERIFY(!controller.ready());
     QVERIFY(!window->isVisible());
     bootstrap->hide();

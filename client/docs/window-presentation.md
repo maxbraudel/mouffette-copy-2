@@ -4,6 +4,12 @@
 stacking policy. Startup after bootstrap, tray activation and a second process's
 activation request all use the same `open()` path.
 
+- The native title bar, system menu and minimize/maximize/close controls are
+  explicitly preserved alongside the topmost hint. Qt's Windows backend does
+  not supply its default decoration hints once extra window flags are set;
+  using only `Window | WindowStaysOnTopHint` leaves resize borders but no title
+  bar for dragging. The flags are owned by `WindowPresentation`, with no QML
+  override. See [Qt's Windows flag handling](https://github.com/qt/qtbase/blob/v6.11.2/src/plugins/platforms/windows/qwindowswindow.cpp#L592-L614).
 - Each opening from hidden/minimized state uses the screen under the pointer,
   falling back to the window's screen and then the primary screen. The outer
   window, including native decorations, is centered at 90% of both dimensions
@@ -43,9 +49,11 @@ guarantees placement above non-topmost windows, not an exclusive global rank.
 ## Validation
 
 `tst_WindowPresentation` covers frame-inclusive geometry, negative screen
-origins, QML binding, reopen/minimize restoration, preserving manual resizing,
+origins, QML binding, reopen/minimize restoration, preserving manual movement/resizing,
 staying hidden, native demotion recovery and native handle recreation. macOS
 also checks Space/fullscreen flags and dialog/remote-overlay ordering.
+On Windows it checks the native caption style, the enabled system Move command
+and `WM_NCHITTEST` returning `HTCAPTION` over the title bar.
 
 Before release, run on native macOS and Windows desktops: open on each monitor,
 switch Spaces/virtual desktops, activate another app (including fullscreen),
