@@ -253,8 +253,6 @@ void ApplicationController::initializeBackend()
         setApplicationPage(static_cast<ApplicationPage>(page));
         refreshActiveWorkspace();
     });
-    connect(m_runtime.get(), &ApplicationRuntime::qmlToggleRequested,
-            this, &ApplicationController::toggleRequested);
     connect(m_runtime.get(), &ApplicationRuntime::qmlRaiseRequested,
             this, &ApplicationController::raiseRequested);
     connect(m_runtime.get(), &ApplicationRuntime::qmlHideRequested,

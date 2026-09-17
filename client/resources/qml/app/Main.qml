@@ -230,7 +230,6 @@ QtObject {
                 }
                 presentation.open()
             }
-            function onToggleRequested() { presentation.toggle() }
             function onHideRequested() { window.hide() }
         }
         ToastStack {

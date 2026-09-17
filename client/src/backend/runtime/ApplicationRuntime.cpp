@@ -3853,7 +3853,7 @@ void ApplicationRuntime::onTrayIconActivated(int reason) {
     case SystemTrayManager::ActivationReason::Trigger:
     case SystemTrayManager::ActivationReason::DoubleClick:
     case SystemTrayManager::ActivationReason::Context:
-        emit qmlToggleRequested();
+        emit qmlRaiseRequested();
         break;
     default:
         break;

@@ -2,15 +2,23 @@
 #include <cstdio>
 #include <cstring>
 
-// A separate application owns the fullscreen Space. A second window in the
-// tested process cannot exercise AppKit's cross-application Space rules.
+// A separate application owns the covering window/fullscreen Space. A second
+// window in the tested process cannot exercise cross-application ordering.
 @interface FullscreenTestDelegate : NSObject <NSWindowDelegate, NSApplicationDelegate>
 @property(retain) NSWindow* window;
 @property NSUInteger entryAttempts;
+@property BOOL windowed;
 @end
 @implementation FullscreenTestDelegate
 - (void)applicationDidFinishLaunching:(NSNotification*)notification
 {
+    if (self.windowed) {
+        [self.window makeKeyAndOrderFront:nil];
+        [NSApp activateIgnoringOtherApps:YES];
+        std::printf("READY %ld\n", (long)self.window.windowNumber);
+        std::fflush(stdout);
+        return;
+    }
     [self enterFullscreen];
 }
 - (void)enterFullscreen
@@ -43,7 +51,7 @@
 }
 @end
 
-int main()
+int main(int argc, char* argv[])
 {
     @autoreleasepool {
         NSApplication* app = [NSApplication sharedApplication];
@@ -53,6 +61,7 @@ int main()
             backing:NSBackingStoreBuffered defer:NO];
         FullscreenTestDelegate* delegate = [[FullscreenTestDelegate alloc] init];
         delegate.window = window;
+        delegate.windowed = argc > 1 && std::strcmp(argv[1], "--windowed") == 0;
         window.delegate = delegate;
         app.delegate = delegate;
         window.title = @"Mouffette fullscreen test fixture";
@@ -60,6 +69,13 @@ int main()
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{
             char command[32];
             while (std::fgets(command, sizeof(command), stdin)) {
+                if (std::strncmp(command, "RAISE", 5) == 0) {
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        [app activateIgnoringOtherApps:YES];
+                        [window makeKeyAndOrderFront:nil];
+                        [window orderFrontRegardless];
+                    });
+                }
                 if (std::strncmp(command, "QUIT", 4) == 0) {
                     dispatch_async(dispatch_get_main_queue(), ^{
                         if (window.styleMask & NSWindowStyleMaskFullScreen) [window toggleFullScreen:nil];

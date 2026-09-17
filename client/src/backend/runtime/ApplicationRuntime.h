@@ -175,7 +175,6 @@ signals:
     void applicationPageChanged(int page);
     void activeWorkspaceChanged(const QString& targetEndpointId);
     void qmlRaiseRequested();
-    void qmlToggleRequested();
     void qmlHideRequested();
 
 private slots:

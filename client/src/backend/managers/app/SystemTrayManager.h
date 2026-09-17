@@ -11,7 +11,7 @@ class QIcon;
  * 
  * This class encapsulates system tray functionality including:
  * - Tray icon setup with fallback
- * - Click handling (show/hide window)
+ * - Activation signals (open and focus window)
  * - Tooltip management
  */
 class SystemTrayManager : public QObject {

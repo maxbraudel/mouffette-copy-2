@@ -19,7 +19,6 @@ public:
     bool alwaysOnTop() const { return m_alwaysOnTop; }
     void setAlwaysOnTop(bool enabled);
     Q_INVOKABLE void open();
-    Q_INVOKABLE void toggle();
 
     static QRect openingGeometry(const QRect& available, const QMargins& frameMargins);
 

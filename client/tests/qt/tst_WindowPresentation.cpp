@@ -25,22 +25,29 @@
 #endif
 
 namespace {
-bool nativeAbove(QWindow& front, QWindow& behind)
-{
 #ifdef Q_OS_MACOS
-    const auto nativeFront = [(__bridge NSView*)reinterpret_cast<void*>(front.winId()) window];
-    const auto nativeBehind = [(__bridge NSView*)reinterpret_cast<void*>(behind.winId()) window];
+bool nativeAbove(CGWindowID front, CGWindowID behind)
+{
     CFArrayRef list = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly, kCGNullWindowID);
     if (!list) return false;
     bool foundFront = false;
     bool ordered = false;
     for (NSDictionary* info in (__bridge NSArray*)list) {
-        const NSInteger number = [info[(__bridge NSString*)kCGWindowNumber] integerValue];
-        if (number == [nativeFront windowNumber]) foundFront = true;
-        if (number == [nativeBehind windowNumber]) { ordered = foundFront; break; }
+        const auto number = [info[(__bridge NSString*)kCGWindowNumber] unsignedIntValue];
+        if (number == front) foundFront = true;
+        if (number == behind) { ordered = foundFront; break; }
     }
     CFRelease(list);
     return ordered;
+}
+#endif
+
+bool nativeAbove(QWindow& front, QWindow& behind)
+{
+#ifdef Q_OS_MACOS
+    const auto nativeFront = [(__bridge NSView*)reinterpret_cast<void*>(front.winId()) window];
+    const auto nativeBehind = [(__bridge NSView*)reinterpret_cast<void*>(behind.winId()) window];
+    return nativeAbove([nativeFront windowNumber], [nativeBehind windowNumber]);
 #elif defined(Q_OS_WIN)
     const HWND frontHandle = reinterpret_cast<HWND>(front.winId());
     const HWND behindHandle = reinterpret_cast<HWND>(behind.winId());
@@ -196,6 +203,63 @@ private slots:
         window->hide();
     }
 
+    void raisesAboveAnotherApplicationWithoutAlwaysOnTop()
+    {
+#ifdef Q_OS_MACOS
+        if (QGuiApplication::platformName() != QLatin1String("cocoa")) QSKIP("Requires native ordering");
+        QWindow window;
+        WindowPresentation presentation;
+        presentation.setAlwaysOnTop(false);
+        presentation.setWindow(&window);
+        presentation.open();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        const auto native = [(__bridge NSView*)reinterpret_cast<void*>(window.winId()) window];
+        const CGWindowID windowId = [native windowNumber];
+        const QRect geometry = window.geometry();
+
+        QProcess coveringApp;
+        coveringApp.start(QCoreApplication::applicationDirPath() + QStringLiteral("/tst_FullscreenHost"),
+                          {QStringLiteral("--windowed")});
+        const auto cleanup = qScopeGuard([&] {
+            window.hide();
+            coveringApp.write("QUIT\n");
+            coveringApp.waitForBytesWritten(1000);
+            if (!coveringApp.waitForFinished(3000)) {
+                coveringApp.kill();
+                coveringApp.waitForFinished(3000);
+            }
+        });
+        QVERIFY(coveringApp.waitForStarted(3000));
+        QTRY_VERIFY_WITH_TIMEOUT(coveringApp.canReadLine(), 3000);
+        const QByteArray ready = coveringApp.readLine().trimmed();
+        QVERIFY2(ready.startsWith("READY "), ready.constData());
+        const CGWindowID coveringId = ready.mid(6).toUInt();
+        QVERIFY(coveringId > 0);
+
+        for (int attempt = 0; attempt < 2; ++attempt) {
+            coveringApp.write("RAISE\n");
+            QVERIFY(coveringApp.waitForBytesWritten(1000));
+            QTRY_VERIFY_WITH_TIMEOUT(nativeAbove(coveringId, windowId), 3000);
+            QTRY_COMPARE(qint64([[[NSWorkspace sharedWorkspace] frontmostApplication] processIdentifier]),
+                         coveringApp.processId());
+
+            presentation.open();
+            QTRY_VERIFY_WITH_TIMEOUT(nativeAbove(windowId, coveringId), 2000);
+            QTRY_VERIFY([native isKeyWindow]);
+            QCOMPARE([native level], NSNormalWindowLevel);
+            QCOMPARE(window.geometry(), geometry);
+            QVERIFY(window.isVisible());
+            presentation.open(); // Repeated tray clicks must leave it in front.
+            QTest::qWait(650);
+            QVERIFY(nativeAbove(windowId, coveringId));
+            QVERIFY([native isKeyWindow]);
+            QVERIFY(window.isVisible());
+        }
+#else
+        QSKIP("macOS cross-application ordering regression");
+#endif
+    }
+
     void opensInsideAnotherApplicationsFullscreenSpace_data()
     {
         QTest::addColumn<bool>("alwaysOnTop");
@@ -255,6 +319,7 @@ private slots:
         const auto native = [(__bridge NSView*)reinterpret_cast<void*>(window.winId()) window];
         QVERIFY([native isVisible]);
         QVERIFY([native isKeyWindow]);
+        QVERIFY(nativeAbove([native windowNumber], fullscreenId));
         QVERIFY(MacWindowManager::isOnCurrentSpace(&window));
         window.rootObject()->forceActiveFocus();
         [NSApp sendEvent:[NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint

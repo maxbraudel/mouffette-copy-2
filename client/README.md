@@ -164,7 +164,7 @@ regression coverage and the required client/server update.
 ### System Tray Features
 - **Auto-start**: Connects to server automatically on launch
 - **Background operation**: Runs silently in the background
-- **Quick access**: Click tray icon to show/hide main window
+- **Quick access**: Click tray icon to open or restore the main window and bring it to the front with focus
 
 The control window stays above other application windows across desktops and
 opens centered at 90% of the available screen width and height. See

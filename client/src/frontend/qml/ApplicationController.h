@@ -152,7 +152,6 @@ signals:
     void dialogChanged();
     void dialogRequested();
     void raiseRequested();
-    void toggleRequested();
     void hideRequested();
 
 private:

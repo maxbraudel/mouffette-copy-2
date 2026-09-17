@@ -3,8 +3,10 @@
 `WindowPresentation` owns the Qt Quick shell's opening geometry.
 `WindowStackingCoordinator` owns the shared native stacking policy: active remote
 scene surfaces stay above the control window and its dialogs/menus. Startup after bootstrap, tray activation and a second process's
-activation request all use the same `open()` path. Tray clicks hide only a
-focused window on the current desktop; a window on another desktop is recalled.
+activation request all use the same `open()` path. Tray clicks always open or
+restore the window, bring it to the front and focus it, including when it is
+already focused or on another desktop. They never hide it; use the native close
+button to hide the window.
 
 The Settings checkbox **App always on top** is enabled by default. Save applies
 it immediately and persists `appAlwaysOnTop` in the profile settings; Cancel
@@ -32,6 +34,10 @@ still opening on the user's current desktop, including a macOS fullscreen Space.
   become key and accept input in another app's fullscreen Space without
   activating the application's previous desktop. Configure it before showing;
   never call Qt's Cocoa `raise()` here, which activates the whole process.
+  Explicit opening also calls `orderFrontRegardless` after assigning keyboard
+  focus: a nonactivating panel can become key while remaining behind another
+  application's window. This raises it once without changing its normal/topmost
+  level or activating an old Space (see [Apple's ordering contract](https://developer.apple.com/documentation/appkit/nswindow/orderfrontregardless%28%29)).
   Topmost mode uses `NSPopUpMenuWindowLevel + 1`, joins all Spaces and other apps'
   fullscreen/Stage Manager groups, and remains stationary in Mission Control.
   Normal mode uses `NSNormalWindowLevel` and `MoveToActiveSpace`; disabling
@@ -145,6 +151,10 @@ Space, receive native keyboard events, and can switch priority without leaving t
 helper exits after each test. It also verifies native inventory/Retina coordinate
 parity, native minimization, normal-mode demotion and restoration of owned dialog levels,
 including a dialog that already inherited its parent's elevated priority.
+The helper's windowed mode reproduces another application covering the normal-mode
+control window; repeated openings must restore native front-to-back ordering and
+keyboard focus without hiding, moving, resizing or making the window topmost.
+Fullscreen coverage also checks actual WindowServer ordering above the host.
 
 The suite additionally covers frame-inclusive geometry, negative screen
 origins, QML binding, reopen/minimize restoration, preserving manual movement/resizing,

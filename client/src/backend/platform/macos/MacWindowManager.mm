@@ -267,6 +267,10 @@ void MacWindowManager::activateApplicationWindow(QWindow* qtWindow) {
     if (!([window styleMask] & NSWindowStyleMaskNonactivatingPanel))
         [NSApp activateIgnoringOtherApps:YES];
     [window makeKeyAndOrderFront:nil];
+    // A nonactivating panel can become key while remaining below the active
+    // application's windows. Explicitly raise it across applications without
+    // activating the process (which could switch away from the current Space).
+    [window orderFrontRegardless];
     [window makeFirstResponder:[window contentView]];
 }
 

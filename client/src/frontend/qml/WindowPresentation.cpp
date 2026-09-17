@@ -72,20 +72,6 @@ void WindowPresentation::setAlwaysOnTop(bool enabled)
     emit alwaysOnTopChanged();
 }
 
-void WindowPresentation::toggle()
-{
-    if (!m_window) return;
-    bool current = true;
-#ifdef Q_OS_MACOS
-    current = MacWindowManager::isOnCurrentSpace(m_window);
-#elif defined(Q_OS_WIN)
-    current = WindowsWindowManager::isOnCurrentDesktop(m_window);
-#endif
-    if (current && m_window->isVisible() && m_window->isActive()
-        && m_window->windowState() != Qt::WindowMinimized) m_window->hide();
-    else open();
-}
-
 QRect WindowPresentation::openingGeometry(const QRect& available, const QMargins& margins)
 {
     // Qt screen coordinates are logical pixels, including on mixed-DPI setups.
