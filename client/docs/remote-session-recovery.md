@@ -20,10 +20,21 @@ CleanupPending (receiver recovery has not finished). Authentication alone does
 not mean Connected: endpoint registration, authoritative inventory reconciliation
 and receiver readiness must finish. Session command readiness remains separate.
 
-Retries have exponential delay with jitter. Their counters reset only after
-30 seconds of stable connection. Initial authentication allows 10 seconds;
-a retained session limits an attempt to its remaining recovery budget. A stale
-transport timer cannot abort a newly authenticating socket.
+While network intent is enabled, an unavailable server is retried indefinitely,
+including after all sessions expire. Background delays grow through 1, 2, 4, 8,
+16 and 30 seconds, with 20% jitter (24–36 seconds at the plateau). There is no
+attempt limit or outage-duration limit. Their counters reset only after
+30 seconds of stable connection. DNS failures, refused connections, timeouts,
+network loss and TLS handshake failures remain retryable; certificate validation
+is never bypassed. A repaired server is authenticated and synchronized on the
+next successful attempt without another Enable click. Intentional Disable stops
+this loop; protocol incompatibility and invalid authentication envelopes remain
+explicit terminal errors.
+
+Each connection/authentication attempt allows 10 seconds independently of the
+remaining session recovery budget. Expiration revokes the old session, not the
+new TCP/authentication attempt or network intent. A stale transport timer cannot
+abort a newly authenticating socket.
 
 ## Transport health and session deadlines
 

@@ -1697,7 +1697,9 @@ void WebSocketClient::onError(QAbstractSocket::SocketError error) {
             break;
         case QAbstractSocket::SslHandshakeFailedError:
             errorString = "SSL handshake failed";
-            emit fatalError("SSL/TLS error - check certificates");
+            // A TLS listener or its certificate configuration can recover
+            // while this client remains enabled. Reject this handshake, but
+            // keep retrying with normal certificate verification on each attempt.
             break;
         default:
             errorString = QString("Socket error: %1").arg(error);

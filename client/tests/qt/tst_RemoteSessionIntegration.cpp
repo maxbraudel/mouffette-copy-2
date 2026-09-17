@@ -16,6 +16,7 @@
 #include <QTemporaryDir>
 #include "backend/network/WebSocketClient.h"
 #include "backend/network/RemoteSessionCoordinator.h"
+#include "backend/managers/network/ConnectionManager.h"
 
 namespace {
 QJsonObject liveTextScene()
@@ -103,7 +104,9 @@ private slots:
     void localProofExpiryClosesAStillHealthyServerSession();
     void uploadResumesFromDurableOffsetAfterTransportLoss();
     void cleanupReceiptRetainsItsOriginalDispatchedGeneration();
+    void reconnectsAutomaticallyAfterProlongedServerOutage();
 private:
+    void startRelay(quint16 port = 0);
     void configure(WebSocketClient& peer, const QString& name);
     void command(QJsonObject body);
     QProcess m_relay;
@@ -114,21 +117,82 @@ private:
 
 void RemoteSessionIntegrationTest::init()
 {
-    const QString node = QStandardPaths::findExecutable(QStringLiteral("node"));
-    QVERIFY2(!node.isEmpty(), "Install Node.js to run the real Qt/Node protocol tests");
-    m_output.clear();
     m_command = 0;
     m_relay.setProcessChannelMode(QProcess::MergedChannels);
     connect(&m_relay, &QProcess::readyReadStandardOutput, this, [this]() {
         m_output += m_relay.readAllStandardOutput();
     });
-    m_relay.start(node, {QStringLiteral(MOUFFETTE_RELAY_FIXTURE)});
+    startRelay();
+}
+
+void RemoteSessionIntegrationTest::startRelay(quint16 port)
+{
+    const QString node = QStandardPaths::findExecutable(QStringLiteral("node"));
+    QVERIFY2(!node.isEmpty(), "Install Node.js to run the real Qt/Node protocol tests");
+    m_output.clear();
+    m_relay.start(node, {QStringLiteral(MOUFFETTE_RELAY_FIXTURE), QString::number(port)});
     QVERIFY(m_relay.waitForStarted());
     QTRY_VERIFY_WITH_TIMEOUT(m_output.contains("TEST_READY "), 5000);
     const QRegularExpression expression(QStringLiteral("TEST_READY (\\d+)"));
     const auto match = expression.match(QString::fromUtf8(m_output));
     QVERIFY2(match.hasMatch(), m_output.constData());
     m_url = QStringLiteral("ws://127.0.0.1:%1").arg(match.captured(1));
+}
+
+void RemoteSessionIntegrationTest::reconnectsAutomaticallyAfterProlongedServerOutage()
+{
+    QTemporaryDir identityDirectory;
+    QVERIFY(identityDirectory.isValid());
+    WebSocketClient client(identityDirectory.path(), false);
+    ConnectionManager manager(&client);
+    configure(client, QStringLiteral("outage-test"));
+    QSignalSpy errors(&manager, &ConnectionManager::connectionError);
+    QSignalSpy fatal(&client, &WebSocketClient::fatalError);
+    QSignalSpy restarted(&client, &WebSocketClient::serverRestarted);
+    QSignalSpy authenticated(&client, &WebSocketClient::connected);
+    manager.connectToServer(m_url);
+    QTRY_COMPARE_WITH_TIMEOUT(manager.state(), ConnectionManager::State::Connected, 4000);
+    QVERIFY(client.hasUnexpiredLease());
+    const QString originalBootId = client.serverBootId();
+    const quint16 port = static_cast<quint16>(QUrl(m_url).port());
+
+    // Kill the real server, including all sockets. Expiration of the old lease
+    // must not clear the network intent or the background retry loop.
+    m_relay.kill();
+    QVERIFY(m_relay.waitForFinished(2000));
+    QTRY_VERIFY_WITH_TIMEOUT(!client.hasUnexpiredLease(), 6000);
+    for (int attempt = 0; attempt < 32; ++attempt) {
+        const qsizetype failures = errors.count();
+        // Accelerate only the waiting between these genuine refused TCP
+        // connections; the production attempt/error scheduling is unchanged.
+        QVERIFY(QMetaObject::invokeMethod(&manager, "attemptReconnect", Qt::DirectConnection));
+        QTRY_VERIFY_WITH_TIMEOUT(errors.count() > failures, 2000);
+        QCOMPARE(manager.state(), ConnectionManager::State::Reconnecting);
+        QVERIFY(manager.connectionEnabled());
+    }
+    startRelay(port);
+    // No Enable, connectToServer or forced retry after the server returns.
+    // Wait for the actual capped timer (30 seconds, plus up to 20% jitter).
+    QTRY_COMPARE_WITH_TIMEOUT(manager.state(), ConnectionManager::State::Connected, 40000);
+    QCOMPARE(authenticated.count(), 2);
+    QCOMPARE(restarted.count(), 1);
+    QVERIFY(client.serverBootId() != originalBootId);
+    QVERIFY(fatal.isEmpty());
+
+    // A voluntary Disable during a later outage still overrides that intent.
+    m_relay.kill();
+    QVERIFY(m_relay.waitForFinished(2000));
+    QTRY_VERIFY_WITH_TIMEOUT(!client.isConnected(), 1000);
+    manager.setConnectionEnabled(false);
+    manager.completeDisconnect(manager.transitionId());
+    startRelay(port);
+    QTest::qWait(1200);
+    QCOMPARE(manager.state(), ConnectionManager::State::Disconnected);
+    QCOMPARE(authenticated.count(), 2);
+    manager.setConnectionEnabled(true);
+    QTRY_COMPARE_WITH_TIMEOUT(manager.state(), ConnectionManager::State::Connected, 4000);
+    QCOMPARE(authenticated.count(), 3);
+    manager.disconnect();
 }
 
 void RemoteSessionIntegrationTest::cleanup()

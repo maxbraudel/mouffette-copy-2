@@ -4,7 +4,7 @@
 // Faults are injected at the network boundary, not inside either state machine.
 const readline = require('node:readline');
 const { MouffetteServer } = require('../../../server/server');
-const relay = new MouffetteServer({ port: 0, host: "127.0.0.1", protocolLogger: () => {}, metricLogger: () => {} });
+const relay = new MouffetteServer({ port: Number(process.argv[2] || 0), host: "127.0.0.1", protocolLogger: () => {}, metricLogger: () => {} });
 const dropped = new Map();
 const droppedIncoming = new Map();
 const suppressedProofs = new Set();

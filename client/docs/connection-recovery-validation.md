@@ -26,6 +26,16 @@ Implementation and test configuration are described in
   RemoteSceneLifecycle, RemoteSceneControllerLifecycle, SceneRunCoordinator,
   UploadRemovalSecurity, UploadScheduler, RemoteCacheStore, RemoteCacheHistory,
   ProjectManager, AppConfig and DeviceIdentityStore pass.
+- Server-return regression: after the real Node server is killed and the old
+  recovery budget expires, 32 refused TCP connections do not disable retries.
+  Restarting Node on the same address restores authentication, registration and
+  reconciliation through the actual 24–36 second retry timer, without Enable.
+  Disable during another outage prevents automatic reconnection; Enable restores
+  it. Only the waits between the 32 refused attempts are accelerated.
+- DNS, refusal, remote closure, timeout, network and TLS handshake errors remain
+  retryable in the ConnectionManager regression suite. TLS certificate checking
+  remains enabled. The TLS error is injected; certificate repair is not exercised
+  against a real TLS listener by these tests.
 - Cache regressions cover cancelled writers never acknowledging stale bytes,
   independent scopes remaining usable, asynchronous quarantine, autonomous
   deletion retry, bounded admission, reserved cleanup capacity and retention of

@@ -68,6 +68,8 @@ private slots:
     void manualIntentDominatesLateSignalsAndQueuesEnable();
     void fastRetrySchedule();
     void backgroundRetrySchedule();
+    void unavailableServerErrorsRemainRetryable_data();
+    void unavailableServerErrorsRemainRetryable();
     void clientInfoUsesProtocolIdentity();
     void signedHandshakeAndHeartbeat();
     void handshakeRejectsMalformedEnvelope_data();
@@ -157,6 +159,36 @@ void ConnectionManagerTest::backgroundRetrySchedule() {
     verifyJittered(4, 16000);
     verifyJittered(5, 30000);
     verifyJittered(50, 30000);
+    verifyJittered(std::numeric_limits<int>::max(), 30000);
+}
+
+void ConnectionManagerTest::unavailableServerErrorsRemainRetryable_data()
+{
+    QTest::addColumn<QAbstractSocket::SocketError>("error");
+    QTest::newRow("refused") << QAbstractSocket::ConnectionRefusedError;
+    QTest::newRow("closed") << QAbstractSocket::RemoteHostClosedError;
+    QTest::newRow("dns") << QAbstractSocket::HostNotFoundError;
+    QTest::newRow("timeout") << QAbstractSocket::SocketTimeoutError;
+    QTest::newRow("network") << QAbstractSocket::NetworkError;
+    QTest::newRow("tls") << QAbstractSocket::SslHandshakeFailedError;
+}
+
+void ConnectionManagerTest::unavailableServerErrorsRemainRetryable()
+{
+    QFETCH(QAbstractSocket::SocketError, error);
+    QTemporaryDir identityDirectory;
+    QVERIFY(identityDirectory.isValid());
+    WebSocketClient client(identityDirectory.path(), false);
+    ConnectionManager manager(&client);
+    QSignalSpy fatal(&client, &WebSocketClient::fatalError);
+    QSignalSpy errors(&manager, &ConnectionManager::connectionError);
+    QVERIFY(QMetaObject::invokeMethod(&client, "onError", Qt::DirectConnection,
+                                      Q_ARG(QAbstractSocket::SocketError, error)));
+    QCOMPARE(errors.count(), 1);
+    QVERIFY(fatal.isEmpty());
+    QVERIFY(manager.connectionEnabled());
+    QCOMPARE(manager.state(), ConnectionManager::State::Reconnecting);
+    manager.disconnect();
 }
 
 void ConnectionManagerTest::clientInfoUsesProtocolIdentity() {
