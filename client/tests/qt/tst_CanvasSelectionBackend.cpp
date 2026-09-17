@@ -50,7 +50,6 @@
 #include "frontend/qml/MediaSettingsViewModel.h"
 #include "frontend/qml/WindowPresentation.h"
 #ifdef Q_OS_MACOS
-#include "backend/platform/macos/MacWindowManager.h"
 bool performFinderDrop(QWindow* window, const QString& path, const QPoint& position);
 #endif
 
@@ -995,11 +994,7 @@ private slots:
         QVERIFY(fixture.initialize());
         fixture.view.show();
         QVERIFY(QTest::qWaitForWindowExposed(&fixture.view));
-#ifdef Q_OS_MACOS
-        MacWindowManager::activateApplicationWindow(&fixture.view);
-#else
         fixture.view.requestActivate();
-#endif
         QVERIFY(QTest::qWaitForWindowActive(&fixture.view));
         auto* pinch = fixture.view.rootObject()->findChild<QQuickPinchHandler*>();
         QVERIFY(pinch);
@@ -1364,11 +1359,10 @@ private slots:
         QVERIFY(fixture.initialize());
         fixture.view.show();
         QVERIFY(QTest::qWaitForWindowExposed(&fixture.view));
+        fixture.view.requestActivate();
 #ifdef Q_OS_MACOS
-        MacWindowManager::activateApplicationWindow(&fixture.view);
         constexpr Qt::KeyboardModifier control = Qt::MetaModifier;
 #else
-        fixture.view.requestActivate();
         constexpr Qt::KeyboardModifier control = Qt::ControlModifier;
 #endif
         QVERIFY(QTest::qWaitForWindowActive(&fixture.view));
@@ -1419,11 +1413,10 @@ private slots:
         QVERIFY(fixture.initialize());
         fixture.view.show();
         QVERIFY(QTest::qWaitForWindowExposed(&fixture.view));
+        fixture.view.requestActivate();
 #ifdef Q_OS_MACOS
-        MacWindowManager::activateApplicationWindow(&fixture.view);
         constexpr Qt::KeyboardModifier control = Qt::MetaModifier;
 #else
-        fixture.view.requestActivate();
         constexpr Qt::KeyboardModifier control = Qt::ControlModifier;
 #endif
         QVERIFY(QTest::qWaitForWindowActive(&fixture.view));
@@ -1493,11 +1486,7 @@ private slots:
         }
         fixture.view.show();
         QVERIFY(QTest::qWaitForWindowExposed(&fixture.view));
-#ifdef Q_OS_MACOS
-        MacWindowManager::activateApplicationWindow(&fixture.view);
-#else
         fixture.view.requestActivate();
-#endif
         QVERIFY(QTest::qWaitForWindowActive(&fixture.view));
         QTRY_COMPARE(root->size(), QSizeF(fixture.view.size()));
 
@@ -1701,11 +1690,7 @@ private slots:
         auto* text = fixture.document.addText({300,200}, "Words");
         fixture.view.show();
         QVERIFY(QTest::qWaitForWindowExposed(&fixture.view));
-#ifdef Q_OS_MACOS
-        MacWindowManager::activateApplicationWindow(&fixture.view);
-#else
         fixture.view.requestActivate();
-#endif
         QVERIFY(QTest::qWaitForWindowActive(&fixture.view));
         auto* root = fixture.view.rootObject();
         root->forceActiveFocus();
@@ -1781,11 +1766,7 @@ private slots:
         QTRY_VERIFY(video->player()->duration() > 3000);
         fixture.view.show();
         QVERIFY(QTest::qWaitForWindowExposed(&fixture.view));
-#ifdef Q_OS_MACOS
-        MacWindowManager::activateApplicationWindow(&fixture.view);
-#else
         fixture.view.requestActivate();
-#endif
         QVERIFY(QTest::qWaitForWindowActive(&fixture.view));
         fixture.view.rootObject()->forceActiveFocus();
         QTRY_COMPARE(fixture.view.rootObject()->property("selectedVideoId").toString(), video->mediaId());
@@ -2194,9 +2175,7 @@ private slots:
         const QRectF original = media->sceneRect();
         view.show();
         QVERIFY(QTest::qWaitForWindowExposed(&view));
-#ifdef Q_OS_MACOS
-        MacWindowManager::activateApplicationWindow(&view);
-#endif
+        view.requestActivate();
         QVERIFY(QTest::qWaitForWindowActive(&view));
         QQuickItem* item = nullptr;
         QTRY_VERIFY((item = findQuickItemWithProperty(root, "currentMediaId", media->mediaId())));
@@ -2581,11 +2560,7 @@ private slots:
         QVERIFY(fixture.initialize());
         fixture.view.show();
         QVERIFY(QTest::qWaitForWindowExposed(&fixture.view));
-#ifdef Q_OS_MACOS
-        MacWindowManager::activateApplicationWindow(&fixture.view);
-#else
         fixture.view.requestActivate();
-#endif
         QVERIFY(QTest::qWaitForWindowActive(&fixture.view));
         const QPointF dropPoint(500, 350);
         const QImage emptyFrame = fixture.view.grabWindow();
@@ -2709,11 +2684,7 @@ private slots:
         QVERIFY(fixture.initialize());
         fixture.view.show();
         QVERIFY(QTest::qWaitForWindowExposed(&fixture.view));
-#ifdef Q_OS_MACOS
-        MacWindowManager::activateApplicationWindow(&fixture.view);
-#else
         fixture.view.requestActivate();
-#endif
         QVERIFY(QTest::qWaitForWindowActive(&fixture.view));
         QTemporaryDir directory;
         const QString path = video ? QString::fromUtf8(TEST_VIDEO_FILE)
@@ -3263,11 +3234,7 @@ private slots:
         QVERIFY(fixture.initialize());
         fixture.view.show();
         QVERIFY(QTest::qWaitForWindowExposed(&fixture.view));
-#ifdef Q_OS_MACOS
-        MacWindowManager::activateApplicationWindow(&fixture.view);
-#else
         fixture.view.requestActivate();
-#endif
         QVERIFY(QTest::qWaitForWindowActive(&fixture.view));
         auto* root = fixture.view.rootObject();
         auto* a = fixture.document.addText({300, 200}, "First");
@@ -3357,11 +3324,7 @@ private slots:
         page->setPosition({37, 29});
         window.show();
         QVERIFY(QTest::qWaitForWindowExposed(&window));
-#ifdef Q_OS_MACOS
-        MacWindowManager::activateApplicationWindow(&window);
-#else
         window.requestActivate();
-#endif
         QVERIFY(QTest::qWaitForWindowActive(&window));
         page->setSize(QSizeF(window.width() - 74, window.height() - 58));
         auto* root = findQuickItemWithProperty(page, "canvasController",
@@ -3554,11 +3517,7 @@ private slots:
         page->setPosition({37, 29});
         window.show();
         QVERIFY(QTest::qWaitForWindowExposed(&window));
-#ifdef Q_OS_MACOS
-        MacWindowManager::activateApplicationWindow(&window);
-#else
         window.requestActivate();
-#endif
         QVERIFY(QTest::qWaitForWindowActive(&window));
         page->setSize(QSizeF(window.width() - 74, window.height() - 58));
         auto* root = findQuickItemWithProperty(page, "canvasController",

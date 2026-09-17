@@ -99,7 +99,7 @@ void WindowStackingCoordinator::configureControlWindow(QWindow* window)
     for (const Entry& entry : m_windows) {
         if (entry.window != window || entry.scene) continue;
 #if defined(Q_OS_MACOS)
-        MacWindowManager::configureControlWindow(window, entry.alwaysOnTop);
+        MacWindowManager::configureControlWindow(window);
 #elif defined(Q_OS_WIN)
         WindowsWindowManager::configureControlWindow(window, entry.alwaysOnTop);
 #endif
@@ -182,11 +182,9 @@ void WindowStackingCoordinator::enforce()
     for (const Entry& entry : windows) {
         if (entry.scene || !entry.window) continue;
         configureControlWindow(entry.window);
+#ifdef Q_OS_WIN
         if (!entry.alwaysOnTop || !visible(entry.window)) continue;
         anyVisible = true;
-#if defined(Q_OS_MACOS)
-        MacWindowManager::setWindowAlwaysOnTop(entry.window);
-#elif defined(Q_OS_WIN)
         WindowsWindowManager::keepAboveAndOnAllDesktops(entry.window, lastScene, true);
 #endif
     }

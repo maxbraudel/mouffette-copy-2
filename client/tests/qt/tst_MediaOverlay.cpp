@@ -29,9 +29,6 @@
 #include "backend/media/MediaResidencyManager.h"
 #include "backend/files/FileManager.h"
 #include "backend/network/UploadManager.h"
-#ifdef Q_OS_MACOS
-#include "backend/platform/macos/MacWindowManager.h"
-#endif
 
 class MediaOverlayTest final : public QObject
 {
@@ -755,11 +752,7 @@ void MediaOverlayTest::mediaPanelVisibilityAnchorInteractionAndScroll()
 
     window.show();
     QVERIFY(QTest::qWaitForWindowExposed(&window));
-#ifdef Q_OS_MACOS
-    MacWindowManager::activateApplicationWindow(&window);
-#else
     window.requestActivate();
-#endif
     QVERIFY(QTest::qWaitForWindowActive(&window));
     harness->setSize(window.size());
     QCoreApplication::processEvents();
@@ -1035,11 +1028,7 @@ void MediaOverlayTest::mediaActionPalette()
     QSignalSpy clicked(button.get(), SIGNAL(clicked()));
     window.show();
     QVERIFY(QTest::qWaitForWindowExposed(&window));
-#ifdef Q_OS_MACOS
-    MacWindowManager::activateApplicationWindow(&window);
-#else
     window.requestActivate();
-#endif
     QVERIFY(QTest::qWaitForWindowActive(&window));
     QTest::mouseMove(&window, {5, 5});
     QCOMPARE(button->property("foregroundColor").value<QColor>(), foreground);
@@ -1088,11 +1077,7 @@ void MediaOverlayTest::mediaRowsAndProgress()
     // Cocoa can constrain the first window size on a scaled display. Keep
     // the animated rows and click targets inside the actual visible surface.
     harness->setSize(window.size());
-#ifdef Q_OS_MACOS
-    MacWindowManager::activateApplicationWindow(&window);
-#else
     window.requestActivate();
-#endif
     QVERIFY(QTest::qWaitForWindowActive(&window));
     auto* panel = findVisualItem(harness.get(), QStringLiteral("realMediaListPanel"));
     QVERIFY(panel);
@@ -1411,11 +1396,7 @@ void MediaOverlayTest::toolbarToolsAndGlobalMemoryUsage()
 
     window.show();
     QVERIFY(QTest::qWaitForWindowExposed(&window));
-#ifdef Q_OS_MACOS
-    MacWindowManager::activateApplicationWindow(&window);
-#else
     window.requestActivate();
-#endif
     QVERIFY(QTest::qWaitForWindowActive(&window));
     // The shared edge has one logical pixel of border, with a button fill on
     // either side. Sampling both neighbors catches adjacent duplicate lines.
@@ -1463,11 +1444,7 @@ void MediaOverlayTest::toolbarToolsAndGlobalMemoryUsage()
     appWindow->resize(900, 650);
     appWindow->showNormal();
     QVERIFY(QTest::qWaitForWindowExposed(appWindow));
-#ifdef Q_OS_MACOS
-    MacWindowManager::activateApplicationWindow(appWindow);
-#else
     appWindow->requestActivate();
-#endif
     QVERIFY(QTest::qWaitForWindowActive(appWindow));
     // First exposure can fit the window to a smaller screen at high DPR.
     // Establish the same wide size used below and wait for layout before
@@ -1711,11 +1688,7 @@ void MediaOverlayTest::mediaSettingsPanelRestoresTabsAndBindings()
 
     window.show();
     QVERIFY(QTest::qWaitForWindowExposed(&window));
-#ifdef Q_OS_MACOS
-    MacWindowManager::activateApplicationWindow(&window);
-#else
     window.requestActivate();
-#endif
     QVERIFY(QTest::qWaitForWindowActive(&window));
     harness->setSize(window.size());
     session.setSettingsVisible(true);
@@ -1996,11 +1969,7 @@ void MediaOverlayTest::videoVolumeAndMuteStayIndependentAndSyncWithSettings()
     // Cocoa can constrain the requested size on scaled displays. Keep both
     // settings and transport controls inside the actual native window.
     page->setSize(window.size());
-#ifdef Q_OS_MACOS
-    MacWindowManager::activateApplicationWindow(&window);
-#else
     window.requestActivate();
-#endif
     QVERIFY(QTest::qWaitForWindowActive(&window));
     host->controller()->updateCamera(1.0, 0.0, 0.0);
     CanvasMedia* video = host->document()->addPreparedFile(

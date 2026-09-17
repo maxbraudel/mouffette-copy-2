@@ -6,9 +6,7 @@
 #include <QScreen>
 #include <QtQml/qqml.h>
 
-#if defined(Q_OS_MACOS)
-#include "backend/platform/macos/MacWindowManager.h"
-#elif defined(Q_OS_WIN)
+#if defined(Q_OS_WIN)
 #include "backend/platform/windows/WindowsWindowManager.h"
 #endif
 
@@ -36,16 +34,16 @@ void WindowPresentation::setWindow(QWindow* window)
     if (m_window) stacking.unregisterWindow(m_window);
     m_window = window;
     if (window) {
+#ifdef Q_OS_MACOS
+        // A standard Qt window lets AppKit supply the native title bar and
+        // close/minimize/fullscreen controls without panel customizations.
+        auto flags = Qt::WindowFlags(Qt::Window);
+#else
         // Explicit decorations are needed when Qt's Windows backend receives
         // additional flags (StaysOnTop otherwise suppresses the title bar).
         auto flags = window->flags() | Qt::WindowTitleHint
                          | Qt::WindowSystemMenuHint | Qt::WindowMinMaxButtonsHint
                          | Qt::WindowCloseButtonHint;
-#ifdef Q_OS_MACOS
-        // Keep standard-size native title-bar controls on the nonmodal panel.
-        // AppKit owns the green button's fullscreen icon, menu and action.
-        flags = (flags & ~Qt::WindowType_Mask) | Qt::Dialog | Qt::CustomizeWindowHint
-                | Qt::WindowFullscreenButtonHint;
 #endif
         flags.setFlag(Qt::WindowStaysOnTopHint, m_alwaysOnTop);
         window->setFlags(flags);
@@ -113,12 +111,7 @@ void WindowPresentation::open()
     stacking.configureControlWindow(m_window);
     // Native decoration sizes may only be known once the window is shown.
     if (reopening) fitToScreen(screen);
-#ifdef Q_OS_MACOS
-    // QCocoaWindow::raise() activates the whole process and can switch Spaces.
-    MacWindowManager::activateApplicationWindow(m_window);
-#else
     m_window->raise();
     m_window->requestActivate();
-#endif
     WindowStackingCoordinator::instance().enforce();
 }

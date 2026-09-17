@@ -12,10 +12,12 @@ The Settings checkbox **App always on top** is enabled by default. Save applies
 it immediately and persists `appAlwaysOnTop` in the profile settings; Cancel
 leaves the current policy untouched. Existing settings without the key mean
 `true`. Only the interactive shell and its owned dialogs use this setting.
-Normal mode removes topmost priority and automatic all-desktop pinning while
-still opening on the user's current desktop, including a macOS fullscreen Space.
+On macOS this uses Qt's standard `WindowStaysOnTopHint`. The editor appears
+on all ordinary desktops in both priority modes, using native `CanJoinAllSpaces`.
+Fullscreen follows the normal macOS window behavior. On Windows, normal mode also removes
+automatic all-desktop pinning.
 
-- The native title bar, system menu and minimize/maximize/close controls are
+- On Windows, the native title bar, system menu and minimize/maximize/close controls are
   explicitly preserved alongside the topmost hint. Qt's Windows backend does
   not supply its default decoration hints once extra window flags are set;
   using only `Window | WindowStaysOnTopHint` leaves resize borders but no title
@@ -30,35 +32,19 @@ still opening on the user's current desktop, including a macOS fullscreen Space.
 - Raising an already visible window preserves its current size and position.
   Closing still hides it; its priority is not enforced while hidden/minimized.
   Live scene surfaces keep their independent visibility and priority.
-- macOS uses a Qt-owned, nonactivating `QNSPanel` in both priority modes. It can
-  become key and accept input in another app's fullscreen Space without
-  activating the application's previous desktop. Configure it before showing;
-  never call Qt's Cocoa `raise()` here, which activates the whole process.
-  The nonmodal `Qt::Dialog` type keeps that native panel with a standard title
-  bar and standard-size close/minimize/fullscreen buttons. `Qt::Tool` adds the compact
-  `NSWindowStyleMaskUtilityWindow` decoration in [Qt's Cocoa backend](https://github.com/qt/qtbase/blob/v6.11.2/src/plugins/platforms/cocoa/qcocoawindow.mm#L580-L581),
-  shrinking these buttons. Use AppKit's normal metrics instead of manually
-  resizing buttons or compensating in QML.
-  `WindowFullscreenButtonHint` and `FullScreenPrimary` enable AppKit's native
-  fullscreen button, including its icon, menu and action. No custom button
-  handler is installed. Fullscreen uses a managed Space and normal window
-  level; leaving fullscreen restores the current normal/topmost policy.
-  Explicit opening also calls `orderFrontRegardless` after assigning keyboard
-  focus: a nonactivating panel can become key while remaining behind another
-  application's window. This raises it once without changing its normal/topmost
-  level or activating an old Space (see [Apple's ordering contract](https://developer.apple.com/documentation/appkit/nswindow/orderfrontregardless%28%29)).
-  Topmost mode uses `NSPopUpMenuWindowLevel + 1`, joins all Spaces and other apps'
-  fullscreen/Stage Manager groups, and remains stationary in Mission Control.
-  Normal mode uses `NSNormalWindowLevel` and `MoveToActiveSpace`; disabling
-  topmost restores the original levels of owned native dialogs.
-  Native child dialogs/color pickers stay above the control window; remote
-  rendering overlays use `CGWindowLevelForKey(kCGScreenSaverWindowLevelKey)`
-  above both (currently scene 1000, dialogs 103, control 102). Both the control window
-  and its dialogs must stay below `CGWindowLevelForKey(kCGDraggingWindowLevelKey)`.
-  The earlier `NSScreenSaverWindowLevel` policy put them above that layer
-  (1000/1001 versus 500), preventing native Finder drops from reaching the
-  canvas despite the copy cursor. See the native window-level restriction
-  documented by [Hammerspoon](https://www.hammerspoon.org/docs/hs.canvas.html#windowLevels).
+- macOS uses a standard `Qt::Window` backed by `NSWindow`. Qt and AppKit own
+  the title bar, close/minimize/fullscreen buttons, fullscreen transitions,
+  window level and dialog ordering. Opening uses `QWindow::raise()` and
+  `requestActivate()`. There is no custom button action, nonactivating panel,
+  or periodic native level enforcement. The only additional Space setting is
+  `CanJoinAllSpaces`, applied to the editor while preserving Qt's fullscreen
+  flags. It is reapplied after native handle/state changes, without a dedicated
+  timer, and does not depend on the always-on-top setting.
+  Opening from another application's fullscreen Space may switch to the
+  editor's desktop; displaying the editor over that fullscreen app is no longer
+  supported. Remote scene overlays retain their independent all-Space policy.
+  The editor and its dialogs stay below the native drag layer so Finder drops
+  can reach the canvas.
 - Windows uses `HWND_TOPMOST` without taking focus and pins the individual
   window with the shell's `IVirtualDesktopPinnedApps::PinView`. It does not pin
   every window of the application. Pinning is queried again after reopening or
@@ -69,7 +55,8 @@ still opening on the user's current desktop, including a macOS fullscreen Space.
   supplies the current desktop ID when the foreground window has none.
 - The coordinator applies scene priority on activation and after native
   surface/state changes, control-window reopening and popup activation. One
-  500 ms timer covers all visible registered windows, without taking focus.
+  500 ms timer enforces active scenes and Windows control windows, without
+  taking focus. A macOS editor alone does not keep that timer running.
   Windows also constrains topmost raises in `WM_WINDOWPOSCHANGING` and listens
   to native show/reorder/foreground WinEvents (including native dialog loops).
   Scene windows have a stable front-to-back order; the control window stays
@@ -154,27 +141,25 @@ freshness without rebuilding screens or scheduling project writes.
 
 ## Validation
 
-`tst_WindowPresentation` starts a separate Cocoa `tst_FullscreenHost` process to
-verify that both priority modes open inside another application's fullscreen
-Space, receive native keyboard events, and can switch priority without leaving that Space. The
-helper exits after each test. It also verifies native inventory/Retina coordinate
-parity, native minimization, normal-mode demotion and restoration of owned dialog levels,
-including a dialog that already inherited its parent's elevated priority.
-The helper's windowed mode reproduces another application covering the normal-mode
-control window; repeated openings must restore native front-to-back ordering and
-keyboard focus without hiding, moving, resizing or making the window topmost.
-Fullscreen coverage also checks actual WindowServer ordering above the host.
+`tst_WindowPresentation` verifies native inventory/Retina coordinates,
+minimization, normal/topmost changes and native handle recreation.
+A separate Cocoa `tst_FullscreenHost` process in windowed mode covers the
+normal-mode editor; repeated openings must restore native ordering and
+keyboard focus without hiding, moving, resizing or making the editor topmost.
 
 The suite additionally covers frame-inclusive geometry, negative screen
 origins, QML binding, reopen/minimize restoration, preserving manual movement/resizing,
-staying hidden, native demotion recovery and native handle recreation. macOS
+staying hidden, Windows native demotion recovery and native handle recreation. macOS
 compares all three native button sizes and the title-bar height with a standard
-window, including after priority changes and native handle recreation. It
+window, verifies that the editor is not an NSPanel, and checks AppKit exposes
+a native fullscreen button, including after priority changes and native handle
+recreation. It
 also checks Space/fullscreen flags and scene-above-dialog-above-control ordering,
 hidden native preparation and retired surfaces staying destroyed.
 The green-button regression clicks the actual native button in both priority
 modes, waits for AppKit's fullscreen entry/exit notifications, verifies screen
-size and Qt state, changes priority in fullscreen, and checks geometry and
+size and Qt state, changes priority in fullscreen, and checks all-desktop
+behavior, geometry and
 window policy restoration after exit.
 It checks that both the editor and its dialogs stay below the native drag
 layer, including across enforcement ticks. `CanvasSelectionBackend` also

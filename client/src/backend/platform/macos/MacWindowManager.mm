@@ -5,12 +5,10 @@
 
 #ifdef Q_OS_MACOS
 #import <Cocoa/Cocoa.h>
-#import <objc/runtime.h>
 #include <QtGui/QGuiApplication>
 #include <QtGui/QWindow>
 #include <QtGui/QScreen>
 #include <QtGui/qscreen_platform.h>
-#include <QVariant>
 
 namespace {
 NSWindow* nativeWindowFor(QWindow* qtWindow)
@@ -25,105 +23,14 @@ NSWindow* nativeWindowFor(QWindow* qtWindow)
 }
 }
 
-namespace {
-char originalControlChildLevel;
-NSArray<NSWindow*>* controlChildren(QWindow* qtWindow, NSWindow* window)
-{
-    NSMutableArray<NSWindow*>* children = [NSMutableArray array];
-    for (NSWindow* child in [NSApp windows]) {
-        if (child == window) continue;
-        bool ownedPopup = false;
-        bool sceneSurface = false;
-        for (QWindow* candidate : QGuiApplication::topLevelWindows()) {
-            if (!candidate->handle()) continue;
-            if (candidate->property("mouffetteSceneSurface").toBool()
-                && nativeWindowFor(candidate) == child) {
-                sceneSurface = true;
-                break;
-            }
-            for (QWindow* owner = candidate->transientParent(); owner; owner = owner->transientParent()) {
-                if (owner == qtWindow) {
-                    ownedPopup = nativeWindowFor(candidate) == child;
-                    break;
-                }
-            }
-            if (ownedPopup) break;
-        }
-        if (!sceneSurface && ([child parentWindow] == window || [child sheetParent] == window
-            || child == [NSApp modalWindow] || ownedPopup
-            || [child isKindOfClass:[NSColorPanel class]])) [children addObject:child];
-    }
-    return children;
-}
-}
-
-void MacWindowManager::configureControlWindow(QWindow* qtWindow, bool alwaysOnTop)
+void MacWindowManager::configureControlWindow(QWindow* qtWindow)
 {
     NSWindow* window = nativeWindowFor(qtWindow);
     if (!window) return;
-    if ([window isKindOfClass:[NSPanel class]]) {
-        // Keep the panel nonactivating for its entire native lifetime. It can
-        // become key and accept text without activating the application's old
-        // desktop. Priority changes must never toggle this style bit.
-        const auto style = [window styleMask] | NSWindowStyleMaskNonactivatingPanel;
-        if ([window styleMask] != style) [window setStyleMask:style];
-        [(NSPanel*)window setBecomesKeyOnlyIfNeeded:NO];
-    }
-    // Set collection behavior before the level: AppKit validates the combination.
-    const bool fullscreen = qtWindow->windowState() == Qt::WindowFullScreen
-        || ([window styleMask] & NSWindowStyleMaskFullScreen);
-    NSWindowCollectionBehavior behavior = NSWindowCollectionBehaviorFullScreenPrimary
-        | NSWindowCollectionBehaviorFullScreenDisallowsTiling
-        | NSWindowCollectionBehaviorParticipatesInCycle;
-    behavior |= fullscreen ? NSWindowCollectionBehaviorManaged : alwaysOnTop
-        ? NSWindowCollectionBehaviorCanJoinAllSpaces | NSWindowCollectionBehaviorStationary
-        : NSWindowCollectionBehaviorMoveToActiveSpace | NSWindowCollectionBehaviorManaged;
-    if (@available(macOS 13.0, *)) {
-        if (!fullscreen) behavior |= NSWindowCollectionBehaviorCanJoinAllApplications;
-    }
+    // Join ordinary desktops without changing Qt's native fullscreen policy.
+    const auto behavior = ([window collectionBehavior] & ~NSWindowCollectionBehaviorMoveToActiveSpace)
+        | NSWindowCollectionBehaviorCanJoinAllSpaces;
     if ([window collectionBehavior] != behavior) [window setCollectionBehavior:behavior];
-    // Interactive windows must remain below the WindowServer drag layer.
-    const NSWindowLevel topmostLevel = NSPopUpMenuWindowLevel + 1;
-    const NSWindowLevel level = alwaysOnTop && !fullscreen ? topmostLevel : NSNormalWindowLevel;
-    if ([window level] != level) [window setLevel:level];
-    [window setHidesOnDeactivate:NO];
-    for (NSWindow* child in controlChildren(qtWindow, window)) {
-        NSNumber* original = objc_getAssociatedObject(child, &originalControlChildLevel);
-        if (alwaysOnTop) {
-            if (!original) {
-                NSWindowLevel baseline = [child level];
-                // AppKit can inherit the parent's elevated level before we
-                // observe a sheet/picker. Do not preserve that inherited
-                // priority as the child's normal level when the option is off.
-                if (baseline >= topmostLevel)
-                    baseline = [child isKindOfClass:[NSPanel class]]
-                        ? NSFloatingWindowLevel : NSNormalWindowLevel;
-                objc_setAssociatedObject(child, &originalControlChildLevel,
-                    @(baseline), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-            }
-            if ([child level] != level + 1) [child setLevel:level + 1];
-        } else if (original) {
-            [child setLevel:[original integerValue]];
-            objc_setAssociatedObject(child, &originalControlChildLevel, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        }
-    }
-}
-
-void MacWindowManager::setWindowAlwaysOnTop(QWindow* qtWindow)
-{
-    configureControlWindow(qtWindow, true);
-    NSWindow* window = nativeWindowFor(qtWindow);
-    if (!window || ![window isVisible] || [window isMiniaturized] || [NSApp isHidden]) return;
-    [window orderFrontRegardless];
-    for (NSWindow* child in controlChildren(qtWindow, window)) {
-        if ([child isVisible]) [child orderFrontRegardless];
-    }
-}
-
-bool MacWindowManager::isOnCurrentSpace(QWindow* qtWindow)
-{
-    NSWindow* window = qtWindow && qtWindow->handle() ? nativeWindowFor(qtWindow) : nil;
-    return window ? [window isOnActiveSpace] : false;
 }
 
 void MacWindowManager::configureGlobalOverlay(QWindow* qtWindow, bool clickThrough) {
@@ -262,27 +169,7 @@ void MacWindowManager::orderOutWindow(QWindow* qtWindow) {
     [window orderOut:nil];
 }
 
-void MacWindowManager::activateApplicationWindow(QWindow* qtWindow) {
-    NSWindow* window = nativeWindowFor(qtWindow);
-    if (!window) return;
-    // Nonactivating control panels take keyboard focus in the current Space.
-    // Activating their whole process would select an old main window/Space.
-    // Ordinary NSWindows still need application activation to receive input.
-    if (!([window styleMask] & NSWindowStyleMaskNonactivatingPanel))
-        [NSApp activateIgnoringOtherApps:YES];
-    [window makeKeyAndOrderFront:nil];
-    // A nonactivating panel can become key while remaining below the active
-    // application's windows. Explicitly raise it across applications without
-    // activating the process (which could switch away from the current Space).
-    [window orderFrontRegardless];
-    [window makeFirstResponder:[window contentView]];
-}
-
 #else
-
-void MacWindowManager::setWindowAlwaysOnTop(QWindow* window) {
-    Q_UNUSED(window);
-}
 
 void MacWindowManager::setWindowAsGlobalOverlay(QWindow* window, bool clickThrough) {
     Q_UNUSED(window);
@@ -290,10 +177,6 @@ void MacWindowManager::setWindowAsGlobalOverlay(QWindow* window, bool clickThrou
 }
 
 void MacWindowManager::orderOutWindow(QWindow* window) {
-    Q_UNUSED(window);
-}
-
-void MacWindowManager::activateApplicationWindow(QWindow* window) {
     Q_UNUSED(window);
 }
 

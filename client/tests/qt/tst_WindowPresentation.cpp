@@ -97,11 +97,16 @@ private slots:
         presentation.setWindow(&window);
         // Adding only WindowStaysOnTopHint bypasses Qt's default Windows title
         // bar hints: the resize border survives, but there is no drag surface.
+#ifndef Q_OS_MACOS
         QVERIFY(window.flags().testFlag(Qt::WindowTitleHint));
         QVERIFY(window.flags().testFlag(Qt::WindowSystemMenuHint));
         QVERIFY(window.flags().testFlag(Qt::WindowMinimizeButtonHint));
         QVERIFY(window.flags().testFlag(Qt::WindowMaximizeButtonHint));
         QVERIFY(window.flags().testFlag(Qt::WindowCloseButtonHint));
+#else
+        QCOMPARE(window.type(), Qt::Window);
+        QVERIFY(!window.flags().testFlag(Qt::CustomizeWindowHint));
+#endif
         QVERIFY(window.flags().testFlag(Qt::WindowStaysOnTopHint));
 
 #ifdef Q_OS_WIN
@@ -164,8 +169,10 @@ private slots:
                     QCOMPARE(actual.frame.size.height, expected.frame.size.height);
                 }
                 QCOMPARE(titleBarHeight(native), titleBarHeight(standard));
-                QVERIFY([native isKindOfClass:[NSPanel class]]);
-                QVERIFY(native.styleMask & NSWindowStyleMaskNonactivatingPanel);
+                QVERIFY(native.collectionBehavior & NSWindowCollectionBehaviorCanJoinAllSpaces);
+                QVERIFY(!(native.collectionBehavior & NSWindowCollectionBehaviorMoveToActiveSpace));
+                QVERIFY(![native isKindOfClass:[NSPanel class]]);
+                QVERIFY(!(native.styleMask & NSWindowStyleMaskNonactivatingPanel));
                 QVERIFY(!(native.styleMask & NSWindowStyleMaskUtilityWindow));
                 window.hide();
                 window.destroy();
@@ -233,6 +240,7 @@ private slots:
         WindowStackingCoordinator::instance().enforce();
         QVERIFY(native.collectionBehavior & NSWindowCollectionBehaviorFullScreenPrimary);
         QVERIFY(!(native.collectionBehavior & NSWindowCollectionBehaviorFullScreenAuxiliary));
+        QVERIFY(native.collectionBehavior & NSWindowCollectionBehaviorCanJoinAllSpaces);
         // WindowServer retires the fullscreen Space after AppKit reports exit.
         // Keep its owner alive until that desktop transition has settled.
         QTest::qWait(1200);
@@ -296,7 +304,7 @@ private slots:
         if (QGuiApplication::platformName() == QLatin1String("cocoa")) {
             const auto native = [(__bridge NSView*)reinterpret_cast<void*>(window->winId()) window];
             QVERIFY([native styleMask] & NSWindowStyleMaskMiniaturizable);
-            [native miniaturize:nil]; // Exercise the actual title-bar action on an NSPanel.
+            [native miniaturize:nil]; // Exercise the actual native title-bar action.
             QTRY_VERIFY([native isMiniaturized]);
             QTRY_COMPARE(window->windowState(), Qt::WindowMinimized);
         } else window->showMinimized();
@@ -367,85 +375,6 @@ private slots:
 #endif
     }
 
-    void opensInsideAnotherApplicationsFullscreenSpace_data()
-    {
-        QTest::addColumn<bool>("alwaysOnTop");
-        QTest::newRow("topmost") << true;
-        QTest::newRow("normal") << false;
-    }
-
-    void opensInsideAnotherApplicationsFullscreenSpace()
-    {
-#ifdef Q_OS_MACOS
-        if (QGuiApplication::platformName() != QLatin1String("cocoa")) QSKIP("Requires native Spaces");
-        QFETCH(bool, alwaysOnTop);
-        QQuickView window;
-        QQmlComponent input(window.engine());
-        input.setData("import QtQuick\nTextInput { focus: true }", QUrl());
-        window.setContent(QUrl(), &input, input.create());
-        QVERIFY2(window.rootObject(), qPrintable(input.errorString()));
-        WindowPresentation presentation;
-        presentation.setAlwaysOnTop(alwaysOnTop);
-        presentation.setWindow(&window);
-        presentation.open();
-        QVERIFY(QTest::qWaitForWindowExposed(&window));
-        window.hide();
-        QProcess fullscreen;
-        fullscreen.start(QCoreApplication::applicationDirPath() + QStringLiteral("/tst_FullscreenHost"), {});
-        const auto cleanup = qScopeGuard([&] {
-            window.hide();
-            // Let AppKit finish removing the temporary Space before the next
-            // row starts. Killing a fullscreen process mid-transition races
-            // Mission Control's animation and can prevent the next entry.
-            fullscreen.write("QUIT\n");
-            fullscreen.waitForBytesWritten(1000);
-            if (!fullscreen.waitForFinished(5000)) {
-                fullscreen.kill();
-                fullscreen.waitForFinished(3000);
-            }
-        });
-        QVERIFY(fullscreen.waitForStarted(3000));
-        QTRY_VERIFY_WITH_TIMEOUT(fullscreen.canReadLine(), 8000);
-        const QByteArray ready = fullscreen.readLine().trimmed();
-        QVERIFY2(ready.startsWith("READY "), ready.constData());
-        const int fullscreenId = ready.mid(6).toInt();
-        QVERIFY(fullscreenId > 0);
-        const auto hostIsOnScreen = [&] {
-            CFArrayRef list = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly, kCGNullWindowID);
-            bool found = false;
-            for (NSDictionary* info in (__bridge NSArray*)list)
-                if ([info[(__bridge NSString*)kCGWindowNumber] intValue] == fullscreenId) found = true;
-            if (list) CFRelease(list);
-            return found;
-        };
-        QTRY_VERIFY_WITH_TIMEOUT(hostIsOnScreen(), 2000);
-        presentation.open();
-        QTRY_VERIFY_WITH_TIMEOUT(MacWindowManager::isOnCurrentSpace(&window), 2000);
-        QTest::qWait(650); // Includes native ordering/activation and enforcement.
-        QVERIFY2(hostIsOnScreen(), "Opening Mouffette switched away from the fullscreen Space");
-        const auto native = [(__bridge NSView*)reinterpret_cast<void*>(window.winId()) window];
-        QVERIFY([native isVisible]);
-        QVERIFY([native isKeyWindow]);
-        QVERIFY(nativeAbove([native windowNumber], fullscreenId));
-        QVERIFY(MacWindowManager::isOnCurrentSpace(&window));
-        window.rootObject()->forceActiveFocus();
-        [NSApp sendEvent:[NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint
-            modifierFlags:0 timestamp:0 windowNumber:[native windowNumber] context:nil
-            characters:@"a" charactersIgnoringModifiers:@"a" isARepeat:NO keyCode:0]];
-        [NSApp sendEvent:[NSEvent keyEventWithType:NSEventTypeKeyUp location:NSZeroPoint
-            modifierFlags:0 timestamp:0 windowNumber:[native windowNumber] context:nil
-            characters:@"a" charactersIgnoringModifiers:@"a" isARepeat:NO keyCode:0]];
-        QTRY_COMPARE(window.rootObject()->property("text").toString(), QStringLiteral("a"));
-        presentation.setAlwaysOnTop(!alwaysOnTop);
-        QTest::qWait(550);
-        QVERIFY(hostIsOnScreen());
-        QVERIFY(MacWindowManager::isOnCurrentSpace(&window));
-        presentation.setAlwaysOnTop(alwaysOnTop);
-#else
-        QSKIP("macOS fullscreen Spaces regression");
-#endif
-    }
-
     void nativeMacInventoryMatchesAdvertisedCoordinates()
     {
 #ifdef Q_OS_MACOS
@@ -473,14 +402,6 @@ private slots:
         QWindow dialog;
         dialog.setTransientParent(&window);
         dialog.show();
-#ifdef Q_OS_MACOS
-        if (QGuiApplication::platformName() == QLatin1String("cocoa")) {
-            const auto child = [(__bridge NSView*)reinterpret_cast<void*>(dialog.winId()) window];
-            // A native child may already have inherited its parent's level
-            // before the coordinator first encounters it.
-            [child setLevel:NSPopUpMenuWindowLevel + 1];
-        }
-#endif
         WindowStackingCoordinator::instance().enforce();
         const QRect geometry = window.geometry();
         presentation.setAlwaysOnTop(false);
@@ -494,8 +415,7 @@ private slots:
             const auto child = [(__bridge NSView*)reinterpret_cast<void*>(dialog.winId()) window];
             QCOMPARE([native level], NSNormalWindowLevel);
             QVERIFY([child level] < NSPopUpMenuWindowLevel);
-            QVERIFY([native collectionBehavior] & NSWindowCollectionBehaviorMoveToActiveSpace);
-            QVERIFY(!([native collectionBehavior] & NSWindowCollectionBehaviorCanJoinAllSpaces));
+            QVERIFY([native collectionBehavior] & NSWindowCollectionBehaviorCanJoinAllSpaces);
             QVERIFY([native collectionBehavior] & NSWindowCollectionBehaviorFullScreenPrimary);
 #elif defined(Q_OS_WIN)
             if (QGuiApplication::platformName() != QLatin1String("windows")) return;
@@ -517,7 +437,7 @@ private slots:
         window.hide();
     }
 
-    void nativePrioritySurvivesDemotionAndRecreation()
+    void nativePrioritySurvivesRecreation()
     {
 #if defined(Q_OS_MACOS) || defined(Q_OS_WIN)
         if (QGuiApplication::platformName() == QLatin1String("offscreen")
@@ -533,20 +453,12 @@ private slots:
         const auto native = [&window] {
             return [(__bridge NSView*)reinterpret_cast<void*>(window.winId()) window];
         };
-        const NSWindowLevel expectedLevel = NSPopUpMenuWindowLevel + 1;
-        QTRY_COMPARE([native() level], expectedLevel);
+        const NSWindowLevel expectedLevel = [native() level];
+        QVERIFY(expectedLevel > NSNormalWindowLevel);
         const auto behavior = [native() collectionBehavior];
-        QVERIFY(behavior & NSWindowCollectionBehaviorCanJoinAllSpaces);
         QVERIFY(behavior & NSWindowCollectionBehaviorFullScreenPrimary);
-        QVERIFY(behavior & NSWindowCollectionBehaviorStationary);
-        if (@available(macOS 13.0, *)) {
-            QVERIFY(behavior & NSWindowCollectionBehaviorCanJoinAllApplications);
-        }
-        QVERIFY(![native() hidesOnDeactivate]);
-        [native() setLevel:NSNormalWindowLevel];
-        [native() setCollectionBehavior:NSWindowCollectionBehaviorDefault];
-        QTRY_COMPARE([native() level], expectedLevel);
-        QVERIFY([native() collectionBehavior] & NSWindowCollectionBehaviorCanJoinAllSpaces);
+        QVERIFY(!(behavior & NSWindowCollectionBehaviorFullScreenAuxiliary));
+        QVERIFY(behavior & NSWindowCollectionBehaviorCanJoinAllSpaces);
 
         QWindow remoteOverlay;
         remoteOverlay.setFlags(Qt::Tool | Qt::FramelessWindowHint | Qt::WindowDoesNotAcceptFocus);
@@ -559,7 +471,7 @@ private slots:
         QVERIFY(QTest::qWaitForWindowExposed(&dialog));
         const auto nativeDialog = [(__bridge NSView*)reinterpret_cast<void*>(dialog.winId()) window];
         const auto nativeOverlay = [(__bridge NSView*)reinterpret_cast<void*>(remoteOverlay.winId()) window];
-        QTRY_VERIFY([nativeDialog level] > [native() level]);
+        QTRY_VERIFY([nativeDialog level] >= [native() level]);
         QVERIFY([nativeOverlay level] > [nativeDialog level]);
         dialog.hide();
         remoteOverlay.hide();
@@ -627,7 +539,7 @@ private slots:
             auto* nativeDialog = [(__bridge NSView*)reinterpret_cast<void*>(dialog.winId()) window];
             return [nativeScene() level] == CGWindowLevelForKey(kCGScreenSaverWindowLevelKey)
                 && [nativeScene() level] > [nativeDialog level]
-                && [nativeDialog level] > [nativeControl level]
+                && [nativeDialog level] >= [nativeControl level]
                 && [nativeDialog level] < CGWindowLevelForKey(kCGDraggingWindowLevelKey)
                 && [nativeScene() ignoresMouseEvents] && ![nativeScene() isKeyWindow]
                 && nativeAbove(scene, dialog) && nativeAbove(dialog, control);
@@ -737,7 +649,7 @@ private slots:
         // Sending synthetic QDropEvents directly to Qt bypasses this boundary.
         QVERIFY2([native level] < draggingLevel,
                  "The interactive canvas must stay below the native drag layer");
-        QVERIFY([native level] > NSPopUpMenuWindowLevel);
+        QVERIFY([native level] > NSNormalWindowLevel);
         QTest::qWait(650);
         QVERIFY([native level] < draggingLevel);
 
@@ -747,7 +659,7 @@ private slots:
         dialog.show();
         QVERIFY(QTest::qWaitForWindowExposed(&dialog));
         const auto nativeDialog = [(__bridge NSView*)reinterpret_cast<void*>(dialog.winId()) window];
-        QTRY_VERIFY([nativeDialog level] > [native level]);
+        QTRY_VERIFY([nativeDialog level] >= [native level]);
         QVERIFY([nativeDialog level] < draggingLevel);
 #else
         QSKIP("Finder's native drop routing is macOS-specific");
