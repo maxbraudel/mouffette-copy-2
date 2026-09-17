@@ -1,7 +1,9 @@
 # Logo Mouffette
 
 `mouffette-logo.svg` est la source unique. Les fichiers générés conservent ses
-formes, ses couleurs et sa marge transparente ; ne pas les retoucher séparément.
+formes, ses couleurs et son cadrage sans marge ; ne pas les retoucher séparément.
+Le `viewBox="30 30 452 452"` épouse les limites du cercle : le logo touche les
+quatre côtés du carré, avec uniquement les coins naturellement transparents.
 
 | Fichiers | Usage |
 |---|---|
