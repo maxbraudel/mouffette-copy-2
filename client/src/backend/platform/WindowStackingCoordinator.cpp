@@ -55,7 +55,7 @@ WindowStackingCoordinator::WindowStackingCoordinator(QObject* parent) : QObject(
         const WINEVENTPROC callback = [](HWINEVENTHOOK, DWORD event, HWND, LONG object,
                                          LONG, DWORD, DWORD) {
             if (nativeCoordinator && (event == EVENT_SYSTEM_FOREGROUND || object == OBJID_WINDOW))
-                nativeCoordinator->scheduleEnforcement();
+                nativeCoordinator->enforce(); // Also works inside native modal message loops.
         };
         m_windowEventHook = SetWinEventHook(EVENT_OBJECT_DESTROY, EVENT_OBJECT_REORDER,
             nullptr, callback, 0, 0, WINEVENT_OUTOFCONTEXT);
@@ -142,7 +142,7 @@ void WindowStackingCoordinator::enforce()
     m_deferred.stop();
     const auto windows = m_windows;
     bool anyVisible = false;
-    QWindow* lastScene = nullptr;
+    QPointer<QWindow> lastScene;
     // Stable front-to-back order prevents multiple overlays continually
     // raising one another. Never activate or show from an enforcement tick.
     for (const Entry& entry : windows) {

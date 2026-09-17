@@ -18,7 +18,8 @@ activation request all use the same `open()` path.
 - Coordinates remain in Qt logical pixels, including mixed-DPI and monitors
   positioned to the left of or above the primary screen.
 - Raising an already visible window preserves its current size and position.
-  Closing still hides it; priority enforcement stops while hidden/minimized.
+  Closing still hides it; its priority is not enforced while hidden/minimized.
+  Live scene surfaces keep their independent visibility and priority.
 - macOS uses `NSPopUpMenuWindowLevel + 1`, joins all Spaces and other apps' full
   screen/Stage Manager groups, and remains stationary in Mission Control.
   Native child dialogs/color pickers stay above the control window; remote
@@ -45,7 +46,8 @@ activation request all use the same `open()` path.
   `WindowDoesNotAcceptFocus`. They use the complete screen geometry, including
   Dock/menu/taskbar areas. macOS scenes join all Spaces, remain stationary,
   use FullScreenAuxiliary and, on macOS 13+, CanJoinAllApplications for Stage
-  Manager. Windows attempts to pin each visible scene window individually.
+  Manager. Hiding the macOS application does not hide a live scene (`canHide=NO`).
+  Windows attempts to pin each visible scene window individually.
 - Configuration is separate from native ordering: hidden PREPARE windows are
   never ordered in by AppKit. STOP unregisters surfaces before deferred
   destruction; queued enforcement only inspects currently registered windows.

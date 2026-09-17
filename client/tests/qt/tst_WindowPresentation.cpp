@@ -18,6 +18,40 @@
 #include <windowsx.h>
 #endif
 
+namespace {
+bool nativeAbove(QWindow& front, QWindow& behind)
+{
+#ifdef Q_OS_MACOS
+    const auto nativeFront = [(__bridge NSView*)reinterpret_cast<void*>(front.winId()) window];
+    const auto nativeBehind = [(__bridge NSView*)reinterpret_cast<void*>(behind.winId()) window];
+    CFArrayRef list = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly, kCGNullWindowID);
+    if (!list) return false;
+    bool foundFront = false;
+    bool ordered = false;
+    for (NSDictionary* info in (__bridge NSArray*)list) {
+        const NSInteger number = [info[(__bridge NSString*)kCGWindowNumber] integerValue];
+        if (number == [nativeFront windowNumber]) foundFront = true;
+        if (number == [nativeBehind windowNumber]) { ordered = foundFront; break; }
+    }
+    CFRelease(list);
+    return ordered;
+#elif defined(Q_OS_WIN)
+    const HWND frontHandle = reinterpret_cast<HWND>(front.winId());
+    const HWND behindHandle = reinterpret_cast<HWND>(behind.winId());
+    bool foundFront = false;
+    for (HWND handle = GetTopWindow(nullptr); handle; handle = GetWindow(handle, GW_HWNDNEXT)) {
+        if (handle == frontHandle) foundFront = true;
+        if (handle == behindHandle) return foundFront;
+    }
+    return false;
+#else
+    Q_UNUSED(front);
+    Q_UNUSED(behind);
+    return false;
+#endif
+}
+}
+
 class WindowPresentationTest : public QObject
 {
     Q_OBJECT
@@ -258,7 +292,8 @@ private slots:
                 && [nativeScene() level] > [nativeDialog level]
                 && [nativeDialog level] > [nativeControl level]
                 && [nativeDialog level] < CGWindowLevelForKey(kCGDraggingWindowLevelKey)
-                && [nativeScene() ignoresMouseEvents] && ![nativeScene() isKeyWindow];
+                && [nativeScene() ignoresMouseEvents] && ![nativeScene() isKeyWindow]
+                && nativeAbove(scene, dialog) && nativeAbove(dialog, control);
 #elif defined(Q_OS_WIN)
             const HWND overlay = reinterpret_cast<HWND>(scene.winId());
             const HWND main = reinterpret_cast<HWND>(control.winId());
@@ -283,6 +318,22 @@ private slots:
         QTRY_VERIFY(ordered());
         QTest::qWait(1100); // Multiple enforcement ticks, not just initial show.
         QVERIFY(ordered());
+        QWindow contender;
+        contender.setFlags(Qt::Tool | Qt::WindowStaysOnTopHint | Qt::WindowDoesNotAcceptFocus);
+        contender.setGeometry(30, 30, 100, 100);
+        contender.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&contender));
+#ifdef Q_OS_MACOS
+        auto* nativeContender = [(__bridge NSView*)reinterpret_cast<void*>(contender.winId()) window];
+        [nativeContender setLevel:CGWindowLevelForKey(kCGScreenSaverWindowLevelKey)];
+        [nativeContender orderFrontRegardless];
+#elif defined(Q_OS_WIN)
+        SetWindowPos(reinterpret_cast<HWND>(contender.winId()), HWND_TOPMOST, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        QVERIFY(GetWindowLongPtr(reinterpret_cast<HWND>(scene.winId()), GWL_EXSTYLE) & WS_EX_TRANSPARENT);
+#endif
+        QTRY_VERIFY(nativeAbove(scene, contender));
+        contender.hide();
 #ifdef Q_OS_MACOS
         const auto behavior = [nativeScene() collectionBehavior];
         QVERIFY(behavior & NSWindowCollectionBehaviorCanJoinAllSpaces);
@@ -291,6 +342,11 @@ private slots:
         if (@available(macOS 13.0, *)) {
             QVERIFY(behavior & NSWindowCollectionBehaviorCanJoinAllApplications);
         }
+        QVERIFY(![nativeScene() canHide]);
+        [NSApp hide:nil];
+        QTest::qWait(50);
+        QVERIFY([nativeScene() isVisible]);
+        [NSApp unhideWithoutActivation];
         [nativeScene() setLevel:NSNormalWindowLevel];
 #elif defined(Q_OS_WIN)
         SetWindowPos(reinterpret_cast<HWND>(scene.winId()), HWND_NOTOPMOST, 0, 0, 0, 0,

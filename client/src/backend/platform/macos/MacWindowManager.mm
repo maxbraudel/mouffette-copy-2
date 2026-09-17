@@ -105,6 +105,7 @@ void MacWindowManager::configureGlobalOverlay(QWindow* qtWindow, bool clickThrou
         [panel setBecomesKeyOnlyIfNeeded:YES];
     }
     [window setHidesOnDeactivate:NO];
+    [window setCanHide:NO]; // Hiding the control application must not hide a live scene.
     [window setAcceptsMouseMovedEvents:NO];
     [window setIgnoresMouseEvents:clickThrough];
 }

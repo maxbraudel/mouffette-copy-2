@@ -115,10 +115,11 @@ void WindowsWindowManager::keepAboveAndOnAllDesktops(QWindow* window, QWindow* p
         && !SetWindowPos(hwnd, after, 0, 0, 0, 0,
                          SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER)) {
         // Rate-limit errors by native handle; a new handle gets a fresh check.
+        const DWORD error = GetLastError();
         const qulonglong failedHandle = reinterpret_cast<qulonglong>(hwnd);
         if (window->property("mouffetteStackingFailure").toULongLong() != failedHandle) {
             window->setProperty("mouffetteStackingFailure", failedHandle);
-            qWarning() << "Window priority failed" << window->objectName() << GetLastError();
+            qWarning() << "Window priority failed" << window->objectName() << error;
         }
     }
 

@@ -301,6 +301,10 @@ private slots:
         QTRY_COMPARE(rendered()["destWidth"].toDouble(), secondary.w * 0.5);
         QCOMPARE(rendered()["destX"].toDouble(), secondary.w * 0.25);
         QCOMPARE(secondary.sourceScreenDefinition, sourceTopology);
+        QWindowSystemInterface::handleScreenLogicalDotsPerInchChange(
+            display.platform->screen(), 144, 144);
+        QTRY_COMPARE(secondary.window->geometry(), display.platform->screen()->geometry());
+        QTRY_COMPARE(rendered()["destWidth"].toDouble(), secondary.window->width() * 0.5);
 
         display.remove();
         QVERIFY(!secondary.window->isVisible()); // Before the deferred refresh.
