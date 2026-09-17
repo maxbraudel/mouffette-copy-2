@@ -25,11 +25,12 @@ function fixture() {
             platform: 'test', screens: [], lastHeartbeatAt: 1000000 + now,
             lastHeartbeatMonotonicAt: now, ws };
         server.clients.set(id, client);
-        server.connectionGenerationByEndpoint.set(id, generation);
+        server.currentTransportByEndpoint.set(id, client);
+        server.connectionGenerationSequence = Math.max(server.connectionGenerationSequence, generation);
         return client;
     };
     const send = (id, type, fields = {}) => server.handleMessage(id, {
-        type, protocolVersion: 6, serverBootId: server.serverBootId,
+        type, protocolVersion: 7, serverBootId: server.serverBootId,
         messageId: crypto.randomUUID(), connectionGeneration: server.clients.get(id).connectionGeneration,
         ...fields,
     });
@@ -202,4 +203,4 @@ const ofType = (client, type) => client.ws.messages.filter(message => message.ty
     assert.equal(ofType(f.server.clients.get('A'), 'stopped').at(-1).replay, true);
 }
 
-console.log('connection recovery v6 tests passed');
+console.log('connection recovery v7 tests passed');

@@ -180,6 +180,7 @@ endif()
 # explicitly, never discovered by a filesystem glob.
 set(MOUFFETTE_STORAGE_SOURCES
     src/backend/runtime/RuntimeStorageBootstrap.cpp
+    src/backend/runtime/InstallationIdentityBootstrap.cpp
     src/backend/runtime/storage/StorageUpgradeEngine.cpp
     src/backend/runtime/storage/StorageIO.cpp
     src/backend/runtime/storage/StorageRegistry.cpp
@@ -762,6 +763,7 @@ if(BUILD_TESTING)
 
     add_executable(tst_RemoteSessionIntegration
         tests/qt/tst_RemoteSessionIntegration.cpp
+        tests/fixtures/MultiInstanceProtocolWorker.cpp
         "$<FILTER:$<TARGET_OBJECTS:MouffetteClient>,EXCLUDE,/src/main[.]cpp[.](o|obj)$>"
     )
     target_include_directories(tst_RemoteSessionIntegration PRIVATE

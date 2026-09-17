@@ -18,13 +18,15 @@ const { MouffetteServer } = require('./server');
     const publicKeyDer = keys.publicKey.export({ type: 'spki', format: 'der' });
     const installationId = installationIdForPublicKey(publicKeyDer);
     const instanceId = 'primary';
+    const instanceOrdinal = 1;
     const signature = crypto.sign(null,
-        challengePayload({ ...challenge, runtimeId, instanceId }), keys.privateKey);
+        challengePayload({ ...challenge, runtimeId, instanceId, instanceOrdinal }), keys.privateKey);
     const response = {
-        protocolVersion: 6,
+        protocolVersion: 7,
         serverBootId,
         runtimeId,
         instanceId,
+        instanceOrdinal,
         publicKey: publicKeyDer.toString('base64url'),
         installationId,
         signature: signature.toString('base64url'),
@@ -102,6 +104,9 @@ function addAuthenticatedClient(server, connectionId, endpointId,
         screens: [],
         ws,
     });
+    server.currentTransportByEndpoint.set(endpointId, server.clients.get(connectionId));
+    server.connectionGenerationSequence = Math.max(server.connectionGenerationSequence,
+        server.clients.get(connectionId).connectionGeneration);
     return ws;
 }
 
@@ -110,6 +115,7 @@ function addAuthenticationCandidate(server, connectionId, keyPair, runtimeId,
     const ws = testSocket();
     const publicKeyDer = keyPair.publicKey.export({ type: 'spki', format: 'der' });
     const challenge = createChallenge(server.serverBootId, issuedAt);
+    const instanceOrdinal = instanceId === 'primary' ? 1 : Number(instanceId.slice(9));
     const installationId = installationIdForPublicKey(publicKeyDer);
     const client = {
         id: connectionId,
@@ -127,14 +133,15 @@ function addAuthenticationCandidate(server, connectionId, keyPair, runtimeId,
     };
     server.clients.set(connectionId, client);
     const response = {
-        protocolVersion: 6,
+        protocolVersion: 7,
         serverBootId: server.serverBootId,
         runtimeId,
         instanceId,
+        instanceOrdinal,
         installationId,
         publicKey: publicKeyDer.toString('base64url'),
         signature: crypto.sign(null,
-            challengePayload({ ...challenge, runtimeId, instanceId }), keyPair.privateKey)
+            challengePayload({ ...challenge, runtimeId, instanceId, instanceOrdinal }), keyPair.privateKey)
             .toString('base64url'),
     };
     return {
@@ -214,7 +221,7 @@ function addAuthenticationCandidate(server, connectionId, keyPair, runtimeId,
         server, 'same-install-primary', keys, crypto.randomUUID(), now);
     const secondary = addAuthenticationCandidate(
         server, 'same-install-secondary', keys, crypto.randomUUID(), now,
-        crypto.randomUUID());
+        'instance-2');
 
     server.handleAuthResponse('same-install-primary', primary.response, now + 1);
     server.handleAuthResponse('same-install-secondary', secondary.response, now + 2);
@@ -328,7 +335,7 @@ function messages(socket, type) {
     const oldClient = boundaryServer.clients.get('old-boundary');
     oldClient.runtimeId = oldRuntimeId;
     oldClient.lastHeartbeatAt = base;
-    boundaryServer.connectionGenerationByEndpoint.set(boundaryCandidate.endpointId, 1);
+    boundaryServer.connectionGenerationSequence = 1;
     const session = boundaryServer.remoteSessions.open({
         ownerEndpointId: 'owner-device',
         targetEndpointId: boundaryCandidate.endpointId,
@@ -1171,7 +1178,7 @@ function messages(socket, type) {
     oldClient.runtimeId = runtimeId;
     oldClient.lastHeartbeatAt = epoch;
     oldClient.lastHeartbeatMonotonicAt = monotonic;
-    server.connectionGenerationByEndpoint.set(replacement.endpointId, 1);
+    server.connectionGenerationSequence = 1;
     const targetSocket = addAuthenticatedClient(
         server, 'replacement-close-target', 'B');
     const session = server.remoteSessions.open({
@@ -1241,7 +1248,7 @@ function messages(socket, type) {
     const owner = context.server.clients.get('owner-connection');
     owner.runtimeId = 'different-runtime';
     owner.connectionGeneration = 2;
-    context.server.connectionGenerationByEndpoint.set('A', 2);
+    context.server.connectionGenerationSequence = 2;
     context.server.handleRemoteSessionClose('owner-connection', {
         remoteSessionId: context.session.remoteSessionId,
         generation: context.session.generation,
@@ -1793,7 +1800,7 @@ function cursorContext(prefix) {
     }];
     context.cursorMessage = (overrides = {}) => ({
         type: 'remote_session_cursor',
-        protocolVersion: 6,
+        protocolVersion: 7,
         serverBootId: context.server.serverBootId,
         messageId: crypto.randomUUID(),
         connectionGeneration: 1,

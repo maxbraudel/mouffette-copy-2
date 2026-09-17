@@ -99,6 +99,7 @@ public:
     static ClientInfo fromJson(const QJsonObject& json);
     
     // Helper methods
+    QString getInstanceDisplayName() const;
     QString getIdentityDisplayText() const;
     QString availabilityBadgeText() const;
     QString getProjectDeadlineText(qint64 nowMs = -1) const;

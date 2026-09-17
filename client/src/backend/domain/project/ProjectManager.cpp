@@ -23,6 +23,11 @@ ProjectTargetReference mergeTargetPresentation(
     ProjectTargetReference merged = incoming;
     if (merged.machineName.trimmed().isEmpty()) merged.machineName = previous.machineName;
     if (merged.platform.trimmed().isEmpty()) merged.platform = previous.platform;
+    if (merged.instanceOrdinal <= 0) {
+        merged.installationId = previous.installationId;
+        merged.instanceId = previous.instanceId;
+        merged.instanceOrdinal = previous.instanceOrdinal;
+    }
     return merged;
 }
 }
@@ -544,7 +549,8 @@ void ProjectManager::checkpointVisibleProjects(qint64 atMs)
 }
 
 QList<ProjectClientEntry> ProjectManager::mergeDiscoveredClients(const QList<ClientInfo>& discovered,
-                                                                  qint64 atMs)
+                                                                  qint64 atMs,
+                                                                  bool localDiscoveryUsable)
 {
     const qint64 current = atMs >= 0 ? atMs : nowMs();
 
@@ -557,11 +563,15 @@ QList<ProjectClientEntry> ProjectManager::mergeDiscoveredClients(const QList<Cli
             continue;
         }
         seen.insert(endpointId);
+        ProjectRecord* project = mutableProjectForTarget(endpointId);
+        if (!project && (!localDiscoveryUsable || !client.canAcceptSession())) {
+            continue;
+        }
 
         ProjectClientEntry entry;
         entry.endpointId = endpointId;
         entry.online = client.isOnline();
-        if (ProjectRecord* project = mutableProjectForTarget(endpointId)) {
+        if (project) {
             const ProjectTargetReference fresh = mergeTargetPresentation(
                 project->target,
                 ProjectTargetReference::fromClientInfo(client));
@@ -577,6 +587,9 @@ QList<ProjectClientEntry> ProjectManager::mergeDiscoveredClients(const QList<Cli
             if (client.getPlatform().trimmed().isEmpty()) {
                 client.setPlatform(fresh.platform);
             }
+            client.setInstallationId(fresh.installationId);
+            client.setInstanceId(fresh.instanceId);
+            client.setInstanceOrdinal(fresh.instanceOrdinal);
             client.setScreens(project->savedScreens);
             client.setVolumePercent(project->savedVolumePercent);
             entry.hasProject = true;

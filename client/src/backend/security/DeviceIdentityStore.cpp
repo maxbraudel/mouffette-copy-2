@@ -430,6 +430,14 @@ DeviceIdentityStore::ReadState DeviceIdentityStore::inspectStored(QString* error
 }
 
 bool DeviceIdentityStore::initialize(QString* errorMessage) {
+    return initializeImpl(true, errorMessage);
+}
+
+bool DeviceIdentityStore::initializeExisting(QString* errorMessage) {
+    return initializeImpl(false, errorMessage);
+}
+
+bool DeviceIdentityStore::initializeImpl(bool allowCreation, QString* errorMessage) {
     if (d->key) return true;
 
     QByteArray encoded;
@@ -467,6 +475,10 @@ bool DeviceIdentityStore::initialize(QString* errorMessage) {
         d->backend = loadedFromVault ? StorageBackend::NativeVault
                                      : StorageBackend::OwnerOnlyFile;
     } else {
+        if (!allowCreation) {
+            if (errorMessage) *errorMessage = QStringLiteral("The installation identity is missing; runtime cannot replace it.");
+            return false;
+        }
         d->key = Impl::generateKey();
         if (!d->key) {
             if (errorMessage) *errorMessage = opensslError(QStringLiteral("Ed25519 key generation"));

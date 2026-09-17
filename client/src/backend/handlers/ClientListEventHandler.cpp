@@ -48,7 +48,7 @@ void ClientListEventHandler::onClientListReceived(const QList<ClientInfo>& clien
             if (activeWorkspace->canvas) {
                 activeWorkspace->canvas->setRemoteSceneTarget(
                     activeWorkspace->targetEndpointId,
-                    activeWorkspace->lastClientInfo.getMachineName());
+                    activeWorkspace->lastClientInfo.getInstanceDisplayName());
             }
         }
     }
@@ -94,7 +94,7 @@ void ClientListEventHandler::onClientListReceived(const QList<ClientInfo>& clien
                 if (activeWorkspace->canvas) {
                     activeWorkspace->canvas->setRemoteSceneTarget(
                         activeWorkspaceEndpointId,
-                        activeWorkspace->lastClientInfo.getMachineName());
+                        activeWorkspace->lastClientInfo.getInstanceDisplayName());
                 }
                 navigationManager->refreshActiveClientPreservingCanvas(
                     activeWorkspace->lastClientInfo);

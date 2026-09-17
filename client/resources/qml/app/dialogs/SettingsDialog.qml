@@ -68,6 +68,8 @@ Dialog {
             AppButton {
                 objectName: "clearStorageAndCloseButton"
                 text: "Clear storage and close"
+                ToolTip.visible: hovered
+                ToolTip.text: "Clear this instance's settings, projects, history and cache. Its network identity and other instances are kept."
                 destructive: true
                 enabled: controller.ready && !controller.clearingStorage
                 onClicked: controller.clearStorageAndClose()

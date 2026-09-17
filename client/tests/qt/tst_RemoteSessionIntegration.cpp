@@ -17,6 +17,15 @@
 #include "backend/network/WebSocketClient.h"
 #include "backend/network/RemoteSessionCoordinator.h"
 #include "backend/managers/network/ConnectionManager.h"
+#include "backend/runtime/ApplicationRuntime.h"
+#include "backend/runtime/RuntimeProfile.h"
+#include "backend/domain/project/ProjectManager.h"
+#include <QScopeGuard>
+#include "../fixtures/MultiInstanceProtocolWorker.h"
+#include <QDir>
+#include <memory>
+#include <vector>
+#include <algorithm>
 
 namespace {
 QJsonObject liveTextScene()
@@ -105,6 +114,8 @@ private slots:
     void uploadResumesFromDurableOffsetAfterTransportLoss();
     void cleanupReceiptRetainsItsOriginalDispatchedGeneration();
     void reconnectsAutomaticallyAfterProlongedServerOutage();
+    void concurrentProcessesShareInstallationAndKeepStableSlots();
+    void retainedServerPresenceDoesNotKeepProjectlessRows();
 private:
     void startRelay(quint16 port = 0);
     void configure(WebSocketClient& peer, const QString& name);
@@ -123,6 +134,80 @@ void RemoteSessionIntegrationTest::init()
         m_output += m_relay.readAllStandardOutput();
     });
     startRelay();
+}
+
+void RemoteSessionIntegrationTest::retainedServerPresenceDoesNotKeepProjectlessRows()
+{
+    QTemporaryDir runtimeDirectory;
+    QTemporaryDir targetIdentity;
+    const auto previousProfile = RuntimeProfile::context();
+    const auto restoreProfile = qScopeGuard([&] { RuntimeProfile::configure(previousProfile); });
+    RuntimeProfileContext profile;
+    profile.rootPath = runtimeDirectory.path();
+    profile.persistent = false;
+    RuntimeProfile::configure(profile);
+    ApplicationRuntime observer(profile);
+    observer.getProjectManager()->stopAutomaticTimersForTesting();
+    auto* observerConnection = observer.findChild<ConnectionManager*>();
+    QVERIFY(observerConnection);
+    WebSocketClient target(targetIdentity.path(), false);
+    ConnectionManager targetConnection(&target);
+    configure(target, QStringLiteral("discovery-target"));
+    connect(&targetConnection, &ConnectionManager::disconnectRequested, &target,
+            [&](quint64 transition) {
+        target.beginEndpointDisable(QStringLiteral("disable-%1").arg(transition));
+    });
+    connect(&target, &WebSocketClient::endpointDisableAcknowledged, &targetConnection,
+            [&](const QString&, quint64) {
+        targetConnection.completeDisconnect(targetConnection.transitionId());
+    });
+    QList<ClientInfo> rawPresence;
+    connect(observer.getWebSocketClient(), &WebSocketClient::clientListReceived,
+            &observer, [&](const QList<ClientInfo>& clients) { rawPresence = clients; });
+    const auto targetIsRetainedOffline = [&] {
+        return std::any_of(rawPresence.begin(), rawPresence.end(), [&](const ClientInfo& peer) {
+            return peer.endpointId() == target.endpointId()
+                && peer.availabilityBadgeText() == QLatin1String("Disconnected");
+        });
+    };
+    observerConnection->connectToServer(m_url);
+    targetConnection.connectToServer(m_url);
+    QTRY_COMPARE_WITH_TIMEOUT(observerConnection->state(), ConnectionManager::State::Connected, 4000);
+    QTRY_COMPARE_WITH_TIMEOUT(targetConnection.state(), ConnectionManager::State::Connected, 4000);
+    QTRY_COMPARE_WITH_TIMEOUT(observer.displayClients().size(), 1, 4000);
+    QCOMPARE(observer.getProjectManager()->projectCount(), 0);
+
+    targetConnection.setConnectionEnabled(false);
+    QTRY_VERIFY_WITH_TIMEOUT(targetIsRetainedOffline(), 4000);
+    QVERIFY(observer.displayClients().isEmpty());
+    observer.activateClient(target.endpointId()); // a delayed click cannot open it
+    QVERIFY(!observer.findWorkspace(target.endpointId()));
+    QVERIFY(observer.getWebSocketClient()->remoteSessionCoordinator()->all().isEmpty());
+
+    QTRY_COMPARE(targetConnection.state(), ConnectionManager::State::Disconnected);
+    targetConnection.setConnectionEnabled(true);
+    QTRY_COMPARE_WITH_TIMEOUT(observer.displayClients().size(), 1, 4000);
+    QCOMPARE(observer.getProjectManager()->projectCount(), 0);
+    observer.activateClient(target.endpointId());
+    QTRY_VERIFY_WITH_TIMEOUT(observer.getProjectManager()->hasProjectForTarget(target.endpointId()), 4000);
+    observer.navigateToClients();
+
+    targetConnection.setConnectionEnabled(false);
+    QTRY_VERIFY_WITH_TIMEOUT(targetIsRetainedOffline(), 4000);
+    QCOMPARE(observer.displayClients().size(), 1);
+    QVERIFY(observer.displayClients().first().hasProject());
+    QCOMPARE(observer.displayClients().first().endpointId(), target.endpointId());
+    QVERIFY(observer.getProjectManager()->deleteProject(target.endpointId()));
+    QVERIFY(observer.displayClients().isEmpty());
+    QVERIFY(targetIsRetainedOffline()); // visibility did not erase wire presence
+
+    QTRY_COMPARE(targetConnection.state(), ConnectionManager::State::Disconnected);
+    targetConnection.setConnectionEnabled(true);
+    QTRY_COMPARE_WITH_TIMEOUT(observer.displayClients().size(), 1, 4000);
+    observer.setConnectionEnabled(false);
+    QVERIFY(observer.displayClients().isEmpty());
+    QTRY_COMPARE_WITH_TIMEOUT(observerConnection->state(), ConnectionManager::State::Disconnected, 4000);
+    observer.handleApplicationAboutToQuit();
 }
 
 void RemoteSessionIntegrationTest::startRelay(quint16 port)
@@ -591,5 +676,185 @@ void RemoteSessionIntegrationTest::duplicateOpenAndMetadataRefresh()
     target.disconnect();
 }
 
-QTEST_MAIN(RemoteSessionIntegrationTest)
+void RemoteSessionIntegrationTest::concurrentProcessesShareInstallationAndKeepStableSlots()
+{
+    struct Peer {
+        QProcess process;
+        QByteArray pending;
+        QList<QJsonObject> events;
+        ~Peer() { stop(); }
+        void stop() {
+            if (process.state() == QProcess::NotRunning) return;
+            process.closeWriteChannel();
+            if (!process.waitForFinished(5000)) {
+                process.kill();
+                process.waitForFinished(2000);
+            }
+        }
+        QJsonObject last(const QString& event) const {
+            for (auto it = events.crbegin(); it != events.crend(); ++it)
+                if (it->value("event").toString() == event) return *it;
+            return {};
+        }
+        QJsonObject identity() const { return last(QStringLiteral("identity")); }
+        QString endpoint() const { return identity().value("endpointId").toString(); }
+        QString state() const { return last(QStringLiteral("state")).value("state").toString(); }
+        QJsonObject outgoing(const QString& target) const {
+            for (auto it = events.crbegin(); it != events.crend(); ++it)
+                if (it->value("event") == QLatin1String("session")
+                    && it->value("ownerEndpointId").toString() == endpoint()
+                    && it->value("targetEndpointId").toString() == target) return *it;
+            return {};
+        }
+        void send(QJsonObject message) {
+            process.write(QJsonDocument(message).toJson(QJsonDocument::Compact) + '\n');
+        }
+    };
+    QTemporaryDir root;
+    QVERIFY(root.isValid());
+    std::vector<std::unique_ptr<Peer>> workers;
+    const auto startPeer = [&]() -> Peer* {
+        auto peer = std::make_unique<Peer>();
+        auto* raw = peer.get();
+        connect(&raw->process, &QProcess::readyReadStandardOutput, this, [raw] {
+            raw->pending += raw->process.readAllStandardOutput();
+            int newline;
+            while ((newline = raw->pending.indexOf('\n')) >= 0) {
+                const auto event = QJsonDocument::fromJson(raw->pending.left(newline)).object();
+                raw->pending.remove(0, newline + 1);
+                if (!event.isEmpty()) raw->events.append(event);
+            }
+        });
+        raw->process.start(QCoreApplication::applicationFilePath(),
+            {QStringLiteral("--multi-instance-worker"), root.path(), m_url});
+        const bool started = raw->process.waitForStarted(5000);
+        workers.push_back(std::move(peer));
+        return started ? raw : nullptr;
+    };
+    for (int i = 0; i < 3; ++i) QVERIFY(startPeer());
+    for (const auto& peer : workers) peer->process.write("go\n");
+    QTRY_VERIFY_WITH_TIMEOUT(std::all_of(workers.begin(), workers.end(), [](const auto& peer) {
+        return peer->state() == QLatin1String("Connected");
+    }), 10000);
+    const auto byOrdinal = [&](int ordinal) -> Peer* {
+        for (const auto& peer : workers)
+            if (peer->process.state() != QProcess::NotRunning
+                && peer->identity().value("ordinal").toInt() == ordinal) return peer.get();
+        return nullptr;
+    };
+    Peer* primary = byOrdinal(1);
+    Peer* secondary = byOrdinal(2);
+    Peer* third = byOrdinal(3);
+    QVERIFY(primary && secondary && third);
+    const QString installation = primary->identity().value("installationId").toString();
+    QVERIFY(!installation.isEmpty());
+    QSet<QString> endpoints;
+    QSet<QString> directories;
+    for (const auto& peer : workers) {
+        QCOMPARE(peer->identity().value("installationId").toString(), installation);
+        QCOMPARE(peer->identity().value("identityRoot"), primary->identity().value("identityRoot"));
+        endpoints.insert(peer->endpoint());
+        directories.insert(peer->identity().value("root").toString());
+        QTRY_COMPARE_WITH_TIMEOUT(peer->last("clients").value("clients").toArray().size(), 2, 3000);
+        for (const auto& value : peer->last("clients").value("clients").toArray()) {
+            const auto discovered = value.toObject();
+            const int ordinal = discovered.value("instanceOrdinal").toInt();
+            QVERIFY(ordinal >= 1 && ordinal <= 3);
+            QCOMPARE(discovered.value("installationId").toString(), installation);
+            QCOMPARE(discovered.value("displayName").toString(),
+                     QStringLiteral("shared-computer (%1)").arg(ordinal));
+            QVERIFY(!discovered.value("runtimeId").toString().isEmpty());
+        }
+    }
+    QCOMPARE(endpoints.size(), 3);
+    QCOMPARE(directories.size(), 3);
+
+    primary->send({{"action", "open"}, {"target", secondary->endpoint()}});
+    secondary->send({{"action", "open"}, {"target", primary->endpoint()}});
+    third->send({{"action", "open"}, {"target", primary->endpoint()}});
+    QTRY_VERIFY_WITH_TIMEOUT(primary->outgoing(secondary->endpoint()).value("commandReady").toBool(), 4000);
+    QTRY_VERIFY_WITH_TIMEOUT(secondary->outgoing(primary->endpoint()).value("commandReady").toBool(), 4000);
+    QTRY_VERIFY_WITH_TIMEOUT(third->outgoing(primary->endpoint()).value("commandReady").toBool(), 4000);
+    const QString independentSession = third->outgoing(primary->endpoint()).value("remoteSessionId").toString();
+    secondary->send({{"action", "disable"}});
+    QTRY_COMPARE_WITH_TIMEOUT(secondary->state(), QStringLiteral("Disconnected"), 4000);
+    third->send({{"action", "inspect"}, {"id", "independent"}, {"session", independentSession}});
+    QTRY_COMPARE_WITH_TIMEOUT(third->last("result").value("id").toString(), QStringLiteral("independent"), 2000);
+    QVERIFY(third->last("result").value("ready").toBool());
+    QCOMPARE(primary->state(), QStringLiteral("Connected"));
+
+    const auto oldSecondary = secondary->identity();
+    secondary->stop();
+    QCOMPARE(secondary->process.exitCode(), 0);
+    QVERIFY(!QFileInfo::exists(oldSecondary.value("root").toString()));
+    secondary = startPeer();
+    QVERIFY(secondary);
+    secondary->process.write("go\n");
+    QTRY_COMPARE_WITH_TIMEOUT(secondary->state(), QStringLiteral("Connected"), 7000);
+    QCOMPARE(secondary->identity().value("ordinal").toInt(), 2);
+    QCOMPARE(secondary->endpoint(), oldSecondary.value("endpointId").toString());
+    QCOMPARE(secondary->identity().value("installationId").toString(), installation);
+    QVERIFY(secondary->identity().value("runtimeId") != oldSecondary.value("runtimeId"));
+    QVERIFY(secondary->identity().value("root") != oldSecondary.value("root"));
+    QVERIFY(secondary->outgoing(primary->endpoint()).isEmpty());
+
+    const auto oldPrimary = primary->identity();
+    const QString markerPath = QDir(oldPrimary.value("root").toString()).filePath("persistent-marker");
+    QFile marker(markerPath);
+    QVERIFY(marker.open(QIODevice::WriteOnly));
+    QCOMPARE(marker.write("persistent"), qint64(10));
+    marker.close();
+    primary->send({{"action", "disable"}});
+    QTRY_COMPARE_WITH_TIMEOUT(primary->state(), QStringLiteral("Disconnected"), 4000);
+    primary->stop();
+    QVERIFY(QFileInfo::exists(markerPath));
+    QCOMPARE(third->state(), QStringLiteral("Connected"));
+    primary = startPeer();
+    QVERIFY(primary);
+    primary->process.write("go\n");
+    QTRY_COMPARE_WITH_TIMEOUT(primary->state(), QStringLiteral("Connected"), 7000);
+    QCOMPARE(primary->identity().value("ordinal").toInt(), 1);
+    QCOMPARE(primary->endpoint(), oldPrimary.value("endpointId").toString());
+    QCOMPARE(primary->identity().value("root"), oldPrimary.value("root"));
+    QVERIFY(primary->identity().value("runtimeId") != oldPrimary.value("runtimeId"));
+    QVERIFY(QFileInfo::exists(markerPath));
+
+    const auto crashed = secondary->identity();
+    secondary->process.kill();
+    QVERIFY(secondary->process.waitForFinished(2000));
+    QVERIFY(QFileInfo::exists(crashed.value("root").toString()));
+    secondary = startPeer();
+    QVERIFY(secondary);
+    secondary->process.write("go\n");
+    QTRY_COMPARE_WITH_TIMEOUT(secondary->state(), QStringLiteral("Connected"), 7000);
+    QCOMPARE(secondary->identity().value("ordinal").toInt(), 2);
+    QCOMPARE(secondary->endpoint(), crashed.value("endpointId").toString());
+    QVERIFY(secondary->identity().value("runtimeId") != crashed.value("runtimeId"));
+    QVERIFY(!QFileInfo::exists(crashed.value("root").toString()));
+
+    // All enabled processes recover after a server restart. A disabled one
+    // stays disconnected despite sharing the installation with them.
+    secondary->send({{"action", "disable"}});
+    QTRY_COMPARE_WITH_TIMEOUT(secondary->state(), QStringLiteral("Disconnected"), 4000);
+    const quint16 port = static_cast<quint16>(QUrl(m_url).port());
+    m_relay.kill();
+    QVERIFY(m_relay.waitForFinished(2000));
+    QTRY_VERIFY_WITH_TIMEOUT(primary->state() != QLatin1String("Connected")
+                             && third->state() != QLatin1String("Connected"), 2000);
+    startRelay(port);
+    QTRY_COMPARE_WITH_TIMEOUT(primary->state(), QStringLiteral("Connected"), 10000);
+    QTRY_COMPARE_WITH_TIMEOUT(third->state(), QStringLiteral("Connected"), 10000);
+    QCOMPARE(secondary->state(), QStringLiteral("Disconnected"));
+    QCOMPARE(third->identity().value("ordinal").toInt(), 3);
+    for (const auto& peer : workers) QVERIFY(peer->last("failure").isEmpty());
+}
+
+int main(int argc, char** argv)
+{
+    QApplication app(argc, argv);
+    if (app.arguments().value(1) == QLatin1String("--multi-instance-worker"))
+        return runMultiInstanceProtocolWorker(app, app.arguments());
+    RemoteSessionIntegrationTest test;
+    return QTest::qExec(&test, argc, argv);
+}
 #include "tst_RemoteSessionIntegration.moc"

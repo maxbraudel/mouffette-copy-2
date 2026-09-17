@@ -113,7 +113,7 @@ QString SceneActivityListModel::peerDisplayName(const QString& endpointId) const
     if (m_clientsModel) {
         const ClientInfo client = m_clientsModel->client(endpointId);
         if (!client.getMachineName().trimmed().isEmpty()) {
-            return client.getMachineName().trimmed();
+            return client.getInstanceDisplayName();
         }
     }
     const QString abbreviated = endpointId.left(8);

@@ -230,8 +230,8 @@ ApplicationRuntime::ApplicationRuntime(const RuntimeProfileContext& runtimeProfi
       m_systemMonitor(new SystemMonitor(this)),
       m_systemTrayManager(new SystemTrayManager(this)),
       m_webSocketClient(new WebSocketClient(
-          RuntimeProfile::identityLocation(), runtimeProfile.isPersistent(), this, {},
-          runtimeProfile.instanceId, runtimeProfile.ordinal)),
+          RuntimeProfile::identityLocation(), runtimeProfile.useNativeIdentityVault, this, {},
+          runtimeProfile.ordinal)),
       m_connectionManager(new ConnectionManager(m_webSocketClient, this)),
       m_settingsManager(new SettingsManager(this)),
       m_webSocketMessageHandler(new WebSocketMessageHandler(this, this)),
@@ -728,17 +728,15 @@ ApplicationRuntime::ApplicationRuntime(const RuntimeProfileContext& runtimeProfi
             this, [this](const QString& status) {
         setLocalNetworkStatus(status);
         if (status == QLatin1String("Reconnecting")) {
-            for (ClientInfo& client : m_discoveredClients) {
-                client.setStatus(QStringLiteral("Reconnecting"));
-                client.setAvailabilityStatus(QStringLiteral("Reconnecting"));
-            }
-            refreshProjectClientList();
             if (m_activeCanvas) {
                 // Grace disables new remote commands but does not tear down the
                 // running graph or discard resumable upload state.
                 m_activeCanvas->setOverlayActionsEnabled(false);
             }
         }
+        // Reproject on every state transition, including degradation and
+        // recovery without a new presence revision. Keep raw discovery intact.
+        refreshProjectClientList();
     });
     connect(m_connectionManager, &ConnectionManager::leaseExpired,
             this, [this](const QString& boot, quint64 generation) {
@@ -1061,14 +1059,17 @@ QList<ClientInfo> ApplicationRuntime::buildDisplayClientList(const QList<ClientI
         }
     }
     m_discoveredClients = connectedClients;
+    const bool localDiscoveryUsable = m_connectionManager
+        && m_connectionManager->state() == ConnectionManager::State::Connected;
     if (!m_projectManager) {
-        m_displayClients = ClientListBuilder::buildDisplayClientList(this, connectedClients);
+        m_displayClients = ClientListBuilder::buildDisplayClientList(
+            this, connectedClients, localDiscoveryUsable);
         emit displayClientsChanged(m_displayClients);
         return m_displayClients;
     }
 
     const QList<ProjectClientEntry> entries =
-        m_projectManager->mergeDiscoveredClients(connectedClients);
+        m_projectManager->mergeDiscoveredClients(connectedClients, -1, localDiscoveryUsable);
     QList<ClientInfo> result;
     result.reserve(entries.size());
     for (const ProjectClientEntry& entry : entries) {
@@ -1112,14 +1113,26 @@ QList<ClientInfo> ApplicationRuntime::buildDisplayClientList(const QList<ClientI
                 m_webSocketClient, binding);
 
             QString status = client.availabilityBadgeText();
-            if (closePending || terminalBinding) {
+            if (!localDiscoveryUsable) {
+                const auto localState = m_connectionManager
+                    ? m_connectionManager->state() : ConnectionManager::State::Disconnected;
+                status = localState == ConnectionManager::State::Degraded
+                    ? QStringLiteral("Degraded")
+                    : localState == ConnectionManager::State::Disconnecting
+                        ? QStringLiteral("Disconnecting")
+                        : (localState == ConnectionManager::State::Disconnected
+                           || localState == ConnectionManager::State::Failed)
+                            ? QStringLiteral("Unreachable") : QStringLiteral("Reconnecting");
+            } else if (!client.canAcceptSession()) {
+                // Preserve server degradation/recovery even if a retained
+                // session still has an older command-ready observation.
+                status = client.availabilityBadgeText();
+            } else if (closePending || terminalBinding) {
                 status = (m_remoteSessionOpenDesiredTargets.contains(
                              entry.endpointId)
                           || wantsForegroundRemoteSession(entry.endpointId))
                     ? QStringLiteral("Connecting")
                     : QStringLiteral("Available");
-            } else if (!m_webSocketClient || !m_webSocketClient->isConnected()) {
-                status = QStringLiteral("Reconnecting");
             } else if (m_remoteSessionOpenPendingTargets.contains(
                            entry.endpointId)
                        || m_remoteSessionOpenDesiredTargets.contains(
@@ -1142,7 +1155,7 @@ QList<ClientInfo> ApplicationRuntime::buildDisplayClientList(const QList<ClientI
                 ? session->remoteContentClearedOnDisconnect : false;
             if (session->canvas) {
                 session->canvas->setRemoteSceneTarget(
-                    entry.endpointId, client.getMachineName());
+                    entry.endpointId, client.getInstanceDisplayName());
             }
         }
         result.append(client);
@@ -1717,7 +1730,7 @@ void ApplicationRuntime::showScreenView(const ClientInfo& client) {
 }
 
 void ApplicationRuntime::updateClientNameDisplay(const ClientInfo& client) {
-    m_remoteDisplayName = client.getMachineName().trimmed();
+    m_remoteDisplayName = client.endpointId().isEmpty() ? QString() : client.getInstanceDisplayName();
     emit presentationStateChanged();
 }
 
@@ -3755,7 +3768,8 @@ void ApplicationRuntime::setRemoteClientState(const RemoteClientState& state,
     m_remoteBusy = state.spinnerActive;
     m_remoteStatusText = state.statusText().trimmed().toUpper();
     m_selectedClient = state.clientInfo;
-    m_remoteDisplayName = state.clientInfo.getMachineName().trimmed();
+    m_remoteDisplayName = state.clientInfo.endpointId().isEmpty()
+        ? QString() : state.clientInfo.getInstanceDisplayName();
     m_remoteVolumePercent = state.volumeVisible ? state.volumePercent : -1;
     refreshOverlayActionsState(
         state.connectionStatus == RemoteClientState::Connected,
@@ -3841,8 +3855,9 @@ NotificationCenter* ApplicationRuntime::getNotificationCenter() const
 
 QString ApplicationRuntime::remoteDisplayName() const
 {
+    if (m_selectedClient.endpointId().isEmpty() && m_remoteDisplayName.isEmpty()) return {};
     return m_remoteDisplayName.isEmpty()
-        ? m_selectedClient.getMachineName() : m_remoteDisplayName;
+        ? m_selectedClient.getInstanceDisplayName() : m_remoteDisplayName;
 }
 
 bool ApplicationRuntime::canDeleteActiveProject() const

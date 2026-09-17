@@ -16,7 +16,7 @@ const CURSOR_DEBUG = DEFAULT_CONFIG.cursorDebug;
 const CANONICAL_UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const OPAQUE_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
-// Protocol v6 is a hard cut-over. Obsolete names are rejected at the envelope
+// Protocol v7 is a hard cut-over. Obsolete names are rejected at the envelope
 // boundary and are never translated.
 const REMOVED_MESSAGE_TYPES = new Set([
     'register', 'device_register',
@@ -277,10 +277,10 @@ function isCanonicalScene(scene, maximumScreens, maximumMedia) {
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// MOUFFETTE SERVER - PROTOCOL V5 IDENTITY BOUNDARY
+// MOUFFETTE SERVER - PROTOCOL V7 IDENTITY BOUNDARY
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 //
-// Protocol v6 authenticates one installation key, derives one addressable
+// Protocol v7 authenticates one installation key, derives one addressable
 // endpoint per application instance, and keeps transport runtime identity
 // separate. Removed wire identifiers are never accepted as aliases.
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -305,9 +305,12 @@ class MouffetteServer {
         this.presenceRevision = 0;
         this.presenceSignature = '';
         this.endpointPresence = new Map();
-        this.connectionGenerationByEndpoint = new Map();
+        // Unique within serverBootId, without retaining one counter per endpoint
+        // ever observed. The authority index contains only admitted transports.
+        this.connectionGenerationSequence = 0;
+        this.currentTransportByEndpoint = new Map();
         this.wss = null;
-        this.uploads = new Map(); // uploadId -> protocol-v6 endpoint/session state
+        this.uploads = new Map(); // uploadId -> protocol-v7 endpoint/session state
         this.uploadTombstones = new Map(); // uploadId -> bounded terminal result
         this.pendingAssetRemovals = new Map(); // removalId -> immutable session-scoped removal
         this.assetRemovalTombstones = new Map(); // removalId -> bounded committed/error result
@@ -532,7 +535,7 @@ class MouffetteServer {
             
             ws.on('close', () => {
                 if (clientInfo.authTimer) clearTimeout(clientInfo.authTimer);
-                if (clientInfo.replaced) {
+                if (clientInfo.replaced || this.clients.get(clientInfo.id) !== clientInfo) {
                     return;
                 }
                 const finalId = clientInfo.id;
@@ -546,12 +549,13 @@ class MouffetteServer {
                     this.unregisterConnectionForEndpoint(clientInfo.endpointId, finalId);
                 }
                 this.clients.delete(finalId);
+                this.forgetCurrentTransport(clientInfo);
                 this.broadcastClientList();
             });
             
             ws.on('error', (error) => {
                 if (clientInfo.authTimer) clearTimeout(clientInfo.authTimer);
-                if (clientInfo.replaced) {
+                if (clientInfo.replaced || this.clients.get(clientInfo.id) !== clientInfo) {
                     return;
                 }
                 const finalId = clientInfo.id;
@@ -565,6 +569,7 @@ class MouffetteServer {
                     this.unregisterConnectionForEndpoint(clientInfo.endpointId, finalId);
                 }
                 this.clients.delete(finalId);
+                this.forgetCurrentTransport(clientInfo);
                 this.broadcastClientList();
             });
             
@@ -1443,21 +1448,21 @@ class MouffetteServer {
             return;
         }
         if (!this.isValidOpaqueId(message.type)) {
-            this.sendError(clientId, 'Invalid protocol v6 message type',
+            this.sendError(clientId, 'Invalid protocol v7 message type',
                 'invalid_message_type');
             return;
         }
         if (REMOVED_MESSAGE_TYPES.has(message.type)
             || (typeof message.type === 'string' && message.type.startsWith('remote_scene_'))) {
             this.sendError(clientId,
-                `Obsolete message type is not supported by protocol v6: ${message.type}`,
+                `Obsolete message type is not supported by protocol v7: ${message.type}`,
                 'removed_message_type');
             return;
         }
         const removedField = findRemovedWireField(message);
         if (removedField) {
             this.sendError(clientId,
-                `Obsolete field is not supported by protocol v6: ${removedField}`,
+                `Obsolete field is not supported by protocol v7: ${removedField}`,
                 'removed_protocol_field');
             return;
         }
@@ -1637,7 +1642,7 @@ class MouffetteServer {
                 this.handleRemoteSessionTeardownAck(clientId, message);
                 break;
             default:
-                this.sendError(clientId, 'Unknown protocol v6 message type', 'unknown_message_type');
+                this.sendError(clientId, 'Unknown protocol v7 message type', 'unknown_message_type');
         }
     }
 
@@ -1668,11 +1673,18 @@ class MouffetteServer {
             this.unregisterConnectionForEndpoint(client.endpointId, client.id);
         }
         this.clients.delete(client.id);
+        this.forgetCurrentTransport(client);
         if (client.ws && (client.ws.readyState === WebSocket.OPEN
             || client.ws.readyState === WebSocket.CONNECTING)) {
             client.ws.close(code, reason);
         }
         return true;
+    }
+
+    forgetCurrentTransport(client) {
+        if (client && this.currentTransportByEndpoint.get(client.endpointId) === client) {
+            this.currentTransportByEndpoint.delete(client.endpointId);
+        }
     }
 
     sweepExpiredClientTransports(now = this.monotonicNow()) {
@@ -1719,9 +1731,18 @@ class MouffetteServer {
             return;
         }
 
-        for (const existing of this.clients.values()) {
-            if (existing === client || !existing.authenticated
-                || existing.endpointId !== verified.endpointId) continue;
+        // Exhaustion must fail before retiring any admitted transport. A new
+        // server boot obtains a fresh namespace; generations must never wrap.
+        if (!Number.isSafeInteger(this.connectionGenerationSequence)
+            || this.connectionGenerationSequence >= Number.MAX_SAFE_INTEGER) {
+            this.sendError(clientId, 'Transport generation capacity exhausted',
+                'connection_generation_exhausted');
+            client.ws.close(1011, 'Transport generation capacity exhausted');
+            return;
+        }
+
+        const existing = this.currentTransportByEndpoint.get(verified.endpointId);
+        if (existing && existing !== client) {
             if (existing.runtimeId !== verified.runtimeId) {
                 if (!this.clientLeaseExpired(existing, monotonicNow)) {
                     this.sendError(clientId, 'This endpoint is already online', 'endpoint_already_connected');
@@ -1729,28 +1750,37 @@ class MouffetteServer {
                     return;
                 }
                 this.expireRemoteSessionsForClient(existing, monotonicNow);
-                for (const session of this.remoteSessions.sessionsForEndpoint(existing.endpointId)) {
-                    const terminated = this.remoteSessions.terminate(session.remoteSessionId, 'runtime_restarted', monotonicNow);
-                    if (terminated.ok && !terminated.replay) this.beginRemoteSessionTeardown(terminated.session);
-                }
                 this.retireClientTransport(
                     existing, false, 1001, 'Superseded after heartbeat lease expiry');
-                continue;
+            } else {
+                const protectedByLease = this.handleRemoteSessionDeparture(
+                    existing, monotonicNow);
+                this.retireClientTransport(
+                    existing, protectedByLease, 1000, 'Connection rebound');
             }
-            const protectedByLease = this.handleRemoteSessionDeparture(
-                existing, monotonicNow);
-            this.retireClientTransport(
-                existing, protectedByLease, 1000, 'Connection rebound');
         }
 
-        const generation = (this.connectionGenerationByEndpoint.get(verified.endpointId) || 0) + 1;
-        this.connectionGenerationByEndpoint.set(verified.endpointId, generation);
+        // A departing socket may already have left the live transport index
+        // while its sessions retain a recovery lease. Reusing its ordinal in
+        // another process must not inherit that process's session authority.
+        for (const session of this.remoteSessions.sessionsForEndpoint(verified.endpointId)) {
+            const runtimeId = session.ownerEndpointId === verified.endpointId
+                ? session.ownerRuntimeId : session.targetRuntimeId;
+            if (runtimeId === verified.runtimeId || TERMINAL_PHASES.has(session.phase)) continue;
+            const terminated = this.remoteSessions.terminate(
+                session.remoteSessionId, 'runtime_restarted', monotonicNow);
+            if (terminated.ok && !terminated.replay) this.beginRemoteSessionTeardown(terminated.session);
+        }
+
+        const generation = ++this.connectionGenerationSequence;
         client.authenticated = true;
         client.installationId = verified.installationId;
         client.endpointId = verified.endpointId;
         client.instanceId = verified.instanceId;
+        client.instanceOrdinal = verified.instanceOrdinal;
         client.runtimeId = verified.runtimeId;
         client.connectionGeneration = generation;
+        this.currentTransportByEndpoint.set(client.endpointId, client);
         if (client.authTimer) clearTimeout(client.authTimer);
         client.authTimer = null;
         client.lastHeartbeatAt = epochNow;
@@ -1766,6 +1796,7 @@ class MouffetteServer {
             installationId: client.installationId,
             endpointId: client.endpointId,
             instanceId: client.instanceId,
+            instanceOrdinal: client.instanceOrdinal,
             runtimeId: client.runtimeId,
             connectionGeneration: generation,
             policy: {
@@ -2346,11 +2377,8 @@ class MouffetteServer {
                 'Only an authenticated session party may close it',
                 'not_a_session_party', message);
         }
-        const latestConnectionGeneration =
-            this.connectionGenerationByEndpoint.get(client.endpointId);
         if (message.connectionGeneration !== client.connectionGeneration
-            || (Number.isSafeInteger(latestConnectionGeneration)
-                && client.connectionGeneration !== latestConnectionGeneration)) {
+            || this.currentTransportByEndpoint.get(client.endpointId) !== client) {
             return this.sendRemoteSessionError(clientId,
                 'Stale connection generation', 'stale_connection_generation', message);
         }
@@ -3073,12 +3101,9 @@ class MouffetteServer {
 
     resolveClientId(targetEndpointId) {
         if (typeof targetEndpointId !== 'string' || !targetEndpointId) return null;
-        for (const [transportKey, clientInfo] of this.clients.entries()) {
-            if (clientInfo.authenticated && clientInfo.endpointId === targetEndpointId) {
-                return transportKey;
-            }
-        }
-        return null;
+        const client = this.currentTransportByEndpoint.get(targetEndpointId);
+        return client && client.authenticated && this.clients.get(client.id) === client
+            ? client.id : null;
     }
 
     getEndpointId(clientId) {
@@ -3128,10 +3153,7 @@ class MouffetteServer {
                 || message.platform.length > 128) {
                 return 'platform must be a non-empty string of at most 128 characters';
             }
-            if (!Number.isSafeInteger(message.instanceOrdinal)
-                || message.instanceOrdinal < 1
-                || (client.instanceId === 'primary' && message.instanceOrdinal !== 1)
-                || (client.instanceId !== 'primary' && message.instanceOrdinal < 2)) {
+            if (message.instanceOrdinal !== client.instanceOrdinal) {
                 return 'instanceOrdinal is inconsistent with the authenticated instance';
             }
             if (!normalizeScreens(message.screens, this.MAX_REMOTE_SCENE_SCREENS))
@@ -3166,7 +3188,6 @@ class MouffetteServer {
 
         client.machineName = message.machineName;
         client.platform = message.platform;
-        client.instanceOrdinal = message.instanceOrdinal;
         client.screens = normalizeScreens(message.screens, this.MAX_REMOTE_SCENE_SCREENS);
         client.systemUI = message.systemUI.map(normalizeUiZone);
         client.volumePercent = message.volumePercent;
@@ -3244,6 +3265,9 @@ class MouffetteServer {
         if (!client || !client.endpointId || !client.machineName) return;
         this.endpointPresence.delete(client.endpointId);
         this.endpointPresence.set(client.endpointId, {
+            installationId: client.installationId,
+            instanceId: client.instanceId, instanceOrdinal: client.instanceOrdinal,
+            runtimeId: client.runtimeId,
             endpointId: client.endpointId, machineName: client.machineName,
             platform: client.platform, lastSeenAt: client.lastHeartbeatAt || null,
             lastContact: client.lastHeartbeatMonotonicAt ?? this.monotonicNow(),
@@ -3259,6 +3283,9 @@ class MouffetteServer {
         for (const client of this.clients.values()) {
             if (!client.authenticated || !client.machineName || !client.endpointId) continue;
             entries.set(client.endpointId, {
+                installationId: client.installationId,
+                instanceId: client.instanceId, instanceOrdinal: client.instanceOrdinal,
+                runtimeId: client.runtimeId,
                 endpointId: client.endpointId, machineName: client.machineName,
                 platform: client.platform, lastSeenAt: client.lastHeartbeatAt || null,
                 lastContact: client.lastHeartbeatMonotonicAt ?? now,
@@ -3280,6 +3307,9 @@ class MouffetteServer {
                     .some(session => !TERMINAL_PHASES.has(session.phase)
                         && now < this.remoteSessions.validUntil(session));
             result.push({
+                installationId: entry.installationId,
+                instanceId: entry.instanceId, instanceOrdinal: entry.instanceOrdinal,
+                runtimeId: entry.runtimeId,
                 endpointId: entry.endpointId, machineName: entry.machineName,
                 platform: entry.platform, lastSeenAt: entry.lastSeenAt,
                 status: usable ? (suspect ? 'Degraded' : 'Available')
@@ -3324,7 +3354,7 @@ class MouffetteServer {
         }
     }
 
-    // Protocol v6 upload state. A transfer is immutable and belongs to one
+    // Protocol v7 upload state. A transfer is immutable and belongs to one
     // RemoteSession generation; authenticated socket identity supplies both
     // parties, so client-provided sender/target aliases are never consulted.
     uploadPayload(upload, type, extra = {}) {
@@ -4244,7 +4274,7 @@ class MouffetteServer {
             .reduce((total, other) => total + other.relayedBytes - other.durableBytes, 0);
         if (outstanding + decoded.length > this.MAX_UPLOAD_UNACKNOWLEDGED_BYTES
             || targetOutstanding + decoded.length > this.MAX_TARGET_BUFFERED_UPLOAD_BYTES) {
-            // Correct v6 senders wait for durable progress at the advertised
+            // Correct v7 senders wait for durable progress at the advertised
             // fixed 1 MiB window. Reject only a sender violating that bound.
             return this.rejectTrackedUpload(upload, 'upload_flow_control_violation');
         }

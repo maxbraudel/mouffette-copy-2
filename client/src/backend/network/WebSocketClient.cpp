@@ -1,6 +1,7 @@
 #include "backend/network/WebSocketClient.h"
 #include "backend/config/AppConfig.h"
 #include "backend/runtime/SuspendInclusiveClock.h"
+#include "backend/runtime/RuntimeProfile.h"
 #include "backend/network/SceneRunCoordinator.h"
 #include "backend/security/DeviceIdentityStore.h"
 #include "MediaFormatContract.h"
@@ -10,6 +11,7 @@
 #include <QUuid>
 #include <QRegularExpression>
 #include <QDateTime>
+#include <QDir>
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -219,13 +221,12 @@ bool isRemovedWireType(const QString& type) {
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 WebSocketClient::WebSocketClient(QObject *parent)
-    : WebSocketClient(QString(), true, parent, {}, QStringLiteral("primary"), 1) {}
+    : WebSocketClient(QString(), true, parent, {}, 1) {}
 
 WebSocketClient::WebSocketClient(const QString& identityFallbackDirectory,
                                  bool preferNativeIdentityVault,
                                  QObject *parent,
                                  SuspendInclusiveClock suspendInclusiveClock,
-                                 QString instanceId,
                                  int instanceOrdinal)
     : QObject(parent)
     , m_identityStore(std::make_unique<DeviceIdentityStore>(
@@ -238,7 +239,7 @@ WebSocketClient::WebSocketClient(const QString& identityFallbackDirectory,
     , m_leaseHealthTimer(new QTimer(this))
     , m_suspendInclusiveClock(std::move(suspendInclusiveClock))
     , m_runtimeId(QUuid::createUuid().toString(QUuid::WithoutBraces))
-    , m_instanceId(std::move(instanceId))
+    , m_instanceId(DeviceIdentityStore::instanceIdForOrdinal(instanceOrdinal))
     , m_instanceOrdinal(instanceOrdinal)
 {
     if (!m_suspendInclusiveClock) {
@@ -277,7 +278,23 @@ WebSocketClient::WebSocketClient(const QString& identityFallbackDirectory,
         m_expiredSessionCloses.remove(sessionId);
     });
 
-    if (!m_identityStore->initialize(&m_identityInitializationError)) {
+    const auto profile = RuntimeProfile::context();
+    const bool preparedInstallation = !profile.installationRootPath.isEmpty()
+        && (identityFallbackDirectory.isEmpty()
+            || QDir::cleanPath(identityFallbackDirectory)
+                == QDir::cleanPath(RuntimeProfile::resolvedInstallationRoot(profile)));
+    const auto loadIdentity = [&] {
+        // Bootstrap alone may create a shared installation key, under its
+        // interprocess lock. Losing it afterwards must not silently rotate
+        // all numbered endpoints during construction of a network client.
+        return preparedInstallation
+            ? m_identityStore->initializeExisting(&m_identityInitializationError)
+            : m_identityStore->initialize(&m_identityInitializationError);
+    };
+    if (m_instanceId.isEmpty()) {
+        m_identityInitializationError = QStringLiteral("Instance ordinal must be between 1 and INT_MAX");
+        qCritical().noquote() << m_identityInitializationError;
+    } else if (!loadIdentity()) {
         qCritical().noquote() << "Device identity initialization failed:"
                               << m_identityInitializationError;
     } else {
@@ -1787,9 +1804,10 @@ bool WebSocketClient::handleAuthChallenge(const QJsonObject& message) {
         return false;
     }
 
-    const QByteArray payload = QStringLiteral("mouffette-v%1\n%2\n%3\n%4\n%5")
+    const QByteArray payload = QStringLiteral("mouffette-v%1\n%2\n%3\n%4\n%5\n%6")
         .arg(ProtocolVersion)
         .arg(serverBootId, nonce, m_runtimeId, m_instanceId)
+        .arg(m_instanceOrdinal)
         .toUtf8();
     QString signatureError;
     const QByteArray signature = m_identityStore->sign(payload, &signatureError);
@@ -1809,6 +1827,7 @@ bool WebSocketClient::handleAuthChallenge(const QJsonObject& message) {
     response["messageId"] = QUuid::createUuid().toString(QUuid::WithoutBraces);
     response["runtimeId"] = m_runtimeId;
     response["instanceId"] = m_instanceId;
+    response["instanceOrdinal"] = m_instanceOrdinal;
     response["installationId"] = m_installationId;
     response["publicKey"] = base64UrlEncode(m_identityStore->publicKeyDer());
     response["signature"] = base64UrlEncode(signature);
@@ -1875,6 +1894,8 @@ bool WebSocketClient::handleWelcome(const QJsonObject& message) {
         || message.value("installationId").toString() != m_installationId
         || message.value("endpointId").toString() != m_endpointId
         || message.value("instanceId").toString() != m_instanceId
+        || boundedInteger(message.value("instanceOrdinal"), 1,
+                          std::numeric_limits<int>::max()) != m_instanceOrdinal
         || message.value("runtimeId").toString() != m_runtimeId) {
         emit fatalError(QStringLiteral("Authenticated welcome does not match this connection"));
         abortConnectionAttempt();
@@ -2229,13 +2250,13 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
         emit connectionError(err);
     }
     else if (type == "endpoint_snapshot_applied") {
-        QJsonObject clientInfoObj = message["snapshot"].toObject();
-        clientInfoObj.insert(QStringLiteral("id"), m_endpointId);
-        clientInfoObj.insert(QStringLiteral("runtimeId"), m_runtimeId);
+        const QJsonObject clientInfoObj = message["snapshot"].toObject();
         ClientInfo clientInfo = ClientInfo::fromJson(clientInfoObj);
         if (clientInfo.installationId() != m_installationId
             || clientInfo.endpointId() != m_endpointId
             || clientInfo.instanceId() != m_instanceId
+            || boundedInteger(clientInfoObj.value("instanceOrdinal"), 1,
+                              std::numeric_limits<int>::max()) != m_instanceOrdinal
             || clientInfo.instanceOrdinal() != m_instanceOrdinal
             || clientInfo.runtimeId() != m_runtimeId) {
             emit fatalError(QStringLiteral("Registration identity does not match authenticated endpoint"));
@@ -2272,15 +2293,51 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
         quint64 revision = 0;
         if (!readPositiveSafeJsonInteger(message.value(QStringLiteral("revision")), &revision)
             || revision <= m_clientListRevision) return;
-        m_clientListRevision = revision;
-        QJsonArray clientsArray = message["clients"].toArray();
+        if (!message.value("clients").isArray()
+            || boundedInteger(message.value("observedAtServerMonotonicMs"),
+                              0, 9007199254740991LL) < 0) return;
+        const QJsonArray clientsArray = message["clients"].toArray();
         QList<ClientInfo> clients;
+        QSet<QString> endpointIds;
         
         for (const auto& clientValue : clientsArray) {
-            ClientInfo client = ClientInfo::fromJson(clientValue.toObject());
+            if (!clientValue.isObject()) return;
+            const QJsonObject entry = clientValue.toObject();
+            const QString installationId = entry.value("installationId").toString();
+            const QString endpointId = entry.value("endpointId").toString();
+            const qint64 ordinal = boundedInteger(entry.value("instanceOrdinal"),
+                                                  1, std::numeric_limits<int>::max());
+            const QString instanceId = ordinal > 0
+                ? DeviceIdentityStore::instanceIdForOrdinal(static_cast<int>(ordinal)) : QString();
+            const QString status = entry.value("status").toString();
+            static const QSet<QString> statuses{
+                QStringLiteral("Available"), QStringLiteral("Degraded"),
+                QStringLiteral("Reconnecting"), QStringLiteral("Disconnected")};
+            static const QSet<QString> reasons{
+                QStringLiteral("enabled"), QStringLiteral("transport_suspect"),
+                QStringLiteral("transport_lost"), QStringLiteral("disabled"),
+                QStringLiteral("offline")};
+            if (base64UrlDecode(installationId).size() != 32
+                || base64UrlEncode(base64UrlDecode(installationId)) != installationId
+                || instanceId.isEmpty() || entry.value("instanceId").toString() != instanceId
+                || endpointId != DeviceIdentityStore::endpointIdForInstallation(installationId, instanceId)
+                || endpointIds.contains(endpointId)
+                || !isCanonicalUuid(entry.value("runtimeId").toString())
+                || !statuses.contains(status)
+                || !entry.value("canAcceptSession").isBool()
+                || (entry.value("canAcceptSession").toBool() && status != QLatin1String("Available"))
+                || !reasons.contains(entry.value("reason").toString())
+                || boundedInteger(entry.value("lastSeenAt"), 0, 9007199254740991LL) < 0) {
+                qWarning() << "Rejected malformed client presence" << "endpointId" << endpointId
+                           << "instanceOrdinal" << entry.value("instanceOrdinal");
+                return;
+            }
+            endpointIds.insert(endpointId);
+            ClientInfo client = ClientInfo::fromJson(entry);
             clients.append(client);
         }
-        
+        // A malformed row must neither erase known peers nor consume its revision.
+        m_clientListRevision = revision;
         emit clientListReceived(clients);
     }
     else if (type == "upload_start" || type == "upload_resume"

@@ -1,6 +1,7 @@
 #include <QtTest>
 
 #include "backend/runtime/RuntimeStorageBootstrap.h"
+#include "backend/runtime/InstallationIdentityBootstrap.h"
 #include "backend/runtime/storage/StorageIO.h"
 #include "backend/runtime/storage/StorageRegistry.h"
 #include "backend/security/DeviceIdentityStore.h"
@@ -16,6 +17,7 @@
 #include <QSettings>
 #include <QTemporaryDir>
 #include <QTextStream>
+#include <QScopeGuard>
 
 using namespace RuntimeStorage;
 
@@ -29,7 +31,11 @@ RuntimeProfileContext temporaryContext(const QString& root,
     context.profileId = QStringLiteral("storage-test");
     context.rootPath = root;
     context.channel = channel;
-    context.persistent = false; // Tests must never access the user's native vault.
+    context.persistent = false;
+    context.useNativeIdentityVault = false;
+    context.installationRootPath = root.endsWith(QStringLiteral("instance-1"))
+        ? QDir(QFileInfo(root).absolutePath()).filePath(QStringLiteral("installation"))
+        : QDir(root).filePath(QStringLiteral("installation"));
     return context;
 }
 
@@ -48,6 +54,8 @@ QByteArray readBytes(const QString& path)
 
 QString componentPath(const RuntimeProfileContext& context, const QString& id)
 {
+    if (id == QLatin1String("identity"))
+        return QDir(RuntimeProfile::resolvedInstallationRoot(context)).filePath(QStringLiteral("storage.json"));
     const QMap<QString, QString> paths{
         {"settings", "settings/settings.ini"}, {"projects", "projects/projects-v2.json"},
         {"history", "notification-history-v1.json"}, {"identity", "identity/storage.json"},
@@ -69,8 +77,9 @@ QMap<QString, QByteArray> snapshots(const RuntimeProfileContext& context)
     QMap<QString, QByteArray> result;
     for (const Component& component : components(context))
         result.insert(component.id, readBytes(componentPath(context, component.id)));
-    DeviceIdentityStore identity(QDir(context.rootPath).filePath("identity"), false,
+    DeviceIdentityStore identity(RuntimeProfile::resolvedInstallationRoot(context), false,
                                  context.identityNamespace());
+    result.insert("identity", readBytes(componentPath(context, "identity")));
     result.insert("key", readBytes(identity.fallbackFilePath()));
     return result;
 }
@@ -138,6 +147,12 @@ private slots:
     void clearProfileRemovesWholeDirectory_data();
     void clearProfileRemovesWholeDirectory();
     void clearProfileRejectsUnsafeRoots();
+    void migratesPrimaryIdentityWithoutRotation();
+    void sharedIdentityCorruptionWithoutMetadataIsNotReset();
+    void sharedIdentityRejectsAncestorLinks();
+    void missingLegacyIdentityWithCheckpointIsNotReplaced_data();
+    void missingLegacyIdentityWithCheckpointIsNotReplaced();
+    void inaccessibleLegacyIdentityIsNotReplaced();
 };
 
 void RuntimeStorageBootstrapTest::freshProfileAndLegacyManifestAreSilent()
@@ -226,8 +241,7 @@ void RuntimeStorageBootstrapTest::componentMismatch_data()
 {
     QTest::addColumn<QString>("component");
     QTest::addColumn<int>("version");
-    for (const QString& id : {QStringLiteral("settings"), QStringLiteral("projects"), QStringLiteral("history"),
-                              QStringLiteral("identity"), QStringLiteral("cache")}) {
+    for (const QString& id : {QStringLiteral("settings"), QStringLiteral("projects"), QStringLiteral("history"), QStringLiteral("cache")}) {
         QTest::newRow(qPrintable(id + "-future")) << id << 99;
         QTest::newRow(qPrintable(id + "-unknown-old")) << id << 0;
     }
@@ -284,12 +298,23 @@ void RuntimeStorageBootstrapTest::corruptComponents()
     QVERIFY(bootstrap.run().succeeded());
     QVERIFY(seedData());
     const auto before = snapshots(context);
-    DeviceIdentityStore identity(QDir(context.rootPath).filePath("identity"), false, context.identityNamespace());
+    DeviceIdentityStore identity(RuntimeProfile::resolvedInstallationRoot(context), false, context.identityNamespace());
     const QString path = component == QLatin1String("key") ? identity.fallbackFilePath() : componentPath(context, component);
     QVERIFY(writeBytes(path, "{invalid"));
     const auto result = bootstrap.run();
+    if (component == QLatin1String("key")) {
+        QVERIFY(!result.succeeded());
+        QCOMPARE(result.code, QStringLiteral("installation_identity_failed"));
+        QCOMPARE(readBytes(path), QByteArray("{invalid"));
+        return;
+    }
     QVERIFY2(result.succeeded(), qPrintable(result.cause));
-    const QString resetComponent = component == QLatin1String("key") ? QStringLiteral("identity") : component;
+    if (component == QLatin1String("identity")) {
+        QVERIFY(!result.hadReset());
+        QCOMPARE(snapshots(context).value("key"), before.value("key"));
+        return;
+    }
+    const QString resetComponent = component;
     QCOMPARE(result.resetCategories, QStringList{resetComponent});
     const auto after = snapshots(context);
     for (auto it = before.cbegin(); it != before.cend(); ++it) {
@@ -338,21 +363,19 @@ void RuntimeStorageBootstrapTest::independentComponentsSurviveLaterFailure()
     QTemporaryDir directory;
     const auto context = temporaryContext(directory.path());
     RuntimeStorageBootstrap bootstrap(context);
-    // An unreadable ancestor is an access error, not a reason to delete it.
-    QVERIFY(writeBytes(QDir(directory.path()).filePath("identity"), "blocked"));
+    QVERIFY(writeBytes(context.installationRootPath, "blocked"));
     const auto failed = bootstrap.run();
     QVERIFY(!failed.succeeded());
-    QCOMPARE(failed.code, QStringLiteral("identity_storage_failed"));
-    QCOMPARE(reportFor(failed, "settings").action, Action::Initialized);
-    QVERIFY(seedData());
-    const auto before = snapshots(context);
-    QVERIFY(QFile::remove(QDir(directory.path()).filePath("identity")));
+    QCOMPARE(failed.code, QStringLiteral("installation_identity_failed"));
+    QVERIFY(!QFileInfo::exists(componentPath(context, "settings")));
+    QVERIFY(QFile::remove(context.installationRootPath));
     const auto retried = bootstrap.run();
     QVERIFY2(retried.succeeded(), qPrintable(retried.cause));
-    for (const char* id : {"settings", "projects", "history"}) {
-        QCOMPARE(reportFor(retried, id).action, Action::Preserved);
-        QCOMPARE(readBytes(componentPath(context, id)), before.value(id));
-    }
+    QVERIFY(seedData());
+    const auto before = snapshots(context);
+    const auto next = bootstrap.run();
+    QVERIFY(next.succeeded());
+    QCOMPARE(snapshots(context), before);
 }
 
 void RuntimeStorageBootstrapTest::migrationChainResumesAfterIoFailure()
@@ -548,6 +571,7 @@ void RuntimeStorageBootstrapTest::clearProfileRemovesWholeDirectory()
     QVERIFY(QFile::link(external, QDir(active.rootPath).filePath("identity")));
     QVERIFY(QFile::link(external, QDir(active.rootPath).filePath("cache/Uploads/external")));
 #endif
+    const QByteArray installationKey = snapshots(active).value("key");
     const auto removed = clearProfileStorage(active);
     QVERIFY2(removed.succeeded(), qPrintable(removed.reason));
     QVERIFY(!QFileInfo::exists(active.rootPath));
@@ -557,7 +581,9 @@ void RuntimeStorageBootstrapTest::clearProfileRemovesWholeDirectory()
     QVERIFY(!QFileInfo::exists(active.rootPath));
     const auto nextBoot = RuntimeStorageBootstrap(active).run();
     QVERIFY(nextBoot.succeeded());
-    for (const Report& report : nextBoot.components) QCOMPARE(report.action, Action::Initialized);
+    for (const Report& report : nextBoot.components)
+        QCOMPARE(report.action, report.component == QLatin1String("identity") ? Action::Preserved : Action::Initialized);
+    QCOMPARE(snapshots(active).value("key"), installationKey);
 }
 
 void RuntimeStorageBootstrapTest::clearProfileRejectsUnsafeRoots()
@@ -573,6 +599,150 @@ void RuntimeStorageBootstrapTest::clearProfileRejectsUnsafeRoots()
     QVERIFY(QFile::link(external, link));
     QVERIFY(!clearProfileStorage(temporaryContext(link)).succeeded());
     QCOMPARE(readBytes(QDir(external).filePath("sentinel")), QByteArray("keep"));
+#endif
+}
+
+void RuntimeStorageBootstrapTest::migratesPrimaryIdentityWithoutRotation()
+{
+    QTemporaryDir directory;
+    auto primary = temporaryContext(directory.filePath("primary"));
+    primary.ordinal = 1;
+    primary.instanceId = QStringLiteral("primary");
+    primary.installationRootPath = directory.filePath("installation");
+    primary.legacyPrimaryRootPath = primary.rootPath;
+    DeviceIdentityStore legacy(QDir(primary.rootPath).filePath("identity"), false,
+                               primary.identityNamespace());
+    QString error;
+    QVERIFY2(legacy.initialize(&error), qPrintable(error));
+    const QString installation = legacy.installationId();
+    const QString endpoint = DeviceIdentityStore::endpointIdForInstallation(installation, "primary");
+    const QByteArray originalKey = readBytes(legacy.fallbackFilePath());
+
+    // A secondary can be the first launcher after the upgrade. It adopts #1's
+    // key before touching its own disposable profile.
+    auto secondary = primary;
+    secondary.rootPath = directory.filePath("secondary");
+    secondary.ordinal = 2;
+    secondary.instanceId = QStringLiteral("instance-2");
+    secondary.profileId = QStringLiteral("temporary-uuid");
+    QVERIFY2(RuntimeStorageBootstrap(secondary).run().succeeded(), qPrintable(error));
+    DeviceIdentityStore shared(primary.installationRootPath, false, primary.identityNamespace());
+    QVERIFY(shared.initialize(&error));
+    QCOMPARE(shared.installationId(), installation);
+    QCOMPARE(readBytes(shared.fallbackFilePath()), originalKey);
+    QVERIFY(RuntimeStorageBootstrap(primary).run().succeeded());
+    QCOMPARE(DeviceIdentityStore::endpointIdForInstallation(shared.installationId(), "primary"), endpoint);
+    QVERIFY(clearProfileStorage(primary).succeeded());
+    QVERIFY(!QFileInfo::exists(primary.rootPath));
+    QVERIFY(QFileInfo::exists(secondary.rootPath));
+    QCOMPARE(readBytes(shared.fallbackFilePath()), originalKey);
+    QVERIFY(RuntimeStorageBootstrap(primary).run().succeeded());
+    QCOMPARE(readBytes(shared.fallbackFilePath()), originalKey);
+    QVERIFY(clearProfileStorage(secondary).succeeded());
+    QCOMPARE(readBytes(shared.fallbackFilePath()), originalKey);
+}
+
+void RuntimeStorageBootstrapTest::sharedIdentityCorruptionWithoutMetadataIsNotReset()
+{
+    QTemporaryDir directory;
+    auto context = temporaryContext(directory.filePath("runtime"));
+    context.installationRootPath = directory.filePath("installation");
+    QVERIFY(RuntimeStorageBootstrap(context).run().succeeded());
+    DeviceIdentityStore identity(context.installationRootPath, false, context.identityNamespace());
+    QVERIFY(QFile::remove(componentPath(context, "identity")));
+    QVERIFY(writeBytes(identity.fallbackFilePath(), "corrupt installation key"));
+    const auto result = RuntimeStorageBootstrap(context).run();
+    QVERIFY(!result.succeeded());
+    QCOMPARE(result.code, QStringLiteral("installation_identity_failed"));
+    QCOMPARE(readBytes(identity.fallbackFilePath()), QByteArray("corrupt installation key"));
+    QVERIFY(!QFileInfo::exists(componentPath(context, "identity")));
+}
+
+void RuntimeStorageBootstrapTest::sharedIdentityRejectsAncestorLinks()
+{
+#ifdef Q_OS_WIN
+    QSKIP("Windows QFile::link creates shortcuts, not directory symlinks.");
+#else
+    QTemporaryDir directory;
+    const QString external = directory.filePath("external");
+    QVERIFY(QDir().mkpath(external));
+    const QString link = directory.filePath("link");
+    QVERIFY(QFile::link(external, link));
+    auto context = temporaryContext(directory.filePath("runtime"));
+    context.installationRootPath = QDir(link).filePath("installation");
+    QString error;
+    QVERIFY(!InstallationIdentityBootstrap::prepare(context, &error));
+    QVERIFY(!QFileInfo::exists(QDir(external).filePath("installation")));
+    context.installationRootPath = directory.filePath("installation");
+    context.legacyPrimaryRootPath = QDir(link).filePath("old-primary");
+    QVERIFY(!InstallationIdentityBootstrap::prepare(context, &error));
+    DeviceIdentityStore identity(context.installationRootPath, false, context.identityNamespace());
+    QVERIFY(!QFileInfo::exists(identity.fallbackFilePath()));
+#endif
+}
+
+void RuntimeStorageBootstrapTest::missingLegacyIdentityWithCheckpointIsNotReplaced_data()
+{
+    QTest::addColumn<QByteArray>("checkpoint");
+    QTest::newRow("ready") << QByteArray(R"({"schemaVersion":1,"phase":"ready"})");
+    QTest::newRow("corrupt") << QByteArray("{invalid checkpoint");
+}
+
+void RuntimeStorageBootstrapTest::missingLegacyIdentityWithCheckpointIsNotReplaced()
+{
+    QFETCH(QByteArray, checkpoint);
+    QTemporaryDir directory;
+    auto context = temporaryContext(directory.filePath("secondary"));
+    context.installationRootPath = directory.filePath("installation");
+    context.legacyPrimaryRootPath = directory.filePath("primary");
+    const QString legacyDirectory = QDir(context.legacyPrimaryRootPath).filePath("identity");
+    const QString legacyCheckpoint = QDir(legacyDirectory).filePath("storage.json");
+    QVERIFY(writeBytes(legacyCheckpoint, checkpoint));
+
+    const auto result = RuntimeStorageBootstrap(context).run();
+    QVERIFY(!result.succeeded());
+    QCOMPARE(result.code, QStringLiteral("installation_identity_failed"));
+    QCOMPARE(readBytes(legacyCheckpoint), checkpoint);
+    DeviceIdentityStore shared(context.installationRootPath, false, context.identityNamespace());
+    DeviceIdentityStore legacy(legacyDirectory, false, context.identityNamespace());
+    QVERIFY(!QFileInfo::exists(shared.fallbackFilePath()));
+    QVERIFY(!QFileInfo::exists(legacy.fallbackFilePath()));
+    QVERIFY(!QFileInfo::exists(componentPath(context, "identity")));
+}
+
+void RuntimeStorageBootstrapTest::inaccessibleLegacyIdentityIsNotReplaced()
+{
+#ifdef Q_OS_WIN
+    QSKIP("This test requires POSIX directory permissions.");
+#else
+    QTemporaryDir directory;
+    auto context = temporaryContext(directory.filePath("secondary"));
+    context.installationRootPath = directory.filePath("installation");
+    context.legacyPrimaryRootPath = directory.filePath("primary");
+    const QString legacyDirectory = QDir(context.legacyPrimaryRootPath).filePath("identity");
+    const QString checkpoint = QDir(legacyDirectory).filePath("storage.json");
+    const QByteArray original(R"({"schemaVersion":1,"phase":"ready"})");
+    QVERIFY(writeBytes(checkpoint, original));
+    const auto permissions = QFile::permissions(legacyDirectory);
+    const auto restore = qScopeGuard([legacyDirectory, permissions] {
+        QFile::setPermissions(legacyDirectory, permissions);
+    });
+    // Stat of the directory still succeeds, while looking up its checkpoint
+    // or key yields EACCES. It must not be mistaken for a fresh installation.
+    QVERIFY(QFile::setPermissions(legacyDirectory, QFileDevice::ReadOwner | QFileDevice::WriteOwner));
+    QFile probe(checkpoint);
+    if (probe.open(QIODevice::ReadOnly)) {
+        probe.close();
+        QSKIP("The current user can bypass directory permissions.");
+    }
+    const auto result = RuntimeStorageBootstrap(context).run();
+    QVERIFY(!result.succeeded());
+    QCOMPARE(result.code, QStringLiteral("installation_identity_failed"));
+    DeviceIdentityStore shared(context.installationRootPath, false, context.identityNamespace());
+    QVERIFY(!QFileInfo::exists(shared.fallbackFilePath()));
+    QVERIFY(!QFileInfo::exists(componentPath(context, "identity")));
+    QVERIFY(QFile::setPermissions(legacyDirectory, permissions));
+    QCOMPARE(readBytes(checkpoint), original);
 #endif
 }
 

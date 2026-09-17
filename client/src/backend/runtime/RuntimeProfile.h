@@ -14,10 +14,13 @@ struct RuntimeProfileContext {
     QString instanceId = QStringLiteral("primary");
     QString profileId = QStringLiteral("instance-1");
     QString rootPath;
+    QString installationRootPath;
+    QString legacyPrimaryRootPath;
     QString channel = QStringLiteral(MOUFFETTE_BUILD_CHANNEL);
     bool persistent = true;
+    bool useNativeIdentityVault = false;
 
-    QString identityNamespace() const { return channel + QLatin1Char(':') + profileId; }
+    QString identityNamespace() const { return channel + QStringLiteral(":instance-1"); }
 
     bool isSecondary() const { return ordinal > 1; }
     bool isTemporary() const { return !persistent; }
@@ -37,6 +40,8 @@ public:
 
     static QString profileRoot();
     static QString persistentRoot(const QString& base, const QString& channel);
+    static QString persistentInstallationRoot(const QString& base, const QString& channel);
+    static QString resolvedInstallationRoot(const RuntimeProfileContext& context);
     static QString appDataLocation();
     static QString cacheLocation();
     static QString installationDataLocation();

@@ -1,9 +1,13 @@
-# Connection and session recovery (protocol v6)
+# Connection and session recovery (protocol v7)
 
-Deploy the v6 server and clients together. Authentication is versioned; an
+Deploy the v7 server and clients together. Authentication is versioned; an
 incompatible client receives a terminal compatibility error instead of retrying.
 A process/server restart ends old sessions. Retained selection can create a new
 empty session, but recovery never issues PLAY or COMMIT.
+
+The v7 identity contract keeps one installation key per user/channel and gives
+each local instance a stable numbered endpoint. See [multiple instances](multi-instance-identity.md)
+for migration, profile lifetime and authentication details.
 
 ## Connection authority and user intent
 
@@ -110,6 +114,15 @@ is an independent admission rule with an explicit conflict response.
 Presence is revisioned and includes the latest confirmed observation, ability to
 accept sessions and an unavailability reason. The server rechecks both endpoints
 on OPEN, including the Disable/drain fence.
+
+The client list shows an endpoint only when it has a retained local Project, or
+when the local connection is Connected and the endpoint can accept a session.
+Discovery-only rows disappear on degradation, recovery or disconnection and
+return automatically when available again. A click or provisional workspace
+does not retain an offline row; a successfully created Project does, even empty,
+until deletion or expiry. Server-retained offline presence stays available to
+reconciliation internally. Hiding its row does not close a session, clear
+selection or change the scene recovery budget.
 
 ## Disk work and cleanup
 

@@ -315,7 +315,7 @@ void ApplicationController::openOngoingScene(const QString& sceneRunId)
     const ClientInfo peer = m_clientsModel->client(activity.peerEndpointId);
     const QString peerName = peer.getMachineName().trimmed().isEmpty()
         ? QStringLiteral("Device %1").arg(activity.peerEndpointId.left(8))
-        : peer.getMachineName().trimmed();
+        : peer.getInstanceDisplayName();
     const qint64 elapsedSeconds = qMax<qint64>(0,
         QDateTime::currentMSecsSinceEpoch() - activity.startedAtEpochMs) / 1000;
     const QString duration = elapsedSeconds >= 3600

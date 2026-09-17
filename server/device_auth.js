@@ -2,9 +2,9 @@
 
 const crypto = require('node:crypto');
 
-const PROTOCOL_VERSION = 6;
+const PROTOCOL_VERSION = 7;
 const RUNTIME_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const INSTANCE_ID_PATTERN = /^(?:primary|[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/i;
+const MAX_INSTANCE_ORDINAL = 2147483647;
 const BASE64URL_PATTERN = /^[A-Za-z0-9_-]+$/;
 
 function base64url(buffer) {
@@ -27,9 +27,15 @@ function endpointIdForInstallation(installationId, instanceId) {
         .digest());
 }
 
-function challengePayload({ serverBootId, nonce, runtimeId, instanceId }) {
+function instanceIdForOrdinal(instanceOrdinal) {
+    if (!Number.isInteger(instanceOrdinal) || instanceOrdinal < 1
+        || instanceOrdinal > MAX_INSTANCE_ORDINAL) return null;
+    return instanceOrdinal === 1 ? 'primary' : `instance-${instanceOrdinal}`;
+}
+
+function challengePayload({ serverBootId, nonce, runtimeId, instanceId, instanceOrdinal }) {
     return Buffer.from(
-        `mouffette-v${PROTOCOL_VERSION}\n${serverBootId}\n${nonce}\n${runtimeId}\n${instanceId}`,
+        `mouffette-v${PROTOCOL_VERSION}\n${serverBootId}\n${nonce}\n${runtimeId}\n${instanceId}\n${instanceOrdinal}`,
         'utf8');
 }
 
@@ -59,8 +65,9 @@ function verifyAuthResponse(challenge, response, now, challengeTtlMs) {
         || !RUNTIME_ID_PATTERN.test(response.runtimeId)) {
         return { ok: false, error: 'invalid_runtime_id' };
     }
-    if (typeof response.instanceId !== 'string'
-        || !INSTANCE_ID_PATTERN.test(response.instanceId)) {
+    const canonicalInstanceId = instanceIdForOrdinal(response.instanceOrdinal);
+    if (!canonicalInstanceId) return { ok: false, error: 'invalid_instance_ordinal' };
+    if (response.instanceId !== canonicalInstanceId) {
         return { ok: false, error: 'invalid_instance_id' };
     }
     try {
@@ -82,7 +89,8 @@ function verifyAuthResponse(challenge, response, now, challengeTtlMs) {
         const valid = crypto.verify(null,
             challengePayload({ ...challenge,
                 runtimeId: response.runtimeId,
-                instanceId: response.instanceId }),
+                instanceId: response.instanceId,
+                instanceOrdinal: response.instanceOrdinal }),
             publicKey,
             signature);
         if (!valid) return { ok: false, error: 'invalid_identity_signature' };
@@ -97,6 +105,7 @@ function verifyAuthResponse(challenge, response, now, challengeTtlMs) {
             installationId,
             endpointId,
             instanceId: response.instanceId,
+            instanceOrdinal: response.instanceOrdinal,
             runtimeId: response.runtimeId,
             publicKeyDer,
         };
@@ -107,6 +116,8 @@ function verifyAuthResponse(challenge, response, now, challengeTtlMs) {
 
 module.exports = {
     PROTOCOL_VERSION,
+    MAX_INSTANCE_ORDINAL,
+    instanceIdForOrdinal,
     challengePayload,
     createChallenge,
     installationIdForPublicKey,

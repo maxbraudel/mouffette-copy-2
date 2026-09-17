@@ -45,7 +45,7 @@ QString RuntimeProfile::cacheLocation()
 
 QString RuntimeProfile::installationDataLocation()
 {
-    return identityLocation();
+    return resolvedInstallationRoot(g_context);
 }
 
 QString RuntimeProfile::profileRoot()
@@ -64,6 +64,26 @@ QString RuntimeProfile::persistentRoot(const QString& base, const QString& chann
     return QDir(base).filePath(QStringLiteral("runtimes/%1/instance-1").arg(channel));
 }
 
+QString RuntimeProfile::persistentInstallationRoot(const QString& base, const QString& channel)
+{
+    if (channel != QLatin1String("development") && channel != QLatin1String("production"))
+        return {};
+    return QDir(base).filePath(QStringLiteral("installations/%1").arg(channel));
+}
+
+QString RuntimeProfile::resolvedInstallationRoot(const RuntimeProfileContext& context)
+{
+    if (!context.installationRootPath.isEmpty())
+        return QDir::cleanPath(context.installationRootPath);
+    // Embedded/test contexts retain all writes under their explicit root.
+    // Real application profiles always provide a separate installation root.
+    if (!context.rootPath.isEmpty())
+        return QDir(context.rootPath).filePath(QStringLiteral("installation"));
+    const QString platform = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    return persistentInstallationRoot(platform.isEmpty()
+        ? persistentFallback(QStringLiteral("data")) : platform, context.channel);
+}
+
 QString RuntimeProfile::settingsFilePath()
 {
     return QDir(profileRoot()).filePath(QStringLiteral("settings/settings.ini"));
@@ -76,7 +96,7 @@ QString RuntimeProfile::projectsFilePath()
 
 QString RuntimeProfile::identityLocation()
 {
-    return QDir(profileRoot()).filePath(QStringLiteral("identity"));
+    return installationDataLocation();
 }
 
 QString RuntimeProfile::historyFilePath()

@@ -48,7 +48,7 @@ function trackedSocket(url) {
 }
 
 function assertEnvelope(message, context) {
-    assert.equal(message.protocolVersion, 6);
+    assert.equal(message.protocolVersion, 7);
     assert.equal(message.serverBootId, context.serverBootId);
     assert.equal(message.connectionGeneration, context.connectionGeneration);
     assert.match(message.messageId,
@@ -72,19 +72,21 @@ async function connectDevice(url, machineName) {
     const publicKey = keyPair.publicKey.export({ type: 'spki', format: 'der' });
     const runtimeId = crypto.randomUUID();
     const instanceId = 'primary';
+    const instanceOrdinal = 1;
     const installationId = installationIdForPublicKey(publicKey);
     const endpointId = endpointIdForInstallation(installationId, instanceId);
     peer.ws.send(JSON.stringify({
         type: 'auth_response',
-        protocolVersion: 6,
+        protocolVersion: 7,
         serverBootId: challenge.serverBootId,
         messageId: crypto.randomUUID(),
         runtimeId,
         instanceId,
+        instanceOrdinal,
         installationId,
         publicKey: publicKey.toString('base64url'),
         signature: crypto.sign(null,
-            challengePayload({ ...challenge, runtimeId, instanceId }), keyPair.privateKey)
+            challengePayload({ ...challenge, runtimeId, instanceId, instanceOrdinal }), keyPair.privateKey)
             .toString('base64url'),
     }));
     const welcome = await peer.next(message => message.type === 'welcome');
@@ -96,7 +98,7 @@ async function connectDevice(url, machineName) {
     };
     peer.send = (type, body = {}) => peer.ws.send(JSON.stringify({
         type,
-        protocolVersion: 6,
+        protocolVersion: 7,
         serverBootId: peer.context.serverBootId,
         connectionGeneration: peer.context.connectionGeneration,
         messageId: crypto.randomUUID(),
@@ -176,7 +178,7 @@ async function connectDevice(url, machineName) {
             mediaIds: ['media-integration-1'],
         };
         const uploadEnvelope = body => ({
-            protocolVersion: 6,
+            protocolVersion: 7,
             serverBootId: owner.context.serverBootId,
             messageId: crypto.randomUUID(),
             connectionGeneration: owner.context.connectionGeneration,
@@ -377,7 +379,7 @@ async function connectDevice(url, machineName) {
             const output = peer.ws === owner.ws ? owner : target;
             // A representative post-auth message proves centralized envelopes.
             const clientList = await output.next(message => message.type === 'client_list');
-            assert.equal(clientList.protocolVersion, 6);
+            assert.equal(clientList.protocolVersion, 7);
             assert.equal(clientList.serverBootId, server.serverBootId);
             assert.equal(clientList.connectionGeneration,
                 output.context.connectionGeneration);
@@ -391,7 +393,7 @@ async function connectDevice(url, machineName) {
         await new Promise(resolve => server.wss.close(resolve));
     }
 })().then(() => {
-    console.log('upload transport v6 integration tests passed');
+    console.log('upload transport v7 integration tests passed');
 }).catch(error => {
     console.error(error);
     process.exitCode = 1;

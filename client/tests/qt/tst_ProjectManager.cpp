@@ -21,7 +21,7 @@ ClientInfo client(const QString& endpointId,
     result.setEndpointId(endpointId);
     result.setInstanceId(instanceOrdinal == 1
         ? QStringLiteral("primary")
-        : QStringLiteral("11111111-2222-4333-8444-555555555555"));
+        : QStringLiteral("instance-%1").arg(instanceOrdinal));
     result.setInstanceOrdinal(instanceOrdinal);
     result.setVolumePercent(volume);
     ScreenInfo screen(7, 1920, 1080, -120, 0, true);
@@ -61,6 +61,145 @@ class ProjectManagerTest final : public QObject {
     Q_OBJECT
 
 private slots:
+    void unavailableDiscoveryRequiresAnExistingProject_data()
+    {
+        QTest::addColumn<QString>("status");
+        QTest::newRow("degraded") << QStringLiteral("Degraded");
+        QTest::newRow("reconnecting") << QStringLiteral("Reconnecting");
+        QTest::newRow("disconnected") << QStringLiteral("Disconnected");
+    }
+
+    void unavailableDiscoveryRequiresAnExistingProject()
+    {
+        QFETCH(QString, status);
+        QTemporaryDir directory;
+        ProjectStore store(directory.filePath("projects.json"));
+        ProjectManager manager(&store);
+        manager.stopAutomaticTimersForTesting();
+        ClientInfo first = client("endpoint-1", "transport-1", "Same host", 50, 1);
+        ClientInfo second = client("endpoint-2", "transport-2", "Same host", 70, 2);
+        QCOMPARE(manager.mergeDiscoveredClients({first, second}, 100).size(), 2);
+        first.setStatus(status);
+        first.setAvailabilityStatus(status);
+        first.setCanAcceptSession(false);
+        first.setOnline(status != QLatin1String("Disconnected"));
+        auto entries = manager.mergeDiscoveredClients({first, second}, 101);
+        QCOMPARE(entries.size(), 1);
+        QCOMPARE(entries.first().endpointId, second.endpointId());
+        QCOMPARE(manager.projectCount(), 0);
+
+        // Even an empty project retains its authenticated screen snapshot.
+        const QList<ScreenInfo> screens = first.getScreens();
+        QVERIFY(!manager.createProjectFromSnapshot(
+            ProjectTargetReference::fromClientInfo(first), screens, 63, 1, 100, 100).isEmpty());
+        first.setScreens({});
+        first.setVolumePercent(-1);
+        entries = manager.mergeDiscoveredClients({first, second}, 102);
+        QCOMPARE(entries.size(), 2);
+        QVERIFY(entries.first().hasProject);
+        QCOMPARE(entries.first().client.availabilityBadgeText(), status);
+        QCOMPARE(entries.first().client.getScreens().size(), screens.size());
+        QCOMPARE(entries.first().client.getVolumePercent(), 63);
+
+        // Local loss hides discovery-only rows but never discards a project.
+        entries = manager.mergeDiscoveredClients({first, second}, 103, false);
+        QCOMPARE(entries.size(), 1);
+        QCOMPARE(entries.first().endpointId, first.endpointId());
+        QVERIFY(manager.deleteProject(first.endpointId()));
+        QVERIFY(manager.mergeDiscoveredClients({first, second}, 104, false).isEmpty());
+        QCOMPARE(manager.mergeDiscoveredClients({first, second}, 105).size(), 1);
+
+        first.setOnline(true);
+        first.setCanAcceptSession(true);
+        // Session presentation is not the discovery admission criterion.
+        first.setAvailabilityStatus(QStringLiteral("Connecting"));
+        entries = manager.mergeDiscoveredClients({first, second}, 106);
+        QCOMPARE(entries.size(), 2);
+        QCOMPARE(manager.projectCount(), 0);
+    }
+
+    void expiredProjectCannotKeepRetainedOfflinePresenceVisible()
+    {
+        QTemporaryDir directory;
+        ProjectStore store(directory.filePath("projects.json"));
+        ProjectManager::TimingPolicy timing;
+        timing.projectHiddenRetentionMs = 100;
+        timing.projectMediaHiddenTimeoutMs = 50;
+        ProjectManager manager(&store, timing);
+        manager.stopAutomaticTimersForTesting();
+        ClientInfo peer = client("endpoint-1", "transport", "Host");
+        QVERIFY(!createProject(manager, ProjectTargetReference::fromClientInfo(peer),
+                               ProjectLifecycleState::Hidden, 100).isEmpty());
+        peer.setOnline(false);
+        peer.setStatus(QStringLiteral("Disconnected"));
+        peer.setAvailabilityStatus(QStringLiteral("Disconnected"));
+        QCOMPARE(manager.mergeDiscoveredClients({peer}, 199).size(), 1);
+        manager.processDeadlines(200);
+        QCOMPARE(manager.projectCount(), 0);
+        QVERIFY(manager.mergeDiscoveredClients({peer}, 200).isEmpty());
+    }
+
+    void legacyProjectIdentityRemainsUnknownUntilPresenceThenSurvivesRestart()
+    {
+        const QJsonObject legacyJson{{"endpointId", "device-secondary"},
+            {"machineName", "Studio"}, {"platform", "Linux"}};
+        ProjectTargetReference legacy;
+        QVERIFY(ProjectTargetReference::fromJson(legacyJson, &legacy));
+        QCOMPARE(legacy.instanceOrdinal, 0);
+        QCOMPARE(legacy.toClientInfo(false).getInstanceDisplayName(), QStringLiteral("Studio"));
+        QCOMPARE(legacy.toJson(), legacyJson);
+
+        QTemporaryDir directory;
+        ProjectStore store(directory.filePath(QStringLiteral("projects.json")));
+        ProjectManager writer(&store);
+        writer.stopAutomaticTimersForTesting();
+        QVERIFY(!createProject(writer, legacy, ProjectLifecycleState::Hidden, 1000).isEmpty());
+        ClientInfo discovered = client("device-secondary", "connection-1", "Studio", 50, 3);
+        discovered.setRuntimeId(QStringLiteral("123e4567-e89b-42d3-a456-426614174000"));
+        const auto entries = writer.mergeDiscoveredClients({discovered}, 1001);
+        QCOMPARE(entries.first().client.getInstanceDisplayName(), QStringLiteral("Studio (3)"));
+        QVERIFY(writer.flush());
+        const auto saved = writer.projectForTarget("device-secondary")->target.toJson();
+        QCOMPARE(saved.value("instanceOrdinal").toInt(), 3);
+        QCOMPARE(saved.value("instanceId").toString(), QStringLiteral("instance-3"));
+        QVERIFY(!saved.contains("runtimeId"));
+
+        ProjectManager reader(&store);
+        reader.stopAutomaticTimersForTesting();
+        reader.setNowProviderForTesting([] { return qint64(1002); });
+        QVERIFY(reader.load());
+        auto offline = reader.mergeDiscoveredClients({}, 1002);
+        QCOMPARE(offline.size(), 1);
+        QVERIFY(!offline.first().client.isOnline());
+        QVERIFY(offline.first().client.runtimeId().isEmpty());
+        QCOMPARE(offline.first().client.getInstanceDisplayName(), QStringLiteral("Studio (3)"));
+        QCOMPARE(offline.first().client.installationId(), discovered.installationId());
+
+        ClientInfo metadataOnly("device-secondary", "Renamed", "Linux");
+        const auto refreshed = reader.mergeDiscoveredClients({metadataOnly}, 1003);
+        QCOMPARE(refreshed.first().client.getInstanceDisplayName(), QStringLiteral("Renamed (3)"));
+        offline = reader.mergeDiscoveredClients({}, 1004);
+        QCOMPARE(offline.first().client.instanceId(), QStringLiteral("instance-3"));
+    }
+
+    void malformedOptionalIdentityDoesNotDiscardLegacyProject()
+    {
+        QJsonObject json{{"endpointId", "device"}, {"machineName", "Studio"},
+            {"platform", "Linux"}, {"installationId", "installation"},
+            {"instanceId", "instance-3"}, {"instanceOrdinal", 3.5}};
+        ProjectTargetReference target;
+        QVERIFY(ProjectTargetReference::fromJson(json, &target));
+        QCOMPARE(target.instanceOrdinal, 0);
+        QCOMPARE(target.toClientInfo(false).getInstanceDisplayName(), QStringLiteral("Studio"));
+        json.insert("instanceOrdinal", 2147483648.0);
+        QVERIFY(ProjectTargetReference::fromJson(json, &target));
+        QCOMPARE(target.instanceOrdinal, 0);
+        json.insert("instanceOrdinal", 3);
+        json.insert("instanceId", "instance-03");
+        QVERIFY(ProjectTargetReference::fromJson(json, &target));
+        QCOMPARE(target.instanceOrdinal, 0);
+    }
+
     void initTestCase()
     {
         qRegisterMetaType<ProjectRecord>();
@@ -199,7 +338,10 @@ private slots:
                                durableTargetKeys.cend()),
                  QSet<QString>({QStringLiteral("endpointId"),
                                 QStringLiteral("machineName"),
-                                QStringLiteral("platform")}));
+                                QStringLiteral("platform"),
+                                QStringLiteral("installationId"),
+                                QStringLiteral("instanceId"),
+                                QStringLiteral("instanceOrdinal")}));
         QVERIFY(!durableJson.contains(QStringLiteral("status")));
         QVERIFY(!durableJson.contains(QStringLiteral("volumePercent")));
         QVERIFY(!durableJson.contains(QStringLiteral("lastSeen")));

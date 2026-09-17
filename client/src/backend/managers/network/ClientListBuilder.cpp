@@ -6,7 +6,8 @@
 
 QList<ClientInfo> ClientListBuilder::buildDisplayClientList(
     ApplicationRuntime* mainWindow,
-    const QList<ClientInfo>& connectedClients)
+    const QList<ClientInfo>& connectedClients,
+    bool localDiscoveryUsable)
 {
     if (!mainWindow) return QList<ClientInfo>();
     
@@ -24,10 +25,14 @@ QList<ClientInfo> ClientListBuilder::buildDisplayClientList(
             qWarning() << "ClientListBuilder: ignored a client without endpointId";
             continue;
         }
+        if (identitiesSeen.contains(targetEndpointId)) continue;
         client.setEndpointId(targetEndpointId);
+        bool hasProject = false;
 
         if (ApplicationRuntime::ClientWorkspace* workspace =
                 mainWindow->findWorkspace(targetEndpointId)) {
+            hasProject = !workspace->projectId.isEmpty();
+            client.setProjectId(workspace->projectId);
             workspace->lastClientInfo = client;
             workspace->lastClientInfo.setEndpointId(targetEndpointId);
             workspace->lastClientInfo.setFromMemory(true);
@@ -37,7 +42,7 @@ QList<ClientInfo> ClientListBuilder::buildDisplayClientList(
             if (workspace->canvas) {
                 workspace->canvas->setRemoteSceneTarget(
                     workspace->targetEndpointId,
-                    workspace->lastClientInfo.getMachineName()
+                    workspace->lastClientInfo.getInstanceDisplayName()
                 );
             }
             
@@ -47,6 +52,8 @@ QList<ClientInfo> ClientListBuilder::buildDisplayClientList(
         }
 
         identitiesSeen.insert(targetEndpointId);
+        if (!hasProject && (!localDiscoveryUsable || !client.canAcceptSession())) continue;
+        client.setHasProject(hasProject);
         result.append(client);
     }
 
@@ -63,6 +70,8 @@ QList<ClientInfo> ClientListBuilder::buildDisplayClientList(
             info.setEndpointId(workspace->targetEndpointId);
             info.setOnline(false);
             info.setFromMemory(true);
+            info.setHasProject(true);
+            info.setProjectId(workspace->projectId);
             result.append(info);
         }
     }

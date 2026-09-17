@@ -75,7 +75,8 @@ private slots:
                 send({{"type", "welcome"},
                     {"connectionId", QUuid::createUuid().toString(QUuid::WithoutBraces)},
                     {"installationId", message.value("installationId")}, {"endpointId", owner},
-                    {"instanceId", message.value("instanceId")}, {"runtimeId", message.value("runtimeId")},
+                    {"instanceId", message.value("instanceId")},
+                    {"instanceOrdinal", message.value("instanceOrdinal")}, {"runtimeId", message.value("runtimeId")},
                     {"connectionGeneration", 1}, {"serverMonotonicMs", 0},
                     {"policy", QJsonObject{{"policyVersion", 1}, {"heartbeatIntervalMs", 750},
                         {"leaseTimeoutMs", 3000}, {"transportSuspectAfterMs", 1500},
@@ -319,6 +320,7 @@ private slots:
                         {"installationId", message.value("installationId")},
                         {"endpointId", ownerId},
                         {"instanceId", message.value("instanceId")},
+                        {"instanceOrdinal", message.value("instanceOrdinal")},
                         {"runtimeId", message.value("runtimeId")},
                         {"connectionGeneration", 1}, {"serverMonotonicMs", 10},
                         {"policy", QJsonObject{
@@ -626,6 +628,7 @@ private slots:
                         {"installationId", message.value("installationId")},
                         {"endpointId", ownerId},
                         {"instanceId", message.value("instanceId")},
+                        {"instanceOrdinal", message.value("instanceOrdinal")},
                         {"runtimeId", message.value("runtimeId")},
                         {"connectionGeneration", 1}, {"serverMonotonicMs", 10},
                         {"policy", QJsonObject{
@@ -785,6 +788,7 @@ private slots:
                         {"installationId", message.value("installationId")},
                         {"endpointId", ownerId},
                         {"instanceId", message.value("instanceId")},
+                        {"instanceOrdinal", message.value("instanceOrdinal")},
                         {"runtimeId", message.value("runtimeId")},
                         {"connectionGeneration", 1}, {"serverMonotonicMs", 10},
                         {"policy", QJsonObject{
@@ -967,6 +971,7 @@ private slots:
                         {"installationId", message.value("installationId")},
                         {"endpointId", targetId},
                         {"instanceId", message.value("instanceId")},
+                        {"instanceOrdinal", message.value("instanceOrdinal")},
                         {"runtimeId", message.value("runtimeId")},
                         {"connectionGeneration", 1}, {"serverMonotonicMs", 10},
                         {"policy", QJsonObject{

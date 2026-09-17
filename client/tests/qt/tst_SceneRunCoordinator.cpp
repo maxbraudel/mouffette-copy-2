@@ -282,7 +282,7 @@ private slots:
         RemoteSessionCoordinator sessions;
         sessions.setLocalEndpointId(kOwner);
         auto opened = sessionEnvelope();
-        opened.insert("protocolVersion", 6);
+        opened.insert("protocolVersion", 7);
         opened.insert("stateRevision", 1);
         opened.insert("validUntilServerMonotonicMs", 5000);
         opened.insert("snapshotSequence", 1);
@@ -311,7 +311,7 @@ private slots:
         coordinator.setLocalEndpointId(kTarget);
         QVERIFY(coordinator.upsertSession(sessionEnvelope(), 1));
         auto terminal = sessionEnvelope(3, "CleanupPending", "remote_session_terminating");
-        terminal.insert("protocolVersion", 6);
+        terminal.insert("protocolVersion", 7);
         terminal.insert("stateRevision", 8);
         terminal.insert("teardownId", "missed_generation_cleanup");
         QVERIFY(coordinator.upsertSession(terminal, 3));

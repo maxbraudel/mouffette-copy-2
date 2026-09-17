@@ -1,6 +1,6 @@
 # Mouffette Server
 
-Node.js WebSocket coordinator for Mouffette protocol v6.
+Node.js WebSocket coordinator for Mouffette protocol v7.
 
 ## Run and test
 
@@ -16,18 +16,37 @@ override it. Invalid critical values fail startup.
 ## Protocol envelope
 
 The server sends `auth_challenge` first. The client signs
-`mouffette-v6\n<serverBootId>\n<nonce>\n<runtimeId>\n<instanceId>` with its
+`mouffette-v7\n<serverBootId>\n<nonce>\n<runtimeId>\n<instanceId>\n<instanceOrdinal>` with its
 Ed25519 installation key and returns the SPKI public key and signature as
 base64url. The SHA-256 of the SPKI key is the stable `installationId`; the
 server domain-separates and hashes `installationId + instanceId` to derive and
 verify the targetable `endpointId`.
+
+`instanceOrdinal` is a signed immutable integer from 1 through 2,147,483,647.
+Its only valid `instanceId` is `primary` for 1 and `instance-N` for N >= 2,
+using canonical decimal digits. Both values are included in `welcome` before
+metadata registration; `endpoint_snapshot` cannot change the ordinal. The
+endpoint remains `base64url(SHA256("mouffette-endpoint-v1\n" + installationId +
+"\n" + instanceId))`, preserving the existing primary endpoint. Reusing a free
+ordinal reuses its endpoint; a new process has a new `runtimeId`. Every ordinal
+is independently discoverable and may own or receive sessions, including from
+another instance of the same installation.
+
+Transport `connectionGeneration` values come from one strictly increasing safe
+integer counter per `serverBootId`. Gaps for one endpoint are expected. The
+server retains only an index of current transports, never a growing history of
+endpoint counters. Exhaustion explicitly rejects authentication before replacing
+an existing transport; only a new boot resets the counter. A healthy runtime
+cannot be displaced by another process using the same endpoint. An expired
+runtime's sessions are terminated before replacement; a same-runtime rebound
+preserves only the original remaining recovery budget.
 
 Every subsequent message uses:
 
 ```json
 {
   "type": "message_type",
-  "protocolVersion": 3,
+  "protocolVersion": 7,
   "serverBootId": "uuid-from-welcome",
   "messageId": "unique-uuid",
   "connectionGeneration": 1
@@ -45,7 +64,7 @@ An owner opens `remote_session_open` with `targetEndpointId` and a stable
 same endpoint. An existing scene, another controller, or local UI activity does
 not make the endpoint unavailable for another session.
 
-The v6 welcome policy separates three clocks:
+The v7 welcome policy separates three clocks:
 
 - `heartbeatIntervalMs`: 750 ms; `transportSuspectAfterMs`: 1,500 ms.
 - `leaseTimeoutMs`: 3,000 ms, retained as the **transport** timeout field. A lost
@@ -108,14 +127,16 @@ idempotent, immediately hides command availability, and rejects new outgoing as
 well as incoming sessions. Re-enable authenticates a new transport.
 
 Discovery remains presence-only. `client_list` includes an increasing `revision`,
-an observation timestamp, and each endpoint's `status`, `lastSeenAt`,
+an observation timestamp, and each endpoint's `installationId`, `endpointId`,
+`instanceId`, `instanceOrdinal`, `runtimeId`, `status`, `lastSeenAt`,
 `canAcceptSession` and `reason`. States distinguish Available, Degraded,
 Reconnecting and Disconnected; disabled endpoints report Disconnected with reason
 `disabled`. Recent unavailable endpoints are retained for up to five minutes in
 a bounded 4,096-entry presence cache. Pair cleanup and scene ownership remain
-private and do not label an endpoint Busy.
+private and do not label an endpoint Busy. Offline entries retain the entire
+authenticated identity tuple; `lastSeenAt` uses epoch milliseconds.
 
-Protocol v6 is a coordinated client/server cut-over. Older versions receive an
+Protocol v7 is a coordinated client/server cut-over. Older versions receive an
 explicit protocol-version rejection; the server does not silently translate
 lease or cleanup semantics. Run `npm test` before deploying both artifacts.
 
@@ -180,7 +201,7 @@ Scene messages include `prepare_progress`, `state_snapshot`, `stop`, and
 rejects stale generations, and preserves terminal tombstones for idempotent
 retries. Removed `remote_scene_*` message routes do not exist.
 
-## Fully resident media (v6)
+## Fully resident media (v7)
 
 Upload validation only confirms the durable file identity. The target then decodes
 all image pixels, or validates the entire video/audio while retaining the original
@@ -214,6 +235,12 @@ aggregated. Metrics track lease expiry, resumed/rejected/reconciled sessions,
 unresolved cleanup count/age and event-loop delays. A delayed event loop is
 observable; it cannot revive a terminal session. Metric deduplication is bounded.
 
+`instance_identity_protocol.test.js` covers signed ordinal validation, identity
+collisions, immutable registration, retained offline identity, global generation
+gaps, stale control/upload fencing and bounded transport history.
+`transport_retirement_callbacks.test.js` exercises an old socket error followed
+by authentication/resume and delayed close/error events; obsolete callbacks may
+not affect the replacement session, presence or transport index.
 `connection_recovery_v6.test.js` covers the 3/5-second boundaries, lost RESUME
 results, applied-ACK readiness, terminal replay suppression, disable races,
 independent incoming sessions, bounded obligations and STOP acknowledgements

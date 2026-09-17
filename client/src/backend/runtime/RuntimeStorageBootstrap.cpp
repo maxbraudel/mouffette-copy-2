@@ -1,4 +1,5 @@
 #include "RuntimeStorageBootstrap.h"
+#include "InstallationIdentityBootstrap.h"
 #include "storage/StorageRegistry.h"
 
 #include <QDebug>
@@ -54,6 +55,16 @@ RuntimeStorageBootstrap::Result RuntimeStorageBootstrap::run(const ProgressCallb
     if (!lock.tryLock(0))
         return fail(QStringLiteral("runtime_locked"), QStringLiteral("Cannot acquire the runtime bootstrap lock."));
     RuntimeProfile::configure(m_context);
+
+    // Identity belongs to the installation, not to the disposable profile.
+    // Adopt the primary's historical key before any profile error can offer
+    // Clear storage; a fresh secondary must never reset this shared resource.
+    if (progress) progress(Stage::ValidatingIdentity);
+    QString identityError;
+    RuntimeStorage::Report identityReport;
+    if (!InstallationIdentityBootstrap::prepare(m_context, &identityError, &identityReport))
+        return fail(QStringLiteral("installation_identity_failed"), identityError);
+    result.components.append(identityReport);
 
     for (const RuntimeStorage::Component& component : RuntimeStorage::components(m_context)) {
         Stage stage = Stage::PreparingRuntime;

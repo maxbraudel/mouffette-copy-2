@@ -35,6 +35,7 @@
 #include "backend/domain/models/ClientInfo.h"
 #include "backend/domain/project/ProjectManager.h"
 #include "backend/managers/network/ConnectionManager.h"
+#include "backend/managers/network/ClientListBuilder.h"
 #include "backend/network/RemoteSessionCoordinator.h"
 #include "backend/network/WebSocketClient.h"
 #include "backend/security/DeviceIdentityStore.h"
@@ -50,7 +51,7 @@
 
 // The fake peer speaks the same versioned state/proof protocol as production.
 // Keep authoritative revisions and renew only Active sessions in heartbeat ACKs.
-static void completeV6TestEnvelope(QJsonObject& message)
+static void completeV7TestEnvelope(QJsonObject& message)
 {
     static QHash<QString, quint64> revisions;
     static QHash<QString, QJsonObject> sessions;
@@ -61,6 +62,17 @@ static void completeV6TestEnvelope(QJsonObject& message)
         if (!message.contains(QStringLiteral("revision")))
             message.insert(QStringLiteral("revision"), static_cast<qint64>(++revisions[boot]));
         message.insert(QStringLiteral("observedAtServerMonotonicMs"), 0);
+        QJsonArray clients;
+        for (const QJsonValue& value : message.value("clients").toArray()) {
+            QJsonObject entry = value.toObject();
+            const QString status = entry.value("status").toString();
+            entry.insert("reason", status == QLatin1String("Available") ? "enabled"
+                : status == QLatin1String("Degraded") ? "transport_suspect"
+                : status == QLatin1String("Reconnecting") ? "transport_lost" : "offline");
+            entry.insert("lastSeenAt", 1);
+            clients.append(entry);
+        }
+        message.insert("clients", clients);
     }
     const QString id = message.value(QStringLiteral("remoteSessionId")).toString();
     const QString key = boot + QLatin1Char(':') + id;
@@ -89,10 +101,30 @@ static void completeV6TestEnvelope(QJsonObject& message)
 }
 
 namespace {
+QString fixtureInstallationId()
+{
+    return QString::fromLatin1(QByteArray(32, 'i').toBase64(
+        QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals));
+}
+
+QHash<QString, int> fixtureOrdinals;
+QString fixtureEndpoint(QChar label)
+{
+    const int ordinal = label.unicode();
+    const QString endpointId = DeviceIdentityStore::endpointIdForInstallation(
+        fixtureInstallationId(), DeviceIdentityStore::instanceIdForOrdinal(ordinal));
+    fixtureOrdinals.insert(endpointId, ordinal);
+    return endpointId;
+}
+
 ClientInfo onlineClient(const QString& endpointId, const QString& machineName)
 {
     ClientInfo client(endpointId, machineName, QStringLiteral("Windows"));
     client.setEndpointId(endpointId);
+    client.setInstallationId(fixtureInstallationId());
+    client.setInstanceOrdinal(fixtureOrdinals.value(endpointId, 1));
+    client.setInstanceId(DeviceIdentityStore::instanceIdForOrdinal(client.instanceOrdinal()));
+    client.setRuntimeId(QStringLiteral("123e4567-e89b-42d3-a456-426614174000"));
     client.setOnline(true);
     client.setStatus(QStringLiteral("Available"));
     client.setAvailabilityStatus(QStringLiteral("Available"));
@@ -140,9 +172,9 @@ public:
                 QJsonObject message)
     {
         if (!socket) return false;
-        message.insert(QStringLiteral("protocolVersion"), 6);
+        message.insert(QStringLiteral("protocolVersion"), 7);
         message.insert(QStringLiteral("serverBootId"), socketBootId);
-        completeV6TestEnvelope(message);
+        completeV7TestEnvelope(message);
         if (message.value(QStringLiteral("messageId")).toString().isEmpty()) {
             message.insert(
                 QStringLiteral("messageId"),
@@ -403,6 +435,8 @@ private:
             {QStringLiteral("endpointId"), ownerEndpointId},
             {QStringLiteral("instanceId"),
              authentication.value(QStringLiteral("instanceId"))},
+            {QStringLiteral("instanceOrdinal"),
+             authentication.value(QStringLiteral("instanceOrdinal"))},
             {QStringLiteral("runtimeId"),
              authentication.value(QStringLiteral("runtimeId"))},
             {QStringLiteral("connectionGeneration"),
@@ -419,6 +453,99 @@ class ClientConnectionFlowTest final : public QObject
     Q_OBJECT
 
 private slots:
+    void clientListRetainsOnlyProjectsWhenDiscoveryIsUnavailable()
+    {
+        QTemporaryDir root;
+        RuntimeProfileContext context;
+        context.rootPath = root.path();
+        context.persistent = false;
+        RuntimeProfile::configure(context);
+        ApplicationRuntime runtime(context);
+        runtime.getProjectManager()->stopAutomaticTimersForTesting();
+        RemoteSessionTestServer server(runtime.getWebSocketClient()->endpointId());
+        QVERIFY(server.listen());
+        auto* connections = runtime.findChild<ConnectionManager*>();
+        connections->connectToServer(server.url());
+        QTRY_COMPARE(connections->state(), ConnectionManager::State::Connected);
+        ClientInfo first = onlineClient(fixtureEndpoint(QLatin1Char('A')), "Same host");
+        ClientInfo second = onlineClient(fixtureEndpoint(QLatin1Char('B')), "Same host");
+        const auto publish = [&] {
+            return server.send(QJsonObject{{"type", "client_list"},
+                {"clients", QJsonArray{first.toJson(), second.toJson()}}});
+        };
+        QSignalSpy presence(runtime.getWebSocketClient(), &WebSocketClient::clientListReceived);
+        QVERIFY(publish());
+        QTRY_COMPARE(runtime.displayClients().size(), 2);
+        QVERIFY(!runtime.getProjectManager()->createProjectFromSnapshot(
+            ProjectTargetReference::fromClientInfo(first), first.getScreens(), 57,
+            1, 1).isEmpty());
+        QCOMPARE(runtime.getProjectManager()->projectCount(), 1);
+
+        auto* workspaces = runtime.getWorkspaceManager();
+        QVERIFY(workspaces->getOrCreateWorkspace(first.endpointId(), first));
+        workspaces->updateWorkspaceProjectId(first.endpointId(),
+            runtime.getProjectManager()->projectForTarget(first.endpointId())->projectId);
+        QVERIFY(workspaces->getOrCreateWorkspace(second.endpointId(), second));
+        const auto fallback = ClientListBuilder::buildDisplayClientList(
+            &runtime, {first, second}, false);
+        QCOMPARE(fallback.size(), 1);
+        QCOMPARE(fallback.first().endpointId(), first.endpointId());
+        QVERIFY(fallback.first().hasProject());
+        // Remove the provisional workspace to also check obsolete clicks below.
+        workspaces->deleteWorkspace(second.endpointId());
+
+        // A local health transition reprojects the existing presence without
+        // waiting for a new server revision or rewriting its admission fields.
+        const int previousPresenceCount = presence.count();
+        runtime.getWebSocketClient()->transportHealthChanged(true);
+        QCOMPARE(connections->state(), ConnectionManager::State::Degraded);
+        QCOMPARE(runtime.displayClients().size(), 1);
+        QCOMPARE(runtime.displayClients().first().endpointId(), first.endpointId());
+        QCOMPARE(runtime.displayClients().first().availabilityBadgeText(), QStringLiteral("Degraded"));
+        runtime.getWebSocketClient()->transportHealthChanged(false);
+        QCOMPARE(connections->state(), ConnectionManager::State::Connected);
+        QCOMPARE(runtime.displayClients().size(), 2);
+        QCOMPARE(presence.count(), previousPresenceCount);
+
+        for (const QString& status : {QStringLiteral("Degraded"),
+                                      QStringLiteral("Reconnecting"),
+                                      QStringLiteral("Disconnected")}) {
+            second.setOnline(status != QLatin1String("Disconnected"));
+            second.setCanAcceptSession(false);
+            second.setStatus(status);
+            second.setAvailabilityStatus(status);
+            QVERIFY(publish());
+            QTRY_COMPARE(runtime.displayClients().size(), 1);
+            QCOMPARE(qvariant_cast<QList<ClientInfo>>(presence.last().first()).size(), 2);
+            runtime.activateClient(second.endpointId()); // queued obsolete click
+            QVERIFY(!runtime.findWorkspace(second.endpointId()));
+            QVERIFY(server.openCommands.isEmpty());
+            second.setOnline(true);
+            second.setCanAcceptSession(true);
+            second.setStatus(QStringLiteral("Available"));
+            second.setAvailabilityStatus(QStringLiteral("Available"));
+            QVERIFY(publish());
+            QTRY_COMPARE(runtime.displayClients().size(), 2);
+            QCOMPARE(runtime.getProjectManager()->projectCount(), 1);
+        }
+
+        first.setOnline(false);
+        first.setCanAcceptSession(false);
+        first.setStatus(QStringLiteral("Disconnected"));
+        first.setAvailabilityStatus(QStringLiteral("Disconnected"));
+        second = first;
+        second.setEndpointId(fixtureEndpoint(QLatin1Char('B')));
+        second.setInstanceOrdinal(QLatin1Char('B').unicode());
+        second.setInstanceId(DeviceIdentityStore::instanceIdForOrdinal(second.instanceOrdinal()));
+        QVERIFY(publish());
+        QTRY_COMPARE(runtime.displayClients().size(), 1);
+        QVERIFY(runtime.displayClients().first().hasProject());
+        QCOMPARE(runtime.displayClients().first().getVolumePercent(), 57);
+        QVERIFY(runtime.getProjectManager()->deleteProject(first.endpointId()));
+        QVERIFY(runtime.displayClients().isEmpty()); // no new presence required
+        runtime.handleApplicationAboutToQuit();
+    }
+
     void disableEnableQueuesLatestIntentAndIgnoresObsoleteAcknowledgement()
     {
         QTemporaryDir root;
@@ -504,7 +631,7 @@ private slots:
         QVERIFY(server.listen());
         runtime.findChild<ConnectionManager*>()->connectToServer(server.url());
         QTRY_COMPARE_WITH_TIMEOUT(runtime.localStatusText(), QStringLiteral("CONNECTED"), 2000);
-        const QString target(43, QLatin1Char('O'));
+        const QString target = fixtureEndpoint(QLatin1Char('O'));
         QVERIFY(server.sendClientList(onlineClient(target, QStringLiteral("Lost OPEN target"))));
         QTRY_COMPARE(runtime.displayClients().size(), 1);
         runtime.activateClient(target);
@@ -548,7 +675,7 @@ private slots:
         QSignalSpy ready(runtime.getWebSocketClient(), &WebSocketClient::connected);
         runtime.findChild<ConnectionManager*>()->connectToServer(server.url());
         QTRY_COMPARE_WITH_TIMEOUT(ready.count(), 1, 2000);
-        const QString target(43, QLatin1Char('E'));
+        const QString target = fixtureEndpoint(QLatin1Char('E'));
         const ClientInfo client = onlineClient(target, QStringLiteral("Retained selection"));
         QVERIFY(server.sendClientList(client));
         QTRY_COMPARE(runtime.displayClients().size(), 1);
@@ -624,7 +751,7 @@ private slots:
         QVERIFY(connections);
         connections->connectToServer(server.url());
         QTRY_VERIFY_WITH_TIMEOUT(websocket->isConnected(), 2000);
-        const QString target(43, QLatin1Char('L'));
+        const QString target = fixtureEndpoint(QLatin1Char('L'));
         const QString sessionId = QStringLiteral("local-test-remote-session");
         QVERIFY(server.sendClientList(onlineClient(target, QStringLiteral("Remote peer"))));
         QTRY_COMPARE_WITH_TIMEOUT(runtime.displayClients().size(), 1, 1000);
@@ -709,7 +836,7 @@ private slots:
         QVERIFY(connections);
         connections->connectToServer(server.url());
         QTRY_VERIFY_WITH_TIMEOUT(websocket->isConnected(), 2000);
-        const QString target(43, QLatin1Char('C'));
+        const QString target = fixtureEndpoint(QLatin1Char('C'));
         const QString sessionId = QStringLiteral("cursor-outgoing");
         QVERIFY(server.sendClientList(onlineClient(target, QStringLiteral("Cursor target"))));
         QTRY_COMPARE_WITH_TIMEOUT(runtime.displayClients().size(), 1, 1000);
@@ -906,6 +1033,11 @@ private slots:
         RuntimeProfile::configure(context);
 
         ApplicationRuntime runtime(context);
+        RemoteSessionTestServer server(runtime.getWebSocketClient()->endpointId());
+        QVERIFY(server.listen());
+        auto* connections = runtime.findChild<ConnectionManager*>();
+        connections->connectToServer(server.url());
+        QTRY_COMPARE(connections->state(), ConnectionManager::State::Connected);
         const ClientInfo client = onlineClient(
             QStringLiteral("endpoint-real-canvas"), QStringLiteral("Windows B"));
         runtime.buildDisplayClientList({client});
@@ -917,13 +1049,24 @@ private slots:
         QCOMPARE(runtime.activeWorkspaceEndpointId(), client.endpointId());
         QVERIFY(!runtime.getActiveCanvas());
         QVERIFY(!runtime.activeProjectExists());
-        QVERIFY(!runtime.activeRemoteSessionExists());
+        QCOMPARE(runtime.getWorkspaceManager()->remoteSessionState(client.endpointId()),
+                 WorkspaceManager::RemoteSessionState::Opening);
         QVERIFY(runtime.findWorkspace(client.endpointId()));
         QVERIFY(!runtime.findWorkspace(client.endpointId())->canvas);
         QVERIFY(activeWorkspaceChanged.count() >= 1);
 
         QCOMPARE(runtime.getProjectManager()->projectCount(), 0);
         QVERIFY(runtime.getNavigationManager()->isLoading());
+
+        ClientInfo unavailable = client;
+        unavailable.setOnline(false);
+        unavailable.setCanAcceptSession(false);
+        unavailable.setStatus(QStringLiteral("Disconnected"));
+        runtime.buildDisplayClientList({unavailable});
+        QVERIFY(runtime.displayClients().isEmpty());
+        QCOMPARE(runtime.getProjectManager()->projectCount(), 0);
+        QCOMPARE(runtime.activeWorkspaceEndpointId(), client.endpointId());
+        QVERIFY(runtime.findWorkspace(client.endpointId()));
 
         runtime.handleApplicationAboutToQuit();
     }
@@ -942,6 +1085,11 @@ private slots:
         RuntimeProfile::configure(context);
 
         ApplicationRuntime runtime(context);
+        RemoteSessionTestServer server(runtime.getWebSocketClient()->endpointId());
+        QVERIFY(server.listen());
+        auto* connections = runtime.findChild<ConnectionManager*>();
+        connections->connectToServer(server.url());
+        QTRY_COMPARE(connections->state(), ConnectionManager::State::Connected);
         ClientInfo client = onlineClient(
             QStringLiteral("endpoint-first-snapshot"),
             QStringLiteral("Windows B"));
@@ -1034,7 +1182,7 @@ private slots:
         connections->connectToServer(server.url());
         QTRY_COMPARE_WITH_TIMEOUT(connectedSpy.count(), 1, 2'000);
 
-        const QString targetEndpointId(43, QLatin1Char('V'));
+        const QString targetEndpointId = fixtureEndpoint(QLatin1Char('V'));
         const QString malformedSessionId =
             QStringLiteral("malformed-snapshot-session");
         ClientInfo client = onlineClient(
@@ -1155,7 +1303,7 @@ private slots:
 
         const QString bootId = QUuid::createUuid().toString(QUuid::WithoutBraces);
         const QString ownerEndpointId = runtime.getWebSocketClient()->endpointId();
-        const QString targetEndpointId(43, QLatin1Char('B'));
+        const QString targetEndpointId = fixtureEndpoint(QLatin1Char('B'));
         const QString firstSessionId = QStringLiteral("inactivity-session-1");
         const QString secondSessionId = QStringLiteral("inactivity-session-2");
         const QString teardownId = QStringLiteral("inactivity-teardown-1");
@@ -1164,11 +1312,12 @@ private slots:
         QPointer<QWebSocket> peer;
         QList<QJsonObject> openCommands;
         QList<QJsonObject> closeCommands;
+        QJsonObject authentication;
         auto sendServerMessage = [&](QJsonObject message) {
             QVERIFY2(peer, "The fake server has no authenticated peer");
-            message.insert(QStringLiteral("protocolVersion"), 6);
+            message.insert(QStringLiteral("protocolVersion"), 7);
             message.insert(QStringLiteral("serverBootId"), bootId);
-            completeV6TestEnvelope(message);
+            completeV7TestEnvelope(message);
             if (message.value(QStringLiteral("messageId")).toString().isEmpty()) {
                 message.insert(
                     QStringLiteral("messageId"),
@@ -1198,6 +1347,7 @@ private slots:
                 const QString type =
                     message.value(QStringLiteral("type")).toString();
                 if (type == QLatin1String("auth_response")) {
+                    authentication = message;
                     const QJsonObject policy{
                         {QStringLiteral("policyVersion"), 1},
                         {QStringLiteral("heartbeatIntervalMs"), 1'000},
@@ -1223,6 +1373,8 @@ private slots:
                         {QStringLiteral("endpointId"), ownerEndpointId},
                         {QStringLiteral("instanceId"),
                          message.value(QStringLiteral("instanceId"))},
+                        {QStringLiteral("instanceOrdinal"),
+                         message.value(QStringLiteral("instanceOrdinal"))},
                         {QStringLiteral("runtimeId"),
                          message.value(QStringLiteral("runtimeId"))},
                         {QStringLiteral("connectionGeneration"), 1},
@@ -1242,6 +1394,20 @@ private slots:
                         {QStringLiteral("serverEpochMs"),
                          QDateTime::currentMSecsSinceEpoch()}
                     });
+                } else if (type == QLatin1String("endpoint_snapshot")) {
+                    QJsonObject snapshot = message;
+                    for (const QString& key : {QStringLiteral("installationId"),
+                                              QStringLiteral("instanceId"),
+                                              QStringLiteral("instanceOrdinal"),
+                                              QStringLiteral("runtimeId")})
+                        snapshot.insert(key, authentication.value(key));
+                    snapshot.insert(QStringLiteral("endpointId"), ownerEndpointId);
+                    sendServerMessage(QJsonObject{{"type", "endpoint_snapshot_applied"},
+                        {"snapshot", snapshot}, {"connectionGeneration", 1}});
+                } else if (type == QLatin1String("remote_session_reconcile")) {
+                    sendServerMessage(QJsonObject{{"type", "remote_session_reconciled"},
+                        {"requestId", message.value("requestId")}, {"sessions", QJsonArray{}},
+                        {"complete", true}, {"absentSessionIds", QJsonArray{}}});
                 } else if (type == QLatin1String("remote_session_open")) {
                     openCommands.append(message);
                 } else if (type == QLatin1String("remote_session_close")) {
@@ -1255,6 +1421,8 @@ private slots:
         runtime.getWebSocketClient()->connectToServer(
             QStringLiteral("ws://127.0.0.1:%1").arg(server.serverPort()));
         QTRY_COMPARE_WITH_TIMEOUT(connectedSpy.count(), 1, 2'000);
+        QTRY_COMPARE(runtime.findChild<ConnectionManager*>()->state(),
+                     ConnectionManager::State::Connected);
 
         ClientInfo client = onlineClient(targetEndpointId,
                                          QStringLiteral("Windows B"));
@@ -1497,7 +1665,7 @@ private slots:
         QTRY_COMPARE_WITH_TIMEOUT(connectedSpy.count(), 1, 2'000);
 
         const QStringList targets{
-            QString(43, QLatin1Char('A')), QString(43, QLatin1Char('B'))};
+            fixtureEndpoint(QLatin1Char('A')), fixtureEndpoint(QLatin1Char('B'))};
         QJsonArray clients;
         for (qsizetype i = 0; i < targets.size(); ++i) {
             clients.append(onlineClient(
@@ -1693,7 +1861,7 @@ private slots:
         connections->connectToServer(server.url());
         QTRY_COMPARE_WITH_TIMEOUT(connectedSpy.count(), 1, 2'000);
 
-        const QString targetEndpointId(43, QLatin1Char('I'));
+        const QString targetEndpointId = fixtureEndpoint(QLatin1Char('I'));
         const QString firstSessionId = QStringLiteral("inactivity-auto-session-1");
         ClientInfo client = onlineClient(
             targetEndpointId, QStringLiteral("Inactivity resume target"));
@@ -1839,7 +2007,7 @@ private slots:
         connections->connectToServer(server.url());
         QTRY_COMPARE_WITH_TIMEOUT(connectedSpy.count(), 1, 2'000);
 
-        const QString targetEndpointId(43, QLatin1Char('D'));
+        const QString targetEndpointId = fixtureEndpoint(QLatin1Char('D'));
         ClientInfo client = onlineClient(
             targetEndpointId, QStringLiteral("Cancelled-open target"));
         client.setScreens({});
@@ -1926,7 +2094,7 @@ private slots:
         connections->connectToServer(server.url());
         QTRY_COMPARE_WITH_TIMEOUT(connectedSpy.count(), 1, 2'000);
 
-        const QString targetEndpointId(43, QLatin1Char('K'));
+        const QString targetEndpointId = fixtureEndpoint(QLatin1Char('K'));
         ClientInfo client = onlineClient(
             targetEndpointId, QStringLiteral("Unacknowledged-open target"));
         client.setScreens({});
@@ -2057,7 +2225,7 @@ private slots:
         connections->connectToServer(server.url());
         QTRY_COMPARE_WITH_TIMEOUT(connectedSpy.count(), 1, 2'000);
 
-        const QString targetEndpointId(43, QLatin1Char('R'));
+        const QString targetEndpointId = fixtureEndpoint(QLatin1Char('R'));
         const QString remoteSessionId = QStringLiteral("resumed-grace-session");
         ClientInfo client = onlineClient(
             targetEndpointId, QStringLiteral("Grace target"));
@@ -2167,7 +2335,7 @@ private slots:
         connections->connectToServer(server.url());
         QTRY_COMPARE_WITH_TIMEOUT(connectedSpy.count(), 1, 2'000);
 
-        const QString targetEndpointId(43, QLatin1Char('D'));
+        const QString targetEndpointId = fixtureEndpoint(QLatin1Char('D'));
         const QString remoteSessionId = QStringLiteral("failed-delete-session");
         ClientInfo client = onlineClient(
             targetEndpointId, QStringLiteral("Atomic delete target"));
@@ -2259,7 +2427,7 @@ private slots:
         connections->connectToServer(server.url());
         QTRY_COMPARE_WITH_TIMEOUT(connectedSpy.count(), 1, 2'000);
 
-        const QString targetEndpointId(43, QLatin1Char('E'));
+        const QString targetEndpointId = fixtureEndpoint(QLatin1Char('E'));
         ClientInfo client = onlineClient(
             targetEndpointId, QStringLiteral("Restart target"));
         client.setScreens({});
@@ -2366,7 +2534,7 @@ private slots:
         connections->connectToServer(server.url());
         QTRY_COMPARE_WITH_TIMEOUT(connectedSpy.count(), 1, 2'000);
 
-        const QString targetEndpointId(43, QLatin1Char('R'));
+        const QString targetEndpointId = fixtureEndpoint(QLatin1Char('R'));
         const QString firstSessionId = QStringLiteral("recovered-peer-session-1");
         const QString secondSessionId = QStringLiteral("recovered-peer-session-2");
         ClientInfo client = onlineClient(targetEndpointId,
@@ -2509,7 +2677,7 @@ private slots:
         connections->connectToServer(server.url());
         QTRY_COMPARE_WITH_TIMEOUT(connectedSpy.count(), 1, 2'000);
 
-        const QString targetEndpointId(43, QLatin1Char('S'));
+        const QString targetEndpointId = fixtureEndpoint(QLatin1Char('S'));
         const QString firstSessionId = QStringLiteral("gated-peer-session-1");
         ClientInfo client = onlineClient(targetEndpointId,
                                         QStringLiteral("Gated foreground peer"));
@@ -2615,7 +2783,7 @@ private slots:
         connections->connectToServer(server.url());
         QTRY_COMPARE_WITH_TIMEOUT(connectedSpy.count(), 1, 2'000);
 
-        const QString targetEndpointId(43, QLatin1Char('T'));
+        const QString targetEndpointId = fixtureEndpoint(QLatin1Char('T'));
         const QString firstSessionId = QStringLiteral("automatic-replay-session-1");
         ClientInfo client = onlineClient(targetEndpointId,
                                         QStringLiteral("Automatic replay peer"));
@@ -2717,7 +2885,7 @@ private slots:
         connections->connectToServer(server.url());
         QTRY_COMPARE_WITH_TIMEOUT(connectedSpy.count(), 1, 2'000);
 
-        const QString targetEndpointId(43, QLatin1Char('U'));
+        const QString targetEndpointId = fixtureEndpoint(QLatin1Char('U'));
         const QString firstSessionId = QStringLiteral("automatic-convergence-session-1");
         ClientInfo client = onlineClient(targetEndpointId,
                                         QStringLiteral("Automatic convergence peer"));
@@ -2823,7 +2991,7 @@ private slots:
         connections->connectToServer(server.url());
         QTRY_COMPARE_WITH_TIMEOUT(connectedSpy.count(), 1, 2'000);
 
-        const QString targetEndpointId(43, QLatin1Char('V'));
+        const QString targetEndpointId = fixtureEndpoint(QLatin1Char('V'));
         const QString firstSessionId = QStringLiteral("invalid-auto-session-1");
         const QString rejectedSessionId = QStringLiteral("invalid-auto-session-2");
         ClientInfo client = onlineClient(targetEndpointId,
@@ -2957,7 +3125,7 @@ private slots:
         connections->connectToServer(server.url());
         QTRY_COMPARE_WITH_TIMEOUT(connectedSpy.count(), 1, 2'000);
 
-        const QString targetEndpointId(43, QLatin1Char('F'));
+        const QString targetEndpointId = fixtureEndpoint(QLatin1Char('F'));
         ClientInfo client = onlineClient(
             targetEndpointId, QStringLiteral("Recovered target"));
         client.setScreens({});
@@ -3051,7 +3219,7 @@ private slots:
         QTRY_COMPARE_WITH_TIMEOUT(connectedSpy.count(), 1, 2'000);
         disconnectedSpy.clear();
 
-        const QString targetEndpointId(43, QLatin1Char('G'));
+        const QString targetEndpointId = fixtureEndpoint(QLatin1Char('G'));
         const QString remoteSessionId = QStringLiteral("same-boot-session-1");
         ClientInfo client = onlineClient(
             targetEndpointId, QStringLiteral("Same-boot target"));
@@ -3201,7 +3369,7 @@ private slots:
         connections->connectToServer(server.url());
         QTRY_COMPARE_WITH_TIMEOUT(connectedSpy.count(), 1, 2'000);
 
-        const QString targetEndpointId(43, QLatin1Char('I'));
+        const QString targetEndpointId = fixtureEndpoint(QLatin1Char('I'));
         ClientInfo client = onlineClient(
             targetEndpointId, QStringLiteral("Converging target"));
         client.setScreens({});
@@ -3301,8 +3469,8 @@ private slots:
         connections->connectToServer(server.url());
         QTRY_COMPARE_WITH_TIMEOUT(connectedSpy.count(), 1, 2'000);
 
-        const QString targetB(43, QLatin1Char('H'));
-        const QString targetC(43, QLatin1Char('I'));
+        const QString targetB = fixtureEndpoint(QLatin1Char('H'));
+        const QString targetC = fixtureEndpoint(QLatin1Char('I'));
         const QString sessionB = QStringLiteral("correlated-session-b");
         ClientInfo clientB = onlineClient(targetB, QStringLiteral("Target B"));
         ClientInfo clientC = onlineClient(targetC, QStringLiteral("Target C"));
@@ -3421,7 +3589,7 @@ private slots:
         connections->connectToServer(server.url());
         QTRY_COMPARE_WITH_TIMEOUT(connectedSpy.count(), 1, 2'000);
 
-        const QString peerEndpointId(43, QLatin1Char('J'));
+        const QString peerEndpointId = fixtureEndpoint(QLatin1Char('J'));
         ClientInfo client = onlineClient(
             peerEndpointId, QStringLiteral("Bidirectional peer"));
         client.setScreens({});
@@ -3519,8 +3687,8 @@ private slots:
         connections->connectToServer(server.url());
         QTRY_COMPARE_WITH_TIMEOUT(connectedSpy.count(), 1, 2'000);
 
-        const QString ownerX(43, QLatin1Char('K'));
-        const QString ownerY(43, QLatin1Char('L'));
+        const QString ownerX = fixtureEndpoint(QLatin1Char('K'));
+        const QString ownerY = fixtureEndpoint(QLatin1Char('L'));
         const QString sessionX = QStringLiteral("queued-incoming-session-x");
         const QString sessionY = QStringLiteral("queued-incoming-session-y");
         const QString teardownX = QUuid::createUuid()
@@ -3626,6 +3794,7 @@ private slots:
         QTest::newRow("close") << QStringLiteral("close");
         QTest::newRow("clear") << QStringLiteral("clear");
         QTest::newRow("media") << QStringLiteral("media");
+        QTest::newRow("identity") << QStringLiteral("identity");
     }
 
     void startupFailureActions()
@@ -3642,7 +3811,7 @@ private slots:
         const QString blockerPath = QDir(root).filePath(QStringLiteral("settings"));
         const QString sentinelPath = QDir(otherRoot).filePath(QStringLiteral("keep"));
         {
-            if (action != QLatin1String("media")) {
+            if (action != QLatin1String("media") && action != QLatin1String("identity")) {
                 QFile blocker(blockerPath);
                 QVERIFY(blocker.open(QIODevice::WriteOnly));
                 QCOMPARE(blocker.write("blocked"), qint64(7));
@@ -3664,7 +3833,8 @@ private slots:
                  diagnostics.constData());
         QCOMPARE(QFileInfo::exists(root), action != QLatin1String("clear"));
         QCOMPARE(QFileInfo(blockerPath).isFile(), action == QLatin1String("close"));
-        if (action == QLatin1String("retry") || action == QLatin1String("media"))
+        if (action == QLatin1String("retry") || action == QLatin1String("media")
+            || action == QLatin1String("identity"))
             QVERIFY(QFileInfo(QDir(blockerPath).filePath(QStringLiteral("settings.ini"))).isFile());
         QFile sentinel(sentinelPath);
         QVERIFY(sentinel.open(QIODevice::ReadOnly));
@@ -3757,7 +3927,7 @@ private slots:
         QVERIFY(server.listen(QHostAddress::LocalHost, 0));
 
         const QString bootId = QUuid::createUuid().toString(QUuid::WithoutBraces);
-        const QString targetEndpointId(43, QLatin1Char('C'));
+        const QString targetEndpointId = fixtureEndpoint(QLatin1Char('C'));
         const QString firstSessionId = QStringLiteral("controller-session-1");
         const QString secondSessionId = QStringLiteral("controller-session-2");
         QPointer<QWebSocket> peer;
@@ -3765,12 +3935,13 @@ private slots:
         QList<QJsonObject> endpointSnapshots;
         QList<QJsonObject> openCommands;
         QList<QJsonObject> closeCommands;
+        QJsonObject authentication;
 
         auto sendServerMessage = [&](QJsonObject message) {
             QVERIFY2(peer, "The fake server has no authenticated peer");
-            message.insert(QStringLiteral("protocolVersion"), 6);
+            message.insert(QStringLiteral("protocolVersion"), 7);
             message.insert(QStringLiteral("serverBootId"), bootId);
-            completeV6TestEnvelope(message);
+            completeV7TestEnvelope(message);
             if (message.value(QStringLiteral("messageId")).toString().isEmpty()) {
                 message.insert(
                     QStringLiteral("messageId"),
@@ -3800,6 +3971,7 @@ private slots:
                 const QString type =
                     message.value(QStringLiteral("type")).toString();
                 if (type == QLatin1String("auth_response")) {
+                    authentication = message;
                     ownerEndpointId =
                         DeviceIdentityStore::endpointIdForInstallation(
                             message.value(QStringLiteral("installationId"))
@@ -3830,6 +4002,8 @@ private slots:
                         {QStringLiteral("endpointId"), ownerEndpointId},
                         {QStringLiteral("instanceId"),
                          message.value(QStringLiteral("instanceId"))},
+                        {QStringLiteral("instanceOrdinal"),
+                         message.value(QStringLiteral("instanceOrdinal"))},
                         {QStringLiteral("runtimeId"),
                          message.value(QStringLiteral("runtimeId"))},
                         {QStringLiteral("connectionGeneration"), 1},
@@ -3851,6 +4025,19 @@ private slots:
                     });
                 } else if (type == QLatin1String("endpoint_snapshot")) {
                     endpointSnapshots.append(message);
+                    QJsonObject snapshot = message;
+                    for (const QString& key : {QStringLiteral("installationId"),
+                                              QStringLiteral("instanceId"),
+                                              QStringLiteral("instanceOrdinal"),
+                                              QStringLiteral("runtimeId")})
+                        snapshot.insert(key, authentication.value(key));
+                    snapshot.insert(QStringLiteral("endpointId"), ownerEndpointId);
+                    sendServerMessage(QJsonObject{{"type", "endpoint_snapshot_applied"},
+                        {"snapshot", snapshot}, {"connectionGeneration", 1}});
+                } else if (type == QLatin1String("remote_session_reconcile")) {
+                    sendServerMessage(QJsonObject{{"type", "remote_session_reconciled"},
+                        {"requestId", message.value("requestId")}, {"sessions", QJsonArray{}},
+                        {"complete", true}, {"absentSessionIds", QJsonArray{}}});
                 } else if (type == QLatin1String("remote_session_open")) {
                     openCommands.append(message);
                 } else if (type == QLatin1String("remote_session_close")) {
@@ -4047,7 +4234,18 @@ int main(int argc, char** argv)
         profile.rootPath = args.at(2);
         profile.channel = QStringLiteral("development");
         profile.persistent = false;
+        profile.installationRootPath = RuntimeProfile::persistentInstallationRoot(
+            QDir(profile.rootPath).absoluteFilePath(QStringLiteral("../../..")), profile.channel);
+        profile.legacyPrimaryRootPath = profile.rootPath;
         const QString action = args.at(3);
+        if (action == QLatin1String("identity")) {
+            if (!RuntimeStorageBootstrap(profile).run().succeeded()) return 33;
+            DeviceIdentityStore identity(profile.installationRootPath, false, profile.identityNamespace());
+            QFile key(identity.fallbackFilePath());
+            if (!key.open(QIODevice::WriteOnly | QIODevice::Truncate)
+                || key.write("corrupt") != 7) return 34;
+            key.close();
+        }
         const QString blockerPath = QDir(profile.rootPath).filePath(QStringLiteral("settings"));
         ApplicationController::MediaBootstrapFunction mediaBootstrap;
         if (action == QLatin1String("media")) {
@@ -4099,7 +4297,8 @@ int main(int argc, char** argv)
                         QStringLiteral("bootstrapCloseButton"));
                     QObject* retry = shell->findChild<QObject*>(
                         QStringLiteral("bootstrapRetryButton"));
-                    const bool canClear = action != QLatin1String("media");
+                    const bool canClear = action != QLatin1String("media")
+                        && action != QLatin1String("identity");
                     if (controller.bootstrapCanClearStorage() != canClear || !clear || !close || !retry
                         || clear->property("text").toString() != QLatin1String("Clear storage and close")
                         || !clear->property("destructive").toBool()
@@ -4120,8 +4319,9 @@ int main(int argc, char** argv)
                             app.exit(22);
                         }
                     } else if (action == QLatin1String("close")
-                               || action == QLatin1String("media")) {
-                        if (action == QLatin1String("media")) {
+                               || action == QLatin1String("media")
+                               || action == QLatin1String("identity")) {
+                        if (action == QLatin1String("media") || action == QLatin1String("identity")) {
                             controller.clearStorageAndClose();
                             if (controller.clearingStorage() || requests != 0) {
                                 app.exit(32);
@@ -4163,6 +4363,9 @@ int main(int argc, char** argv)
         profile.rootPath = args.at(2);
         profile.channel = args.at(3);
         profile.persistent = false;
+        profile.installationRootPath = RuntimeProfile::persistentInstallationRoot(
+            QDir(profile.rootPath).absoluteFilePath(QStringLiteral("../../..")), profile.channel);
+        profile.legacyPrimaryRootPath = profile.rootPath;
         if (!RuntimeStorageBootstrap(profile).run().succeeded()) return 10;
         ProjectRecord project;
         project.projectId = QStringLiteral("shutdown-write");

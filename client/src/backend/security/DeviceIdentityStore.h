@@ -33,6 +33,9 @@ public:
     DeviceIdentityStore& operator=(const DeviceIdentityStore&) = delete;
 
     bool initialize(QString* errorMessage = nullptr);
+    // Runtime readers must never create a replacement if bootstrap's key
+    // disappears. Creation is reserved for the locked installation bootstrap.
+    bool initializeExisting(QString* errorMessage = nullptr);
     ReadState inspectStored(QString* errorMessage = nullptr) const;
     // Validates the stored identity and, if it is corrupt, removes it and
     // generates a fresh Ed25519 identity in the same runtime namespace.
@@ -50,11 +53,17 @@ public:
     QString fallbackFilePath() const;
 
     static QString installationIdForPublicKey(const QByteArray& publicKeyDer);
+    static QString instanceIdForOrdinal(int ordinal) {
+        if (ordinal < 1) return {};
+        return ordinal == 1 ? QStringLiteral("primary")
+                            : QStringLiteral("instance-%1").arg(ordinal);
+    }
     static QString endpointIdForInstallation(const QString& installationId,
                                              const QString& instanceId);
     static bool removeObsoleteInstallationIdentity(QString* errorMessage = nullptr);
 
 private:
+    bool initializeImpl(bool allowCreation, QString* errorMessage);
     class Impl;
     std::unique_ptr<Impl> d;
 };

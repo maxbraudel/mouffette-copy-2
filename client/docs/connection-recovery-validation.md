@@ -3,6 +3,11 @@
 Implementation and test configuration are described in
 [remote-session-recovery.md](remote-session-recovery.md).
 
+This is the historical v6 validation record. The current protocol is v7; see
+[multiple-instance identity](multi-instance-identity.md) for the subsequent
+identity migration and its validation. The graphical limitations recorded below
+are not superseded by the network/identity checks.
+
 ## Verified
 
 - macOS Debug build with Qt 6.11.2; `git diff --check`.
@@ -63,7 +68,7 @@ rendering/layout changes were made to work around these assertions.
 
 ## Rollout limits
 
-Server and clients must be released together as v6. Old clients receive a clear
+That release required server and clients together as v6 (superseded by v7). Old clients receive a clear
 incompatibility failure. This work did not deploy a server, publish an installer
 or commit changes. Windows execution and physical sleep/wake on hardware were
 not performed locally; CI is configured to run server and Qt integration tests

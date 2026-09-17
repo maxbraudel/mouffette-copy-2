@@ -1,9 +1,11 @@
 #include "backend/domain/project/ProjectModel.h"
+#include "backend/security/DeviceIdentityStore.h"
 
 #include <QJsonValue>
 #include <QSet>
 
 #include <cmath>
+#include <limits>
 
 namespace {
 constexpr auto kVisible = "visible";
@@ -155,11 +157,18 @@ bool ProjectTargetReference::isValid() const
 
 QJsonObject ProjectTargetReference::toJson() const
 {
-    return {
+    QJsonObject result{
         {QStringLiteral("endpointId"), endpointId},
         {QStringLiteral("machineName"), machineName},
         {QStringLiteral("platform"), platform}
     };
+    if (instanceOrdinal > 0 && !installationId.isEmpty()
+        && instanceId == DeviceIdentityStore::instanceIdForOrdinal(instanceOrdinal)) {
+        result.insert(QStringLiteral("installationId"), installationId);
+        result.insert(QStringLiteral("instanceId"), instanceId);
+        result.insert(QStringLiteral("instanceOrdinal"), instanceOrdinal);
+    }
+    return result;
 }
 
 bool ProjectTargetReference::fromJson(const QJsonObject& json,
@@ -175,6 +184,18 @@ bool ProjectTargetReference::fromJson(const QJsonObject& json,
     parsed.endpointId = json.value(QStringLiteral("endpointId")).toString().trimmed();
     parsed.machineName = json.value(QStringLiteral("machineName")).toString();
     parsed.platform = json.value(QStringLiteral("platform")).toString();
+    const qint64 ordinal = jsonInteger(json, "instanceOrdinal");
+    const QString installationId = json.value(QStringLiteral("installationId")).toString();
+    const QString instanceId = json.value(QStringLiteral("instanceId")).toString();
+    // The descriptive tuple is optional for existing project files. Never
+    // guess a primary instance or discard the user's project when it is absent.
+    if (ordinal > 0 && ordinal <= std::numeric_limits<int>::max()
+        && !installationId.isEmpty()
+        && instanceId == DeviceIdentityStore::instanceIdForOrdinal(static_cast<int>(ordinal))) {
+        parsed.installationId = installationId;
+        parsed.instanceId = instanceId;
+        parsed.instanceOrdinal = static_cast<int>(ordinal);
+    }
 
     if (!parsed.isValid()) {
         setError(error, QStringLiteral("ProjectTargetReference.endpointId is required"));
@@ -190,6 +211,12 @@ ProjectTargetReference ProjectTargetReference::fromClientInfo(const ClientInfo& 
     target.endpointId = client.endpointId().trimmed();
     target.machineName = client.getMachineName();
     target.platform = client.getPlatform();
+    if (client.instanceOrdinal() > 0 && !client.installationId().isEmpty()
+        && client.instanceId() == DeviceIdentityStore::instanceIdForOrdinal(client.instanceOrdinal())) {
+        target.installationId = client.installationId();
+        target.instanceId = client.instanceId();
+        target.instanceOrdinal = client.instanceOrdinal();
+    }
     return target;
 }
 
@@ -197,6 +224,9 @@ ClientInfo ProjectTargetReference::toClientInfo(bool online) const
 {
     ClientInfo client(endpointId, machineName, platform);
     client.setEndpointId(endpointId);
+    client.setInstallationId(installationId);
+    client.setInstanceId(instanceId);
+    client.setInstanceOrdinal(instanceOrdinal);
     client.setStatus(online ? QStringLiteral("Available")
                             : QStringLiteral("Disconnected"));
     client.setAvailabilityStatus(client.getStatus());

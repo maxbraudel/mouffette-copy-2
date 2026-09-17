@@ -21,17 +21,24 @@ private slots:
     void storedIdentityWithTrailingDataIsRejected();
     void nativeVaultNamespacesAreIndependent();
     void danglingFallbackLinkDoesNotCreateExternalKey();
+    void existingIdentityReaderNeverCreatesOrRotates();
 };
 
 void DeviceIdentityStoreTest::endpointIdentityIsInstanceScoped() {
+    QVERIFY(DeviceIdentityStore::instanceIdForOrdinal(0).isEmpty());
+    QVERIFY(DeviceIdentityStore::instanceIdForOrdinal(-1).isEmpty());
+    QCOMPARE(DeviceIdentityStore::instanceIdForOrdinal(1), QStringLiteral("primary"));
+    QCOMPARE(DeviceIdentityStore::instanceIdForOrdinal(2), QStringLiteral("instance-2"));
     const QString installationId(43, QLatin1Char('i'));
     const QString primary = DeviceIdentityStore::endpointIdForInstallation(
         installationId, QStringLiteral("primary"));
     const QString secondary = DeviceIdentityStore::endpointIdForInstallation(
-        installationId, QStringLiteral("123e4567-e89b-42d3-a456-426614174000"));
+        installationId, DeviceIdentityStore::instanceIdForOrdinal(2));
     QCOMPARE(primary.size(), 43);
     QCOMPARE(secondary.size(), 43);
     QVERIFY(primary != secondary);
+    QCOMPARE(secondary, DeviceIdentityStore::endpointIdForInstallation(
+        installationId, DeviceIdentityStore::instanceIdForOrdinal(2)));
     QCOMPARE(primary, DeviceIdentityStore::endpointIdForInstallation(
                           installationId, QStringLiteral("primary")));
 }
@@ -61,6 +68,36 @@ void DeviceIdentityStoreTest::identityIsStableAndOwnerOnly() {
     QCOMPARE(restored.publicKeyDer(), first.publicKeyDer());
 }
 
+void DeviceIdentityStoreTest::existingIdentityReaderNeverCreatesOrRotates() {
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    DeviceIdentityStore missing(directory.path(), false);
+    QString error;
+    QVERIFY(!missing.initializeExisting(&error));
+    QVERIFY(!QFileInfo::exists(missing.fallbackFilePath()));
+
+    DeviceIdentityStore bootstrap(directory.path(), false);
+    QVERIFY(bootstrap.initialize(&error));
+    const QString identity = bootstrap.installationId();
+    DeviceIdentityStore reader(directory.path(), false);
+    QVERIFY(reader.initializeExisting(&error));
+    QCOMPARE(reader.installationId(), identity);
+
+    QFile stored(bootstrap.fallbackFilePath());
+    QVERIFY(stored.open(QIODevice::WriteOnly | QIODevice::Truncate));
+    QCOMPARE(stored.write("corrupt"), qint64(7));
+    stored.close();
+    DeviceIdentityStore corrupt(directory.path(), false);
+    QVERIFY(!corrupt.initializeExisting(&error));
+    QVERIFY(stored.open(QIODevice::ReadOnly));
+    QCOMPARE(stored.readAll(), QByteArray("corrupt"));
+    stored.close();
+    QVERIFY(QFile::remove(stored.fileName()));
+    DeviceIdentityStore disappeared(directory.path(), false);
+    QVERIFY(!disappeared.initializeExisting(&error));
+    QVERIFY(!QFileInfo::exists(stored.fileName()));
+}
+
 void DeviceIdentityStoreTest::signatureVerifiesAndRejectsTampering() {
     QTemporaryDir directory;
     QVERIFY(directory.isValid());
@@ -68,7 +105,7 @@ void DeviceIdentityStoreTest::signatureVerifiesAndRejectsTampering() {
     QString error;
     QVERIFY2(identity.initialize(&error), qPrintable(error));
 
-    const QByteArray payload("mouffette-v6\nboot\nnonce\nruntime\nprimary");
+    const QByteArray payload("mouffette-v7\nboot\nnonce\nruntime\n1");
     const QByteArray signature = identity.sign(payload, &error);
     QCOMPARE(signature.size(), 64);
 

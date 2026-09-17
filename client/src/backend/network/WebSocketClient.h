@@ -34,7 +34,6 @@ public:
                     bool preferNativeIdentityVault,
                     QObject* parent = nullptr,
                     SuspendInclusiveClock suspendInclusiveClock = {},
-                    QString instanceId = QStringLiteral("primary"),
                     int instanceOrdinal = 1);
     ~WebSocketClient();
     
@@ -345,8 +344,8 @@ private:
     QString m_installationId;     // SHA-256 of the installation public key
     QString m_endpointId;         // Derived from installationId + instanceId
     QString m_runtimeId;          // Stable for this process only
-    QString m_instanceId;
-    int m_instanceOrdinal = 1;
+    const QString m_instanceId;
+    const int m_instanceOrdinal;
     QString m_uploadClientId;
     QString m_uploadChannelToken;
     QString m_socketClientId;     // Raw connection ID provided by welcome (diagnostics)

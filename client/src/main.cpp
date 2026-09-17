@@ -169,8 +169,10 @@ int main(int argc, char *argv[]) {
         exitCode = app.exec();
         qDeleteAll(engine.rootObjects());
     } // Runtime services and QML finish their last writes before removal.
+    // Temporary profiles are removed by instanceManager as well. No worker
+    // may still write into them after runtime/QML consumers have retired.
+    QThreadPool::globalInstance()->waitForDone();
     if (clearStorageOnExit) {
-        QThreadPool::globalInstance()->waitForDone();
         instanceManager.releaseProfileLockForRemoval();
         const auto cleared = RuntimeStorage::clearProfileStorage(runtimeProfile);
         if (!cleared.succeeded()) {

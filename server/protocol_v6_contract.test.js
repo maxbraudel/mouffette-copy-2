@@ -37,13 +37,14 @@ function addClient(server, connectionId, endpointId, options = {}) {
         ws,
     };
     server.clients.set(connectionId, client);
+    if (client.authenticated) server.currentTransportByEndpoint.set(endpointId, client);
     return { client, ws };
 }
 
 function envelope(server, type, extra = {}) {
     return {
         type,
-        protocolVersion: 6,
+        protocolVersion: 7,
         serverBootId: server.serverBootId,
         messageId: crypto.randomUUID(),
         connectionGeneration: 1,
@@ -118,7 +119,7 @@ function containsRemovedWireKey(value, forbidden) {
         connectionGeneration: 99,
     }));
     const outbound = lastMessage(recipient.ws, 'test_outbound');
-    assert.equal(outbound.protocolVersion, 6);
+    assert.equal(outbound.protocolVersion, 7);
     assert.equal(outbound.serverBootId, server.serverBootId);
     assert.equal(outbound.connectionGeneration, 99);
     assert.match(outbound.messageId,
@@ -143,7 +144,7 @@ function containsRemovedWireKey(value, forbidden) {
     });
     const mismatch = lastMessage(old.ws, 'error');
     assert.equal(mismatch.code, 'protocol_version_mismatch');
-    assert.equal(mismatch.protocolVersion, 6);
+    assert.equal(mismatch.protocolVersion, 7);
     assert.equal(mismatch.serverBootId, server.serverBootId);
     assert.equal(typeof mismatch.messageId, 'string');
     assert.deepEqual(old.ws.closes, [{ code: 1002, reason: 'Protocol version mismatch' }]);
@@ -178,7 +179,7 @@ function containsRemovedWireKey(value, forbidden) {
     assert.equal(list.clients.some(device => device.endpointId === 'B'), true);
     assert.equal(Object.hasOwn(list.clients.find(device => device.endpointId === 'B'), 'id'), false);
     assert.deepEqual(Object.keys(list.clients.find(device => device.endpointId === 'B')).sort(),
-        ['canAcceptSession', 'endpointId', 'lastSeenAt', 'machineName', 'platform', 'reason', 'status']);
+        ['canAcceptSession', 'endpointId', 'installationId', 'instanceId', 'instanceOrdinal', 'lastSeenAt', 'machineName', 'platform', 'reason', 'runtimeId', 'status']);
     assert.equal(list.clients.find(device => device.endpointId === 'B').status, 'Available');
     const forbiddenOutputFields = new Set([
         'clientId', 'persistentClientId', 'persistentId', 'deviceId', 'sessionId',
@@ -200,7 +201,7 @@ function containsRemovedWireKey(value, forbidden) {
     });
     addClient(server, 'secondary-connection', 'secondary-endpoint', {
         installationId,
-        instanceId: crypto.randomUUID(),
+        instanceId: 'instance-2',
         instanceOrdinal: 2,
     });
 
@@ -208,8 +209,9 @@ function containsRemovedWireKey(value, forbidden) {
     const discovered = lastMessage(primary.ws, 'client_list').clients;
     assert.equal(discovered.length, 1);
     assert.equal(discovered[0].endpointId, 'secondary-endpoint');
-    assert.equal(Object.hasOwn(discovered[0], 'installationId'), false);
-    assert.equal(Object.hasOwn(discovered[0], 'instanceOrdinal'), false);
+    assert.equal(discovered[0].installationId, installationId);
+    assert.equal(discovered[0].instanceOrdinal, 2);
+    assert.equal(discovered[0].instanceId, 'instance-2');
 }
 
 // A device snapshot is a complete replacement. Required fields may not be
@@ -465,4 +467,4 @@ function containsRemovedWireKey(value, forbidden) {
     assert.equal(lastMessage(owner.ws, 'error').code, 'target_offline');
 }
 
-console.log('protocol v6 cut-over tests passed');
+console.log('protocol v7 cut-over tests passed');

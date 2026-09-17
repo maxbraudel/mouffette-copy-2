@@ -38,12 +38,12 @@ signals:
 
 private:
     bool prepareCoordinationRoot(QString* errorMessage);
-    bool acquireSlot(int ordinal);
+    bool acquireSlot(int ordinal, QString* errorMessage);
     bool createTemporaryProfile(QString* errorMessage);
     bool startActivationServer(QString* errorMessage);
-    bool requestActivation() const;
+    bool requestActivation(int ordinal) const;
     void cleanupAbandonedProfiles();
-    QString activationServerName() const;
+    QString activationServerName(int ordinal) const;
 
     QString m_applicationKey;
     bool m_allowMultipleInstances = false;

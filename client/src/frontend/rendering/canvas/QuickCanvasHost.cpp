@@ -556,7 +556,7 @@ void QuickCanvasHost::updateRemoteSceneTargetFromClientList(
 {
     for (const ClientInfo& client : clients) {
         if (client.endpointId() == m_targetClientId) {
-            m_targetMachineName = client.getMachineName();
+            m_targetMachineName = client.getInstanceDisplayName();
             break;
         }
     }

@@ -148,6 +148,15 @@ ClientInfo ClientInfo::fromJson(const QJsonObject& json) {
     return client;
 }
 
+QString ClientInfo::getInstanceDisplayName() const {
+    const QString machineName = m_machineName.trimmed().isEmpty()
+        ? QStringLiteral("Unnamed client")
+        : m_machineName.trimmed();
+    return m_instanceOrdinal > 0
+        ? QStringLiteral("%1 (%2)").arg(machineName).arg(m_instanceOrdinal)
+        : machineName;
+}
+
 QString ClientInfo::getIdentityDisplayText() const {
     QString platformIcon;
     if (m_platform == "macOS") {
@@ -160,13 +169,7 @@ QString ClientInfo::getIdentityDisplayText() const {
         platformIcon = "💻";
     }
 
-    QString machineName = m_machineName.trimmed().isEmpty()
-        ? QStringLiteral("Unnamed client")
-        : m_machineName.trimmed();
-    if (m_instanceOrdinal >= 2) {
-        machineName += QStringLiteral(" — Instance %1").arg(m_instanceOrdinal);
-    }
-    return QStringLiteral("%1 %2").arg(platformIcon, machineName);
+    return QStringLiteral("%1 %2").arg(platformIcon, getInstanceDisplayName());
 }
 
 QString ClientInfo::availabilityBadgeText() const

@@ -4,7 +4,6 @@
 #include "migrations/settings/v0_to_v1.h"
 #include "backend/domain/project/ProjectStore.h"
 #include "backend/notifications/HistoryStore.h"
-#include "backend/security/DeviceIdentityStore.h"
 
 #include <QDir>
 #include <QFileInfo>
@@ -40,69 +39,7 @@ Inspection inspectHistory(const QString& root, const QString& path)
     return result;
 }
 
-QString identityDirectory(const RuntimeProfileContext& context)
-{
-    return QDir(context.rootPath).filePath(QStringLiteral("identity"));
-}
 
-QString identityMetadata(const RuntimeProfileContext& context)
-{
-    return QDir(identityDirectory(context)).filePath(QStringLiteral("storage.json"));
-}
-
-Inspection inspectIdentity(const RuntimeProfileContext& context)
-{
-    QJsonObject metadata;
-    Inspection result = readVersionedJson(context.rootPath, identityMetadata(context),
-                                         StorageVersions::Identity, 4096, &metadata);
-    if (result.state != State::Current) return result;
-    if (metadata.value(QStringLiteral("phase")).toString() != QLatin1String("ready"))
-        return {State::Corrupt, result.version, QStringLiteral("Interrupted identity operation")};
-    DeviceIdentityStore store(identityDirectory(context), context.isPersistent(), context.identityNamespace());
-    QString error;
-    switch (store.inspectStored(&error)) {
-    case DeviceIdentityStore::ReadState::Valid: return result;
-    case DeviceIdentityStore::ReadState::Missing:
-        return {State::Corrupt, result.version, QStringLiteral("Identity material is missing")};
-    case DeviceIdentityStore::ReadState::Corrupt: return {State::Corrupt, result.version, error};
-    case DeviceIdentityStore::ReadState::IoError: return {State::IoError, result.version, error};
-    }
-    return {State::IoError, result.version, QStringLiteral("Cannot inspect identity")};
-}
-
-Operation resetIdentity(const RuntimeProfileContext& context)
-{
-    const Operation prepared = ensureDirectory(context.rootPath, identityDirectory(context));
-    if (!prepared.succeeded()) return prepared;
-    const QString path = identityMetadata(context);
-    QJsonObject previous;
-    const Inspection existing = readVersionedJson(context.rootPath, path,
-                                                 StorageVersions::Identity, 4096, &previous);
-    if (existing.state == State::IoError) return {Failure::IoError, existing.reason};
-    const auto checkpoint = [&](const QString& phase) {
-        return writeJson(context.rootPath, path,
-                         {{QStringLiteral("schemaVersion"), StorageVersions::Identity},
-                          {QStringLiteral("phase"), phase}});
-    };
-    DeviceIdentityStore store(identityDirectory(context), context.isPersistent(), context.identityNamespace());
-    QString error;
-    const auto stored = store.inspectStored(&error);
-    if (stored == DeviceIdentityStore::ReadState::IoError) return {Failure::IoError, error};
-    const bool resumeCreation = existing.state == State::Current
-        && previous.value(QStringLiteral("phase")).toString() == QLatin1String("creating")
-        && stored != DeviceIdentityStore::ReadState::Corrupt;
-    if (!resumeCreation) {
-        Operation operation = checkpoint(QStringLiteral("resetting"));
-        if (!operation.succeeded()) return operation;
-        if (!store.reset(&error)) return {Failure::IoError, error};
-        operation = checkpoint(QStringLiteral("creating"));
-        if (!operation.succeeded()) return operation;
-    }
-    // A crash after creation but before the ready checkpoint reuses the new
-    // key. No second rotation and no backup of the previous key.
-    if (!store.initialize(&error)) return {Failure::IoError, error};
-    return checkpoint(QStringLiteral("ready"));
-}
 }
 
 Operation purgeReceivedMedia(const RuntimeProfileContext& context)
@@ -127,21 +64,13 @@ Operation clearProfileStorage(const RuntimeProfileContext& context)
             && context.channel != QLatin1String("production"))) {
         return {Failure::IoError, QStringLiteral("Refusing to clear an invalid runtime root: %1").arg(root)};
     }
-    if (info.exists()) {
-        // Remove the owned directory first. Even a substituted identity/
-        // symlink must never let DeviceIdentityStore::reset follow its parent
-        // to delete an external fallback key.
-        const Operation removed = removeOwned(root, identityDirectory(context));
-        if (!removed.succeeded()) return removed;
-    }
-    DeviceIdentityStore identity(identityDirectory(context), context.isPersistent(), context.identityNamespace());
-    QString identityError;
-    const bool identityCleared = identity.reset(&identityError);
+    const QString installation = QDir::cleanPath(RuntimeProfile::resolvedInstallationRoot(context));
+    if (installation == root || installation.startsWith(root + QLatin1Char('/')))
+        return {Failure::IoError, QStringLiteral("The profile contains shared installation identity; refusing removal.")};
     // The entire selected root is removed, including unregistered/obsolete
     // files. No sibling channel or external source is part of this operation.
     const Operation removed = info.exists() ? removeOwned(info.absolutePath(), root) : Operation{};
     if (!removed.succeeded()) return removed;
-    if (!identityCleared) return {Failure::IoError, identityError};
     return {};
 }
 
@@ -176,9 +105,6 @@ QList<Component> components(const RuntimeProfileContext& context)
                     {{QStringLiteral("schemaVersion"), StorageVersions::History},
                      {QStringLiteral("entries"), QJsonArray{}},
                      {QStringLiteral("terminalCorrelationIds"), QJsonArray{}}}); }, {}},
-        {QStringLiteral("identity"), StorageVersions::Identity,
-         [=] { return inspectIdentity(context); },
-         [=] { return resetIdentity(context); }, {}},
         {QStringLiteral("cache"), StorageVersions::ReceivedMedia,
          [=] { return readVersionedJson(root, cacheMetadata, StorageVersions::ReceivedMedia, 4096); },
          [=] {

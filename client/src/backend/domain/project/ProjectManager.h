@@ -86,9 +86,11 @@ public:
 
     // Pure projection of live discovery with durable projects, strictly by
     // endpointId. Deadline mutation belongs exclusively to processDeadlines().
-    // Online clients are emitted in discovery order, followed by offline projects.
+    // Only admissible discovery entries or durable projects are visible.
+    // Retained server presence is not itself a reason to keep an offline row.
     QList<ProjectClientEntry> mergeDiscoveredClients(const QList<ClientInfo>& discovered,
-                                                      qint64 nowMs = -1);
+                                                      qint64 nowMs = -1,
+                                                      bool localDiscoveryUsable = true);
 
     void setNowProviderForTesting(std::function<qint64()> provider);
     void stopAutomaticTimersForTesting();

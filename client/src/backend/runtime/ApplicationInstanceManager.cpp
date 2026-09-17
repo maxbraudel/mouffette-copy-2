@@ -1,5 +1,6 @@
 #include "backend/runtime/ApplicationInstanceManager.h"
 #include "backend/config/AppConfig.h"
+#include "backend/security/DeviceIdentityStore.h"
 
 #include <QCryptographicHash>
 #include <QCoreApplication>
@@ -8,6 +9,7 @@
 #include <QEventLoop>
 #include <QFile>
 #include <QFileInfo>
+#include <QDebug>
 #include <QLocalServer>
 #include <QLocalSocket>
 #include <QLockFile>
@@ -16,6 +18,7 @@
 #include <QUuid>
 
 #include <limits>
+#include <algorithm>
 #include <utility>
 
 namespace {
@@ -55,11 +58,22 @@ ApplicationInstanceManager::~ApplicationInstanceManager()
     if (m_profileLock) {
         m_profileLock->unlock();
     }
+    if (m_profile.isTemporary()) {
+        const QString profile = QDir::cleanPath(m_profile.rootPath);
+        const QString profilesRoot = QDir(m_coordinationRoot).filePath(QStringLiteral("profiles"));
+        // A failure before assigning rootPath must never turn QDir("") into
+        // a recursive removal of the process working directory.
+        const bool owned = !m_profile.rootPath.isEmpty()
+            && QFileInfo(profile).isAbsolute()
+            && profile.startsWith(QDir::cleanPath(profilesRoot) + QLatin1Char('/'));
+        const bool removed = !owned || (QFileInfo(profile).isSymLink()
+            ? QFile::remove(profile) : QDir(profile).removeRecursively());
+        if (!removed)
+            qWarning() << "Temporary instance profile removal failed; next startup will retry"
+                       << m_profile.rootPath;
+    }
     if (m_slotLock) {
         m_slotLock->unlock();
-    }
-    if (m_profile.isTemporary()) {
-        QDir(m_profile.rootPath).removeRecursively();
     }
 }
 
@@ -103,23 +117,35 @@ void ApplicationInstanceManager::cleanupAbandonedProfiles()
         if (entry.isSymLink()) {
             // Never follow an untrusted abandoned-profile link outside the
             // coordination root.
-            QFile::remove(entry.absoluteFilePath());
+            if (!QFile::remove(entry.absoluteFilePath())) {
+                qWarning() << "instance_profile_cleanup_deferred"
+                           << "reason=link_removal_failed" << "path=" << entry.absoluteFilePath();
+            }
             continue;
         }
         QLockFile ownership(QDir(entry.absoluteFilePath()).filePath(QStringLiteral("active.lock")));
         if (!acquireRecoveringStaleLock(ownership)) {
+            if (ownership.error() != QLockFile::LockFailedError) {
+                qWarning() << "instance_profile_cleanup_deferred"
+                           << "reason=ownership_unavailable" << "path=" << entry.absoluteFilePath();
+            }
             continue;
         }
         ownership.unlock();
-        QDir(entry.absoluteFilePath()).removeRecursively();
+        if (!QDir(entry.absoluteFilePath()).removeRecursively()) {
+            qWarning() << "instance_profile_cleanup_deferred"
+                       << "reason=removal_failed" << "path=" << entry.absoluteFilePath();
+        }
     }
 }
 
-bool ApplicationInstanceManager::acquireSlot(int ordinal)
+bool ApplicationInstanceManager::acquireSlot(int ordinal, QString* errorMessage)
 {
     auto candidate = std::make_unique<QLockFile>(
         QDir(m_coordinationRoot).filePath(QStringLiteral("slot-%1.lock").arg(ordinal)));
     if (!acquireRecoveringStaleLock(*candidate)) {
+        if (candidate->error() != QLockFile::LockFailedError && errorMessage)
+            *errorMessage = QStringLiteral("Cannot lock application instance slot %1").arg(ordinal);
         return false;
     }
     m_slotLock = std::move(candidate);
@@ -129,9 +155,9 @@ bool ApplicationInstanceManager::acquireSlot(int ordinal)
 
 bool ApplicationInstanceManager::createTemporaryProfile(QString* errorMessage)
 {
-    m_profile.instanceId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    m_profile.instanceId = DeviceIdentityStore::instanceIdForOrdinal(m_profile.ordinal);
     m_profile.profileId = QStringLiteral("instance-%1-%2")
-                              .arg(m_profile.ordinal).arg(m_profile.instanceId);
+                              .arg(m_profile.ordinal).arg(QUuid::createUuid().toString(QUuid::WithoutBraces));
     m_profile.persistent = false;
     const QString profilesRoot = QDir(m_coordinationRoot).filePath(QStringLiteral("profiles"));
     if (!QDir().mkpath(profilesRoot)) {
@@ -153,16 +179,18 @@ bool ApplicationInstanceManager::createTemporaryProfile(QString* errorMessage)
     return true;
 }
 
-QString ApplicationInstanceManager::activationServerName() const
+QString ApplicationInstanceManager::activationServerName(int ordinal) const
 {
-    return QStringLiteral("mouffette-activate-%1").arg(safeKey(
+    const QString primaryName = QStringLiteral("mouffette-activate-%1").arg(safeKey(
         m_applicationKey + QLatin1Char('\n') + m_coordinationRoot));
+    return ordinal == 1 ? primaryName
+        : primaryName + QStringLiteral("-%1").arg(ordinal);
 }
 
 bool ApplicationInstanceManager::startActivationServer(QString* errorMessage)
 {
     m_activationServer = std::make_unique<QLocalServer>();
-    const QString name = activationServerName();
+    const QString name = activationServerName(m_profile.ordinal);
     QLocalServer::removeServer(name);
     if (!m_activationServer->listen(name)) {
         if (errorMessage) {
@@ -175,8 +203,13 @@ bool ApplicationInstanceManager::startActivationServer(QString* errorMessage)
         while (QLocalSocket* socket = m_activationServer->nextPendingConnection()) {
             socket->setParent(m_activationServer.get());
             connect(socket, &QLocalSocket::readyRead, this, [this, socket]() {
-                const QByteArray request = socket->readAll();
-                if (request.startsWith("activate")) {
+                if (socket->bytesAvailable() > 64) {
+                    socket->disconnectFromServer();
+                    return;
+                }
+                if (!socket->canReadLine()) return;
+                const QByteArray request = socket->readLine().trimmed();
+                if (request == QByteArrayLiteral("activate")) {
                     emit activationRequested();
                     socket->write("ok\n");
                     socket->flush();
@@ -188,9 +221,9 @@ bool ApplicationInstanceManager::startActivationServer(QString* errorMessage)
     return true;
 }
 
-bool ApplicationInstanceManager::requestActivation() const
+bool ApplicationInstanceManager::requestActivation(int ordinal) const
 {
-    const QString name = activationServerName();
+    const QString name = activationServerName(ordinal);
     const AppConfig& config = AppConfig::instance();
     for (int attempt = 0; attempt < 30; ++attempt) {
         QLocalSocket socket;
@@ -229,6 +262,7 @@ bool ApplicationInstanceManager::requestActivation() const
 ApplicationInstanceManager::StartResult
 ApplicationInstanceManager::start(QString* errorMessage)
 {
+    if (errorMessage) errorMessage->clear();
     if (!prepareCoordinationRoot(errorMessage)) {
         return StartResult::Failed;
     }
@@ -237,17 +271,54 @@ ApplicationInstanceManager::start(QString* errorMessage)
     // one short-lived coordination lock, using Qt's normal crash recovery.
     QLockFile initializationLock(
         QDir(m_coordinationRoot).filePath(QStringLiteral("initialization.lock")));
+    initializationLock.setStaleLockTime(0);
     if (!initializationLock.tryLock(5000)) {
         if (errorMessage)
             *errorMessage = QStringLiteral("Cannot coordinate concurrent application startup");
         return StartResult::Failed;
     }
     cleanupAbandonedProfiles();
+    m_profile.useNativeIdentityVault = m_requestedCoordinationRoot.isEmpty();
+    if (!m_requestedCoordinationRoot.isEmpty()) {
+        const QString persistentBase = QDir(m_coordinationRoot).filePath(
+            QStringLiteral("persistent/%1").arg(m_profile.channel));
+        m_profile.installationRootPath = QDir(persistentBase).filePath(QStringLiteral("installation"));
+        m_profile.legacyPrimaryRootPath = QDir(persistentBase).filePath(QStringLiteral("instance-1"));
+    } else {
+        const QString platformBase = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+        const QString persistentBase = platformBase.isEmpty()
+            ? QDir(QDir::homePath()).filePath(QStringLiteral(".mouffette/data")) : platformBase;
+        m_profile.installationRootPath = RuntimeProfile::persistentInstallationRoot(persistentBase, m_profile.channel);
+        m_profile.legacyPrimaryRootPath = RuntimeProfile::persistentRoot(persistentBase, m_profile.channel);
+    }
 
     if (!m_allowMultipleInstances) {
-        if (!acquireSlot(1)) {
+        // A surviving secondary remains an application instance even after
+        // #1 exits. The build flag limits launches; it must not renumber or
+        // ignore processes already holding a different slot.
+        QList<int> ordinals;
+        const QFileInfoList slotFiles = QDir(m_coordinationRoot).entryInfoList(
+            {QStringLiteral("slot-*.lock")}, QDir::Files | QDir::NoDotAndDotDot);
+        for (const QFileInfo& slot : slotFiles) {
+            const QString filename = slot.fileName();
+            bool valid = false;
+            const int ordinal = filename.mid(5, filename.size() - 10).toInt(&valid);
+            if (valid && ordinal > 0 && filename == QStringLiteral("slot-%1.lock").arg(ordinal))
+                ordinals.append(ordinal);
+        }
+        std::sort(ordinals.begin(), ordinals.end());
+        for (const int ordinal : ordinals) {
+            QLockFile candidate(QDir(m_coordinationRoot).filePath(QStringLiteral("slot-%1.lock").arg(ordinal)));
+            if (acquireRecoveringStaleLock(candidate)) {
+                candidate.unlock();
+                continue;
+            }
+            if (candidate.error() != QLockFile::LockFailedError) {
+                if (errorMessage) *errorMessage = QStringLiteral("Cannot inspect application instance slot %1").arg(ordinal);
+                return StartResult::Failed;
+            }
             initializationLock.unlock();
-            if (requestActivation()) {
+            if (requestActivation(ordinal)) {
                 return StartResult::ActivatedExisting;
             }
             if (errorMessage) {
@@ -256,10 +327,21 @@ ApplicationInstanceManager::start(QString* errorMessage)
             }
             return StartResult::Failed;
         }
+        QString slotError;
+        if (!acquireSlot(1, &slotError)) {
+            if (errorMessage) *errorMessage = slotError.isEmpty()
+                ? QStringLiteral("The primary application instance slot became unavailable") : slotError;
+            return StartResult::Failed;
+        }
     } else {
         for (int ordinal = 1; ordinal < std::numeric_limits<int>::max(); ++ordinal) {
-            if (acquireSlot(ordinal)) {
+            QString slotError;
+            if (acquireSlot(ordinal, &slotError)) {
                 break;
+            }
+            if (!slotError.isEmpty()) {
+                if (errorMessage) *errorMessage = slotError;
+                return StartResult::Failed;
             }
         }
         if (!m_slotLock) {
@@ -272,19 +354,7 @@ ApplicationInstanceManager::start(QString* errorMessage)
         m_profile.instanceId = QStringLiteral("primary");
         m_profile.profileId = QStringLiteral("instance-1");
         m_profile.persistent = true;
-        if (!m_requestedCoordinationRoot.isEmpty()) {
-            // Test/embedded callers that explicitly isolate coordination also
-            // isolate the persistent runtime from the real user profile.
-            m_profile.rootPath = QDir(m_coordinationRoot).filePath(
-                QStringLiteral("persistent/%1/instance-1").arg(m_profile.channel));
-        } else {
-            const QString base = QStandardPaths::writableLocation(
-                QStandardPaths::AppDataLocation);
-            const QString persistentBase = base.isEmpty()
-                ? QDir(QDir::homePath()).filePath(QStringLiteral(".mouffette/data"))
-                : base;
-            m_profile.rootPath = RuntimeProfile::persistentRoot(persistentBase, m_profile.channel);
-        }
+        m_profile.rootPath = m_profile.legacyPrimaryRootPath;
         const QFileInfo profileRoot(m_profile.rootPath);
         if (profileRoot.isSymLink() || (profileRoot.exists() && !profileRoot.isDir())
             || !QDir().mkpath(m_profile.rootPath)) {
@@ -302,10 +372,10 @@ ApplicationInstanceManager::start(QString* errorMessage)
             if (errorMessage) *errorMessage = QStringLiteral("Persistent runtime is already in use");
             return StartResult::Failed;
         }
-        if (!startActivationServer(errorMessage)) {
-            return StartResult::Failed;
-        }
     } else if (!createTemporaryProfile(errorMessage)) {
+        return StartResult::Failed;
+    }
+    if (!startActivationServer(errorMessage)) {
         return StartResult::Failed;
     }
     if (errorMessage) errorMessage->clear();

@@ -29,6 +29,9 @@ private slots:
     void cleansOnlyAbandonedTemporaryProfiles();
     void redirectsSecondaryWritableState();
     void releasesProfileLockWithoutReleasingInstanceSlot();
+    void failedTemporaryProfileNeverRemovesWorkingDirectory();
+    void inaccessibleAbandonedProfileDoesNotBlockStartup();
+    void singleInstanceLaunchActivatesLowestSurvivingOrdinal();
 };
 
 void ApplicationInstanceManagerTest::allocatesAndReusesUnboundedSlots()
@@ -41,13 +44,19 @@ void ApplicationInstanceManagerTest::allocatesAndReusesUnboundedSlots()
     QCOMPARE(first.start(&error), ApplicationInstanceManager::StartResult::Started);
     QCOMPARE(first.profile().ordinal, 1);
     QCOMPARE(first.profile().instanceId, QStringLiteral("primary"));
+    QVERIFY(!first.profile().useNativeIdentityVault);
+    QVERIFY(first.profile().installationRootPath != first.profile().rootPath);
 
     auto second = std::make_unique<ApplicationInstanceManager>(
         QStringLiteral("allocation"), true, root.path());
     QCOMPARE(second->start(&error), ApplicationInstanceManager::StartResult::Started);
     QCOMPARE(second->profile().ordinal, 2);
+    QCOMPARE(second->profile().instanceId, QStringLiteral("instance-2"));
+    QCOMPARE(second->profile().installationRootPath, first.profile().installationRootPath);
+    QCOMPARE(second->profile().identityNamespace(), first.profile().identityNamespace());
     QVERIFY(second->profile().isTemporary());
     const QString secondRoot = second->profile().rootPath;
+    const QString secondInstanceId = second->profile().instanceId;
     QVERIFY(QDir(secondRoot).exists());
 
     ApplicationInstanceManager third(QStringLiteral("allocation"), true, root.path());
@@ -60,6 +69,9 @@ void ApplicationInstanceManagerTest::allocatesAndReusesUnboundedSlots()
     ApplicationInstanceManager replacement(QStringLiteral("allocation"), true, root.path());
     QCOMPARE(replacement.start(&error), ApplicationInstanceManager::StartResult::Started);
     QCOMPARE(replacement.profile().ordinal, 2);
+    QCOMPARE(replacement.profile().instanceId, secondInstanceId);
+    QVERIFY(replacement.profile().rootPath != secondRoot);
+    QCOMPARE(replacement.profile().installationRootPath, first.profile().installationRootPath);
 }
 
 void ApplicationInstanceManagerTest::allocatesConcurrentSlotsAtomically()
@@ -197,6 +209,35 @@ void ApplicationInstanceManagerTest::singleInstanceLaunchRequestsActivation()
     QTRY_COMPARE_WITH_TIMEOUT(activation.count(), 1, 2000);
 }
 
+void ApplicationInstanceManagerTest::singleInstanceLaunchActivatesLowestSurvivingOrdinal()
+{
+    QTemporaryDir root;
+    QVERIFY(root.isValid());
+    QString error;
+    auto primary = std::make_unique<ApplicationInstanceManager>(
+        QStringLiteral("survivor"), true, root.path());
+    QCOMPARE(primary->start(&error), ApplicationInstanceManager::StartResult::Started);
+    ApplicationInstanceManager second(QStringLiteral("survivor"), true, root.path());
+    ApplicationInstanceManager third(QStringLiteral("survivor"), true, root.path());
+    QCOMPARE(second.start(&error), ApplicationInstanceManager::StartResult::Started);
+    QCOMPARE(third.start(&error), ApplicationInstanceManager::StartResult::Started);
+    QCOMPARE(second.profile().ordinal, 2);
+    QCOMPARE(third.profile().ordinal, 3);
+    const QString secondRoot = second.profile().rootPath;
+    QSignalSpy secondActivation(&second, &ApplicationInstanceManager::activationRequested);
+    QSignalSpy thirdActivation(&third, &ApplicationInstanceManager::activationRequested);
+    primary.reset();
+
+    ApplicationInstanceManager duplicate(QStringLiteral("survivor"), false, root.path());
+    QCOMPARE(duplicate.start(&error), ApplicationInstanceManager::StartResult::ActivatedExisting);
+    QTRY_COMPARE_WITH_TIMEOUT(secondActivation.count(), 1, 2000);
+    QCOMPARE(thirdActivation.count(), 0);
+    QCOMPARE(second.profile().ordinal, 2);
+    QCOMPARE(second.profile().rootPath, secondRoot);
+    QVERIFY(QDir(secondRoot).exists());
+    QVERIFY(!QFileInfo::exists(QDir(root.path()).filePath(QStringLiteral("slot-1.lock"))));
+}
+
 void ApplicationInstanceManagerTest::cleansOnlyAbandonedTemporaryProfiles()
 {
     QTemporaryDir root;
@@ -258,6 +299,81 @@ void ApplicationInstanceManagerTest::releasesProfileLockWithoutReleasingInstance
     ApplicationInstanceManager secondary(QStringLiteral("clear-profile"), true, root.path());
     QCOMPARE(secondary.start(&error), ApplicationInstanceManager::StartResult::Started);
     QCOMPARE(secondary.profile().ordinal, 2);
+}
+
+void ApplicationInstanceManagerTest::failedTemporaryProfileNeverRemovesWorkingDirectory()
+{
+    QTemporaryDir root;
+    QVERIFY(root.isValid());
+    const QString coordination = QDir(root.path()).filePath(QStringLiteral("coordination"));
+    ApplicationInstanceManager primary(QStringLiteral("failed-profile"), true, coordination);
+    QString error;
+    QCOMPARE(primary.start(&error), ApplicationInstanceManager::StartResult::Started);
+    QFile blocked(QDir(coordination).filePath(QStringLiteral("profiles")));
+    QVERIFY(blocked.open(QIODevice::WriteOnly));
+    QCOMPARE(blocked.write("not a directory"), qint64(15));
+    blocked.close();
+
+    // Run the failing destructor with an isolated cwd, never the repository.
+    const QString working = QDir(root.path()).filePath(QStringLiteral("working"));
+    QVERIFY(QDir().mkpath(working));
+    const QString sentinel = QDir(working).filePath(QStringLiteral("keep"));
+    QFile file(sentinel);
+    QVERIFY(file.open(QIODevice::WriteOnly));
+    QCOMPARE(file.write("keep"), qint64(4));
+    file.close();
+    const QString previous = QDir::currentPath();
+    const auto restore = qScopeGuard([previous] { QDir::setCurrent(previous); });
+    QVERIFY(QDir::setCurrent(working));
+    {
+        ApplicationInstanceManager secondary(QStringLiteral("failed-profile"), true, coordination);
+        QCOMPARE(secondary.start(&error), ApplicationInstanceManager::StartResult::Failed);
+        QVERIFY(secondary.profile().rootPath.isEmpty());
+    }
+    QVERIFY(QFileInfo::exists(sentinel));
+}
+
+void ApplicationInstanceManagerTest::inaccessibleAbandonedProfileDoesNotBlockStartup()
+{
+#ifdef Q_OS_WIN
+    QSKIP("This test requires POSIX directory permissions.");
+#else
+    QTemporaryDir root;
+    QVERIFY(root.isValid());
+    const QString abandoned = QDir(root.path()).filePath(QStringLiteral("profiles/instance-2-abandoned"));
+    QVERIFY(QDir().mkpath(abandoned));
+    const auto originalPermissions = QFile::permissions(abandoned);
+    const auto restore = qScopeGuard([abandoned, originalPermissions] {
+        QFile::setPermissions(abandoned, originalPermissions);
+    });
+    QVERIFY(QFile::setPermissions(abandoned, QFileDevice::ReadOwner | QFileDevice::ExeOwner));
+    QLockFile probe(QDir(abandoned).filePath(QStringLiteral("active.lock")));
+    if (probe.tryLock(0)) {
+        probe.unlock();
+        QSKIP("The current user can bypass directory permissions.");
+    }
+    QVERIFY(probe.error() != QLockFile::LockFailedError);
+
+    QString error;
+    ApplicationInstanceManager first(QStringLiteral("deferred-cleanup"), true, root.path());
+    QCOMPARE(first.start(&error), ApplicationInstanceManager::StartResult::Started);
+    QCOMPARE(first.profile().ordinal, 1);
+    QVERIFY(error.isEmpty());
+    QVERIFY(QDir(abandoned).exists());
+    {
+        ApplicationInstanceManager second(QStringLiteral("deferred-cleanup"), true, root.path());
+        QCOMPARE(second.start(&error), ApplicationInstanceManager::StartResult::Started);
+        QCOMPARE(second.profile().ordinal, 2);
+        QVERIFY(error.isEmpty());
+        QVERIFY(QDir(abandoned).exists());
+    }
+    // The original profile remains eligible for the next successful cleanup.
+    QVERIFY(QFile::setPermissions(abandoned, originalPermissions));
+    ApplicationInstanceManager retry(QStringLiteral("deferred-cleanup"), true, root.path());
+    QCOMPARE(retry.start(&error), ApplicationInstanceManager::StartResult::Started);
+    QCOMPARE(retry.profile().ordinal, 2);
+    QVERIFY(!QDir(abandoned).exists());
+#endif
 }
 
 int main(int argc, char** argv)

@@ -53,7 +53,8 @@ function protocolSoak() {
             platform: 'test', screens: [], ws, lastHeartbeatAt: wallOffset + now,
             lastHeartbeatMonotonicAt: now };
         server.clients.set(id, client);
-        server.connectionGenerationByEndpoint.set(id, generation);
+        server.currentTransportByEndpoint.set(id, client);
+        server.connectionGenerationSequence = Math.max(server.connectionGenerationSequence, generation);
         server.handleEndpointSnapshot(id, { machineName: id, platform: 'test',
             instanceOrdinal: 1, screens: [], systemUI: [], volumePercent: 50 });
         return client;
@@ -61,7 +62,7 @@ function protocolSoak() {
     const send = (id, type, fields = {}) => {
         const client = server.clients.get(id);
         assert.ok(client, `missing sender ${id}`);
-        server.handleMessage(id, { type, protocolVersion: 6, serverBootId: server.serverBootId,
+        server.handleMessage(id, { type, protocolVersion: 7, serverBootId: server.serverBootId,
             connectionGeneration: client.connectionGeneration,
             messageId: `00000000-0000-4000-8000-${String(++serial).padStart(12, '0')}`,
             ...fields });
@@ -258,7 +259,7 @@ function protocolSoak() {
         assert.equal(server.uploads.size, 0);
         assert.equal(server.sessionAssets.size, 0);
         assert.equal(server.clients.size, 3);
-        assert.equal(server.connectionGenerationByEndpoint.size, 3);
+        assert.equal(server.currentTransportByEndpoint.size, 3);
         now += 10 + random(100);
     }
     assert.ok(statistics.resumes > 100 && statistics.expired > 30);

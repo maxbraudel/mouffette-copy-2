@@ -12,7 +12,9 @@ private slots:
     void disconnectedPresenceOverridesStaleSessionState();
     void formatsProjectDeadlines();
     void formatsCountdownBoundaries();
-    void appendsInstanceNumberOnlyForSecondaryProfiles();
+    void appendsInstanceNumberForEveryProfile();
+    void preservesInstanceNumberWhenDisconnected();
+    void unknownLegacyOrdinalDoesNotInventPrimary();
 };
 
 void ClientInfoDisplayTest::normalizesEveryPublicAvailabilityBadge_data()
@@ -89,18 +91,43 @@ void ClientInfoDisplayTest::formatsCountdownBoundaries()
     QCOMPARE(ClientInfo::formatRemainingTime(300'000), QStringLiteral("5:00"));
 }
 
-void ClientInfoDisplayTest::appendsInstanceNumberOnlyForSecondaryProfiles()
+void ClientInfoDisplayTest::appendsInstanceNumberForEveryProfile()
 {
     ClientInfo primary(QStringLiteral("endpoint-primary"),
                        QStringLiteral("Studio"), QStringLiteral("macOS"));
     primary.setInstanceOrdinal(1);
-    QVERIFY(!primary.getIdentityDisplayText().contains(QStringLiteral("Instance")));
+    QCOMPARE(primary.getInstanceDisplayName(), QStringLiteral("Studio (1)"));
+    QCOMPARE(primary.getIdentityDisplayText(), QStringLiteral("(apple) Studio (1)"));
 
     ClientInfo secondary(QStringLiteral("endpoint-secondary"),
                          QStringLiteral("Studio"), QStringLiteral("macOS"));
     secondary.setInstanceOrdinal(3);
-    QVERIFY(secondary.getIdentityDisplayText().contains(
-        QStringLiteral("Studio — Instance 3")));
+    QCOMPARE(secondary.getInstanceDisplayName(), QStringLiteral("Studio (3)"));
+    QCOMPARE(secondary.getIdentityDisplayText(), QStringLiteral("(apple) Studio (3)"));
+    secondary.setMachineName(QStringLiteral("   "));
+    QCOMPARE(secondary.getInstanceDisplayName(), QStringLiteral("Unnamed client (3)"));
+}
+
+void ClientInfoDisplayTest::preservesInstanceNumberWhenDisconnected()
+{
+    ClientInfo client(QStringLiteral("endpoint-7"), QStringLiteral("  Studio  "),
+                      QStringLiteral("Linux"));
+    client.setInstanceId(QStringLiteral("instance-7"));
+    client.setInstanceOrdinal(7);
+    client.setOnline(false);
+    client.setStatus(QStringLiteral("Disconnected"));
+    client.setAvailabilityStatus(QStringLiteral("Disconnected"));
+    const ClientInfo restored = ClientInfo::fromJson(client.toJson());
+    QCOMPARE(restored.getInstanceDisplayName(), QStringLiteral("Studio (7)"));
+    QCOMPARE(restored.getDisplayText(), QStringLiteral("(linux) Studio (7) — Disconnected"));
+}
+
+void ClientInfoDisplayTest::unknownLegacyOrdinalDoesNotInventPrimary()
+{
+    ClientInfo client(QStringLiteral("legacy"), QStringLiteral("Studio"), QStringLiteral("Linux"));
+    client.setInstanceOrdinal(0);
+    QCOMPARE(client.getInstanceDisplayName(), QStringLiteral("Studio"));
+    QCOMPARE(client.getIdentityDisplayText(), QStringLiteral("(linux) Studio"));
 }
 
 QTEST_APPLESS_MAIN(ClientInfoDisplayTest)

@@ -32,6 +32,9 @@ function addClient(server, connectionId, endpointId) {
         machineName: endpointId,
         ws,
     });
+    server.currentTransportByEndpoint.set(endpointId, server.clients.get(connectionId));
+    server.connectionGenerationSequence = Math.max(server.connectionGenerationSequence,
+        server.clients.get(connectionId).connectionGeneration);
     return ws;
 }
 
@@ -41,7 +44,7 @@ function messages(ws, type) {
 
 function envelope(session, extra = {}) {
     return {
-        protocolVersion: 6,
+        protocolVersion: 7,
         serverBootId: session.serverBootId,
         messageId: crypto.randomUUID(),
         remoteSessionId: session.remoteSessionId,
@@ -693,7 +696,7 @@ for (const invalidCase of [
     assert.equal(messages(owner, 'stopped').at(-1).success, true);
 
     server.handleMessage('owner-connection', {
-        protocolVersion: 6, serverBootId: server.serverBootId,
+        protocolVersion: 7, serverBootId: server.serverBootId,
         messageId: crypto.randomUUID(),
         type: 'remote_scene_start',
     });
@@ -831,7 +834,7 @@ for (const [overrides, accepted] of [
     }
 }
 
-console.log('scene protocol v6 tests passed');
+console.log('scene protocol v7 tests passed');
 
 // Residency is a separate, authenticated barrier; upload completion never implies it.
 {

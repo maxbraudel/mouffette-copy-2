@@ -29,6 +29,9 @@ function addClient(server, connectionId, endpointId) {
         machineName: endpointId,
         ws,
     });
+    server.currentTransportByEndpoint.set(endpointId, server.clients.get(connectionId));
+    server.connectionGenerationSequence = Math.max(server.connectionGenerationSequence,
+        server.clients.get(connectionId).connectionGeneration);
     return ws;
 }
 
@@ -65,7 +68,7 @@ function setup() {
 
 function envelope(context, extra = {}) {
     return {
-        protocolVersion: 6,
+        protocolVersion: 7,
         serverBootId: context.server.serverBootId,
         messageId: crypto.randomUUID(),
         remoteSessionId: context.session.remoteSessionId,
@@ -402,4 +405,4 @@ function messages(ws, type) {
     assert.equal(messages(context.owner, 'upload_removed').length, before);
 }
 
-console.log('asset removal protocol v6 tests passed');
+console.log('asset removal protocol v7 tests passed');

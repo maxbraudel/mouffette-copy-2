@@ -118,7 +118,7 @@ and through notifications, not overlays on loading media.
 
 ## Remote protocol
 
-Protocol v6 carries session-generation-bound, sequenced `media_residency` snapshots
+Protocol v7 carries session-generation-bound, sequenced `media_residency` snapshots
 and a `media_memory_ready` preparation checklist stage. Upload completion still
 means validated durable transfer, independently of background decoding. The
 receiver validates and caches assets after receipt, outside the scene preparation
@@ -130,7 +130,7 @@ already-ready data and decoder budgets atomically. A stale readiness report fail
 starting a partial scene or scheduling an automatic retry of the launch.
 
 Upgrade the server and both endpoints together. Protocol v4 peers cannot join a
-v6 session; existing saved projects remain readable. File format/animation rules
+v7 session; existing saved projects remain readable. File format/animation rules
 and the 64-megapixel image limit remain; the old cumulative 1 GiB image-only cap
 is replaced by shared dynamic admission.
 

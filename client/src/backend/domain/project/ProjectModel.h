@@ -23,6 +23,9 @@ struct ProjectTargetReference {
     QString endpointId;
     QString machineName;
     QString platform;
+    QString installationId;
+    QString instanceId;
+    int instanceOrdinal = 0; // Unknown for legacy projects until fresh presence arrives.
 
     bool isValid() const;
     QJsonObject toJson() const;

@@ -15,11 +15,13 @@ legacy `-v1`/`-v2` suffixes are not compatibility versions.
 | `settings` | `SettingsManager` / `AppConfig` | `settings/settings.ini`, `[storage] schemaVersion` | 1 | Unversioned valid INI: migrate 0 → 1 |
 | `projects` | `ProjectStore` | `projects/projects-v2.json`, `schemaVersion` | 4 | Versions 1, 2, 3: explicit reset to 4 |
 | `history` | `HistoryStore` | `notification-history-v1.json`, `schemaVersion` | 1 | Unknown formats: reset |
-| `identity` | `DeviceIdentityStore` | `identity/storage.json`, `schemaVersion` + operation `phase` | 1 | Unknown formats: reset only this identity namespace |
 | `cache` | `RemoteCacheStore` | `cache/storage.json`, `schemaVersion` | 1 | Unknown formats: reset; session contents also purged on every launch |
 
-The identity's private material lives in the native credential vault or its
-owner-only file under `identity/`. Cache ownership includes the entire
+The installation identity is separate from these resettable profile components.
+`InstallationIdentityBootstrap` owns `installations/<channel>/storage.json` and
+the private material in the native credential vault or an owner-only file in
+that installation directory. The vault account preserves the historical
+`<channel>:instance-1` namespace for every instance. Cache ownership includes the entire
 `cache/Uploads` subtree: media, session descriptors, intents, tombstones and
 cleanup state. Network protocol and canvas rendering schema versions remain
 separate contracts; an incompatible persisted project change still requires a
@@ -29,7 +31,8 @@ by these components.
 ## Startup and compatibility decisions
 
 `ApplicationInstanceManager` selects and locks a profile. `RuntimeStorageBootstrap`
-then invokes `StorageRegistry` and `StorageUpgradeEngine` before `AppConfig` reads
+first adopts or creates the shared installation identity under an interprocess
+lock, then invokes `StorageRegistry` and `StorageUpgradeEngine` before `AppConfig` reads
 persisted settings and before `ApplicationRuntime` constructs its services.
 
 - Missing component: initialize at the expected version.
@@ -54,7 +57,9 @@ runtime. Previously shared profiles are not imported or cleaned by startup.
 ## Module responsibilities
 
 - `StorageVersions.h`: single expected-version source; store constants alias it.
-- `StorageRegistry.cpp`: five ownership adapters, current validators, default
+- `InstallationIdentityBootstrap`: shared identity adoption, serialized creation
+  and validation. It never silently rotates a corrupt or inaccessible key.
+- `StorageRegistry.cpp`: four profile ownership adapters, current validators, default
   initializers and an explicit transition table. It owns no application UI.
 - `StorageUpgradeEngine`: resolves a complete, unambiguous route before executing
   it; validates each committed step; reports outcomes independently.
@@ -80,15 +85,13 @@ For chained migrations, restart begins at the last committed version; it never
 replays already committed steps. Intermediate serializers must validate their
 output before committing it; the engine checks the resulting stored version.
 
-The identity has two resources (credential material and metadata), so its
-metadata doubles as a small operation journal:
-
-1. Commit `resetting`, then remove the old namespace/file.
-2. Commit `creating`, then initialize the identity if missing.
-3. Commit `ready` only after the identity is valid and durable.
-
-On restart, `creating` with a valid key reuses it and finishes the checkpoint.
-`resetting` safely repeats deletion. No old key is kept. The cache is disposable:
+The shared identity is prepared before any profile component. A valid historical
+primary key is adopted, not reset when the new metadata is absent. File migration
+uses an atomic owner-only write, verifies the installation ID, and publishes a
+ready checkpoint. An interrupted migration reuses the valid key. Metadata can be
+repaired around that key; a missing key with an existing checkpoint, an invalid
+key or an inaccessible vault stops startup with Retry/Close. Profile clearing
+cannot repair or replace that shared identity. The cache is disposable:
 its purge is idempotent, and its new schema marker is committed after reset.
 
 The application holds `active.lock` for the profile lifetime; bootstrap also
@@ -100,15 +103,18 @@ may be removed, but their targets are never read or traversed by a reset.
 ## Development and production
 
 Persistent roots are `runtimes/development/instance-1` and
-`runtimes/production/instance-1` under the platform app-data directory. Both start
-fresh on this rollout. Vault namespaces include `<channel>:<profileId>` and
-instance coordination includes the compiled channel. Secondary development
-instances retain separate temporary roots and identities.
+`runtimes/production/instance-1` under the platform app-data directory. Existing
+primary data and its installation key are preserved. Shared identity roots are
+`installations/development` and `installations/production`; coordination also
+includes the compiled channel. Secondary instances retain separate temporary
+roots but share their channel's installation identity. The smallest free slot
+is reused, with `primary` for slot 1 and `instance-N` for higher slots; the UUID
+in a temporary directory name is never its network identity.
 
 ## Explicit full removal
 
 Settings and the startup window after a profile storage/settings failure offer
-**Clear storage and close**, without confirmation. Media startup failures do not
+**Clear storage and close**, without confirmation. Media and shared identity startup failures do not
 offer it. This is an explicit user action, separate from component upgrades.
 The controller marks the request once and asks the application to quit through
 its normal reader/
@@ -120,9 +126,9 @@ the profile file lock, then invokes
 locked through removal so another launch cannot recreate the profile midway.
 
 Removal deletes the entire active profile directory, including hidden and
-unregistered files, and its channel/profile-specific native identity. Other
-channels, other instances and external media are untouched. The next launch is
-a fresh initialization. Failures are written to stderr and exit with code 6;
+unregistered files, while preserving the shared installation directory and vault.
+Other channels, other instances and external media are untouched. The next
+launch starts with fresh profile data and the same network identity. Failures are written to stderr and exit with code 6;
 there is no success notification, backup or settings-save validation.
 
 ## Changing a format
