@@ -81,7 +81,7 @@ Item {
                 font.pixelSize: Theme.titleFontSize
                 font.bold: true
                 verticalAlignment: Text.AlignVCenter
-                horizontalAlignment: Text.AlignHCenter
+                horizontalAlignment: Text.AlignLeft
                 elide: Text.ElideRight
             }
         }

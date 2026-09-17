@@ -82,8 +82,9 @@ QtObject {
                 Text {
                     id: pageTitle
                     objectName: "pageTitle"
+                    x: backButton.visible ? backButton.width + topBar.gap : 0
                     width: topBar.stacked
-                        ? Math.max(0, (backButton.visible ? backButton.x : actions.x) - topBar.gap)
+                        ? Math.max(0, actions.x - x - topBar.gap)
                         : implicitWidth
                     height: Theme.titleHeight
                     text: root.controller.pageTitle
@@ -97,8 +98,7 @@ QtObject {
                     id: backButton
                     objectName: "backButton"
                     visible: root.controller.applicationPage !== 0
-                    x: topBar.stacked ? actions.x - width - topBar.gap
-                                      : pageTitle.width + topBar.gap
+                    anchors.left: parent.left
                     text: "Go Back"
                     iconSource: "qrc:/icons/icons/arrow-left.svg"
                     iconOnly: topBar.compactButtons
@@ -118,7 +118,7 @@ QtObject {
                     id: remoteStatus
                     objectName: "remoteConnectionStatus"
                     visible: root.controller.applicationPage === 1
-                    x: topBar.stacked ? 0 : backButton.x + backButton.width + topBar.gap
+                    x: topBar.stacked ? 0 : pageTitle.x + pageTitle.width + topBar.gap
                     y: topBar.stacked ? (Theme.controlHeight + topBar.gap) * 2 : 0
                     width: topBar.stacked ? topBar.width : implicitWidth
                     primaryText: root.controller.remoteDisplayName
