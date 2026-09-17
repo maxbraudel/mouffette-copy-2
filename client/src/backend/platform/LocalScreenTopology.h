@@ -18,5 +18,5 @@ struct Screen {
 
 // Shared by discovery, cursor mapping and the renderer. Windows' monitor
 // enumeration order need not be QGuiApplication::screens() order.
-QList<Screen> screens();
+QList<Screen> screens(bool includeIdentity = true);
 }

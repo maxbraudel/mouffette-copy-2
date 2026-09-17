@@ -8,7 +8,6 @@
 
 #if defined(Q_OS_MACOS)
 #include "backend/platform/macos/MacWindowManager.h"
-
 #endif
 
 namespace {

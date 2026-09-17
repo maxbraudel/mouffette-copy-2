@@ -3053,7 +3053,6 @@ void RemoteSceneController::activateScene() {
 			}, Qt::QueuedConnection);
 
 		renderWindow->update();
-
     }
 
     // Mute all videos at scene start and schedule automatic unmute if enabled
@@ -3418,11 +3417,13 @@ void RemoteSceneController::refreshScreenBindings(const QList<LocalScreenTopolog
         if (!output.targetScreen) continue;
         const auto present = std::find_if(screens.cbegin(), screens.cend(), [&](const auto& candidate) {
             return candidate.screen == output.targetScreen
-                && (output.screenIdentity.isEmpty() || candidate.identity == output.screenIdentity);
+                && (output.screenIdentity.isEmpty() || candidate.identity.isEmpty()
+                    || candidate.identity == output.screenIdentity);
         });
         if (present == screens.cend()) {
             handleLocalScreenRemoved(output.targetScreen);
         } else {
+            if (output.screenIdentity.isEmpty()) output.screenIdentity = present->identity;
             occupied.insert(present->screen);
             updateScreenGeometry(it.key(), present->screen, present->geometry);
         }

@@ -945,6 +945,14 @@ if(BUILD_TESTING)
     target_link_libraries(tst_RemoteSceneControllerLifecycle PRIVATE
         "$<TARGET_PROPERTY:MouffetteClient,LINK_LIBRARIES>" Qt6::Test)
     add_test(NAME RemoteSceneControllerLifecycle COMMAND tst_RemoteSceneControllerLifecycle)
+    add_test(NAME RemoteSceneDisplayTopology COMMAND tst_RemoteSceneControllerLifecycle
+        screenHotplugPreservesRunAndMatchesIdentity
+        absentDisplayCannotCompletePreparationOrActivation
+        displayLostBeforeFirstFrameDoesNotSatisfyBarrier
+        allOutputsAbsentKeepVideoAndAudioTimeline)
+    set_tests_properties(RemoteSceneDisplayTopology PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software;QT_QUICK_CONTROLS_STYLE=Basic"
+        RUN_SERIAL TRUE)
 
     add_executable(tst_RemoteSceneLifecycle
         tests/qt/tst_RemoteSceneLifecycle.cpp
@@ -985,7 +993,7 @@ if(BUILD_TESTING)
     add_test(NAME SceneRunCoordinator COMMAND tst_SceneRunCoordinator)
     # Native window focus/grabs are part of these tests. Do not race other GUI
     # suites when CI invokes ctest with parallel jobs.
-    set_tests_properties(TextOutlineMotion CanvasInteraction CanvasInteractionScaled CanvasSelectionBackend ClientConnectionFlow VideoPlaybackBackend UploadRemovalSecurity RemoteSceneControllerLifecycle RemoteSceneLifecycle MediaOverlay MediaOverlayScaled
+    set_tests_properties(WindowPresentation TextOutlineMotion CanvasInteraction CanvasInteractionScaled CanvasSelectionBackend ClientConnectionFlow VideoPlaybackBackend UploadRemovalSecurity RemoteSceneControllerLifecycle RemoteSceneLifecycle MediaOverlay MediaOverlayScaled
         PROPERTIES RUN_SERIAL TRUE)
     # Match the production style explicitly. Loading the native Controls
     # plugin concurrently with asynchronous QML compilation is unstable on

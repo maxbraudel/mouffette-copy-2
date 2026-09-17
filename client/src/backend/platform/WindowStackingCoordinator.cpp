@@ -4,6 +4,7 @@
 #include <QGuiApplication>
 #include <QPlatformSurfaceEvent>
 #include <QScopedValueRollback>
+#include <QVariant>
 
 #if defined(Q_OS_MACOS)
 #include "backend/platform/macos/MacWindowManager.h"
@@ -91,6 +92,7 @@ void WindowStackingCoordinator::registerWindow(QWindow* window, bool scene)
 {
     if (!window) return;
     unregisterWindow(window);
+    window->setProperty("mouffetteSceneSurface", scene);
     Entry entry{window, scene, !scene, {}};
     entry.destroyed = connect(window, &QObject::destroyed, this, [this] {
         m_windows.removeIf([](const Entry& entry) { return entry.window.isNull(); });
@@ -114,6 +116,7 @@ void WindowStackingCoordinator::setSceneWindowActive(QWindow* window, bool activ
 
 void WindowStackingCoordinator::unregisterWindow(QWindow* window)
 {
+    if (window) window->setProperty("mouffetteSceneSurface", false);
     m_windows.removeIf([window](const Entry& entry) {
         if (entry.window && entry.window != window) return false;
         QObject::disconnect(entry.destroyed);
@@ -124,6 +127,11 @@ void WindowStackingCoordinator::unregisterWindow(QWindow* window)
 
 void WindowStackingCoordinator::scheduleEnforcement()
 {
+    if (m_windows.isEmpty()) {
+        m_timer.stop();
+        m_deferred.stop();
+        return;
+    }
     if (!m_enforcing && !m_deferred.isActive()) m_deferred.start();
 }
 

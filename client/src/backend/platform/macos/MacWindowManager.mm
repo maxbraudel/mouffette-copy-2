@@ -6,6 +6,7 @@
 #include <QtGui/QWindow>
 #include <QtGui/QScreen>
 #include <QtGui/qscreen_platform.h>
+#include <QVariant>
 
 namespace {
 NSWindow* nativeWindowFor(QWindow* qtWindow)
@@ -47,8 +48,14 @@ void MacWindowManager::setWindowAlwaysOnTop(QWindow* qtWindow) {
     for (NSWindow* child in [NSApp windows]) {
         if (child == window || ![child isVisible]) continue;
         bool ownedPopup = false;
+        bool sceneSurface = false;
         for (QWindow* candidate : QGuiApplication::topLevelWindows()) {
             if (!candidate->isVisible()) continue;
+            if (candidate->property("mouffetteSceneSurface").toBool()
+                && nativeWindowFor(candidate) == child) {
+                sceneSurface = true;
+                break;
+            }
             for (QWindow* owner = candidate->transientParent(); owner; owner = owner->transientParent()) {
                 if (owner == qtWindow) {
                     ownedPopup = nativeWindowFor(candidate) == child;
@@ -57,6 +64,7 @@ void MacWindowManager::setWindowAlwaysOnTop(QWindow* qtWindow) {
             }
             if (ownedPopup) break;
         }
+        if (sceneSurface) continue;
         if ([child parentWindow] == window || [child sheetParent] == window
             || child == [NSApp modalWindow] || ownedPopup
             || [child isKindOfClass:[NSColorPanel class]]) {

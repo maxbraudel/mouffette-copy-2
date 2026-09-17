@@ -438,7 +438,23 @@ private slots:
         QCOMPARE(preparedCount, 1);
         QCOMPARE(readyCount, checklist.size());
         QCOMPARE(stopCount, 0);
+
+        // Device snapshots can arrive during PREPARE or playback. The scene
+        // serialization used by periodic state_snapshot messages must retain
+        // the accepted screen definitions AND their normalized media spans.
+        const auto frozenScene = host->document()->serializeSceneState();
+        host->setScreens({});
+        QCOMPARE(host->document()->serializeSceneState(), frozenScene);
+        client.sceneStartedReceived({{"sceneRunId", scenePrepare.value("sceneRunId")},
+                                     {"digest", scenePrepare.value("digest")},
+                                     {"allStarted", true}});
+        QVERIFY(host->remoteSceneLaunched());
+        const ScreenInfo replacement(0, 1280, 720, -1280, -720, true);
+        host->setScreens({replacement});
+        QCOMPARE(host->document()->serializeSceneState(), frozenScene);
         host->handleRemoteConnectionLost();
+        QCOMPARE(host->document()->serializeSceneState().value("screens").toArray(),
+                 QJsonArray{replacement.toJson()});
         client.disconnect();
         files.unmarkAllForClient(targetId);
     }

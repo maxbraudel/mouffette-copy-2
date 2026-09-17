@@ -44,3 +44,9 @@ Regression coverage lives in `tst_RemoteSceneLifecycle`,
 actual remote-session cleanup and lease-expiry events. The server scene protocol
 tests cover signed end offsets and reject malformed delays before remote
 preparation.
+
+Remote scene surfaces take priority over Mouffette and its dialogs, while
+remaining transparent to input. Display loss hides only the affected output;
+its timeline and media keep running, and an unambiguously identified returning
+screen resumes the current frame. See [window presentation](window-presentation.md)
+for native ordering, topology handling and system limitations.

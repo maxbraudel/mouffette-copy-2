@@ -564,6 +564,13 @@ void QuickCanvasHost::updateRemoteSceneTargetFromClientList(
 
 void QuickCanvasHost::setScreens(const QList<ScreenInfo>& screens)
 {
+    if (m_sceneLaunching || m_sceneLaunched || m_sceneStopping) {
+        // Screen discovery keeps updating during hot-plug, but the run's
+        // screens and normalized spans are immutable. Re-serializing against
+        // a new topology would make the receiver reject every state snapshot.
+        m_pendingScreens = screens;
+        return;
+    }
     m_document->setScreens(screens);
     // A topology replacement never owns the camera. Initial fitting is an
     // explicit workspace transition; subsequent screen changes must preserve
@@ -1091,6 +1098,11 @@ void QuickCanvasHost::stopScenePresentation()
     m_residencyGroup.clear();
     m_document->setEditsLocked(false);
     cancelPresentationBarrier();
+    if (m_pendingScreens) {
+        const auto screens = std::move(*m_pendingScreens);
+        m_pendingScreens.reset();
+        m_document->setScreens(screens);
+    }
 }
 
 void QuickCanvasHost::startPresentationBarrier()

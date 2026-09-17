@@ -182,7 +182,7 @@ void SystemMonitor::stopVolumeMonitoring() {
 
 QList<ScreenInfo> SystemMonitor::getLocalScreenInfo() const {
     QList<ScreenInfo> screens;
-    const auto topology = LocalScreenTopology::screens();
+    const auto topology = LocalScreenTopology::screens(false);
     for (qsizetype index = 0; index < topology.size(); ++index) {
         const auto& screen = topology[index];
         const QRect& geometry = screen.advertisedGeometry;
@@ -207,7 +207,7 @@ bool SystemMonitor::getLocalCursorPosition(int* screenId,
     POINT physicalPosition{};
     if (!GetPhysicalCursorPos(&physicalPosition)) return false;
 
-    const auto topology = LocalScreenTopology::screens();
+    const auto topology = LocalScreenTopology::screens(false);
     for (qsizetype index = 0; index < topology.size(); ++index) {
         const auto& screen = topology[index];
         if (!screen.nativeWindowsCoordinates) break;

@@ -352,6 +352,10 @@ private slots:
         QVERIFY(!controller.m_screenWindows.isEmpty());
         controller.refreshScreenBindings({});
         QVERIFY(!controller.remoteRenderGraphsReady());
+        // Text may prime synchronously inside onRemoteSceneStart. Re-evaluate
+        // readiness with the target absent, as a later media-ready callback does.
+        controller.m_sceneActivationRequested = false;
+        controller.startSceneActivationIfReady();
         QTest::qWait(60);
         QVERIFY(!controller.m_sceneActivationRequested);
         QVERIFY(!controller.m_screenWindows[0].window->isVisible());
@@ -359,6 +363,29 @@ private slots:
         controller.m_sceneActivationRequested = true;
         controller.activateScene();
         QVERIFY(!controller.m_sceneActivated);
+        QTRY_VERIFY_WITH_TIMEOUT(!findRemoteWindow(), 2000);
+    }
+
+    void displayLostBeforeFirstFrameDoesNotSatisfyBarrier()
+    {
+        RemoteSceneController controller(nullptr, nullptr);
+        const auto scene = textScene();
+        controller.onRemoteSceneStart(QStringLiteral("first-frame-hotplug"), scene);
+        QTRY_VERIFY_WITH_TIMEOUT(controller.m_sceneActivationRequested, 5000);
+        auto& output = controller.m_screenWindows[0];
+        output.screenIdentity = QStringLiteral("test-first-frame-screen");
+        LocalScreenTopology::Screen target{output.targetScreen, output.screenIdentity,
+            output.window->geometry(), {}, true, false};
+        controller.activateScene();
+        controller.refreshScreenBindings({}); // Before queued compositor events.
+        QTest::qWait(80);
+        QVERIFY(!output.window->isVisible());
+        QVERIFY(controller.m_screensAwaitingFirstFrame.contains(0));
+        QCOMPARE(controller.m_firstFramePresentedLocalSteadyMs, qint64(-1));
+        controller.refreshScreenBindings({target});
+        QTRY_VERIFY_WITH_TIMEOUT(controller.m_screensAwaitingFirstFrame.isEmpty(), 5000);
+        QVERIFY(controller.m_firstFramePresentedLocalSteadyMs >= 0);
+        controller.onRemoteSceneStop(QStringLiteral("first-frame-hotplug"), scene["sceneInstanceId"].toString());
         QTRY_VERIFY_WITH_TIMEOUT(!findRemoteWindow(), 2000);
     }
 
