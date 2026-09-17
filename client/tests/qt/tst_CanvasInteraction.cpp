@@ -3,6 +3,7 @@
 #include "frontend/rendering/canvas/TextOutlineItem.h"
 
 #include <QEvent>
+#include <QCursor>
 #include <QFontDatabase>
 #include <QGuiApplication>
 #include <QMouseEvent>
@@ -356,6 +357,124 @@ private slots:
         QTest::failOnWarning(QRegularExpression(
             "TypeError:|ReferenceError:|Binding loop detected|Object set as mask|QQuickItem::stackAfter"
             "|\\[QuickCanvas\\]\\[InputCoordinator\\]"));
+    }
+
+    void resizeHandleCursors_data()
+    {
+        reselectMedia_data();
+    }
+
+    void resizeHandleCursors()
+    {
+        QFETCH(QString, type);
+        CanvasFixture scene;
+        QVERIFY2(scene.initialize(), qPrintable(scene.error));
+        scene.add("a", type, 100, 150);
+        scene.select("a", false);
+        const QList<QPair<QPoint, Qt::CursorShape>> handles {
+            {{100, 150}, Qt::SizeFDiagCursor}, {{240, 150}, Qt::SizeVerCursor},
+            {{380, 150}, Qt::SizeBDiagCursor}, {{100, 235}, Qt::SizeHorCursor},
+            {{380, 235}, Qt::SizeHorCursor}, {{100, 320}, Qt::SizeBDiagCursor},
+            {{240, 320}, Qt::SizeVerCursor}, {{380, 320}, Qt::SizeFDiagCursor}
+        };
+        for (const auto& handle : handles) {
+            QTest::mouseMove(&scene.window, handle.first);
+            QTRY_COMPARE(scene.window.cursor().shape(), handle.second);
+        }
+        QTest::mouseMove(&scene.window, {240, 235});
+        QTRY_COMPARE(scene.window.cursor().shape(), Qt::ArrowCursor);
+        QTest::mouseMove(&scene.window, scene.backgroundPoint());
+        QTRY_COMPARE(scene.window.cursor().shape(), Qt::ArrowCursor);
+
+        // Keep the resize cursor even after the pointer leaves its original hitbox.
+        QTest::mousePress(&scene.window, Qt::LeftButton, Qt::NoModifier, {380, 320});
+        const auto release = qScopeGuard([&] {
+            QTest::mouseRelease(&scene.window, Qt::LeftButton, Qt::NoModifier, {430, 360});
+        });
+        QTest::mouseMove(&scene.window, {430, 360});
+        QTRY_COMPARE(scene.root->property("interactionMode").toString(), QString("resize"));
+        QTRY_COMPARE(scene.window.cursor().shape(), Qt::SizeFDiagCursor);
+    }
+
+    void textEditingAndCreationCursors()
+    {
+        CanvasFixture scene;
+        QVERIFY2(scene.initialize(), qPrintable(scene.error));
+        scene.add("a", "text", 100, 150);
+        scene.doubleClick({240, 235});
+        QTRY_VERIFY(scene.visual("a")->property("editing").toBool());
+        QTest::mouseMove(&scene.window, {250, 235});
+        QTRY_COMPARE(scene.window.cursor().shape(), Qt::IBeamCursor);
+        QTest::mouseMove(&scene.window, scene.backgroundPoint());
+        QTRY_COMPARE(scene.window.cursor().shape(), Qt::ArrowCursor);
+        scene.click(scene.backgroundPoint());
+        QTRY_VERIFY(!scene.visual("a")->property("editing").toBool());
+        scene.root->setProperty("textToolActive", true);
+        // Tool switches must refresh feedback without another pointer movement.
+        QTRY_COMPARE(scene.window.cursor().shape(), Qt::IBeamCursor);
+        scene.root->setProperty("textToolActive", false);
+        QTRY_COMPARE(scene.window.cursor().shape(), Qt::ArrowCursor);
+    }
+
+    void leftButtonBackgroundPan_data()
+    {
+        QTest::addColumn<bool>("touchpad");
+        QTest::addColumn<QString>("state");
+        for (bool touchpad : {false, true}) {
+            for (const auto& state : {QString("idle"), QString("selected"),
+                                      QString("editing")}) {
+                QTest::newRow(qPrintable((touchpad ? "touchpad-" : "mouse-") + state))
+                    << touchpad << state;
+            }
+        }
+    }
+
+    void leftButtonBackgroundPan()
+    {
+        QFETCH(bool, touchpad);
+        QFETCH(QString, state);
+        CanvasFixture scene;
+        QVERIFY2(scene.initialize(), qPrintable(scene.error));
+        scene.add("a", "text", 100, 150);
+        if (state == "selected") scene.select("a", false);
+        if (state == "editing") {
+            scene.doubleClick({240, 235});
+            QTRY_VERIFY(scene.visual("a")->property("editing").toBool());
+        }
+
+        // Cocoa can label button-driven mouse events with the trackpad device.
+        auto* device = const_cast<QPointingDevice*>(QPointingDevice::primaryPointingDevice());
+        auto* deviceState = QPointingDevicePrivate::get(device);
+        const auto originalType = deviceState->deviceType;
+        const auto restoreDevice = qScopeGuard([&] { deviceState->deviceType = originalType; });
+        deviceState->deviceType = touchpad ? QInputDevice::DeviceType::TouchPad
+                                          : QInputDevice::DeviceType::Mouse;
+        const QPoint start = scene.backgroundPoint();
+        const QPoint end = start + QPoint(80, 48);
+        QTest::mouseMove(&scene.window, start);
+        QTRY_COMPARE(scene.window.cursor().shape(), Qt::ArrowCursor);
+        QTest::mousePress(&scene.window, Qt::LeftButton, Qt::NoModifier, start);
+        auto release = qScopeGuard([&] {
+            QTest::mouseRelease(&scene.window, Qt::LeftButton, Qt::NoModifier, end);
+        });
+        QTest::mouseMove(&scene.window, start + QPoint(2, 2));
+        QTRY_COMPARE(scene.window.cursor().shape(), Qt::ArrowCursor);
+        QCOMPARE(scene.root->property("panX").toDouble(), 0.0);
+        QTest::mouseMove(&scene.window, start + QPoint(40, 24));
+        QTRY_COMPARE(scene.root->property("interactionMode").toString(), QString("pan"));
+        QTRY_COMPARE(scene.window.cursor().shape(), Qt::ClosedHandCursor);
+        QTest::qWait(260); // Keep the native gesture alive across the watchdog.
+        QTest::mouseMove(&scene.window, end);
+        QTRY_COMPARE(scene.root->property("panX").toDouble(), 80.0);
+        QTRY_COMPARE(scene.root->property("panY").toDouble(), 48.0);
+        QTest::mouseRelease(&scene.window, Qt::LeftButton, Qt::NoModifier, end);
+        release.dismiss();
+        QTRY_COMPARE(scene.root->property("interactionMode").toString(), QString("idle"));
+        QTRY_COMPARE(scene.window.cursor().shape(), Qt::ArrowCursor);
+        QVERIFY(!scene.root->property("anyMediaEditing").toBool());
+        QVERIFY(scene.selected.isEmpty());
+        QCOMPARE(scene.entry("a").value("x").toDouble(), 100.0);
+        QCOMPARE(scene.entry("a").value("y").toDouble(), 150.0);
     }
 
     void reselectMedia_data()

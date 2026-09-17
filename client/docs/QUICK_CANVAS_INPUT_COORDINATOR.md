@@ -112,6 +112,19 @@ Qt grants a grab. Rejecting a move only after `DragHandler.active` becomes true
 is too late to protect another target. Hover is cursor feedback, never ownership.
 Resize masks use exact handle hit tests even without an earlier mouse move.
 
+Left-button camera pan accepts both mouse and trackpad devices on every OS.
+Its containment mask admits only background presses and retains that choice
+through release, including when the press finishes a text edit or the pointer
+crosses a media. The handler stays enabled throughout native grab cleanup.
+
+The top input layer derives cursor feedback from the active gesture and the
+same live hit tests: closed hand during pan, directional arrows on resize
+handles, I-beam for the text tool or the active editor, arrow otherwise.
+The wheel-only `MouseArea` shares this feedback: `acceptedButtons: Qt.NoButton`
+alone still installs an arrow that masks lower layers. Sharing its cursor
+binding also refreshes tool changes under a stationary pointer. Floating
+controls retain their own cursors above the canvas input layer.
+
 Qt documents the typed [containment mask](https://doc.qt.io/qt-6/qml-qtquick-item.html#containmentMask-prop)
 and distinguishes [opacity from input eligibility](https://doc.qt.io/qt-6/qml-qtquick-item.html#opacity-prop).
 Selection chrome keeps its `Repeater` and visuals inside the selection layer,

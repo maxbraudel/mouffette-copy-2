@@ -15,6 +15,10 @@ production QML, not a JavaScript approximation of the state machine:
 - Highlighted multiline text preservation, real keyboard edit, commit and re-entry.
 - Topmost visible target, transparency, hidden media and reordered stacking.
 - Exact resize handles, including their outer half without prior hover.
+- Actual window cursors for all eight handles on text, image and video, including active resize.
+- I-beam over the active editor and immediate cursor changes when toggling the text tool.
+- Left-button background pan with mouse/trackpad, after selection or text editing;
+  arrow at rest and below the drag threshold, closed hand during pan, arrow on release.
 - Stationary cursor after geometry change; transformed canvas, pan and zoom.
 - Deleting an active editor and selecting another item.
 - Deleting an item mid-drag, then selecting and dragging another item.

@@ -1157,6 +1157,31 @@ Rectangle {
                 root.textCreateRequested(viewX, viewY)
             }
 
+            // Cursor feedback belongs to this top input layer, just like
+            // picking. A full-canvas arrow here would hide cursors belonging
+            // to the selection chrome and TextEdit in the lower layers.
+            HoverHandler {
+                id: canvasHover
+                acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
+                cursorShape: {
+                    if (root.interactionMode === "pan")
+                        return Qt.ClosedHandCursor
+                    if (selectionChrome && selectionChrome.interacting)
+                        return selectionChrome.effectiveResizeCursorShape
+                    var p = point.position
+                    var handle = selectionChrome && root.interactionMode === "idle"
+                        ? selectionChrome.hitTestHandle(p.x, p.y) : null
+                    if (handle)
+                        return selectionChrome.resizeCursorForHandle(handle.handleId)
+                    if (root.editingEnabled && root.textToolActive)
+                        return Qt.IBeamCursor
+                    var editor = textEditSession.activeEditor
+                    if (editor && root.mediaIdAtPoint(p.x, p.y) === editor.mediaId)
+                        return Qt.IBeamCursor
+                    return Qt.ArrowCursor
+                }
+            }
+
             // A single native handler owns every media move. Keeping the grab
             // above renderer delegates makes movement independent from Image,
             // VideoOutput, poster-frame and TextEdit subtree lifecycles.
@@ -1461,20 +1486,36 @@ Rectangle {
                 }
             }
 
+            Item {
+                id: backgroundPanInputSurface
+                anchors.fill: parent
+                // Admit background presses before Qt grants a grab, including
+                // the press that finishes text editing. Once chosen, retain
+                // that owner even when the pointer crosses a media or handle.
+                containmentMask: QtObject {
+                    function contains(p: point): bool {
+                        var coordinator = inputLayer.inputCoordinator
+                        if (!root.canStartCanvasPan(panDrag.active))
+                            return false
+                        if (panDrag.active || coordinator.primaryGestureActive)
+                            return coordinator.ownerAllowsCanvasPan(panDrag.active)
+                        return !(selectionChrome && selectionChrome.hitTestHandle(p.x, p.y))
+                            && root.mediaIdAtPoint(p.x, p.y) === ""
+                    }
+                }
+            }
+
             DragHandler {
                 id: panDrag
-                // Background pan must never preempt media press-selection.
-                // Also disabled while any text item is in edit mode so the passive
-                // grab from this DragHandler doesn't block TextEdit cursor placement.
-                enabled: !root.anyMediaEditing
-                         && root.canStartCanvasPan(panDrag.active)
-                         && inputLayer.inputCoordinator.ownerAllowsCanvasPan(panDrag.active)
+                parent: backgroundPanInputSurface
+                // Keep native observation stable until release/cancel. The
+                // containment mask excludes media and editable text up front.
                 target: null
-                acceptedDevices: PointerDevice.Mouse
+                acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
                 acceptedButtons: Qt.LeftButton
                 dragThreshold: 16
-                // Yield to media/resize drags whenever they need the gesture.
-                grabPermissions: PointerHandler.ApprovesTakeOverByAnything
+                grabPermissions: PointerHandler.CanTakeOverFromAnything
+                cursorShape: panSessionActive ? Qt.ClosedHandCursor : undefined
                 property real lastTranslationX: 0.0
                 property real lastTranslationY: 0.0
                 property bool panSessionActive: false
@@ -1522,7 +1563,7 @@ Rectangle {
                 acceptedButtons: Qt.MiddleButton
                 dragThreshold: 0
                 grabPermissions: PointerHandler.TakeOverForbidden
-                cursorShape: active ? Qt.ClosedHandCursor : Qt.ArrowCursor
+                cursorShape: panSessionActive ? Qt.ClosedHandCursor : undefined
                 property real lastTranslationX: 0.0
                 property real lastTranslationY: 0.0
                 property bool panSessionActive: false
@@ -1591,6 +1632,10 @@ Rectangle {
             MouseArea {
                 anchors.fill: parent
                 acceptedButtons: Qt.NoButton
+                // MouseArea installs an arrow even with no accepted buttons.
+                // Share the input layer's feedback, including tool changes
+                // under a stationary pointer (MouseArea refreshes it at once).
+                cursorShape: canvasHover.cursorShape
                 hoverEnabled: false
                 scrollGestureEnabled: true
                 preventStealing: false
