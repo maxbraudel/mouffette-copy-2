@@ -3909,21 +3909,22 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
                 freezeVideoOutput(item);
             }
         });
-        QObject::connect(item->player, &ResidentVideoPlayer::errorOccurred, item->player,
+        QObject::connect(item->player, &ResidentVideoPlayer::errorOccurred, this,
             [this, epoch, weakItem](QMediaPlayer::Error error, const QString& message) {
                 auto item = weakItem.lock();
                 if (!item || epoch != m_sceneEpoch || error == QMediaPlayer::NoError) return;
+                qWarning() << "RemoteSceneController: player error" << message << item->mediaId;
                 if (!m_sceneActivated) sendPrepareResult(false, message);
-                else qWarning() << "RemoteSceneController: player error" << message << item->mediaId;
-            });
+                else if (m_ws) m_ws->sendSceneStop(m_pendingSceneInstanceId, QStringLiteral("video_playback_failed"));
+                onRemoteSceneStop(m_pendingSenderClientId, m_pendingSceneInstanceId);
+            }, Qt::QueuedConnection);
         QObject::connect(item->player, &ResidentVideoPlayer::frameReady, item->player,
-            [this, epoch, weakItem](qint64 timestamp) {
+            [this, epoch, weakItem](qint64) {
                 auto item = weakItem.lock();
                 if (!item || epoch != m_sceneEpoch || item->primedFirstFrame || !item->liveSink) return;
-                const auto frame = item->liveSink->videoFrame();
                 const qint64 desired = std::max<qint64>(0, targetDisplayTimestamp(item));
-                if (!frame.isValid() || timestamp > desired + 1
-                    || (frame.endTime() >= 0 && frame.endTime() / 1000 < desired)) return;
+                const auto frame = item->player->preparedFrame(desired);
+                if (!frame.isValid()) return;
                 item->primedFrame = frame;
                 item->lastFrameImage = convertFrameToImage(frame);
                 if (item->lastFrameImage.isNull()) {
@@ -3937,7 +3938,7 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
                 item->awaitingDecoderSync = false;
                 item->awaitingLivePlayback = false;
                 item->liveWarmupFramesRemaining = 0;
-                item->displayTimestampMs = timestamp;
+                item->displayTimestampMs = desired;
                 item->hasDisplayTimestamp = true;
                 applyImageToSpans(item, item->lastFrameImage);
                 evaluateItemReadiness(item);

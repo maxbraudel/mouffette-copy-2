@@ -354,6 +354,39 @@ private slots:
         }
     }
 
+    void reportedDelayedVideoCanLaunchAndRelaunch()
+    {
+        std::unique_ptr<QuickCanvasHost> host(QuickCanvasHost::create());
+        QVERIFY(host);
+        host->setProjectEditingEnabled(true);
+        auto* video = host->document()->addPreparedFile(
+            QString::fromUtf8(TEST_REPORTED_VIDEO_FILE), QSize(720, 1280), true, {});
+        QVERIFY(video);
+        QTRY_VERIFY2_WITH_TIMEOUT(video->residencyReady(), qPrintable(MediaResidencyManager::instance().errorString(video->residencyOwnerId())), 10000);
+        auto settings = video->settings();
+        settings.unmuteAutomatically = false;
+        video->setSettings(settings);
+        video->setMuted(true);
+        for (int attempt = 0; attempt < 3; ++attempt) {
+            video->setPositionMs(2200);
+            host->triggerTestSceneAction();
+            QTRY_VERIFY_WITH_TIMEOUT(video->isPlaying(), 5000);
+            QVERIFY(host->testSceneLaunched());
+            QTRY_VERIFY_WITH_TIMEOUT(video->positionMs() > 100, 2000);
+            if (attempt == 1) {
+                // A decoder failure during a scene must unlock and restore the
+                // draft, without destroying players inside their signal stack.
+                emit video->player()->errorOccurred(QMediaPlayer::FormatError, "simulated decoder failure");
+                QVERIFY(host->testSceneLaunched());
+                QTRY_VERIFY_WITH_TIMEOUT(!host->testSceneLaunched(), 1000);
+            } else {
+                host->triggerTestSceneAction();
+            }
+            QCOMPARE(video->positionMs(), qint64(2200));
+            QVERIFY(!video->isPlaying());
+        }
+    }
+
     void testScenePlayAndPauseDelays()
     {
         std::unique_ptr<QuickCanvasHost> host(QuickCanvasHost::create());

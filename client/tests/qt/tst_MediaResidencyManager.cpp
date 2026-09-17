@@ -3,6 +3,7 @@
 #include <QTemporaryDir>
 #include <QSignalSpy>
 #include "backend/media/MediaResidencyManager.h"
+#include "backend/media/ResidentVideoPlayer.h"
 
 class MediaResidencyManagerTest : public QObject {
     Q_OBJECT
@@ -18,6 +19,82 @@ class MediaResidencyManagerTest : public QObject {
         return value.save(path) ? path : QString();
     }
 private slots:
+    void unavailablePlayerFailsBeforeResidency() {
+        if (qEnvironmentVariable("QT_MEDIA_BACKEND") != QLatin1String("unavailable"))
+            QSKIP("Run in the isolated unavailable-backend CTest process");
+        // Qt falls back to a discovered backend for an unknown backend name.
+        // Hide multimedia plugins in this isolated process to exercise early
+        // rejection on a computer with no usable playback backend.
+        QTemporaryDir plugins;
+        QVERIFY(plugins.isValid());
+        QCoreApplication::setLibraryPaths({plugins.path()});
+        MediaResidencyManager manager;
+        manager.setMemorySnapshotForTesting(memory());
+        QSignalSpy errors(&manager, &MediaResidencyManager::errorOccurred);
+        manager.acquire("video", QString::fromUtf8(TEST_VIDEO_FILE));
+        QTRY_COMPARE_WITH_TIMEOUT(manager.state("video"), QStringLiteral("error"), 10000);
+        QVERIFY(!manager.ready("video"));
+        QVERIFY(!manager.asset("video"));
+        QVERIFY(!manager.errorString("video").isEmpty());
+        QVERIFY(!errors.isEmpty());
+        // No stuck decoder reservation or stalled queue after native failure.
+        QCOMPARE(manager.summary().value("playbackBudgetBytes").toULongLong(), quint64(0));
+        QTemporaryDir dir;
+        manager.acquire("image", image(dir, "valid.png", 32, qRgb(1, 2, 3)));
+        QTRY_VERIFY_WITH_TIMEOUT(manager.ready("image"), 3000);
+    }
+    void nativeFailureDoesNotPublishReadyAndCanBeRetried() {
+        MediaResidencyManager manager;
+        manager.setMemorySnapshotForTesting(memory());
+        bool injected = false;
+        bool announcedReady = false;
+        connect(&manager, &MediaResidencyManager::ownerChanged, &manager, [&](const QString& owner) {
+            if (owner == QLatin1String("video") && manager.ready(owner)) announcedReady = true;
+        });
+        connect(&manager, &MediaResidencyManager::changed, &manager, [&] {
+            if (injected || manager.summary().value("playbackBudgetBytes").toULongLong() == 0) return;
+            injected = true;
+            const QPointer<ResidentVideoPlayer> player = manager.findChild<ResidentVideoPlayer*>();
+            QVERIFY(player);
+            // Software validation has succeeded. Make only the native player's
+            // private source fail, leaving the verified shared asset intact.
+            QTimer::singleShot(0, player, [player] {
+                if (!player || !player->asset()) return;
+                auto broken = std::make_shared<ResidentMediaAsset>(*player->asset());
+                broken->compressedVideo = QByteArrayLiteral("invalid native MP4 stream");
+                player->setAsset(broken);
+            });
+        });
+        manager.acquire("video", QString::fromUtf8(TEST_VIDEO_FILE));
+        QTRY_COMPARE_WITH_TIMEOUT(manager.state("video"), QStringLiteral("error"), 10000);
+        QVERIFY(injected);
+        QVERIFY(!announcedReady);
+        QVERIFY(!manager.asset("video"));
+        QVERIFY(!manager.errorString("video").isEmpty());
+        QCOMPARE(manager.summary().value("pendingPlaybackBudgetBytes").toULongLong(), quint64(0));
+        manager.retry("video");
+        QTRY_VERIFY2_WITH_TIMEOUT(manager.ready("video"), qPrintable(manager.errorString("video")), 10000);
+        QVERIFY(announcedReady);
+        QCOMPARE(manager.summary().value("playbackBudgetBytes").toULongLong(), quint64(0));
+    }
+    void cancellingNativeValidationKeepsTheQueueUsable() {
+        MediaResidencyManager manager;
+        manager.setMemorySnapshotForTesting(memory());
+        bool cancelled = false;
+        connect(&manager, &MediaResidencyManager::changed, &manager, [&] {
+            if (cancelled || manager.summary().value("playbackBudgetBytes").toULongLong() == 0) return;
+            cancelled = true;
+            QVERIFY(!manager.ready("video"));
+            manager.release("video");
+        });
+        manager.acquire("video", QString::fromUtf8(TEST_VIDEO_FILE));
+        QTRY_VERIFY_WITH_TIMEOUT(cancelled, 10000);
+        QVERIFY(!manager.ready("video"));
+        QTRY_VERIFY(manager.assets().isEmpty());
+        manager.acquire("replacement", QString::fromUtf8(TEST_VIDEO_FILE));
+        QTRY_VERIFY2_WITH_TIMEOUT(manager.ready("replacement"), qPrintable(manager.errorString("replacement")), 10000);
+        QCOMPARE(manager.summary().value("playbackBudgetBytes").toULongLong(), quint64(0));
+    }
     void smallConfiguredReserveAllowsFourGiBAvailable_data() {
         QTest::addColumn<int>("percent");
         QTest::addColumn<quint64>("total");
@@ -562,5 +639,5 @@ private slots:
                 + summary.value("otherBytes").toULongLong());
     }
 };
-QTEST_GUILESS_MAIN(MediaResidencyManagerTest)
+QTEST_MAIN(MediaResidencyManagerTest)
 #include "tst_MediaResidencyManager.moc"

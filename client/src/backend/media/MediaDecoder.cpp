@@ -683,7 +683,10 @@ std::shared_ptr<ResidentMediaAsset> MediaDecoder::decode(
             }
             if (!job.asset->videoFrameCount) { job.error = QStringLiteral("The video decoded no frames"); return fail(); }
             if (audio && !job.asset->audioSampleCount) { job.error = QStringLiteral("The audio track decoded no samples"); return fail(); }
-            job.asset->durationUs = std::max(job.lastVideoTimestampUs + job.lastVideoDurationUs, audioCursorUs);
+            // The container's edit lists trim decoder preroll and AAC padding.
+            // Use the same playable duration as Qt, not the untrimmed PCM tail.
+            job.asset->durationUs = metadata.durationUs > 0 ? metadata.durationUs
+                : std::max(job.lastVideoTimestampUs + job.lastVideoDurationUs, audioCursorUs);
             // Demuxers can report clean EOF for truncated indexed streams.
             // MP4 edit lists intentionally mark preroll/trimmed samples as
             // discard: they must be decoded for codec state but need not

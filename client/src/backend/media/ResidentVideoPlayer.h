@@ -30,6 +30,9 @@ public:
     ~ResidentVideoPlayer() override;
     void setAsset(std::shared_ptr<const ResidentMediaAsset> asset);
     bool preparedAt(qint64 positionMs) const;
+    // The decoded image for this cursor, including a hold before the first PTS.
+    // Returns an invalid frame while loading, on error, or for another cursor.
+    QVideoFrame preparedFrame(qint64 positionMs) const;
     void prepare(qint64 positionMs); // prime a paused native frame asynchronously
     void clearAsset(); // retain the occurrence's cursor for later re-residency
     // Fresh Qt presentation/cache identity, shared immutable CPU planes. Never
@@ -37,7 +40,10 @@ public:
     static QVideoFrame presentationFrame(const QVideoFrame& frame);
     std::shared_ptr<const ResidentMediaAsset> asset() const { return m_asset; }
     qint64 position() const { return m_positionMs; }
-    qint64 duration() const { return m_asset ? (m_asset->durationUs + 999) / 1000 : 0; }
+    qint64 duration() const {
+        const qint64 us = m_asset ? m_asset->durationUs : 0;
+        return us > 0 ? us / 1000 + (us % 1000 != 0) : 0;
+    }
     QMediaPlayer::PlaybackState playbackState() const { return m_state; }
     QMediaPlayer::MediaStatus mediaStatus() const { return m_status; }
     QMediaPlayer::Error error() const { return m_error; }
@@ -78,6 +84,7 @@ private:
     void setState(QMediaPlayer::PlaybackState state);
     void setStatus(QMediaPlayer::MediaStatus status);
     void fail(QMediaPlayer::Error error, const QString& message);
+    void watchPreparation();
 
     std::shared_ptr<const ResidentMediaAsset> m_asset;
     QPointer<QAudioOutput> m_audioOutput;
@@ -88,6 +95,7 @@ private:
     std::unique_ptr<QVideoSink> m_decodeSink;
     QVideoFrame m_frame;
     QTimer m_positionTimer;
+    QTimer m_preparationTimer;
     qint64 m_positionMs = 0;
     int m_loops = QMediaPlayer::Once;
     bool m_loading = false;

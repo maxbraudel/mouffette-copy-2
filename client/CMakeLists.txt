@@ -697,6 +697,11 @@ if(BUILD_TESTING)
     target_link_libraries(tst_MediaResidencyManager PRIVATE MouffetteResidentMedia Qt6::Test)
     target_compile_definitions(tst_MediaResidencyManager PRIVATE TEST_VIDEO_FILE="${CMAKE_SOURCE_DIR}/tests/fixtures/resident-timeline.mp4")
     add_test(NAME MediaResidencyManager COMMAND tst_MediaResidencyManager)
+    add_test(NAME MediaResidencyUnavailableBackend COMMAND tst_MediaResidencyManager unavailablePlayerFailsBeforeResidency)
+    set_tests_properties(ResidentMedia MediaResidencyManager PROPERTIES
+        ENVIRONMENT "QT_MEDIA_BACKEND=ffmpeg;QT_QPA_PLATFORM=offscreen")
+    set_tests_properties(MediaResidencyUnavailableBackend PROPERTIES
+        ENVIRONMENT "QT_MEDIA_BACKEND=unavailable;QT_QPA_PLATFORM=offscreen")
 
     add_executable(tst_DeviceIdentityStore
         tests/qt/tst_DeviceIdentityStore.cpp
@@ -966,6 +971,10 @@ if(BUILD_TESTING)
     target_link_libraries(tst_RemoteSceneControllerLifecycle PRIVATE
         "$<TARGET_PROPERTY:MouffetteClient,LINK_LIBRARIES>" Qt6::Test)
     add_test(NAME RemoteSceneControllerLifecycle COMMAND tst_RemoteSceneControllerLifecycle)
+    foreach(_video_regression_target tst_VideoPlaybackBackend tst_RemoteSceneControllerLifecycle)
+        target_compile_definitions(${_video_regression_target} PRIVATE
+            TEST_REPORTED_VIDEO_FILE="${CMAKE_SOURCE_DIR}/../scream.mp4")
+    endforeach()
     add_test(NAME RemoteSceneDisplayTopology COMMAND tst_RemoteSceneControllerLifecycle
         screenHotplugPreservesRunAndMatchesIdentity
         absentDisplayCannotCompletePreparationOrActivation

@@ -863,7 +863,7 @@ void QuickCanvasHost::prepareSceneVideos(std::function<void()> ready)
                 [this, context](QMediaPlayer::Error error, const QString& message) {
             if (context && m_videoPreparation == context && error != QMediaPlayer::NoError)
                 failScene(message, m_sceneAccepted);
-        });
+        }, Qt::QueuedConnection);
     }
     const int timeout = m_webSocket
         ? m_webSocket->serverPolicy().value(QStringLiteral("scenePrepareTimeoutMs")).toInt(5000) : 5000;
@@ -1053,6 +1053,14 @@ void QuickCanvasHost::beginScenePresentation(bool remote)
     m_sceneContext = new QObject(this);
     rememberDraftState();
     for (CanvasMedia* media : m_document->media()) {
+        if (media->isVideo() && media->player()) {
+            const QPointer<QObject> context(m_sceneContext);
+            connect(media->player(), &ResidentVideoPlayer::errorOccurred, m_sceneContext,
+                    [this, context](QMediaPlayer::Error error, const QString& message) {
+                if (context && context == m_sceneContext && error != QMediaPlayer::NoError)
+                    failScene(message, m_sceneAccepted);
+            }, Qt::QueuedConnection);
+        }
         new SceneMediaPlayback(media, m_sceneContext);
     }
     m_document->clearSelection();

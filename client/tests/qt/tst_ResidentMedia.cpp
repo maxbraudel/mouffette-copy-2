@@ -20,7 +20,8 @@ extern "C" {
 namespace {
 // Generate a bounded, reproducible MP4 with delayed video frames and an AAC
 // tail. Tests need neither the repository's large sample nor an ffmpeg CLI.
-bool writeVideo(const QString& path, bool rotated = false, bool variableRate = false) {
+bool writeVideo(const QString& path, bool rotated = false, bool variableRate = false,
+                int videoDelayFrames = 0, int audioFrames = 23) {
     AVFormatContext* format = nullptr;
     AVCodecContext* video = nullptr;
     AVCodecContext* audio = nullptr;
@@ -102,7 +103,7 @@ bool writeVideo(const QString& path, bool rotated = false, bool variableRate = f
             for (int y = 0; y < frame->height / 2; ++y)
                 std::memset(frame->data[p] + y * frame->linesize[p], p == 1 ? 90 : 180, frame->width / 2);
         const int variablePts[12] = {0, 1, 3, 4, 7, 8, 9, 11, 12, 13, 14, 16};
-        frame->pts = variableRate ? variablePts[i] : i;
+        frame->pts = (variableRate ? variablePts[i] : i) + videoDelayFrames;
         frame->duration = 1;
         if (!encode(video, vs, frame)) return false;
     }
@@ -114,7 +115,7 @@ bool writeVideo(const QString& path, bool rotated = false, bool variableRate = f
     frame->nb_samples = audio->frame_size;
     av_channel_layout_copy(&frame->ch_layout, &audio->ch_layout);
     if (av_frame_get_buffer(frame, 0) < 0) return false;
-    for (int i = 0; i < 23; ++i) {
+    for (int i = 0; i < audioFrames; ++i) {
         if (av_frame_make_writable(frame) < 0) return false;
         auto* samples = reinterpret_cast<float*>(frame->data[0]);
         for (int j = 0; j < frame->nb_samples; ++j)
@@ -605,6 +606,79 @@ private slots:
         QVERIFY(sink.videoFrame().isValid());
         player.clearAsset();
         QCOMPARE(releasedPrepared.size(), 1); // teardown cannot release twice
+    }
+
+    void delayedVideoAndAudioTailPrepareWithoutMovingTheClock_data() {
+        QTest::addColumn<int>("delayFrames");
+        QTest::newRow("one-frame-late") << 1;
+        QTest::newRow("one-second-late") << 25;
+        QTest::newRow("later-than-preparation-deadline") << 250;
+    }
+    void delayedVideoAndAudioTailPrepareWithoutMovingTheClock() {
+        QFETCH(int, delayFrames);
+        QTemporaryDir directory;
+        const QString path = directory.filePath("delayed.mp4");
+        QVERIFY(writeVideo(path, false, false, delayFrames, 80));
+        QString error;
+        const auto asset = MediaDecoder::decode(path, {}, &error);
+        QVERIFY2(asset, qPrintable(error));
+        const qint64 firstUs = delayFrames * 40000LL;
+        QCOMPARE(asset->firstFrame.timestampUs, firstUs);
+        ResidentVideoPlayer player;
+        QAudioOutput audio;
+        audio.setMuted(true);
+        player.setAudioOutput(&audio);
+        player.setAsset(asset);
+        QVERIFY(!player.preparedAt(0)); // the poster is not native readiness
+        const qint64 lastUs = firstUs + 440000;
+        for (qint64 target : {qint64(0), firstUs / 2000, player.duration() - 1,
+                             firstUs / 1000 + 201, qint64(0)}) {
+            player.prepare(target);
+            QTRY_VERIFY2_WITH_TIMEOUT(player.preparedAt(target), qPrintable(player.errorString()), 3000);
+            QCOMPARE(player.position(), target);
+            QVERIFY(!player.isPlaying());
+            const auto frame = player.preparedFrame(target);
+            QVERIFY(!frame.toImage().isNull());
+            if (target * 1000 < firstUs) QCOMPARE(frame.startTime(), firstUs);
+            if (target == player.duration() - 1) QCOMPARE(frame.startTime(), lastUs);
+        }
+        player.play();
+        QTRY_VERIFY_WITH_TIMEOUT(player.position() > 50, 1500);
+        player.pause();
+        const qint64 stoppedAt = player.position();
+        player.clearAsset();
+        player.setAsset(asset);
+        QTRY_VERIFY_WITH_TIMEOUT(player.preparedAt(stoppedAt), 3000);
+        QCOMPARE(player.position(), stoppedAt);
+        player.stop();
+        player.prepare(0);
+        QTRY_VERIFY_WITH_TIMEOUT(player.preparedAt(0), 3000);
+        QCOMPARE(player.position(), qint64(0));
+    }
+
+    void preparationTimeoutReleasesDecoderAndAllowsRecovery() {
+        QTemporaryDir directory;
+        const QString path = directory.filePath("unreachable.mp4");
+        QVERIFY(writeVideo(path, false, false, 25, 80));
+        const auto valid = MediaDecoder::decode(path);
+        QVERIFY(valid);
+        auto inconsistent = std::make_shared<ResidentMediaAsset>(*valid);
+        // A cached poster claims a frame at zero, but native decoding proves
+        // there is none there. This must time out without poisoning a retry.
+        inconsistent->firstFrame.timestampUs = 0;
+        int released = 0;
+        inconsistent->releasePlayback = [&](bool) { ++released; };
+        ResidentVideoPlayer player;
+        QSignalSpy errors(&player, &ResidentVideoPlayer::errorOccurred);
+        player.setAsset(inconsistent);
+        QTRY_COMPARE_WITH_TIMEOUT(errors.size(), 1, 6500);
+        QTRY_COMPARE(released, 1);
+        QVERIFY(player.errorString().contains("0 ms"));
+        QVERIFY(!player.preparedAt(0));
+        player.setAsset(valid);
+        QTRY_VERIFY_WITH_TIMEOUT(player.preparedAt(0), 3000);
+        QCOMPARE(player.error(), QMediaPlayer::NoError);
+        QCOMPARE(errors.size(), 1);
     }
 
     void variableFrameRateUsesPresentationTimestamps() {

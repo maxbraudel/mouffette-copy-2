@@ -1,5 +1,6 @@
 #include "backend/media/MediaResidencyManager.h"
 #include "backend/media/MediaDecoder.h"
+#include "backend/media/ResidentVideoPlayer.h"
 #include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QDateTime>
@@ -64,6 +65,8 @@ struct MediaResidencyManager::Entry {
     std::atomic<quint64> required{0};
     double progress = 0;
     std::shared_ptr<const ResidentMediaAsset> data;
+    std::unique_ptr<ResidentVideoPlayer> validationPlayer;
+    bool validationAdmissionRefused = false;
     std::shared_ptr<std::atomic_bool> cancelled = std::make_shared<std::atomic_bool>(false);
     std::atomic<quint64> allocated{0};
     quint64 generation = 0;
@@ -85,7 +88,10 @@ MediaResidencyManager::MediaResidencyManager(QObject* parent) : QObject(parent) 
 }
 MediaResidencyManager::~MediaResidencyManager() {
     m_timer.stop();
-    for (const auto& entry : m_entries) entry->cancelled->store(true);
+    for (const auto& entry : m_entries) {
+        entry->cancelled->store(true);
+        cancelPlaybackValidation(entry);
+    }
     // Workers queue progress to this QObject. Keep it alive until every
     // canceled worker has stopped, so no cross-thread QPointer/invoke race is
     // possible during final process/service destruction. Ordinary release is
@@ -333,9 +339,11 @@ void MediaResidencyManager::release(const QString& ownerId) {
     for (auto it = m_pins.begin(); it != m_pins.end(); ++it) it->removeAll(ownerId);
     if (e->owners.isEmpty()) {
         e->cancelled->store(true);
+        cancelPlaybackValidation(e);
         ++e->generation;
         e->data.reset();
         m_entries.removeAll(e);
+        QTimer::singleShot(0, this, &MediaResidencyManager::sampleNow);
     }
     emit changed();
 }
@@ -411,7 +419,7 @@ void MediaResidencyManager::startProbe(const EntryPtr& e) {
         }
         e->hash = result.hash;
         e->estimated = result.probe.estimatedBytes;
-        e->scratch = std::max(DecodeScratch, result.probe.scratchBytes);
+        e->scratch = std::max({DecodeScratch, result.probe.scratchBytes, result.probe.playbackBudgetBytes});
         // Merge complete content identities, never merely paths or filenames.
         for (const auto other : m_entries) {
             if (other == e || other->hash != e->hash || other->cancelled->load()) continue;
@@ -485,6 +493,7 @@ void MediaResidencyManager::unpinGroup(const QString& group) {
 }
 void MediaResidencyManager::evict(const EntryPtr& e) {
     if (protectedEntry(e)) return;
+    cancelPlaybackValidation(e);
     e->state = QStringLiteral("waiting_for_memory");
     e->error = waitingReason(e->estimated + e->scratch);
     e->progress = 0;
@@ -610,7 +619,7 @@ void MediaResidencyManager::startDecode(const EntryPtr& e, quint64 allowance) {
             result.asset->reservePlayback = [manager, weak, generation] {
                 const auto entry = weak.lock();
                 if (!manager || !entry || entry->generation != generation || !entry->data
-                    || entry->state != QLatin1String("ready")) return false;
+                    || (entry->state != QLatin1String("ready") && !entry->validationPlayer)) return false;
                 const quint64 pendingBefore = manager->pendingPlaybackBudgetBytes();
                 ++entry->activePlayers;
                 ++entry->pendingPlayers;
@@ -622,6 +631,7 @@ void MediaResidencyManager::startDecode(const EntryPtr& e, quint64 allowance) {
                 const bool admitted = consumesPinnedSlot
                     ? manager->admitsBudget(entry->data->playbackBudgetBytes, false)
                     : manager->admitsBudget(0);
+                if (entry->validationPlayer) entry->validationAdmissionRefused = !admitted;
                 if (!admitted) {
                     --entry->activePlayers; --entry->pendingPlayers; return false;
                 }
@@ -650,6 +660,10 @@ void MediaResidencyManager::startDecode(const EntryPtr& e, quint64 allowance) {
             };
             e->data = std::move(result.asset);
             e->estimated = e->data->residentBytes;
+            if (e->data->video) {
+                validatePlayback(e);
+                return;
+            }
             e->state = QStringLiteral("ready"); e->error.clear(); e->progress = 1;
             e->requiresHealthySamples = false;
         }
@@ -692,6 +706,73 @@ void MediaResidencyManager::startDecode(const EntryPtr& e, quint64 allowance) {
         result.asset = MediaDecoder::decode(e->path, callbacks, &result.error);
         return result;
     }));
+}
+void MediaResidencyManager::validatePlayback(const EntryPtr& e) {
+    // Keep the existing decoding state until the actual platform player has
+    // produced a renderable start image. This gates local imports and receiver
+    // residency alike, with one temporary, budgeted decoder per shared asset.
+    m_decoding = true;
+    e->validationAdmissionRefused = false;
+    e->validationPlayer = std::make_unique<ResidentVideoPlayer>(this);
+    const QPointer<ResidentVideoPlayer> player(e->validationPlayer.get());
+    const std::weak_ptr<Entry> weak = e;
+    const quint64 generation = e->generation;
+    auto finish = [this, weak, generation](const QString& error) {
+        // Never destroy a player from inside one of its multimedia callbacks.
+        QMetaObject::invokeMethod(this, [this, weak, generation, error] {
+            if (const auto entry = weak.lock()) finishPlaybackValidation(entry, generation, error);
+        }, Qt::QueuedConnection);
+    };
+    connect(player, &ResidentVideoPlayer::frameReady, this, [player, finish](qint64) {
+        if (!player) return;
+        const auto frame = player->preparedFrame(0);
+        if (!frame.isValid()) return;
+        finish(frame.toImage().isNull()
+            ? QStringLiteral("The video player cannot render this video's first image") : QString());
+    });
+    connect(player, &ResidentVideoPlayer::errorOccurred, this,
+            [finish](QMediaPlayer::Error error, const QString& message) {
+        if (error != QMediaPlayer::NoError) finish(message);
+    });
+    player->setAsset(e->data);
+    // Automatic poster loading may defer budget admission. Import validation
+    // requires an explicit result so it cannot remain silently pending.
+    if (player && player->error() == QMediaPlayer::NoError) player->prepare(0);
+}
+void MediaResidencyManager::cancelPlaybackValidation(const EntryPtr& e) {
+    if (!e->validationPlayer) return;
+    auto player = std::move(e->validationPlayer);
+    disconnect(player.get(), nullptr, this, nullptr);
+    player.reset();
+    m_decoding = false;
+}
+void MediaResidencyManager::finishPlaybackValidation(
+    const EntryPtr& e, quint64 generation, const QString& error) {
+    if (e->generation != generation || !e->validationPlayer || e->owners.isEmpty()) return;
+    const bool waitingForMemory = e->cancelled->load() || e->validationAdmissionRefused;
+    QString failure = e->validationPlayer->error() != QMediaPlayer::NoError
+        ? e->validationPlayer->errorString() : error;
+    if (failure.isEmpty() && e->validationPlayer->error() != QMediaPlayer::NoError)
+        failure = QStringLiteral("The video playback engine could not prepare this video");
+    cancelPlaybackValidation(e);
+    if (waitingForMemory) {
+        evict(e);
+    } else if (!failure.isEmpty()) {
+        e->data.reset();
+        e->state = QStringLiteral("error");
+        e->error = failure;
+        e->progress = 0;
+        publish(e);
+        const auto owners = e->owners.values();
+        for (const auto& id : owners) if (m_owners.contains(id)) emit errorOccurred(id, failure);
+    } else {
+        e->state = QStringLiteral("ready");
+        e->error.clear();
+        e->progress = 1;
+        e->requiresHealthySamples = false;
+        publish(e);
+    }
+    QTimer::singleShot(0, this, &MediaResidencyManager::sampleNow);
 }
 void MediaResidencyManager::sampleNow() {
     refreshSystemMemory();

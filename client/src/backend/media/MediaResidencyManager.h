@@ -78,6 +78,9 @@ private:
     void startProbe(const EntryPtr& entry);
     void schedule();
     void startDecode(const EntryPtr& entry, quint64 allowance);
+    void validatePlayback(const EntryPtr& entry);
+    void finishPlaybackValidation(const EntryPtr& entry, quint64 generation, const QString& error);
+    void cancelPlaybackValidation(const EntryPtr& entry);
     void publish(const EntryPtr& entry);
     void evict(const EntryPtr& entry);
     bool protectedEntry(const EntryPtr& entry) const;

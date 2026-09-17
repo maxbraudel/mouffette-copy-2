@@ -85,15 +85,35 @@ mouffette_patch_ffmpeg(playbackengine/qffmpegstreamdecoder.cpp
         } else {
             onFrameFound(next);
         }]=])
+# At EOF the final video image remains visible through a longer audio track.
+# Extend its interval before seek filtering without moving either track's PTS.
+mouffette_patch_ffmpeg(playbackengine/qffmpegcodeccontext_p.h
+    "uint streamIndex() const { return d->stream->index; }"
+    [=[uint streamIndex() const { return d->stream->index; }
+    TrackPosition mediaEnd() const {
+        return TrackPosition(d->formatContext->duration == AV_NOPTS_VALUE
+                                 ? 0 : d->formatContext->duration);
+    }]=])
+set(_old_video_drain [=[        if (!packet.isValid() && m_sessionCtx.pendingVideoFrame.isValid())
+            onFrameFound(std::exchange(m_sessionCtx.pendingVideoFrame, Frame{}));]=])
+set(_video_drain [=[        if (!packet.isValid() && m_sessionCtx.pendingVideoFrame.isValid()) {
+            Frame last = std::exchange(m_sessionCtx.pendingVideoFrame, Frame{});
+            const auto heldDuration = m_codecContext.mediaEnd() - last.startTime();
+            if (heldDuration > last.duration()) last.setDuration(heldDuration);
+            onFrameFound(last);
+        }]=])
+# Upgrade build trees that already contain the previous lookahead patch.
+file(READ "${_ffmpeg}/playbackengine/qffmpegstreamdecoder.cpp" _decoder_source)
+string(FIND "${_decoder_source}" "${_old_video_drain}" _old_video_drain_offset)
+if(NOT _old_video_drain_offset EQUAL -1)
+    string(REPLACE "${_old_video_drain}" "${_video_drain}" _decoder_source "${_decoder_source}")
+    file(WRITE "${_ffmpeg}/playbackengine/qffmpegstreamdecoder.cpp" "${_decoder_source}")
+endif()
 mouffette_patch_ffmpeg(playbackengine/qffmpegstreamdecoder.cpp
     [=[        else
             decodeMedia(packet);
     };]=]
-    [=[        else
-            decodeMedia(packet);
-        if (!packet.isValid() && m_sessionCtx.pendingVideoFrame.isValid())
-            onFrameFound(std::exchange(m_sessionCtx.pendingVideoFrame, Frame{}));
-    };]=])
+    "        else\n            decodeMedia(packet);\n${_video_drain}\n    };")
 mouffette_patch_ffmpeg(playbackengine/qffmpegstreamdecoder.cpp
     "frame.isValid() && frame.absoluteEnd() < m_sessionCtx.absSeekPos"
     "frame.isValid() && (m_trackType == QPlatformMediaPlayer::VideoStream ? frame.absoluteEnd() <= m_sessionCtx.absSeekPos : frame.absoluteEnd() < m_sessionCtx.absSeekPos)")

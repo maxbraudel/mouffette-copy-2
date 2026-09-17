@@ -393,6 +393,59 @@ private slots:
         QTRY_VERIFY_WITH_TIMEOUT(!findRemoteWindow(), 2000);
     }
 
+    void reportedDelayedVideoPreparesAtStartAndAudioTail()
+    {
+        const QString fileId = QStringLiteral("reported-delayed-video");
+        const QString owner = UploadManager::residencyOwnerId({}, 0, fileId);
+        const QString path = QString::fromUtf8(TEST_REPORTED_VIDEO_FILE);
+        FileManager files;
+        files.registerReceivedFilePath(fileId, path);
+        auto& residency = MediaResidencyManager::instance();
+        residency.acquire(owner, path);
+        const auto cleanup = qScopeGuard([&] {
+            files.removeReceivedFileMapping(fileId);
+            residency.release(owner);
+        });
+        QTRY_VERIFY2_WITH_TIMEOUT(residency.ready(owner), qPrintable(residency.errorString(owner)), 10000);
+        const qint64 tail = (residency.asset(owner)->durationUs + 999) / 1000 - 1;
+        RemoteSceneController controller(&files, nullptr);
+        int attempt = 0;
+        for (qint64 target : {qint64(0), tail, qint64(33), qint64(0)}) {
+            auto scene = videoScene(fileId);
+            scene["sceneInstanceId"] = QStringLiteral("delayed-video-run-%1").arg(++attempt);
+            auto media = scene["media"].toArray().first().toObject();
+            media["startPositionMs"] = target;
+            media["autoPlay"] = attempt == 4;
+            scene["media"] = QJsonArray{media};
+            controller.onRemoteSceneStart(QStringLiteral("delayed-video-owner"), scene);
+            QTRY_VERIFY_WITH_TIMEOUT(controller.m_sceneActivationRequested, 5000);
+            const auto item = controller.m_mediaItems.first();
+            QVERIFY(item->primedFirstFrame);
+            QVERIFY(!item->lastFrameImage.isNull());
+            QCOMPARE(item->player->position(), target);
+            QCOMPARE(item->displayTimestampMs, target);
+            controller.activateScene();
+            QTRY_VERIFY_WITH_TIMEOUT(controller.m_firstFramePresentedLocalSteadyMs >= 0, 5000);
+            if (attempt == 4) {
+                QTRY_VERIFY_WITH_TIMEOUT(item->player->isPlaying() && item->player->position() > 100, 2000);
+                QVERIFY(item->renderVisible);
+            } else {
+                QCOMPARE(item->player->position(), target);
+                QVERIFY(!item->player->isPlaying());
+            }
+            if (attempt == 2) {
+                QPointer<ResidentVideoPlayer> player(item->player);
+                emit player->errorOccurred(QMediaPlayer::FormatError, "simulated decoder failure");
+                QVERIFY(player);
+                QTRY_VERIFY_WITH_TIMEOUT(player.isNull(), 3000);
+            } else {
+                controller.onRemoteSceneStop(QStringLiteral("delayed-video-owner"), scene["sceneInstanceId"].toString());
+            }
+            QTRY_VERIFY_WITH_TIMEOUT(!controller.m_teardownInProgress, 3000);
+            QVERIFY(!findRemoteWindow());
+        }
+    }
+
     void allOutputsAbsentKeepVideoAndAudioTimeline()
     {
         const QString fileId = QStringLiteral("hotplug-video");

@@ -9,6 +9,7 @@
 #include <utility>
 
 namespace {
+constexpr int PreparationTimeoutMs = 5000;
 class PresentationFrameBuffer final : public QAbstractVideoBuffer {
 public:
     explicit PresentationFrameBuffer(QVideoFrame source) : m_source(std::move(source)) {}
@@ -37,6 +38,13 @@ private:
 
 
 ResidentVideoPlayer::ResidentVideoPlayer(QObject* parent) : QObject(parent) {
+    m_preparationTimer.setSingleShot(true);
+    connect(&m_preparationTimer, &QTimer::timeout, this, [this] {
+        if (preparedAt(m_positionMs)) return;
+        fail(QMediaPlayer::FormatError,
+             QStringLiteral("The video player could not prepare an image at %1 ms (last decoded image: %2 ms)")
+                 .arg(m_positionMs).arg(m_frame.isValid() ? m_frame.startTime() / 1000 : -1));
+    });
     // Preserve marker/automation resolution independently of the platform's
     // coarse positionChanged interval. The decoder/audio clock stays authoritative.
     m_positionTimer.setTimerType(Qt::PreciseTimer);
@@ -72,6 +80,7 @@ void ResidentVideoPlayer::releasePlayer() {
     m_decodeSink.reset();
     m_source.reset();
     m_loading = false;
+    m_preparationTimer.stop();
     m_positionTimer.stop();
     m_frame = {};
     if (m_videoSink) m_videoSink->setVideoFrame({});
@@ -142,6 +151,10 @@ bool ResidentVideoPlayer::ensurePlayer(bool reportFailure) {
     m_source->open(QIODevice::ReadOnly);
     m_decodeSink = std::make_unique<QVideoSink>();
     m_player = std::make_unique<QMediaPlayer>();
+    if (!m_player->isAvailable()) {
+        fail(QMediaPlayer::ResourceError, QStringLiteral("The video playback engine is unavailable"));
+        return false;
+    }
     m_player->setLoops(m_loops);
     m_player->setAudioOutput(m_audioOutput);
     m_player->setVideoSink(m_decodeSink.get());
@@ -157,8 +170,10 @@ bool ResidentVideoPlayer::ensurePlayer(bool reportFailure) {
             if (!self || !native || native != m_player.get() || !m_asset) return;
         }
         m_frame = frame;
+        if (preparedAt(m_positionMs) || isPlaying()) m_preparationTimer.stop();
+        const QPointer<ResidentVideoPlayer> self(this);
         if (m_videoSink) m_videoSink->setVideoFrame(frame);
-        emit frameReady(frame.startTime() / 1000);
+        if (self && native && native == m_player.get()) emit frameReady(frame.startTime() / 1000);
     });
     connect(m_player.get(), &QMediaPlayer::positionChanged, this, [this](qint64 value) {
         if (m_loading || !m_asset || m_positionMs == value) return;
@@ -193,6 +208,7 @@ bool ResidentVideoPlayer::ensurePlayer(bool reportFailure) {
                 // immediately flush that work for a second seek.
                 native->setPosition(target);
                 if (m_requestedState == QMediaPlayer::PlayingState) {
+                    m_preparationTimer.stop();
                     native->play();
                 } else {
                     native->pause();
@@ -209,16 +225,38 @@ bool ResidentVideoPlayer::ensurePlayer(bool reportFailure) {
         setStatus(status);
     });
     // Synthetic type hint only; no file/network URL. Reads use the memory device.
+    watchPreparation();
     m_player->setSourceDevice(m_source.get(), QUrl(QStringLiteral("resident:///video.mp4")));
     return true;
 }
 
 bool ResidentVideoPlayer::preparedAt(qint64 positionMs) const {
+    return preparedFrame(positionMs).isValid();
+}
+QVideoFrame ResidentVideoPlayer::preparedFrame(qint64 positionMs) const {
+    if (!m_player || m_loading || m_error != QMediaPlayer::NoError || !m_asset
+        || !m_frame.isValid() || m_frame.startTime() < 0) return {};
     const qint64 target = std::clamp<qint64>(positionMs, 0, std::max<qint64>(0, duration() - 1));
-    return m_player && !m_loading && m_error == QMediaPlayer::NoError && m_frame.isValid()
-        && m_frame.startTime() / 1000 <= target + 1
-        && (m_frame.endTime() < 0 ? m_frame.startTime() / 1000 >= target - 1
-                                 : m_frame.endTime() / 1000 > target);
+    const qint64 firstUs = m_asset->firstFrame.timestampUs;
+    const qint64 startUs = m_frame.startTime();
+    // A valid MP4 may start its video after its audio. Hold the verified first
+    // image before its PTS without moving either track's presentation clock.
+    const bool firstImage = target * 1000 < firstUs && startUs / 1000 == firstUs / 1000;
+    // Qt seeks in milliseconds, frames use microseconds. Compare the same
+    // millisecond bucket at the start, and an exclusive end for VFR boundaries.
+    const bool coversTarget = startUs / 1000 <= target
+        && (m_frame.endTime() < 0 ? startUs / 1000 == target : m_frame.endTime() > target * 1000);
+    return firstImage || coversTarget ? m_frame : QVideoFrame{};
+}
+void ResidentVideoPlayer::watchPreparation() {
+    // Playback may legitimately traverse a long audio-only interval. The
+    // image deadline applies to source loading and paused preparation only.
+    if (!m_asset || preparedAt(m_positionMs)
+        || (!m_loading && m_requestedState == QMediaPlayer::PlayingState)) {
+        m_preparationTimer.stop();
+        return;
+    }
+    m_preparationTimer.start(PreparationTimeoutMs);
 }
 void ResidentVideoPlayer::prepare(qint64 positionMs) {
     if (!m_asset) return;
@@ -226,6 +264,7 @@ void ResidentVideoPlayer::prepare(qint64 positionMs) {
     m_requestedState = QMediaPlayer::PausedState;
     setPosition(positionMs);
     if (ensurePlayer() && !m_loading) m_player->pause();
+    if (m_player && m_error == QMediaPlayer::NoError) watchPreparation();
 }
 void ResidentVideoPlayer::presentPoster() {
     if (!m_asset || !m_videoSink) return;
@@ -273,6 +312,7 @@ void ResidentVideoPlayer::setStatus(QMediaPlayer::MediaStatus status) {
     emit mediaStatusChanged(status);
 }
 void ResidentVideoPlayer::fail(QMediaPlayer::Error error, const QString& message) {
+    m_preparationTimer.stop();
     if (m_player) {
         const QPointer<QMediaPlayer> failedPlayer = m_player.get();
         // A failed source can never produce the frame that retires its future
@@ -295,10 +335,14 @@ void ResidentVideoPlayer::fail(QMediaPlayer::Error error, const QString& message
 }
 void ResidentVideoPlayer::play() {
     if (!m_asset) return;
+    if (m_error != QMediaPlayer::NoError) releasePlayer();
     if (m_positionMs >= duration()) setPosition(0);
     m_requestedState = QMediaPlayer::PlayingState;
     if (!ensurePlayer()) return;
-    if (!m_loading) m_player->play();
+    if (!m_loading) {
+        m_preparationTimer.stop();
+        m_player->play();
+    }
     setState(m_requestedState);
 }
 void ResidentVideoPlayer::pause() {
@@ -321,6 +365,7 @@ void ResidentVideoPlayer::setPosition(qint64 value) {
     m_positionMs = value;
     if (m_asset && (m_player || value > 0)) {
         if (ensurePlayer() && !m_loading && changed) {
+            watchPreparation();
             m_player->setPosition(value);
             // Qt does not produce a new frame for a stopped native player.
             // Keep paused scrubbing functional after Stop/EndOfMedia as well.
