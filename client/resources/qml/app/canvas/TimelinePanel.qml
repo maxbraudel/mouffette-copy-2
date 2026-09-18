@@ -574,7 +574,6 @@ FocusScope {
                 objectName: "timelineClipTrack"
                 y: keyTrack.y + keyTrack.height
                 width: parent.width; height: root.clipHeight
-                Rectangle { anchors.fill: parent; color: Theme.overlaySelected; opacity: 0.45 }
                 Rectangle { width: parent.width; height: 1; color: Theme.overlayBorder }
                 Text { x: trackViewport.contentX + 6; y: 2; text: "CLIPS"; font.pixelSize: 9; color: Theme.overlayDisabledText }
                 Repeater {
@@ -584,7 +583,7 @@ FocusScope {
                         timeContent: timelineContent
                         trackHeight: clipTrack.height
                         interactive: false
-                        opacity: root.timeline ? root.timeline.otherKeyframeOpacity : 0.3
+                        opacity: Math.min(1, (root.timeline ? root.timeline.otherKeyframeOpacity : 0.3) + 0.1)
                     }
                 }
                 Repeater {

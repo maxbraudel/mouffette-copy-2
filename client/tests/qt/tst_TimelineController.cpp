@@ -487,7 +487,7 @@ private slots:
         f.timeline.seek(4000); QVERIFY(!media->clipActive());
     }
 
-    void videoExtensionsShowHatchingDuringResize()
+    void videoExtensionsShowHoldRegionsDuringResize()
     {
         TimelineFixture f; QVERIFY(f.initialize());
         auto* doc=f.host->document();

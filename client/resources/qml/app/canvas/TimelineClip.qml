@@ -62,7 +62,9 @@ Rectangle {
     width: Math.max(2, (shownEnd - shownStart) * panel.pixelsPerMs)
     height: Math.max(12, trackHeight - 22)
     radius: 3
-    color: interactive && panel.timeline && panel.timeline.selectedClipId === modelData.id ? Theme.accent : Theme.overlayHover
+    color: interactive && panel.timeline && panel.timeline.selectedClipId === modelData.id
+        ? Theme.controlSelectionBackground : interactive ? Theme.overlayHover : Theme.overlayPressed
+    border.width: interactive ? 1 : 0
     border.color: Theme.overlayText
     clip: true
     readonly property real shownSourceIn: modelData.sourceInMs
@@ -72,11 +74,11 @@ Rectangle {
         ? Math.min(shownDuration, Math.max(0, -shownSourceIn)) : 0
     readonly property real trailingHoldMs: modelData.isVideo
         ? Math.min(shownDuration, Math.max(0, shownSourceIn + shownDuration - modelData.actualSourceDurationMs)) : 0
-    HatchRegion {
+    HoldRegion {
         objectName: "timelineClipLeadingHold"
         width: clipItem.leadingHoldMs * panel.pixelsPerMs
     }
-    HatchRegion {
+    HoldRegion {
         objectName: "timelineClipTrailingHold"
         x: clipItem.width - width
         width: clipItem.trailingHoldMs * panel.pixelsPerMs
@@ -92,34 +94,11 @@ Rectangle {
         text: panel.formatTime(clipItem.shownStart) + " → " + panel.formatTime(clipItem.shownEnd)
         font.pixelSize: 10; color: Theme.overlayText; verticalAlignment: Text.AlignVCenter; elide: Text.ElideRight
     }
-    // Draw only the visible viewport's stripes, regardless of clip length/zoom.
-    component HatchRegion: Item {
-        id: region
+    component HoldRegion: Rectangle {
         height: clipItem.height
         visible: width > 0
-        clip: true
-        Rectangle { anchors.fill: parent; color: Theme.overlayText; opacity: 0.12 }
-        Item {
-            id: stripeViewport
-            x: Math.max(0, panel.visibleStartX - clipItem.x - region.x)
-            width: Math.max(0, Math.min(region.width - x, panel.visibleEndX - clipItem.x - region.x - x))
-            height: parent.height
-            clip: true
-            Repeater {
-                model: stripeViewport.width > 0 ? Math.ceil((stripeViewport.width + stripeViewport.height) / 8) + 1 : 0
-                Rectangle {
-                    required property int index
-                    x: index * 8 - stripeViewport.height - (stripeViewport.x % 8)
-                    y: -stripeViewport.height
-                    width: 1
-                    height: stripeViewport.height * 3
-                    rotation: -45
-                    transformOrigin: Item.TopLeft
-                    color: Theme.overlayText
-                    opacity: 0.3
-                }
-            }
-        }
+        color: Theme.overlayText
+        opacity: 0.12
     }
     MouseArea {
         id: clipMove
