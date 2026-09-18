@@ -1342,12 +1342,14 @@ private slots:
         connections->connectToServer(server.url());
         QTRY_COMPARE(connections->state(), ConnectionManager::State::Connected);
         ClientInfo client = onlineClient(
-            QStringLiteral("endpoint-first-snapshot"),
+            fixtureEndpoint(QLatin1Char('N')),
             QStringLiteral("Windows B"));
         client.setScreens({});
         client.setVolumePercent(-1);
-        runtime.buildDisplayClientList({client});
+        QVERIFY(server.sendClientList(client));
+        QTRY_COMPARE(runtime.displayClients().size(), 1);
         runtime.activateClient(client.endpointId());
+        QTRY_COMPARE(server.openCommands.size(), 1);
 
         QVERIFY(!runtime.getActiveCanvas());
         QCOMPARE(runtime.remoteVolumePercent(), -1);
@@ -1361,28 +1363,12 @@ private slots:
         });
 
         const ScreenInfo remoteScreen(7, 2560, 1440, -2560, 0, true);
-        const QJsonObject envelope{
-            {QStringLiteral("type"), QStringLiteral("remote_session_opened")},
-            {QStringLiteral("requestId"), QStringLiteral("open-request-1")},
-            {QStringLiteral("remoteSessionId"), QStringLiteral("session-1")},
-            {QStringLiteral("generation"), 1},
-            {QStringLiteral("phase"), QStringLiteral("Active")},
-            {QStringLiteral("ownerEndpointId"),
-             runtime.getWebSocketClient()->endpointId()},
-            {QStringLiteral("targetEndpointId"), client.endpointId()},
-            {QStringLiteral("snapshot"), QJsonObject{
-                {QStringLiteral("screens"), QJsonArray{remoteScreen.toJson()}},
-                {QStringLiteral("systemUI"), QJsonArray{}},
-                {QStringLiteral("volumePercent"), 47},
-                {QStringLiteral("revision"), 1},
-                {QStringLiteral("capturedAtEpochMs"),
-                 QDateTime::currentMSecsSinceEpoch()}
-            }}
-        };
-
-        QVERIFY(QMetaObject::invokeMethod(
-            runtime.getWebSocketClient(), "remoteSessionOpened",
-            Qt::DirectConnection, Q_ARG(QJsonObject, envelope)));
+        QVERIFY(server.sendOpened(
+            QStringLiteral("first-snapshot-session"),
+            server.openCommands.first().value(QStringLiteral("requestId")).toString(),
+            client.endpointId(), remoteScreen, 47));
+        QTRY_COMPARE(activeWorkspaceChanged.count(), 1);
+        QVERIFY(runtime.isRemoteClientConnected());
 
         ApplicationRuntime::ClientWorkspace* workspace =
             runtime.findWorkspace(client.endpointId());
