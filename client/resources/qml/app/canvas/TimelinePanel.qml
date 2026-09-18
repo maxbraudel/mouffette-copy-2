@@ -484,6 +484,7 @@ FocusScope {
                             MouseArea {
                                 id: trimHandle
                                 required property int modelData
+                                objectName: modelData < 0 ? "timelineClipTrimStart" : "timelineClipTrimEnd"
                                 x: modelData < 0 ? 0 : clipItem.width - width
                                 width: Math.min(8, clipItem.width / 3); height: clipItem.height
                                 enabled: root.editable

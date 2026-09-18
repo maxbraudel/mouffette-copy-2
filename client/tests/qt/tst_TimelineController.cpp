@@ -225,6 +225,101 @@ private slots:
         MediaResidencyManager::instance().clearMemorySnapshotForTesting();
     }
 
+    void firstClipResizePreservesTheOppositeEdge_data()
+    {
+        QTest::addColumn<bool>("trimStart");
+        QTest::newRow("start") << true;
+        QTest::newRow("end") << false;
+    }
+
+    void firstClipResizePreservesTheOppositeEdge()
+    {
+        QFETCH(bool, trimStart);
+        auto& residency = MediaResidencyManager::instance();
+        residency.setMemorySnapshotForTesting({8ULL << 30, 6ULL << 30, 512ULL << 20, false, 0});
+        const auto resetMemory = qScopeGuard([&] { residency.clearMemorySnapshotForTesting(); });
+        std::unique_ptr<QuickCanvasHost> host(QuickCanvasHost::create());
+        QVERIFY(host);
+        host->setProjectEditingEnabled(true);
+        TimelineController timeline;
+        timeline.setHost(host.get());
+        QList<QVariantMap> publishedClips;
+        connect(&timeline, &TimelineController::tracksChanged, &timeline, [&] {
+            for (const auto& row : timeline.clips()) publishedClips.append(row.toMap());
+        });
+        QQuickView view;
+        view.setResizeMode(QQuickView::SizeRootObjectToView);
+        view.resize(1100, 240);
+        view.setInitialProperties({{"session", QVariantMap{
+            {"timeline", QVariant::fromValue<QObject*>(&timeline)}}}});
+        view.setSource(QUrl(QStringLiteral("qrc:/qt/qml/Mouffette/App/resources/qml/app/canvas/TimelinePanel.qml")));
+        QCOMPARE(view.status(), QQuickView::Ready);
+        view.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&view));
+        auto* media = host->document()->addPreparedFile(QString::fromUtf8(TEST_VIDEO_FILE), {160, 90}, true, {});
+        QVERIFY(media);
+        host->document()->select(media->mediaId());
+        QTRY_VERIFY(media->residencyReady() && !media->timelineTrack().clips.isEmpty());
+        const auto original = media->timelineTrack().clips.first();
+        QVERIFY(original.durationSlots > 100);
+        const auto& grid = host->document()->timelineSettings();
+        const qreal sourceEnd = grid.timeMs(grid.sourceSlots(media->sourceDurationMs()));
+        QVERIFY(!publishedClips.isEmpty());
+        for (const auto& row : publishedClips) {
+            QCOMPARE(row.value("actualSourceDurationMs").toLongLong(), media->sourceDurationMs());
+            QCOMPARE(row.value("sourceDurationMs").toDouble(), sourceEnd);
+        }
+        view.rootObject()->setProperty("viewDurationMs", 40000.0);
+        const auto findItem = [&](const QString& name) {
+            QQuickItem* result = nullptr;
+            auto visit = [&](auto&& self, QQuickItem* item) -> void {
+                if (item->objectName() == name) result = item;
+                for (auto* child : item->childItems()) self(self, child);
+            };
+            visit(visit, view.rootObject());
+            return result;
+        };
+        QQuickItem* clip = findItem("timelineVideoClip");
+        QVERIFY(clip);
+        QQuickItem* handle = findItem(trimStart ? "timelineClipTrimStart" : "timelineClipTrimEnd");
+        QVERIFY(handle);
+        const QPoint press = handle->mapToScene({handle->width()/2, handle->height()/2}).toPoint();
+        const auto saved = host->serializeProjectState();
+        QTest::mouseClick(&view, Qt::LeftButton, Qt::NoModifier, press);
+        QCOMPARE(host->serializeProjectState(), saved);
+        QTest::mouseMove(&view, press);
+        QTest::mousePress(&view, Qt::LeftButton, Qt::NoModifier, press);
+        QCOMPARE(clip->property("shownStart").toDouble(), grid.timeMs(original.startSlot));
+        QCOMPARE(clip->property("shownEnd").toDouble(), grid.timeMs(original.endSlot()));
+        const QPoint release = press + QPoint(trimStart ? 100 : -100, 0);
+        QTest::mouseMove(&view, release, 20);
+        const qint64 expectedDelta = grid.nearestSlot(100 / view.rootObject()->property("pixelsPerMs").toDouble());
+        const qint64 expectedStart = original.startSlot + (trimStart ? expectedDelta : 0);
+        const qint64 expectedEnd = original.endSlot() - (trimStart ? 0 : expectedDelta);
+        QCOMPARE(grid.nearestSlot(clip->property("shownStart").toDouble()), expectedStart);
+        QCOMPARE(grid.nearestSlot(clip->property("shownEnd").toDouble()), expectedEnd);
+        QCOMPARE(host->serializeProjectState(), saved);
+        QTest::mouseRelease(&view, Qt::LeftButton, Qt::NoModifier, release);
+        QCOMPARE(media->timelineTrack().clips.size(), 1);
+        const auto result = media->timelineTrack().clips.first();
+        QCOMPARE(result.startSlot, expectedStart);
+        QCOMPARE(result.endSlot(), expectedEnd);
+        QCOMPARE(result.sourceStartSlot, original.sourceStartSlot + (trimStart ? expectedDelta : 0));
+
+        // Re-extend the same edge to the source boundary, including its final
+        // compensated slot. The first gesture must not lose that source range.
+        handle = findItem(trimStart ? "timelineClipTrimStart" : "timelineClipTrimEnd");
+        QVERIFY(handle);
+        const QPoint extendFrom = handle->mapToScene({handle->width()/2, handle->height()/2}).toPoint();
+        QTest::mousePress(&view, Qt::LeftButton, Qt::NoModifier, extendFrom);
+        QTest::mouseMove(&view, press, 20);
+        QTest::mouseRelease(&view, Qt::LeftButton, Qt::NoModifier, press);
+        const auto extended = media->timelineTrack().clips.first();
+        QCOMPARE(extended.startSlot, original.startSlot);
+        QCOMPARE(extended.durationSlots, original.durationSlots);
+        QCOMPARE(extended.sourceStartSlot, original.sourceStartSlot);
+    }
+
     void productionTimelineQmlLoadsAndCapturesOnGrid()
     {
         std::unique_ptr<QuickCanvasHost> host(QuickCanvasHost::create());

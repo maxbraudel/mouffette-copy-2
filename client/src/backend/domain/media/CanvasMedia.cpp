@@ -196,6 +196,10 @@ void CanvasMedia::refreshResidency()
     const auto asset = manager.asset(m_residencyOwnerId);
     if (manager.ready(m_residencyOwnerId) && asset) {
         if (isVideo()) {
+            // setAsset() can emit runtime signals before durationChanged().
+            // Those signals publish the default clip, so its source bounds
+            // must already be available to the document and timeline model.
+            restoreSourceDurationMs((asset->durationUs + 999) / 1000);
             initializeVideoRuntime();
             // Publish a playable asset only after audio discovery completes,
             // so the first Play never starts silently and changes clocks later.
