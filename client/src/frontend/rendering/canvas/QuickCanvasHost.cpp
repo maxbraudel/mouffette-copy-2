@@ -468,14 +468,27 @@ void QuickCanvasHost::setCurrentTool(Tool tool)
 
 bool QuickCanvasHost::remoteSceneActionEnabled() const
 {
-    if (m_sceneLaunching || m_sceneStopping) return false;
-    if (m_sceneLaunched) return true;
-    if (m_testSceneLaunched || m_sceneContext) return false;
-    return m_projectEditingEnabled && m_actionsEnabled && m_contentAvailable && m_webSocket
-        && m_webSocket->isConnected() && !m_targetClientId.isEmpty()
-        && m_document->hasActiveScreens() && !m_document->media().isEmpty()
-        && (!m_uploadManager || !m_uploadManager->isBusy())
-        && mediaReadinessReason(true).isEmpty();
+    return remoteSceneUnavailableReason().isEmpty();
+}
+
+QString QuickCanvasHost::remoteSceneUnavailableReason() const
+{
+    if (m_sceneLaunching) return QStringLiteral("The remote scene is starting. Please wait");
+    if (m_sceneStopping) return QStringLiteral("The remote scene is stopping. Please wait");
+    if (m_sceneLaunched) return {};
+    if (m_testSceneLaunched) return QStringLiteral("Pause the local preview before launching a remote scene");
+    if (m_sceneContext) return QStringLiteral("Wait for the current scene to finish closing");
+    if (!m_projectEditingEnabled) return QStringLiteral("Create or open a project first");
+    if (!m_contentAvailable) return QStringLiteral("Wait for the remote session to reconnect");
+    if (m_document->media().isEmpty()) return QStringLiteral("Add media to the project first");
+    if (!m_document->hasActiveScreens()) return QStringLiteral("No target screens available");
+    if (!m_actionsEnabled) return QStringLiteral("Launch a remote session first");
+    if (!m_webSocket || !m_webSocket->isConnected())
+        return QStringLiteral("The server is disconnected. Wait for the connection to be restored");
+    if (m_targetClientId.isEmpty()) return QStringLiteral("Select a remote client first");
+    if (m_uploadManager && m_uploadManager->isBusy())
+        return QStringLiteral("A media transfer is in progress. Wait for it to finish");
+    return mediaReadinessReason(true);
 }
 
 bool QuickCanvasHost::testSceneActionEnabled() const

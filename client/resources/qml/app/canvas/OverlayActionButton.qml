@@ -8,7 +8,7 @@ AbstractButton {
 
     enum Tone { Normal, Uploading, Uploaded, Remote, Test }
     property int tone: OverlayActionButton.Normal
-    // Busy acknowledgements keep their blue fill even though input is locked.
+    // Busy acknowledgements retain their blue fill while clicks explain the wait.
     property bool busy: false
     property bool monospace: false
     property real bottomRadius: 0
@@ -45,7 +45,7 @@ AbstractButton {
     hoverEnabled: true
     Accessible.role: Accessible.Button
     Accessible.name: text
-    Accessible.description: control.enabled ? "" : unavailableReason
+    Accessible.description: unavailableReason
     StateTextMetrics {
         id: textMetrics
         text: control.monospace ? "" : control.text

@@ -61,6 +61,7 @@ public:
     bool remoteSceneLaunched() const override { return m_sceneLaunched; }
     bool testSceneLaunched() const override { return m_testSceneLaunched; }
     bool remoteSceneActionEnabled() const override;
+    QString remoteSceneUnavailableReason() const;
     bool testSceneActionEnabled() const override;
     QString mediaReadinessReason(bool remote) const;
     bool remoteMediaCached(const QString& mediaId) const;

@@ -5,6 +5,7 @@
 #include "frontend/rendering/canvas/QuickCanvasHost.h"
 #include "frontend/qml/MediaSettingsViewModel.h"
 #include "frontend/qml/TimelineController.h"
+#include "frontend/ui/notifications/ToastNotificationSystem.h"
 #include "backend/network/UploadManager.h"
 #include "shared/rendering/ICanvasHost.h"
 
@@ -203,7 +204,7 @@ ClientWorkspaceViewModel::remoteSceneActionState() const
 bool ClientWorkspaceViewModel::remoteSceneActionEnabled() const
 {
     const ICanvasHost* canvas = m_canvas;
-    return !m_actionPending && canvas && canvas->remoteSceneActionEnabled();
+    return !m_actionPending && hasProject() && canvas && canvas->remoteSceneActionEnabled();
 }
 
 int ClientWorkspaceViewModel::remoteSceneActionTone() const
@@ -219,17 +220,11 @@ int ClientWorkspaceViewModel::remoteSceneActionTone() const
 QString ClientWorkspaceViewModel::remoteSceneUnavailableReason() const
 {
     if (!hasProject()) return QStringLiteral("Create a project first");
-    if (!m_canvas || m_canvas->enumerateMediaItems().isEmpty()) {
-        return QStringLiteral("Add media to the project first");
-    }
-    if (!m_canvas->hasActiveScreens()) return QStringLiteral("No target screens available");
-    if (!remoteCommandsEnabled()) return QStringLiteral("Launch a remote session first");
-    if (m_uploadManager && m_uploadManager->isBusy()) {
-        return QStringLiteral("A media transfer is in progress");
-    }
+    if (!m_canvas) return QStringLiteral("Canvas is unavailable");
     if (const auto* host = qobject_cast<const QuickCanvasHost*>(m_canvas.data()))
-        return host->mediaReadinessReason(true);
-    return {};
+        return host->remoteSceneUnavailableReason();
+    return m_canvas->remoteSceneActionEnabled() ? QString()
+        : QStringLiteral("The remote scene is currently unavailable");
 }
 
 QString ClientWorkspaceViewModel::testSceneActionText() const
@@ -335,19 +330,33 @@ bool ClientWorkspaceViewModel::uploadBelongsToSession() const
 bool ClientWorkspaceViewModel::uploadActionEnabled() const
 {
     const UploadState state = uploadState();
-    return !m_actionPending && (state == UploadState::Ready
+    return !m_actionPending && m_uploadAction && (state == UploadState::Ready
         || state == UploadState::Uploaded || state == UploadState::Uploading);
 }
 
 QString ClientWorkspaceViewModel::uploadUnavailableReason() const
 {
     if (!hasProject()) return QStringLiteral("Create a project first");
-    if (!m_canvas || m_canvas->enumerateMediaItems().isEmpty()) {
+    if (!m_canvas) return QStringLiteral("Canvas is unavailable");
+    if (m_canvas->enumerateMediaItems().isEmpty()) {
         return QStringLiteral("Add media to the project first");
     }
+    if (!m_uploadManager || !m_uploadAction) return QStringLiteral("Media upload is unavailable");
     if (!remoteCommandsEnabled()) return QStringLiteral("Launch a remote session first");
+    if (m_canvas->remoteSceneLaunching()) return QStringLiteral("The remote scene is starting. Please wait");
+    if (m_canvas->remoteSceneStopping()) return QStringLiteral("The remote scene is stopping. Please wait");
     if (m_canvas->remoteSceneLaunched()) return QStringLiteral("Stop the remote scene first");
-    return {};
+    switch (uploadState()) {
+    case UploadState::Preparing:
+        return m_uploadManager->outgoingState() == UploadManager::OutgoingState::Suspended
+            ? QStringLiteral("The upload is paused while the remote computer reconnects")
+            : QStringLiteral("The upload is being prepared. Please wait");
+    case UploadState::Finalizing: return QStringLiteral("The upload is being finalized. Please wait");
+    case UploadState::Cancelling: return QStringLiteral("The upload cancellation is in progress. Please wait");
+    case UploadState::Removing: return QStringLiteral("Remote media are being removed. Please wait");
+    case UploadState::Unavailable: return QStringLiteral("Another media transfer is in progress. Wait for it to finish");
+    default: return {};
+    }
 }
 
 int ClientWorkspaceViewModel::uploadActionTone() const
@@ -463,12 +472,17 @@ void ClientWorkspaceViewModel::setActiveTool(const QString& tool)
 
 void ClientWorkspaceViewModel::toggleRemoteScene()
 {
-    if (remoteSceneActionEnabled() && m_canvas) {
-        dispatchAction([this] {
-            if (m_canvas && hasProject() && m_canvas->remoteSceneActionEnabled())
-                m_canvas->triggerRemoteSceneAction();
-        });
+    if (m_actionPending) {
+        TOAST_INFO("An action is already being processed. Please wait");
+        return;
     }
+    const QString reason = remoteSceneUnavailableReason();
+    if (!reason.isEmpty()) { TOAST_INFO(reason); return; }
+    dispatchAction([this] {
+        const QString reason = remoteSceneUnavailableReason();
+        if (!reason.isEmpty()) { TOAST_INFO(reason); return; }
+        m_canvas->triggerRemoteSceneAction();
+    });
 }
 
 void ClientWorkspaceViewModel::toggleTestScene()
@@ -483,10 +497,21 @@ void ClientWorkspaceViewModel::toggleTestScene()
 
 void ClientWorkspaceViewModel::triggerUploadAction()
 {
-    if (!uploadActionEnabled() || !m_uploadAction) return;
+    if (m_actionPending) {
+        TOAST_INFO("An action is already being processed. Please wait");
+        return;
+    }
+    const QString reason = uploadUnavailableReason();
+    if (!reason.isEmpty()) { TOAST_INFO(reason); return; }
     const UploadState requestedState = uploadState();
     dispatchAction([this, requestedState] {
-        if (uploadState() == requestedState && m_uploadAction) m_uploadAction();
+        const QString reason = uploadUnavailableReason();
+        if (!reason.isEmpty()) { TOAST_INFO(reason); return; }
+        if (uploadState() != requestedState) {
+            TOAST_INFO("The upload state has changed. Please try again");
+            return;
+        }
+        m_uploadAction();
     });
 }
 

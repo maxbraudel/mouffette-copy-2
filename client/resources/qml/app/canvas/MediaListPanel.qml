@@ -33,7 +33,7 @@ Rectangle {
         return bytes.toFixed(unit === 0 ? 0 : bytes < 10 ? 2 : 1) + " " + units[unit]
     }
 
-    visible: session && session.hasProject && mediaCount > 0
+    visible: session && session.hasProject
     implicitWidth: Math.max(200, mediaNaturalWidth, remoteButton.implicitWidth,
                             uploadButton.implicitWidth)
     width: Math.min(implicitWidth, 420, parent ? Math.max(0, parent.width * 0.5) : 420)
@@ -255,7 +255,7 @@ Rectangle {
                                "Stop Remote Scene", "Stopping Remote Scene..."]
                 tone: root.session ? root.session.remoteSceneActionTone : OverlayActionButton.Normal
                 busy: tone === OverlayActionButton.Uploading && !root.session.actionPending
-                enabled: root.session && root.session.remoteSceneActionEnabled
+                enabled: !!root.session
                 unavailableReason: root.session ? root.session.remoteSceneUnavailableReason : ""
                 onClicked: root.session.toggleRemoteScene()
             }
@@ -275,8 +275,8 @@ Rectangle {
                 }
                 tone: root.session ? root.session.uploadActionTone : OverlayActionButton.Normal
                 busy: tone === OverlayActionButton.Uploading && !root.session.actionPending
-                monospace: busy && enabled
-                enabled: root.session && root.session.uploadActionEnabled
+                monospace: busy && root.session.uploadActionEnabled
+                enabled: !!root.session
                 unavailableReason: root.session ? root.session.uploadUnavailableReason : ""
                 bottomRadius: Theme.overlayRadius
                 onClicked: root.session.triggerUploadAction()

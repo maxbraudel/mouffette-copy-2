@@ -276,7 +276,8 @@ FocusScope {
                 iconOnly: transportViewport.compactButtons
                 destructive: true
                 visible: !!root.timeline && root.timeline.remoteActive
-                enabled: !!root.session && !!root.session.remoteSceneActionEnabled
+                enabled: !!root.session
+                Accessible.description: root.session ? root.session.remoteSceneUnavailableReason : ""
                 onClicked: root.session.toggleRemoteScene()
             }
         }
