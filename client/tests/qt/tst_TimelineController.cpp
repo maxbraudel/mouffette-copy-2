@@ -76,7 +76,7 @@ class TimelineControllerTest final : public QObject
 {
     Q_OBJECT
 private slots:
-    void trackZeroStaysCenteredAndInsertionDoesNotMoveTheViewport()
+    void trackZeroStartsCenteredAndInsertionPreservesValidScrollPosition()
     {
         TimelineFixture f; QVERIFY(f.initialize());
         f.view.resize(1100, 500);
@@ -85,12 +85,16 @@ private slots:
         QTRY_COMPARE(viewport->property("contentY").toReal(), (f.timeline.clipTrackHeightPx() - viewport->height()) / 2);
         QCOMPARE(f.view.rootObject()->property("trackNames").toStringList(), QStringList{"Track 0"});
         auto* doc = f.host->document();
-        const qreal initialScroll = viewport->property("contentY").toReal();
+        const qreal emptyScroll = viewport->property("contentY").toReal();
         auto* zero = doc->addText({}, "Zero"); QVERIFY(zero);
         auto* clip = f.item("timelineClip"); QVERIFY(clip);
         QTest::qWait(30);
-        QCOMPARE(viewport->property("contentY").toReal(), initialScroll);
+        QCOMPARE(viewport->property("contentY").toReal(), emptyScroll);
         QCOMPARE(f.view.rootObject()->property("trackNames").toStringList(), (QStringList{"Track 1", "Track 0", "Track -1"}));
+        f.view.resize(1100, 240);
+        QTRY_COMPARE(f.view.rootObject()->height(), 240.0);
+        QTest::qWait(30);
+        const qreal initialScroll = viewport->property("contentY").toReal();
         const auto position = clip->mapToScene({0, 0});
         const auto savedZero = zero->timelineTrack().toJson();
         for (int i = 1; i <= 5; ++i) {
@@ -102,14 +106,16 @@ private slots:
             QCOMPARE(zero->timelineTrack().toJson(), savedZero);
         }
         // Growing the lower edge and pasting a block also retain the fixed origin.
+        viewport->setProperty("contentY", 0.0);
+        const auto lowerPosition = clip->mapToScene({0, 0});
         doc->clearSelection();
         auto* below = doc->addText({}, "Below"); QVERIFY(below);
         QVERIFY(doc->moveTimelineClip(below->timelineTrack().clip.id, 0, 1));
         const auto copied = doc->serializeProjectState();
         QVERIFY(!doc->pasteMediaState(copied, {}).isEmpty());
         QTest::qWait(30);
-        QCOMPARE(viewport->property("contentY").toReal(), initialScroll);
-        QCOMPARE(clip->mapToScene({0, 0}), position);
+        QCOMPARE(viewport->property("contentY").toReal(), 0.0);
+        QCOMPARE(clip->mapToScene({0, 0}), lowerPosition);
         QCOMPARE(zero->timelineTrack().toJson(), savedZero);
         // Even after scrolling upwards, another insertion does not jump.
         viewport->setProperty("contentY", -3.5 * f.timeline.clipTrackHeightPx());
@@ -117,6 +123,84 @@ private slots:
         QVERIFY(doc->addText({}, "Another upper track"));
         QTest::qWait(30);
         QCOMPARE(clip->mapToScene({0, 0}), scrolled);
+    }
+
+    void tracksUseOnlyAvailableSpaceAndNeverScrollPastTheirEdges()
+    {
+        TimelineFixture f; QVERIFY(f.initialize());
+        f.view.resize(1100, 500);
+        auto* viewport = f.item("timelineClipViewport"); QVERIFY(viewport);
+        auto* bar = f.item("timelineVerticalScrollBar"); QVERIFY(bar);
+        QTRY_COMPARE(f.view.rootObject()->height(), 500.0);
+        const qreal trackHeight = f.timeline.clipTrackHeightPx();
+        auto* doc = f.host->document();
+        for (int count = 0; count <= 8; ++count) {
+            if (count) QVERIFY(doc->addText({}, QString::number(count)));
+            QTest::qWait(20);
+            const qreal top = f.timeline.firstTrackIndex() * trackHeight;
+            const qreal bottom = top + f.timeline.trackCount() * trackHeight;
+            const auto point = viewport->mapToScene({100, viewport->height()/2}).toPoint();
+            f.wheel(point, {0, 10000}, {});
+            if (bottom - top <= viewport->height()) {
+                const qreal blankAbove = top - viewport->property("contentY").toReal();
+                const qreal blankBelow = viewport->height() - (bottom - viewport->property("contentY").toReal());
+                QCOMPARE(blankAbove, blankBelow);
+                QCOMPARE(bar->property("size").toReal(), 1.0);
+                const auto scroll = viewport->property("contentY").toReal();
+                f.wheel(point, {0, -10000}, {});
+                QCOMPARE(viewport->property("contentY").toReal(), scroll);
+            } else {
+                QCOMPARE(viewport->property("contentY").toReal(), top);
+                f.wheel(point, {0, -10000}, {});
+                QCOMPARE(viewport->property("contentY").toReal() + viewport->height(), bottom);
+                QCOMPARE(bar->property("size").toReal(), viewport->height() / (bottom - top));
+            }
+        }
+        // Shrinking the track range removes obsolete scroll space as well.
+        while (!doc->media().isEmpty())
+            QVERIFY(doc->removeMedia(doc->media().first()->mediaId()));
+        QTRY_COMPARE(f.timeline.trackCount(), 1);
+        QTRY_COMPARE(viewport->property("contentY").toReal(), (trackHeight - viewport->height()) / 2);
+        QCOMPARE(bar->property("size").toReal(), 1.0);
+    }
+
+    void outerTrackSeparatorsOnlyAppearInsideTheViewport()
+    {
+        TimelineFixture f; QVERIFY(f.initialize());
+        auto* viewport = f.item("timelineClipViewport"); QVERIFY(viewport);
+        const qreal trackHeight = f.timeline.clipTrackHeightPx();
+        for (bool occupied : {false, true}) {
+            if (occupied) QVERIFY(f.host->document()->addText({}, "Track zero"));
+            for (int blankSpace : {120, 0}) {
+                const int viewHeight = qRound(f.view.rootObject()->height() - viewport->height()
+                    + f.timeline.trackCount() * trackHeight + blankSpace);
+                f.view.resize(1100, viewHeight);
+                QTRY_COMPARE(f.view.rootObject()->height(), qreal(viewHeight));
+                QTest::qWait(30);
+                int edgesChecked = 0;
+                for (const auto* name : {"timelineClipTrackHeader", "timelineClipTrack"}) {
+                    for (auto* row : timelineItems(f.view.rootObject(), name)) {
+                        if (!row->isVisible()) continue;
+                        const int index = row->property("trackIndex").toInt();
+                        if (index == f.timeline.firstTrackIndex()) {
+                            auto* top = timelineItems(row, "timelineTrackTopSeparator").value(0);
+                            QVERIFY(top);
+                            QCOMPARE(top->isVisible(), blankSpace > 0);
+                            QCOMPARE(top->mapToScene({0, 0}).y(), row->mapToScene({0, 0}).y());
+                            ++edgesChecked;
+                        }
+                        if (index == f.timeline.firstTrackIndex() + f.timeline.trackCount() - 1) {
+                            auto* bottom = timelineItems(row, "timelineTrackBottomSeparator").value(0);
+                            QVERIFY(bottom);
+                            QCOMPARE(bottom->isVisible(), blankSpace > 0);
+                            QCOMPARE(bottom->mapToScene({0, bottom->height()}).y(), row->mapToScene({0, row->height()}).y());
+                            ++edgesChecked;
+                        }
+                    }
+                }
+                QCOMPARE(edgesChecked, 4);
+            }
+        }
     }
 
     void toolbarKeepsPlaybackCenteredAndEditingSeparate()
@@ -1155,20 +1239,19 @@ private slots:
     {
         TimelineFixture f; QVERIFY(f.initialize());
         auto* tracks = f.item("timelineTracks");
-        auto* row = f.item("timelineClipTrack");
-        const QPoint point = row->mapToScene({tracks->width()*0.6, row->height()/2}).toPoint();
-        const auto colorAt = [&](const QImage& frame) {
-            return frame.pixelColor(qRound(point.x() * frame.width() / qreal(f.view.width())),
-                qRound(point.y() * frame.height() / qreal(f.view.height())));
-        };
         // Put a clip below track zero, then select its empty neighbour.
         auto* media = f.host->document()->addText({}, "Clip");
         auto track = media->timelineTrack(); track.trackIndex = 1;
         media->setTimelineTrack(track);
         f.timeline.setActiveTrackIndex(1);
         auto* viewport = f.item("timelineClipViewport");
-        viewport->setProperty("contentY", (f.timeline.clipTrackHeightPx() - viewport->height()) / 2);
+        viewport->setProperty("contentY", 0.0);
         QTest::qWait(30);
+        const QPoint point = viewport->mapToScene({tracks->width()*0.6, f.timeline.clipTrackHeightPx()/2.0}).toPoint();
+        const auto colorAt = [&](const QImage& frame) {
+            return frame.pixelColor(qRound(point.x() * frame.width() / qreal(f.view.width())),
+                qRound(point.y() * frame.height() / qreal(f.view.height())));
+        };
         const QImage before = f.view.grabWindow(); QVERIFY(!before.isNull());
         QTest::mouseClick(&f.view, Qt::LeftButton, Qt::NoModifier, point);
         QCOMPARE(f.timeline.activeTrackIndex(), 0);

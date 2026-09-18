@@ -528,6 +528,25 @@ FocusScope {
             textFormat: Text.PlainText
             verticalAlignment: Text.AlignVCenter
         }
+        component TrackSeparators: Item {
+            required property int trackIndex
+            readonly property real trackTop: trackIndex * root.clipHeight - clipViewport.contentY
+            anchors.fill: parent
+            Rectangle {
+                objectName: "timelineTrackTopSeparator"
+                width: parent.width; height: 1
+                visible: parent.trackTop > 0
+                color: Theme.overlayBorder
+            }
+            Rectangle {
+                objectName: "timelineTrackBottomSeparator"
+                anchors.bottom: parent.bottom
+                width: parent.width; height: 1
+                visible: parent.trackIndex === root.lastTrackIndex
+                    && parent.trackTop + root.clipHeight < clipViewport.height
+                color: Theme.overlayBorder
+            }
+        }
         Rectangle {
             id: keyframeSeparator
             objectName: "timelineKeyframeSeparator"
@@ -573,7 +592,7 @@ FocusScope {
                         y: trackIndex * root.clipHeight - clipViewport.contentY
                         width: clipHeaders.width; height: root.clipHeight
                         visible: trackIndex >= root.firstTrackIndex && trackIndex <= root.lastTrackIndex
-                        Rectangle { width: parent.width; height: 1; color: Theme.overlayBorder }
+                        TrackSeparators { trackIndex: parent.trackIndex }
                         TrackName {
                             objectName: "timelineClipTrackLabel"
                             height: parent.height
@@ -735,8 +754,9 @@ FocusScope {
                     y: keyTrack.y + keyTrack.height + keyframeSeparator.height
                     width: parent.width; height: Math.max(0, parent.height - y)
                     // A track's Y coordinate never depends on the first occupied row.
-                    // Margins expand the scroll range around the fixed track-zero origin.
-                    readonly property real centerPadding: Math.max(0, (height - root.clipHeight) / 2)
+                    // Only unused viewport space centers the tracks; overflowing rows have no padding.
+                    readonly property real centerPadding: Math.max(0,
+                        (height - (root.lastTrackIndex - root.firstTrackIndex + 1) * root.clipHeight) / 2)
                     readonly property real topMargin: -root.firstTrackIndex * root.clipHeight + centerPadding
                     readonly property real bottomMargin: centerPadding
                     readonly property real contentHeight: (root.lastTrackIndex + 1) * root.clipHeight
@@ -747,6 +767,7 @@ FocusScope {
                     onHeightChanged: {
                         contentY -= (height - previousHeight) / 2
                         previousHeight = height
+                        Qt.callLater(root.scrollTracks, 0)
                     }
                     Component.onCompleted: contentY = (root.clipHeight - height) / 2
                     ScrollBar {
@@ -779,7 +800,7 @@ FocusScope {
                                 y: trackIndex * root.clipHeight
                                 width: clipViewport.width; height: root.clipHeight
                                 visible: trackIndex >= root.firstTrackIndex && trackIndex <= root.lastTrackIndex
-                                Rectangle { width: parent.width; height: 1; color: Theme.overlayBorder }
+                                TrackSeparators { trackIndex: parent.trackIndex }
                                 MouseArea {
                                     anchors.fill: parent
                                     enabled: root.editable
