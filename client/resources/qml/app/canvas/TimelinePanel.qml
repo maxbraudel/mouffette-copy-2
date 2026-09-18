@@ -463,7 +463,8 @@ FocusScope {
             Rectangle { y: root.rulerHeight; width: parent.width; height: 1; color: Theme.overlayBorder }
             MouseArea {
                 id: scrubber
-                anchors.fill: parent
+                width: parent.width
+                height: root.rulerHeight
                 acceptedButtons: Qt.LeftButton
                 preventStealing: true
                 enabled: !!root.timeline && !root.timeline.remoteActive
@@ -473,6 +474,18 @@ FocusScope {
                     root.timeline.seek(root.clampTime((mouse.x - 12) / root.pixelsPerMs))
                 }
                 onPositionChanged: mouse => { if (pressed) root.timeline.seek(root.clampTime((mouse.x - 12) / root.pixelsPerMs)) }
+            }
+            MouseArea {
+                y: root.rulerHeight
+                width: parent.width
+                height: parent.height - y
+                acceptedButtons: Qt.LeftButton
+                preventStealing: true
+                enabled: !!root.timeline && !root.timeline.remoteActive
+                onPressed: {
+                    root.focusTrack()
+                    root.timeline.clearSelection()
+                }
             }
             Repeater {
                 model: Math.ceil(trackViewport.width / (root.gridStep * root.pixelsPerMs)) + 2

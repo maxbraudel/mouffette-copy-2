@@ -261,6 +261,7 @@ private slots:
         const QPoint from = tracks->mapToScene({220, 10}).toPoint();
         const QPoint to = from + QPoint(260, 0);
         QTest::mousePress(&f.view, Qt::LeftButton, Qt::NoModifier, from);
+        QCOMPARE(f.timeline.positionMs(), f.timeline.gridTime(f.timeAt(220)));
         QTest::mouseMove(&f.view, to, 20);
         QTest::mouseRelease(&f.view, Qt::LeftButton, Qt::NoModifier, to);
         QCOMPARE(f.scroll(), 500.0);
@@ -279,6 +280,40 @@ private slots:
         QCOMPARE(f.scroll(), 500.0);
         QCOMPARE(f.timeline.positionMs(), position);
         QCOMPARE(f.scale(), scale);
+        QCOMPARE(f.host->serializeProjectState(), saved);
+    }
+
+    void trackBackgroundDoesNotSeek_data()
+    {
+        QTest::addColumn<QString>("trackName");
+        QTest::newRow("keyframes") << QStringLiteral("timelineKeyframeTrack");
+        QTest::newRow("clips") << QStringLiteral("timelineClipTrack");
+    }
+
+    void trackBackgroundDoesNotSeek()
+    {
+        QFETCH(QString, trackName);
+        TimelineFixture f;
+        QVERIFY(f.initialize());
+        auto* track = f.item(trackName);
+        auto* tracks = f.item("timelineTracks");
+        QVERIFY(track && tracks);
+        f.timeline.seek(1000);
+        const auto position = f.timeline.positionMs();
+        const auto saved = f.host->serializeProjectState();
+        const QPoint from = track->mapToScene({tracks->width() * 0.4, track->height() / 2}).toPoint();
+        const QPoint to = from + QPoint(qRound(tracks->width() * 0.2), 0);
+
+        QTest::mouseClick(&f.view, Qt::LeftButton, Qt::NoModifier, from);
+        QCOMPARE(f.timeline.positionMs(), position);
+        QTest::mousePress(&f.view, Qt::LeftButton, Qt::NoModifier, from);
+        QTest::mouseMove(&f.view, to, 20);
+        QCOMPARE(f.timeline.positionMs(), position);
+        // Entering the ruler must not turn a drag started in a track into a seek.
+        const QPoint ruler = tracks->mapToScene({tracks->width() * 0.6, 10}).toPoint();
+        QTest::mouseMove(&f.view, ruler, 20);
+        QTest::mouseRelease(&f.view, Qt::LeftButton, Qt::NoModifier, ruler);
+        QCOMPARE(f.timeline.positionMs(), position);
         QCOMPARE(f.host->serializeProjectState(), saved);
     }
 
@@ -377,10 +412,12 @@ private slots:
         QVERIFY(ghost);
         QVERIFY(!ghost->property("interactive").toBool()); // Shared delegate, inert for other media.
         const auto saved = f.host->serializeProjectState();
+        const auto position = f.timeline.positionMs();
         const QPoint ghostCenter = ghost->mapToScene({ghost->width()/2, ghost->height()/2}).toPoint();
         QTest::mousePress(&f.view, Qt::LeftButton, Qt::NoModifier, ghostCenter);
         QTest::mouseMove(&f.view, ghostCenter + QPoint(50, 0), 20);
         QTest::mouseRelease(&f.view, Qt::LeftButton, Qt::NoModifier, ghostCenter + QPoint(50, 0));
+        QCOMPARE(f.timeline.positionMs(), position);
         QVERIFY(f.timeline.selectedClipId().isEmpty());
         QCOMPARE(doc->primarySelectedMediaId(), primary->mediaId());
         QCOMPARE(f.host->serializeProjectState(), saved);
