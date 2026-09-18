@@ -17,7 +17,7 @@ FocusScope {
     readonly property real pixelsPerMs: Math.max(1, trackViewport.width - 24) / Math.max(1, viewDurationMs)
     readonly property real rulerHeight: timeline ? timeline.rulerHeightPx : 28
     readonly property real clipHeight: timeline ? timeline.clipTrackHeightPx : 64
-    readonly property real keyHeight: Math.max(30, trackViewport.height - rulerHeight - clipHeight - 16)
+    readonly property real keyHeight: Math.max(30, trackViewport.height - rulerHeight - clipHeight)
     readonly property real slotMs: 1000 / (timeline ? timeline.slotsPerSecond : 30)
     readonly property int maximumFrame: Math.round(maximumMs / slotMs)
     readonly property int frameDigits: String(maximumFrame).length
@@ -121,6 +121,20 @@ FocusScope {
 
     component TimelineButton: AppButton {
         focusPolicy: Qt.NoFocus
+    }
+    component TimelineEditButton: TimelineButton {
+        iconOnly: editBar.compactButtons
+    }
+    function buttonRowTextWidth(row) {
+        var width = 0
+        var count = 0
+        for (var i = 0; i < row.children.length; ++i) {
+            var child = row.children[i]
+            if (!child.visible) continue
+            width += child instanceof AppButton ? child.textWidth : child.implicitWidth
+            ++count
+        }
+        return width + Math.max(0, count - 1) * row.spacing
     }
     component KeyframeDiamond: Rectangle {
         width: root.timeline ? root.timeline.keyframeSizePx : 10
@@ -275,6 +289,9 @@ FocusScope {
     Item {
         id: editBar
         objectName: "timelineEditBar"
+        // Measure labels independently of the current mode so resizing cannot oscillate.
+        readonly property bool compactButtons: width < actionViewport.contentPadding * 2
+            + root.buttonRowTextWidth(actions) + actions.spacing + root.buttonRowTextWidth(layoutActions)
         anchors.left: parent.left; anchors.right: parent.right
         anchors.top: transportSeparator.bottom
         anchors.topMargin: 8
@@ -285,7 +302,7 @@ FocusScope {
             readonly property int contentPadding: 8
             anchors.fill: parent
             clip: true
-            // The flexible gap collapses to normal button spacing before the whole row scrolls.
+            // Compact buttons share one scrollable row if their icons still do not fit.
             contentWidth: Math.max(width, contentPadding * 2 + actions.width + actions.spacing + layoutActions.width)
             contentHeight: height
             boundsBehavior: Flickable.StopAtBounds
@@ -294,7 +311,7 @@ FocusScope {
                 id: actions
                 x: actionViewport.contentPadding
                 spacing: 6
-                TimelineButton {
+                TimelineEditButton {
                     objectName: "timelinePlaceKeyframe"
                     text: root.timeline && root.timeline.hasKeyframeAtPosition ? "Update keyframe" : "Place keyframe"
                     textVariants: ["Update keyframe", "Place keyframe"]
@@ -303,7 +320,7 @@ FocusScope {
                     enabled: root.editable && root.timeline.canCapture
                     onClicked: { root.focusTrack(); root.timeline.placeKeyframe() }
                 }
-                TimelineButton {
+                TimelineEditButton {
                     objectName: "timelineSplitClip"
                     text: "Split clip"
                     iconSource: "qrc:/icons/icons/timeline/split.svg"
@@ -311,7 +328,7 @@ FocusScope {
                     enabled: root.editable && root.timeline.canSplit
                     onClicked: { root.focusTrack(); root.timeline.splitClip() }
                 }
-                TimelineButton {
+                TimelineEditButton {
                     objectName: "timelineInsertClip"
                     text: "Insert full video"
                     iconSource: "qrc:/icons/icons/timeline/insert.svg"
@@ -319,21 +336,21 @@ FocusScope {
                     enabled: root.editable
                     onClicked: { root.focusTrack(); root.timeline.insertFullClip() }
                 }
-                TimelineButton {
+                TimelineEditButton {
                     objectName: "timelineCopy"
                     text: "Copy"
                     iconSource: "qrc:/icons/icons/timeline/copy.svg"
                     enabled: root.editable && (root.timeline.selectedKeyframeId !== "" || root.timeline.selectedClipId !== "")
                     onClicked: { root.focusTrack(); root.timeline.copySelected() }
                 }
-                TimelineButton {
+                TimelineEditButton {
                     objectName: "timelinePaste"
                     text: "Paste"
                     iconSource: "qrc:/icons/icons/timeline/paste.svg"
                     enabled: root.editable && root.timeline.canPaste
                     onClicked: { root.focusTrack(); root.timeline.paste() }
                 }
-                TimelineButton {
+                TimelineEditButton {
                     objectName: "timelineDelete"
                     text: "Delete"
                     iconSource: "qrc:/icons/icons/delete.svg"
@@ -341,7 +358,7 @@ FocusScope {
                     enabled: root.editable && (root.timeline.selectedKeyframeId !== "" || root.timeline.selectedClipId !== "")
                     onClicked: { root.focusTrack(); root.timeline.deleteSelected() }
                 }
-                TimelineButton {
+                TimelineEditButton {
                     objectName: "timelinePlaceStop"
                     text: root.timeline && root.timeline.stopTimeMs >= 0 ? "Move Stop here" : "Place Stop"
                     textVariants: ["Move Stop here", "Place Stop"]
@@ -349,7 +366,7 @@ FocusScope {
                     enabled: root.editable
                     onClicked: { root.focusTrack(); root.timeline.placeStop() }
                 }
-                TimelineButton {
+                TimelineEditButton {
                     objectName: "timelineRemoveStop"
                     text: "Remove Stop"
                     iconSource: "qrc:/icons/icons/timeline/stop-remove.svg"
@@ -373,7 +390,7 @@ FocusScope {
                 anchors.rightMargin: actionViewport.contentPadding
                 height: Theme.controlHeight
                 spacing: transportViewport.gap
-                TimelineButton {
+                TimelineEditButton {
                     id: zoomOutButton
                     objectName: "timelineZoomOut"
                     text: "Zoom out"
@@ -381,7 +398,7 @@ FocusScope {
                     enabled: !!root.timeline
                     onClicked: root.zoom(2)
                 }
-                TimelineButton {
+                TimelineEditButton {
                     id: zoomInButton
                     objectName: "timelineZoomIn"
                     text: "Zoom in"
@@ -389,7 +406,7 @@ FocusScope {
                     enabled: !!root.timeline
                     onClicked: root.zoom(0.5)
                 }
-                TimelineButton {
+                TimelineEditButton {
                     id: fitButton
                     objectName: "timelineFitDuration"
                     text: "Fit duration"
@@ -432,10 +449,14 @@ FocusScope {
         contentHeight: height
         boundsBehavior: Flickable.StopAtBounds
         interactive: false
-        ScrollBar.horizontal: ScrollBar { policy: ScrollBar.AlwaysOn }
+        ScrollBar.horizontal: ScrollBar {
+            policy: ScrollBar.AlwaysOn
+            z: 1
+            background: null
+        }
         Item {
             id: timeContent
-            width: trackViewport.contentWidth; height: trackViewport.height - 16
+            width: trackViewport.contentWidth; height: trackViewport.height
             Rectangle { width: parent.width; height: root.rulerHeight; color: Theme.overlaySelected }
             Rectangle { y: root.rulerHeight; width: parent.width; height: 1; color: Theme.overlayBorder }
             MouseArea {

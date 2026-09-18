@@ -112,7 +112,7 @@ private slots:
             QCOMPARE(f.item("timelineMaximumTime")->property("text").toString(), maximumTime);
         }
         f.timeline.goToStart();
-        for (int width : {1100, 680, 420}) {
+        for (int width : {1100, 680, 420, 320}) {
             f.view.resize(width, 240);
             QTRY_COMPARE(f.view.rootObject()->width(), qreal(width));
             QTRY_VERIFY(qAbs(playback->mapToScene({playback->width()/2, 0}).x() - width/2.0) <= 0.5);
@@ -124,6 +124,13 @@ private slots:
             QCOMPARE(editActions->mapToScene({0, 0}).x(), qreal(0));
             QCOMPARE(editActions->width(), qreal(width));
             QCOMPARE(edit->height(), play->height());
+            for (const auto* name : {"timelinePlaceKeyframe", "timelineCopy", "timelinePaste",
+                                     "timelineDelete", "timelinePlaceStop", "timelineRemoveStop",
+                                     "timelineZoomOut", "timelineZoomIn", "timelineFitDuration"}) {
+                QTRY_COMPARE(f.item(name)->property("iconOnly").toBool(), width < 1100);
+            }
+            if (width == 420)
+                QTRY_COMPARE(editActions->property("contentWidth").toReal(), editActions->width());
             QTRY_COMPARE(layout->mapToScene({0, 0}).y(), edit->y());
             auto* authoring = f.item("timelinePlaceKeyframe")->parentItem();
             const auto gap = layout->mapToScene({0, 0}).x() - authoring->mapToScene({authoring->width(), 0}).x();
@@ -150,15 +157,17 @@ private slots:
         const auto screenshotPrefix = qEnvironmentVariable("MOUFFETTE_TIMELINE_SCREENSHOT");
         if (!screenshotPrefix.isEmpty()) {
             QTest::qWait(100);
-            QVERIFY(f.view.grabWindow().save(screenshotPrefix + "420-scrolled.png"));
+            QVERIFY(f.view.grabWindow().save(screenshotPrefix + QString::number(f.view.width()) + "-scrolled.png"));
         }
         // Scrolling over the now-visible zoom group moves the same content.
         const auto rightmostScroll = editActions->property("contentX").toReal();
         f.wheel(layout->mapToScene({layout->width()/2, 12}).toPoint(), {80, 0}, {});
-        QCOMPARE(editActions->property("contentX").toReal(), rightmostScroll - 80);
+        QCOMPARE(editActions->property("contentX").toReal(), qMax(qreal(0), rightmostScroll - 80));
         f.view.resize(1100, 240);
         QTRY_VERIFY(!play->property("iconOnly").toBool());
         QTRY_COMPARE(editActions->property("contentX").toReal(), qreal(0));
+        QTRY_VERIFY(!f.item("timelinePlaceKeyframe")->property("iconOnly").toBool());
+        QTRY_VERIFY(!f.item("timelineZoomIn")->property("iconOnly").toBool());
         const auto playWidth = play->width();
         f.timeline.removeStop();
         f.timeline.togglePlayback();

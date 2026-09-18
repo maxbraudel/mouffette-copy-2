@@ -68,9 +68,12 @@ playback. Its transport row shows the current time and frame on the left, center
 playback buttons, and the project maximum time and frame on the right. Both readouts
 use monospace digits padded to the project maximum, independently of the Stop marker.
 Editing actions align left and zoom/fit align right within one scrollable row.
-The gap between them shrinks as the window narrows; once the buttons no longer fit,
-the entire row scrolls together. Its side padding belongs to the scrollable content;
+The gap between them shrinks as the window narrows. If the full labels no longer
+fit, all buttons in the row switch to icons with tooltips. If the icons still do
+not fit, the entire row scrolls together. Its side padding belongs to the scrollable content;
 overflow adds neither a scrollbar nor extra height.
+The tracks fill the panel to its bottom edge; their horizontal scrollbar overlays
+the content without reserving a gutter.
 The ruler, zoom, horizontal scroll and fit command navigate the project.
 Shift temporarily snaps against all keys and clip boundaries;
 releasing it immediately restores ordinary grid alignment. The ruler groups grid
