@@ -105,7 +105,7 @@ void DeviceIdentityStoreTest::signatureVerifiesAndRejectsTampering() {
     QString error;
     QVERIFY2(identity.initialize(&error), qPrintable(error));
 
-    const QByteArray payload("mouffette-v7\nboot\nnonce\nruntime\n1");
+    const QByteArray payload("mouffette-v8\nboot\nnonce\nruntime\n1");
     const QByteArray signature = identity.sign(payload, &error);
     QCOMPARE(signature.size(), 64);
 

@@ -62,7 +62,7 @@ function protocolSoak() {
     const send = (id, type, fields = {}) => {
         const client = server.clients.get(id);
         assert.ok(client, `missing sender ${id}`);
-        server.handleMessage(id, { type, protocolVersion: 7, serverBootId: server.serverBootId,
+        server.handleMessage(id, { type, protocolVersion: 8, serverBootId: server.serverBootId,
             connectionGeneration: client.connectionGeneration,
             messageId: `00000000-0000-4000-8000-${String(++serial).padStart(12, '0')}`,
             ...fields });

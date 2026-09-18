@@ -10,15 +10,12 @@ Rectangle {
 
     required property var session
     property real maximumHeight: 620
-    property int activeTab: 0
     property bool presentationReady: true
     readonly property var settings: session ? session.mediaSettings : null
     readonly property string selectedMediaId: settings && settings.available
                                                ? settings.mediaId : ""
     property int editGeneration: 0
-    readonly property real activePageHeight: activeTab === 0
-                                                   ? scenePage.height
-                                                   : elementPage.height
+    readonly property real activePageHeight: elementPage.height
     readonly property real desiredHeight: 42 + activePageHeight
 
     objectName: "sceneElementPanel"
@@ -33,7 +30,6 @@ Rectangle {
     border.color: Theme.overlayBorder
     clip: true
 
-    onActiveTabChanged: contentFlick.contentY = 0
     onVisibleChanged: if (!visible) contentFlick.contentY = 0
     onSelectedMediaIdChanged: {
         editGeneration += 1
@@ -49,65 +45,7 @@ Rectangle {
         onPressed: root.forceActiveFocus()
     }
 
-    component PanelTab: AbstractButton {
-        id: tab
 
-        required property bool active
-        property bool leading: false
-
-        hoverEnabled: true
-        focusPolicy: Qt.TabFocus
-        Accessible.role: Accessible.PageTab
-        Accessible.name: text
-
-        contentItem: Text {
-            text: tab.text
-            color: Theme.overlayText
-            font.pixelSize: 14
-            font.bold: true
-            horizontalAlignment: Text.AlignHCenter
-            verticalAlignment: Text.AlignVCenter
-        }
-
-        background: Rectangle {
-            // Item.clip is rectangular. Match the panel's inner top corners
-            // explicitly so every tab fill stays inside its rounded border.
-            topLeftRadius: tab.leading ? Math.max(0, root.radius - root.border.width) : 0
-            topRightRadius: tab.leading ? 0 : Math.max(0, root.radius - root.border.width)
-            color: {
-                if (tab.down)
-                    return Theme.overlayPressed
-                if (tab.active)
-                    return tab.hovered ? Theme.overlayPressed : Theme.overlaySelected
-                return tab.hovered ? Theme.overlayHover : "transparent"
-            }
-        }
-    }
-
-    component RangeButton: AbstractButton {
-        id: button
-        implicitHeight: 28
-        hoverEnabled: true
-        focusPolicy: Qt.TabFocus
-        Accessible.role: Accessible.Button
-        Accessible.name: text
-        contentItem: Text {
-            text: button.text
-            color: button.enabled ? Theme.overlayText : Theme.overlayDisabledText
-            font.pixelSize: 12
-            font.weight: Font.DemiBold
-            horizontalAlignment: Text.AlignHCenter
-            verticalAlignment: Text.AlignVCenter
-        }
-        background: Rectangle {
-            radius: 4
-            color: !button.enabled ? Theme.overlayDisabledBackground
-                 : button.down ? Theme.overlayPressed
-                 : button.hovered ? Theme.overlayHover : "transparent"
-            border.color: button.activeFocus ? Theme.focusBorder
-                        : button.enabled ? Theme.controlBorder : Theme.controlDisabledBorder
-        }
-    }
 
     component SettingsCheckBox: AppCheckBox {
         implicitHeight: 25
@@ -515,47 +453,19 @@ Rectangle {
         }
     }
 
-    Item {
-        id: tabStrip
+    Text {
+        objectName: "elementSettingsTitle"
         anchors.left: parent.left
         anchors.right: parent.right
-        anchors.top: parent.top
-        anchors.margins: 1
-        height: 39
-
-        PanelTab {
-            id: sceneTab
-            objectName: "sceneSettingsTab"
-            anchors.left: parent.left
-            anchors.top: parent.top
-            anchors.bottom: parent.bottom
-            width: (parent.width - tabDivider.width) / 2
-            text: "Scene"
-            leading: true
-            active: root.activeTab === 0
-            onClicked: root.activeTab = 0
-        }
-
-        Rectangle {
-            id: tabDivider
-            anchors.left: sceneTab.right
-            anchors.top: parent.top
-            anchors.bottom: parent.bottom
-            width: 1
-            color: Theme.overlayBorder
-        }
-
-        PanelTab {
-            objectName: "elementSettingsTab"
-            anchors.left: tabDivider.right
-            anchors.right: parent.right
-            anchors.top: parent.top
-            anchors.bottom: parent.bottom
-            text: "Element"
-            active: root.activeTab === 1
-            onClicked: root.activeTab = 1
-        }
+        height: 40
+        text: "Element"
+        color: Theme.overlayText
+        font.pixelSize: 14
+        font.bold: true
+        verticalAlignment: Text.AlignVCenter
+        horizontalAlignment: Text.AlignHCenter
     }
+
 
     Rectangle {
         anchors.left: parent.left
@@ -614,187 +524,12 @@ Rectangle {
             }
         }
 
-        Item {
-            id: scenePage
-            objectName: "sceneSettingsPage"
-            width: contentFlick.width
-            height: sceneContent.height + 20
-            visible: root.activeTab === 0
-
-            Column {
-                id: sceneContent
-                x: 15
-                y: 10
-                width: parent.width - 30
-                spacing: 5
-
-                SettingsSection {
-                    objectName: "sceneImageSection"
-                    title: "Image"
-                    firstSection: true
-
-                    OptionRow {
-                        label: "Display automatically"
-                        checkObjectName: "displayAutomaticallyCheck"
-                        checkedValue: !!root.settings
-                                      && root.settings.displayAutomatically
-                        onCheckedEdited: checked => {
-                            root.settings.displayAutomatically = checked
-                            if (!checked)
-                                root.settings.displayDelayEnabled = false
-                        }
-                    }
-                    OptionRow {
-                        label: "Display delay: "
-                        checkObjectName: "displayDelayCheck"
-                        fieldObjectName: "displayDelayField"
-                        checkedValue: !!root.settings
-                                      && root.settings.displayDelayEnabled
-                        rowEnabled: !!root.settings
-                                    && root.settings.displayAutomatically
-                        valueVisible: true
-                        valueText: root.settings
-                                   ? root.settings.displayDelayText : "1"
-                        suffix: "s"
-                        onCheckedEdited: checked => root.settings.displayDelayEnabled = checked
-                        onTextEdited: text => root.settings.displayDelayText = text
-                    }
-                    OptionRow {
-                        label: "Hide delay: "
-                        checkObjectName: "hideDelayCheck"
-                        fieldObjectName: "hideDelayField"
-                        checkedValue: !!root.settings && root.settings.hideDelayEnabled
-                        valueVisible: true
-                        valueText: root.settings ? root.settings.hideDelayText : "1"
-                        suffix: "s"
-                        inputKind: "signedDecimal"
-                        onCheckedEdited: checked => root.settings.hideDelayEnabled = checked
-                        onTextEdited: text => root.settings.hideDelayText = text
-                    }
-                    OptionRow {
-                        visible: !!root.settings && root.settings.video
-                        label: "Hide when video ends"
-                        checkObjectName: "hideWhenVideoEndsCheck"
-                        checkedValue: !!root.settings
-                                      && root.settings.hideWhenVideoEnds
-                        onCheckedEdited: checked => root.settings.hideWhenVideoEnds = checked
-                    }
-                }
-
-                SettingsSection {
-                    objectName: "sceneAudioSection"
-                    visible: !!root.settings && root.settings.video
-                    title: "Audio"
-
-                    OptionRow {
-                        label: "Unmute automatically"
-                        checkObjectName: "unmuteAutomaticallyCheck"
-                        checkedValue: !!root.settings
-                                      && root.settings.unmuteAutomatically
-                        onCheckedEdited: checked => {
-                            root.settings.unmuteAutomatically = checked
-                            if (!checked)
-                                root.settings.unmuteDelayEnabled = false
-                        }
-                    }
-                    OptionRow {
-                        label: "Unmute delay: "
-                        checkObjectName: "unmuteDelayCheck"
-                        fieldObjectName: "unmuteDelayField"
-                        checkedValue: !!root.settings
-                                      && root.settings.unmuteDelayEnabled
-                        rowEnabled: !!root.settings
-                                    && root.settings.unmuteAutomatically
-                        valueVisible: true
-                        valueText: root.settings
-                                   ? root.settings.unmuteDelayText : "0"
-                        suffix: "s"
-                        onCheckedEdited: checked => root.settings.unmuteDelayEnabled = checked
-                        onTextEdited: text => root.settings.unmuteDelayText = text
-                    }
-                    OptionRow {
-                        label: "Mute delay: "
-                        checkObjectName: "muteDelayCheck"
-                        fieldObjectName: "muteDelayField"
-                        checkedValue: !!root.settings && root.settings.muteDelayEnabled
-                        valueVisible: true
-                        valueText: root.settings ? root.settings.muteDelayText : "1"
-                        suffix: "s"
-                        inputKind: "signedDecimal"
-                        onCheckedEdited: checked => root.settings.muteDelayEnabled = checked
-                        onTextEdited: text => root.settings.muteDelayText = text
-                    }
-                    OptionRow {
-                        label: "Mute when video ends"
-                        checkObjectName: "muteWhenVideoEndsCheck"
-                        checkedValue: !!root.settings
-                                      && root.settings.muteWhenVideoEnds
-                        onCheckedEdited: checked => root.settings.muteWhenVideoEnds = checked
-                    }
-                }
-
-                SettingsSection {
-                    objectName: "sceneVideoSection"
-                    visible: !!root.settings && root.settings.video
-                    title: "Video"
-
-                    OptionRow {
-                        label: "Play automatically"
-                        checkObjectName: "playAutomaticallyCheck"
-                        checkedValue: !!root.settings
-                                      && root.settings.playAutomatically
-                        onCheckedEdited: checked => {
-                            root.settings.playAutomatically = checked
-                            if (!checked)
-                                root.settings.playDelayEnabled = false
-                        }
-                    }
-                    OptionRow {
-                        label: "Play delay: "
-                        checkObjectName: "playDelayCheck"
-                        fieldObjectName: "playDelayField"
-                        checkedValue: !!root.settings && root.settings.playDelayEnabled
-                        rowEnabled: !!root.settings
-                                    && root.settings.playAutomatically
-                        valueVisible: true
-                        valueText: root.settings ? root.settings.playDelayText : "1"
-                        suffix: "s"
-                        onCheckedEdited: checked => root.settings.playDelayEnabled = checked
-                        onTextEdited: text => root.settings.playDelayText = text
-                    }
-                    OptionRow {
-                        label: "Pause delay: "
-                        checkObjectName: "pauseDelayCheck"
-                        fieldObjectName: "pauseDelayField"
-                        checkedValue: !!root.settings && root.settings.pauseDelayEnabled
-                        valueVisible: true
-                        valueText: root.settings ? root.settings.pauseDelayText : "1"
-                        suffix: "s"
-                        onCheckedEdited: checked => root.settings.pauseDelayEnabled = checked
-                        onTextEdited: text => root.settings.pauseDelayText = text
-                    }
-                    OptionRow {
-                        label: "Repeat "
-                        checkObjectName: "repeatCheck"
-                        fieldObjectName: "repeatField"
-                        checkedValue: !!root.settings && root.settings.repeatEnabled
-                        valueVisible: true
-                        valueText: root.settings ? root.settings.repeatCountText : "1"
-                        suffix: " times"
-                        inputKind: "repeat"
-                        onCheckedEdited: checked => root.settings.repeatEnabled = checked
-                        onTextEdited: text => root.settings.repeatCountText = text
-                    }
-                }
-            }
-        }
 
         Item {
             id: elementPage
             objectName: "elementSettingsPage"
             width: contentFlick.width
             height: elementContent.height + 20
-            visible: root.activeTab === 1
 
             Column {
                 id: elementContent
@@ -808,28 +543,6 @@ Rectangle {
                     title: "Image"
                     firstSection: true
 
-                    OptionRow {
-                        label: "Image fade in: "
-                        checkObjectName: "imageFadeInCheck"
-                        fieldObjectName: "imageFadeInField"
-                        checkedValue: !!root.settings && root.settings.fadeInEnabled
-                        valueVisible: true
-                        valueText: root.settings ? root.settings.fadeInText : "1"
-                        suffix: "s"
-                        onCheckedEdited: checked => root.settings.fadeInEnabled = checked
-                        onTextEdited: text => root.settings.fadeInText = text
-                    }
-                    OptionRow {
-                        label: "Image fade out: "
-                        checkObjectName: "imageFadeOutCheck"
-                        fieldObjectName: "imageFadeOutField"
-                        checkedValue: !!root.settings && root.settings.fadeOutEnabled
-                        valueVisible: true
-                        valueText: root.settings ? root.settings.fadeOutText : "1"
-                        suffix: "s"
-                        onCheckedEdited: checked => root.settings.fadeOutEnabled = checked
-                        onTextEdited: text => root.settings.fadeOutText = text
-                    }
                     OptionRow {
                         label: "Opacity: "
                         checkObjectName: "opacityCheck"
@@ -845,33 +558,6 @@ Rectangle {
                     }
                 }
 
-                SettingsSection {
-                    objectName: "elementVideoRangeSection"
-                    visible: !!root.settings && root.settings.video
-                    title: "Video"
-
-                    Row {
-                        width: parent.width
-                        spacing: 6
-
-                        RangeButton {
-                            objectName: "videoStartButton"
-                            width: (parent.width - parent.spacing) / 2
-                            text: root.settings && root.settings.hasVideoStart
-                                  ? "Remove start" : "Place start"
-                            enabled: !!root.settings && root.settings.available
-                            onClicked: root.settings.toggleVideoStart()
-                        }
-                        RangeButton {
-                            objectName: "videoEndButton"
-                            width: (parent.width - parent.spacing) / 2
-                            text: root.settings && root.settings.hasVideoEnd
-                                  ? "Remove end" : "Place end"
-                            enabled: !!root.settings && root.settings.available
-                            onClicked: root.settings.toggleVideoEnd()
-                        }
-                    }
-                }
 
                 SettingsSection {
                     objectName: "elementAudioSection"
@@ -890,30 +576,6 @@ Rectangle {
                         inputKind: "percent"
                         onCheckedEdited: checked => root.settings.audioEnabled = checked
                         onTextEdited: text => root.settings.volumeText = text
-                    }
-                    OptionRow {
-                        label: "Audio fade in: "
-                        checkObjectName: "audioFadeInCheck"
-                        fieldObjectName: "audioFadeInField"
-                        checkedValue: !!root.settings
-                                      && root.settings.audioFadeInEnabled
-                        valueVisible: true
-                        valueText: root.settings ? root.settings.audioFadeInText : "1"
-                        suffix: "s"
-                        onCheckedEdited: checked => root.settings.audioFadeInEnabled = checked
-                        onTextEdited: text => root.settings.audioFadeInText = text
-                    }
-                    OptionRow {
-                        label: "Audio fade out: "
-                        checkObjectName: "audioFadeOutCheck"
-                        fieldObjectName: "audioFadeOutField"
-                        checkedValue: !!root.settings
-                                      && root.settings.audioFadeOutEnabled
-                        valueVisible: true
-                        valueText: root.settings ? root.settings.audioFadeOutText : "1"
-                        suffix: "s"
-                        onCheckedEdited: checked => root.settings.audioFadeOutEnabled = checked
-                        onTextEdited: text => root.settings.audioFadeOutText = text
                     }
                 }
 

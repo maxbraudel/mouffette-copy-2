@@ -6,6 +6,8 @@
 #include <QMetaObject>
 #include <QPointer>
 #include <QTimer>
+#include <QElapsedTimer>
+#include <QHash>
 #include <functional>
 
 class CanvasDocument;
@@ -64,6 +66,16 @@ public:
     bool remoteMediaCached(const QString& mediaId) const;
     void triggerRemoteSceneAction() override;
     void triggerTestSceneAction() override;
+    void timelinePlay();
+    void timelinePause();
+    void timelineSeek(qint64 positionMs);
+    qint64 timelinePositionMs() const;
+    bool timelinePlaying() const { return m_timelinePlaying; }
+
+signals:
+    void timelineTransportChanged();
+
+public:
 
     QJsonObject serializeProjectState() const override;
     bool restoreProjectState(
@@ -72,14 +84,6 @@ public:
         QStringList* skippedMediaIds = nullptr) override;
 
 private:
-    struct DraftMediaState {
-        QPointer<CanvasMedia> media;
-        bool visible = true;
-        bool muted = false;
-        bool playing = false;
-        qint64 positionMs = 0;
-    };
-
     QJsonArray buildSceneManifest(const QJsonObject& scene,
                                   QString* errorMessage) const;
     QJsonArray localPreparationChecklist(const QJsonObject& scene,
@@ -87,7 +91,6 @@ private:
                                          QString* errorMessage) const;
     void reportLocalScenePrepared();
     void prepareSceneVideos(std::function<void()> ready);
-    void rememberDraftState();
     void tryArmRemoteScene();
     void beginScenePresentation(bool remote);
     void stopScenePresentation();
@@ -98,6 +101,10 @@ private:
     void publishActionState();
     void connectWebSocketSignals();
     void sendVideoSnapshot();
+    void advanceTimeline();
+    void applyTimeline(qint64 positionMs, bool playing, bool forceSeek = false);
+    qint64 timelineStopMs() const;
+    qint64 timelineNowMs() const;
 
     QStringList residencyOwners() const;
     QString m_residencyGroup;
@@ -126,7 +133,6 @@ private:
     QString m_sceneRunId;
     QString m_sceneDigest;
     QJsonArray m_localPrepareChecklist;
-    QList<DraftMediaState> m_draftState;
     QObject* m_sceneContext = nullptr;
     QPointer<QObject> m_videoPreparation;
     bool m_localVideosPrepared = false;
@@ -134,4 +140,13 @@ private:
     QTimer m_videoSnapshotTimer;
     QMetaObject::Connection m_frameConnection;
     int m_framesRemaining = 0;
+    QTimer m_timelineTimer;
+    QElapsedTimer m_timelineClock;
+    qint64 m_timelineAnchorPositionMs = 0;
+    qint64 m_remoteStartServerMs = -1;
+    bool m_timelinePlaying = false;
+    bool m_timelineRemote = false;
+    QHash<QString, QString> m_timelineClipIds;
+    QHash<QString, bool> m_timelineVideoPlaying;
+    QHash<QString, qint64> m_timelineSeekGuards;
 };

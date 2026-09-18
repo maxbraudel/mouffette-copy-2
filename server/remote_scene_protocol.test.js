@@ -44,7 +44,7 @@ function messages(ws, type) {
 
 function envelope(session, extra = {}) {
     return {
-        protocolVersion: 7,
+        protocolVersion: 8,
         serverBootId: session.serverBootId,
         messageId: crypto.randomUUID(),
         remoteSessionId: session.remoteSessionId,
@@ -59,16 +59,16 @@ const asset = Object.freeze({
     mediaIds: ['media-1'], sha256: 'a'.repeat(64), size: 128,
 });
 const scene = Object.freeze({
-    renderSchemaVersion: 2,
+    renderSchemaVersion: 3,
+            timeline: { maxDurationMs: 180000, stopTimeMs: -1 },
     screens: [{ id: 1, x: 0, y: 0, width: 1920, height: 1080, primary: true }],
     media: [{
         mediaId: 'media-1', assetId: 'asset-1', fileId: 'a'.repeat(64),
         fileName: 'asset.png', type: 'image',
         x: 0, y: 0, width: 1920, height: 1080,
         baseWidth: 1920, baseHeight: 1080, visible: true, z: 1,
-        autoDisplay: false, autoDisplayDelayMs: 0,
-        autoHide: false, autoHideDelayMs: 0, hideWhenVideoEnds: false,
-        fadeInSeconds: 0, fadeOutSeconds: 0, contentOpacity: 1,
+        scale: 1, contentOpacity: 1, opacityOverrideEnabled: false, rawOpacity: 1,
+        timeline: { keyframes: [], clips: [], clipsInitialized: false },
         spans: [{
             screenId: 1, normX: 0, normY: 0, normW: 1, normH: 1,
             spanDestNormX: 0, spanDestNormY: 0,
@@ -636,14 +636,14 @@ for (const invalidCase of [
     server.handleMessage('owner-connection', envelope(session, {
         type: 'state_snapshot', sceneRunId: 'run-wire-1', digest, sequence: 1,
         sampledServerMonotonicMs: wireMonotonic,
-        snapshot: { videos: [{ mediaId: 'media-1', positionMs: 42 }] },
+        snapshot: { timelinePositionMs: 42 },
     }));
     assert.equal(messages(target, 'state_snapshot').at(-1).sequence, 1);
 
     const snapshotCountBeforeInvalidTimestamp = messages(target, 'state_snapshot').length;
     server.handleMessage('owner-connection', envelope(session, {
         type: 'state_snapshot', sceneRunId: 'run-wire-1', digest, sequence: 2,
-        snapshot: { videos: [] },
+        snapshot: { timelinePositionMs: 0 },
     }));
     assert.equal(messages(owner, 'error').at(-1).code,
         'invalid_state_snapshot_timestamp');
@@ -651,7 +651,7 @@ for (const invalidCase of [
         type: 'state_snapshot', sceneRunId: 'run-wire-1', digest, sequence: 2,
         sampledServerMonotonicMs:
             wireMonotonic + server.config.sceneMaxClockSkewMs + 1,
-        snapshot: { videos: [] },
+        snapshot: { timelinePositionMs: 0 },
     }));
     assert.equal(messages(owner, 'error').at(-1).code,
         'invalid_state_snapshot_timestamp');
@@ -659,14 +659,25 @@ for (const invalidCase of [
         snapshotCountBeforeInvalidTimestamp,
         'an absent or implausibly future server timestamp must fail closed');
 
-    const authoritativeSnapshot = { serializedState: 'x'.repeat(300 * 1024) };
+    for (const snapshot of [{ timelinePositionMs: -1 }, { timelinePositionMs: 180001 },
+        { timelinePositionMs: 1.5 }, { timelinePositionMs: '100' },
+        { timelinePositionMs: 100, media: [] }, { videos: [] }]) {
+        server.handleMessage('owner-connection', envelope(session, {
+            type: 'state_snapshot', sceneRunId: 'run-wire-1', digest, sequence: 2,
+            sampledServerMonotonicMs: wireMonotonic, snapshot,
+        }));
+        assert.equal(messages(owner, 'error').at(-1).code, 'invalid_state_snapshot');
+        assert.equal(messages(target, 'state_snapshot').length, snapshotCountBeforeInvalidTimestamp);
+    }
+
+    const authoritativeSnapshot = { timelinePositionMs: 9000 };
     server.handleMessage('owner-connection', envelope(session, {
         type: 'state_snapshot', sceneRunId: 'run-wire-1', digest, sequence: 2,
         sampledServerMonotonicMs: wireMonotonic,
         snapshot: authoritativeSnapshot,
     }));
     assert.equal(messages(target, 'state_snapshot').at(-1).sequence, 2,
-        'a complete snapshot larger than the former 256 KiB ceiling is relayed');
+        'the timeline clock is relayed without replacing animated media state');
     const relayedSnapshotCount = messages(target, 'state_snapshot').length;
 
     server.handleMessage('owner-connection', envelope(session, {
@@ -696,7 +707,7 @@ for (const invalidCase of [
     assert.equal(messages(owner, 'stopped').at(-1).success, true);
 
     server.handleMessage('owner-connection', {
-        protocolVersion: 7, serverBootId: server.serverBootId,
+        protocolVersion: 8, serverBootId: server.serverBootId,
         messageId: crypto.randomUUID(),
         type: 'remote_scene_start',
     });
@@ -775,19 +786,21 @@ for (const invalidCase of [
         'scene_prepare_ack_delivery_failed');
 }
 
-// Video bounds and signed end offsets survive canonical validation; malformed
-// ranges and offsets still fail before any remote preparation is created.
+// Timeline clips and keyframes are validated before creating a remote graph.
+const clip = { id: 'clip-1', startMs: 4000, sourceInMs: 1000, sourceOutMs: 3000 };
 for (const [overrides, accepted] of [
-    [{}, true], [{ endPositionMs: 1800 }, true],
-    [{ endPositionMs: 1000 }, false], [{ endPositionMs: 999 }, false],
-    [{ endPositionMs: -1 }, false], [{ endPositionMs: 1800.5 }, false],
-    [{ endPositionMs: '1800' }, false], [{ endPositionMs: 604_800_001 }, false],
-    [{ autoHide: true, hideWhenVideoEnds: true, autoHideDelayMs: -250,
-        autoMute: true, muteWhenVideoEnds: true, autoMuteDelayMs: -400 }, true],
-    [{ autoHideDelayMs: -604_800_001 }, false],
-    [{ autoMuteDelayMs: -604_800_001 }, false],
-    [{ autoHideDelayMs: -0.5 }, false], [{ autoMuteDelayMs: '-400' }, false],
-    [{ autoDisplayDelayMs: -250 }, false], [{ autoPlayDelayMs: -250 }, false],
+    [{}, true],
+    [{ timeline: { clipsInitialized: true, keyframes: [], clips: [] } }, true],
+    [{ timeline: { clipsInitialized: false, keyframes: [], clips: [clip] } }, false],
+    [{ timeline: { clipsInitialized: true, keyframes: [], clips: [{ ...clip, sourceOutMs: 5001 }] } }, false],
+    [{ timeline: { clipsInitialized: true, keyframes: [], clips: [{ ...clip, startMs: 179000 }] } }, false],
+    [{ timeline: { clipsInitialized: true, keyframes: [], clips: [{ ...clip, sourceOutMs: 1000 }] } }, false],
+    [{ timeline: { clipsInitialized: true, keyframes: [], clips: [{ ...clip, startMs: 0.5 }] } }, false],
+    [{ timeline: { clipsInitialized: true, keyframes: [], clips: [clip, { ...clip, id: 'clip-2', startMs: 4500 }] } }, false],
+    [{ timeline: { clipsInitialized: true, keyframes: [], clips: [clip, { ...clip, id: 'clip-2', startMs: 6000 }] } }, true],
+    [{ autoPlay: true }, false], [{ startPositionMs: 1000 }, false],
+    [{ endPositionMs: 1800 }, false], [{ fadeInSeconds: 1 }, false],
+    [{ durationMs: -1 }, false], [{ durationMs: 604_800_001 }, false],
 ]) {
     const server = new MouffetteServer({ port: 0, metricLogger: () => {} });
     const owner = addClient(server, 'range-owner', 'A');
@@ -801,11 +814,8 @@ for (const [overrides, accepted] of [
     const videoAsset = { ...asset, extension: 'mp4' };
     const video = {
         ...scene.media[0], type: 'video', fileName: 'clip.mp4',
-        autoPlay: true, autoPlayDelayMs: 0, autoPause: false, autoPauseDelayMs: 0,
-        muted: true, volume: 1, continuousLoop: true, repeatEnabled: false, repeatCount: 0,
-        autoUnmute: false, autoUnmuteDelayMs: 0, autoMute: false, autoMuteDelayMs: 0,
-        muteWhenVideoEnds: false, audioFadeInSeconds: 0, audioFadeOutSeconds: 0,
-        startPositionMs: 1000,
+        muted: true, volume: 1, durationMs: 5000,
+        timeline: { clipsInitialized: true, keyframes: [], clips: [clip] },
         ...overrides,
     };
     const rangedScene = { ...scene, media: [video] };
@@ -823,10 +833,7 @@ for (const [overrides, accepted] of [
     }));
     if (accepted) {
         assert.equal(messages(target, 'scene_prepare').length, 1, JSON.stringify(messages(owner, 'error')));
-        const forwarded = messages(target, 'scene_prepare')[0].scene.media[0];
-        assert.equal(forwarded.endPositionMs, overrides.endPositionMs);
-        assert.equal(forwarded.autoHideDelayMs, video.autoHideDelayMs);
-        assert.equal(forwarded.autoMuteDelayMs, video.autoMuteDelayMs);
+        assert.deepEqual(messages(target, 'scene_prepare')[0].scene.media[0].timeline, video.timeline);
     } else {
         assert.equal(messages(owner, 'error').at(-1).code, 'invalid_scene_manifest');
         assert.equal(messages(target, 'scene_prepare').length, 0);
@@ -834,7 +841,7 @@ for (const [overrides, accepted] of [
     }
 }
 
-console.log('scene protocol v7 tests passed');
+console.log('scene protocol v8 tests passed');
 
 // Residency is a separate, authenticated barrier; upload completion never implies it.
 {

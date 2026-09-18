@@ -20,7 +20,10 @@ Ownership is established at gesture start and remains stable until gesture end/c
 ## Selection Contract
 
 - `CanvasDocument` is the only selection authority; QML consumes its projection.
-- Media selection is triggered on primary press.
+- Media selection is triggered on primary press. An already-selected item becomes
+  primary without clearing the group; Shift adds and promotes.
+- Only the primary owns handles, editing overlays and transforms. Secondary
+  selections retain their border and name, without hidden resize hit targets.
 - Drag start does not re-select when the same gesture already started on that media.
 - Selection changes are published through selection chrome model updates.
 - One viewport-level move handler owns all media types; renderer delegates never
@@ -48,14 +51,14 @@ Ownership is established at gesture start and remains stable until gesture end/c
 
 ## Alt/Option Scroll Contract
 
-- Vertical scroll scales every selected item's geometry around its own center.
+- Vertical scroll scales the primary item around its own center.
 - Input packets accumulate into one provisional transaction; `liveTransforms`
   publishes at most once per rendered frame without changing document/model rows.
 - Releasing Alt or `ScrollEnd`, including a zero-delta end, commits the final
   geometry. Phase-less mouse wheels commit after 160 ms without input.
-- Selection changes, another transform, copy and window suspension finish the
-  transaction. Revoked editing or removal of a participating media cancels it.
-- Each selected media commits position and scale atomically once per gesture.
+- Another transform, copy and window suspension finish the transaction.
+  Selection changes, revoked editing or removal cancel provisional geometry.
+- The primary commits position and scale atomically once per gesture.
 
 ## Mode Contract (InputCoordinator)
 

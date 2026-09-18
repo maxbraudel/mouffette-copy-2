@@ -1163,6 +1163,7 @@ private slots:
         collectOutlines(collectOutlines, fixture.view.rootObject());
         QCOMPARE(outlines.size(), 2);
         for (auto* outline : outlines) QVERIFY(!outline->rasterUpdatesDeferred());
+        fixture.document.setPrimarySelectedMedia(first->mediaId());
         const QRectF firstRect = first->sceneRect(), secondRect = second->sceneRect();
         QSignalSpy documentChanges(&fixture.document, &CanvasDocument::documentChanged);
         QSignalSpy snapshots(&fixture.controller, &QuickCanvasController::mediaSnapshotChanged);
@@ -1178,7 +1179,7 @@ private slots:
         QCOMPARE(selection.count(), 0);
         QCOMPARE(modelChanges.count(), 0);
         QTRY_COMPARE(previews.count(), 1);
-        for (auto* outline : outlines) QVERIFY(outline->rasterUpdatesDeferred());
+        QVERIFY(std::any_of(outlines.cbegin(), outlines.cend(), [](auto* outline) { return outline->rasterUpdatesDeferred(); }));
         QCOMPARE(presentation.count(), 0);
         const QVariantMap preview = fixture.controller.liveTransforms().value(first->mediaId()).toMap();
         QVERIFY(qAbs(preview.value("scale").toReal() - std::pow(1.001, 100)) < 1e-10);
@@ -1197,17 +1198,17 @@ private slots:
         // End can arrive before the next frame. It must include every packet.
         fixture.controller.finishSelectionScaleGesture();
         QVERIFY(qAbs(first->scale() - std::pow(1.001, 200)) < 1e-10);
-        QVERIFY(qAbs(second->scale() - 2.0 * first->scale()) < 1e-10);
+        QCOMPARE(second->scale(), 2.0);
         QVERIFY(completeGeometryOnly);
-        QCOMPARE(documentChanges.count(), 2);
-        QCOMPARE(snapshots.count(), 2);
-        QCOMPARE(selection.count(), 2);
-        QCOMPARE(modelChanges.count(), 2);
+        QCOMPARE(documentChanges.count(), 1);
+        QCOMPARE(snapshots.count(), 1);
+        QCOMPARE(selection.count(), 1);
+        QCOMPARE(modelChanges.count(), 1);
         QCOMPARE(previews.count(), 3); // final preview, then clear
         QVERIFY(fixture.controller.liveTransforms().isEmpty());
         for (auto* outline : outlines) QVERIFY(!outline->rasterUpdatesDeferred());
         fixture.controller.finishSelectionScaleGesture();
-        QCOMPARE(documentChanges.count(), 2);
+        QCOMPARE(documentChanges.count(), 1);
         disconnect(geometryConnection);
     }
 
@@ -1298,7 +1299,7 @@ private slots:
         QCOMPARE(first->scale(), 3.0);
     }
 
-    void centeredSelectionScalingPreservesGroupGeometryAndRejectsInvalidInput()
+    void centeredScalingOnlyChangesPrimaryAndRejectsInvalidInput()
     {
         Fixture fixture;
         QVERIFY(fixture.initialize());
@@ -1309,10 +1310,11 @@ private slots:
         second->setScale(2.0);
         fixture.document.select(first->mediaId(), false);
         fixture.document.select(second->mediaId(), true);
+        fixture.document.setPrimarySelectedMedia(first->mediaId());
         const QRectF firstRect = first->sceneRect(), secondRect = second->sceneRect();
         fixture.controller.scaleSelectionBy(1.25);
         QCOMPARE(first->scale(), 1.25);
-        QCOMPARE(second->scale(), 2.5);
+        QCOMPARE(second->scale(), 2.0);
         QCOMPARE(first->sceneRect().center(), firstRect.center());
         QCOMPARE(second->sceneRect().center(), secondRect.center());
         QVERIFY(first->fitToTextEnabled() && second->fitToTextEnabled());
@@ -1604,11 +1606,14 @@ private slots:
         }
         if (original->isVideo()) {
             QTRY_VERIFY(original->player()->duration() > 3000);
-            original->setPlaybackRange(500, 2500);
+            auto track = original->timelineTrack();
+            track.clips = {{SceneTimeline::newId(), 0, 500, 2500}};
+            track.clipsInitialized = true;
+            original->setTimelineTrack(track);
             original->setPositionMs(1500);
             original->setMuted(true);
             original->setVolume(.37);
-            original->setRepeatEnabled(true);
+
         }
         original->setBaseSize({320, 180});
         original->setPosition({123.25, -56.5});
@@ -1616,10 +1621,8 @@ private slots:
         original->setZ(4.5);
         original->setContentVisible(false);
         auto settings = original->settings();
-        settings.fadeInEnabled = true;
-        settings.fadeInText = "2.50";
-        settings.playDelayEnabled = true;
-        settings.playDelayText = "3.25";
+        settings.opacityOverrideEnabled = true;
+        settings.opacityText = "75";
         original->setSettings(settings);
         auto expected = document.serializeProjectState().value("media").toArray()[0].toObject();
         expected.remove("mediaId");
@@ -1634,11 +1637,24 @@ private slots:
         QCOMPARE(copy->sourcePath(), original->sourcePath());
         auto actual = document.serializeProjectState().value("media").toArray()[1].toObject();
         actual.remove("mediaId");
+        auto normalizeTrackIds = [](QJsonObject* object) {
+            auto track = object->value("timeline").toObject();
+            for (const auto* field : {"keyframes", "clips"}) {
+                QJsonArray values;
+                for (const auto& entry : track.value(field).toArray()) {
+                    auto item = entry.toObject(); item.remove("id"); values.append(item);
+                }
+                track.insert(field, values);
+            }
+            object->insert("timeline", track);
+        };
+        normalizeTrackIds(&actual); normalizeTrackIds(&expected);
         QCOMPARE(actual, expected);
         if (copy->isVideo()) {
             QVERIFY(copy->player() != original->player());
             QVERIFY(!copy->isPlaying());
-            QTRY_COMPARE(copy->player()->position(), qint64(1500));
+            QTRY_VERIFY(copy->residencyReady());
+            QCOMPARE(copy->timelineTrack().clips.first().sourceInMs, 500);
         }
         QCOMPARE(toasts.size(), 1);
         QCOMPARE(toasts.last()[0].toString(), QStringLiteral("Media pasted."));
@@ -1755,7 +1771,7 @@ private slots:
 #endif
     }
 
-    void keyboardVideoTransportAndRangeWarnings()
+    void keyboardVideoMuteDoesNotControlPlayback()
     {
         ClipboardAndToasts environment;
         QSignalSpy toasts(environment.system->notificationCenter(), &NotificationCenter::toastRequested);
@@ -1770,32 +1786,15 @@ private slots:
         QVERIFY(QTest::qWaitForWindowActive(&fixture.view));
         fixture.view.rootObject()->forceActiveFocus();
         QTRY_COMPARE(fixture.view.rootObject()->property("selectedVideoId").toString(), video->mediaId());
+        // Individual video transport/range shortcuts have been removed.
         QTest::keyClick(&fixture.view, Qt::Key_Space);
-        QTRY_VERIFY(video->isPlaying());
-        QTest::keyClick(&fixture.view, Qt::Key_Space);
-        QTRY_VERIFY(!video->isPlaying());
+        QTest::keyClick(&fixture.view, Qt::Key_S);
+        QTest::keyClick(&fixture.view, Qt::Key_E);
+        QVERIFY(!video->isPlaying());
         QTest::keyClick(&fixture.view, Qt::Key_M);
         QVERIFY(video->muted());
         QTest::keyClick(&fixture.view, Qt::Key_M);
         QVERIFY(!video->muted());
-        video->setPositionMs(1000);
-        QTest::keyClick(&fixture.view, Qt::Key_S);
-        QCOMPARE(video->startMarkerMs(), 1000);
-        video->setPositionMs(900);
-        QTest::keyClick(&fixture.view, Qt::Key_E);
-        QCOMPARE(video->endMarkerMs(), -1);
-        QCOMPARE(toasts.last()[0].toString(), QStringLiteral("Place end after start."));
-        video->setPositionMs(2000);
-        QTest::keyClick(&fixture.view, Qt::Key_E);
-        QCOMPARE(video->endMarkerMs(), 2000);
-        QTest::keyClick(&fixture.view, Qt::Key_S);
-        QCOMPARE(video->startMarkerMs(), -1);
-        video->setPositionMs(2100);
-        QTest::keyClick(&fixture.view, Qt::Key_S);
-        QCOMPARE(video->startMarkerMs(), -1);
-        QCOMPARE(toasts.last()[0].toString(), QStringLiteral("Place start before end."));
-        QTest::keyClick(&fixture.view, Qt::Key_E);
-        QCOMPARE(video->endMarkerMs(), -1);
         fixture.document.setEditsLocked(true);
         QTest::keyClick(&fixture.view, Qt::Key_M);
         QVERIFY(!video->muted());
@@ -1825,8 +1824,6 @@ private slots:
         QCOMPARE(fixture.document.media().size(), 1);
         QVERIFY(!video->isPlaying());
         QVERIFY(!video->muted());
-        QCOMPARE(video->startMarkerMs(), -1);
-        QCOMPARE(video->endMarkerMs(), -1);
         auto* delegate = findQuickItemWithProperty(fixture.view.rootObject(), "currentMediaId", video->mediaId());
         QVERIFY(delegate);
         QTest::mouseClick(&fixture.view, Qt::LeftButton, Qt::NoModifier,
@@ -1852,8 +1849,9 @@ private slots:
         QCOMPARE(fixture.document.selectedMediaIds().size(), 2);
 
         fixture.document.select(second->mediaId());
-        QVERIFY(!first->selected());
+        QVERIFY(first->selected());
         QVERIFY(second->selected());
+        QCOMPARE(fixture.document.primarySelectedMediaId(), second->mediaId());
         QCOMPARE(fixture.controller.selectedMediaItem(), second);
     }
 
@@ -1870,7 +1868,7 @@ private slots:
         QVERIFY(QMetaObject::invokeMethod(&fixture.controller,
             "handleTextCommitRequested", Qt::DirectConnection,
             Q_ARG(QString, firstId), Q_ARG(QString, QStringLiteral("Updated"))));
-        QCOMPARE(first->text(), QStringLiteral("Updated"));
+        QCOMPARE(first->text(), QStringLiteral("Text")); // Non-primary late commits are ignored.
         QVERIFY(survivor->selected());
 
         QVERIFY(fixture.document.removeMedia(firstId));
@@ -2022,12 +2020,14 @@ private slots:
         auto* active = add(document, {100,100}, {200,100}, 1);
         auto* control = add(reference, {100,100}, {200,100}, 1);
         auto* follower = add(document, {-1700,-900}, {80,120}, 1.5);
+        add(reference, {-1700,-900}, {80,120}, 1.5);
         const QRectF original = active->sceneRect(), other = follower->sceneRect();
         const QSize targetSize(400, 200);
         const QPointF targetOrigin(100 - (1 - uv.x()) * 200, 100 - (1 - uv.y()) * 100);
         auto* target = add(document, targetOrigin, targetSize, 1);
         add(reference, targetOrigin, targetSize, 1);
         document.select(active->mediaId()); document.select(follower->mediaId(), true);
+        document.setPrimarySelectedMedia(active->mediaId());
         reference.select(control->mediaId());
         const QPointF point = targetOrigin + QPointF(uv.x() * 400 + 2, uv.y() * 200 + 2);
         // Toggle modifiers within the same gesture; every update must still
@@ -2040,24 +2040,17 @@ private slots:
         QCOMPARE(controller.snapGuidesModel(), single.snapGuidesModel());
         QCOMPARE(active->sceneRect(), original);
         QCOMPARE(follower->sceneRect(), other);
-        QCOMPARE(controller.liveTransforms().size(), 2);
+        QCOMPARE(controller.liveTransforms().size(), 1);
         controller.handleMediaResizeEnded(active->mediaId());
         single.handleMediaResizeEnded(control->mediaId());
         QCOMPARE(active->sceneRect(), control->sceneRect());
-        const QRectF result = active->sceneRect();
-        const qreal sx = result.width() / original.width(), sy = result.height() / original.height();
-        const QPointF expectedPosition = other.topLeft() + QPointF(
-            (result.x() - original.x()) * other.width() / original.width(),
-            (result.y() - original.y()) * other.height() / original.height());
-        QVERIFY(QLineF(follower->position(), expectedPosition).length() < .001);
-        QVERIFY(qAbs(follower->sceneRect().width() - other.width() * sx) <= .76);
-        QVERIFY(qAbs(follower->sceneRect().height() - other.height() * sy) <= .76);
-        QCOMPARE(follower->scale(), alt ? 1.5 : 1.5 * sx);
+        QCOMPARE(follower->sceneRect(), other);
+        QCOMPARE(follower->scale(), 1.5);
         QCOMPARE(target->sceneRect(), QRectF(targetOrigin, targetSize));
         QVERIFY(controller.liveTransforms().isEmpty());
     }
 
-    void selectionMoveSnapExcludesFollowersAndUsesActiveMedia()
+    void selectionMoveCanSnapToStationarySecondary()
     {
         Fixture fixture;
         QVERIFY(fixture.initialize());
@@ -2069,23 +2062,25 @@ private slots:
         }
         active->setPosition({100,100}); follower->setPosition({300,200}); target->setPosition({700,400});
         fixture.document.select(active->mediaId()); fixture.document.select(follower->mediaId(), true);
+        fixture.document.setPrimarySelectedMedia(active->mediaId());
         auto& c = fixture.controller;
         c.handleMediaMoveStarted(active->mediaId(), 100, 100, true);
         c.handleMediaMoveUpdated(active->mediaId(), 302, 202, true);
-        QVERIFY(c.liveSnapDragMediaId().isEmpty());
+        QCOMPARE(c.liveSnapDragX(), 300.0);
+        QCOMPARE(c.liveSnapDragY(), 200.0);
         c.handleMediaMoveUpdated(active->mediaId(), 702, 402, true);
         QCOMPARE(c.liveSnapDragX(), 700.0); QCOMPARE(c.liveSnapDragY(), 400.0);
-        QCOMPARE(c.liveTransforms().value(follower->mediaId()).toMap().value("x").toReal(), 900.0);
+        QVERIFY(!c.liveTransforms().contains(follower->mediaId()));
         c.handleMediaMoveEnded(active->mediaId(), 702, 402, true);
         QCOMPARE(active->position(), QPointF(700,400));
-        QCOMPARE(follower->position(), QPointF(900,500));
+        QCOMPARE(follower->position(), QPointF(300,200));
         QCOMPARE(target->position(), QPointF(700,400));
         // A delayed release without a new gesture cannot move anything.
         c.handleMediaMoveEnded(active->mediaId(), 0, 0, false);
         QCOMPARE(active->position(), QPointF(700,400));
     }
 
-    void groupResizePreviewReachesContentAndOverlays()
+    void primaryResizeLeavesSecondaryContentAndLabelUnchanged()
     {
         Fixture fixture;
         QVERIFY(fixture.initialize());
@@ -2096,22 +2091,23 @@ private slots:
         }
         active->setPosition({100,100}); follower->setPosition({600,300}); follower->setScale(1.5);
         fixture.document.select(active->mediaId()); fixture.document.select(follower->mediaId(), true);
+        fixture.document.setPrimarySelectedMedia(active->mediaId());
         auto* root = fixture.view.rootObject();
         QQuickItem* visual = nullptr;
         QQuickItem* overlay = nullptr;
         QTRY_VERIFY((visual = findQuickItemWithProperty(root, "currentMediaId", follower->mediaId())));
         QTRY_VERIFY((overlay = findQuickItemWithProperty(root, "mid", follower->mediaId())));
         fixture.controller.handleMediaResizeRequested(active->mediaId(), "bottom-right", 500, 250, false, true);
-        QTRY_COMPARE(visual->size(), QSizeF(400,150));
+        QTRY_COMPARE(visual->size(), QSizeF(200,100));
         QCOMPARE(visual->scale(), 1.5);
         QCOMPARE(visual->position(), QPointF(600,300));
-        QCOMPARE(overlay->property("screenW").toReal(), 600.0);
-        QCOMPARE(overlay->property("screenH").toReal(), 225.0);
+        QCOMPARE(overlay->property("screenW").toReal(), 300.0);
+        QCOMPARE(overlay->property("screenH").toReal(), 150.0);
         QCOMPARE(follower->baseSize(), QSize(200,100));
         fixture.controller.handleMediaResizeRequested(active->mediaId(), "bottom-right", 500, 300, false, false);
         QTRY_COMPARE(visual->size(), QSizeF(200,100));
-        QCOMPARE(visual->scale(), 3.0);
-        QCOMPARE(overlay->property("screenH").toReal(), 300.0);
+        QCOMPARE(visual->scale(), 1.5);
+        QCOMPARE(overlay->property("screenH").toReal(), 150.0);
         fixture.controller.handleMediaResizeEnded(active->mediaId());
         QTRY_COMPARE(visual->scale(), follower->scale());
         QCOMPARE(overlay->property("screenW").toReal(), follower->sceneRect().width());
@@ -2124,6 +2120,7 @@ private slots:
         auto* active = fixture.document.addText({300,300});
         auto* follower = fixture.document.addText({600,300});
         fixture.document.select(active->mediaId()); fixture.document.select(follower->mediaId(), true);
+        fixture.document.setPrimarySelectedMedia(active->mediaId());
         const QJsonObject original = fixture.document.serializeProjectState();
         auto& c = fixture.controller;
         c.handleMediaResizeRequested(active->mediaId(), "bottom-right", 500, 400, false, true);
@@ -2234,6 +2231,7 @@ private slots:
         }
         moving->setPosition({50, 50});
         target->setPosition({500, 300});
+        fixture.document.select(moving->mediaId());
 
         fixture.controller.handleMediaMoveStarted(
             moving->mediaId(), 50, 50, true);
@@ -2273,6 +2271,7 @@ private slots:
         target->setFitToTextEnabled(false);
         target->setBaseSize({800, 400});
         target->setPosition({100, 100});
+        fixture.document.select(moving->mediaId());
 
         fixture.controller.handleMediaResizeRequested(
             moving->mediaId(), QStringLiteral("bottom-right"),
@@ -2331,6 +2330,7 @@ private slots:
         target->setFitToTextEnabled(false);
         target->setBaseSize({700, 500});
         target->setPosition({100, 100});
+        fixture.document.select(moving->mediaId());
 
         fixture.controller.handleMediaResizeRequested(
             moving->mediaId(), QStringLiteral("bottom-right"),
@@ -2677,15 +2677,27 @@ private slots:
     {
         QFETCH(bool, video);
         QFETCH(bool, alt);
+        const AppConfig previous = AppConfig::instance();
+        const auto restoreConfig = qScopeGuard([&] { AppConfig::instance() = previous; });
+        AppConfig::LoadOptions options;
+        options.defaultEnvFilePath = QString();
+        options.processEnvironment = QProcessEnvironment();
+        // Give first-use GPU pipeline compilation time to finish while retaining
+        // the strict intermediate-pixel assertion below.
+        options.arguments = {"test", "--ui-content-fade-duration-ms=1000"};
+        QString configError;
+        QVERIFY2(AppConfig::instance().load(options, &configError), qPrintable(configError));
         auto& memory = MediaResidencyManager::instance();
         struct ResetMemory { ~ResetMemory() { MediaResidencyManager::instance().clearMemorySnapshotForTesting(); } } reset;
         memory.setMemorySnapshotForTesting({8ULL << 30, 0, 512ULL << 20, false, 0});
         Fixture fixture;
         QVERIFY(fixture.initialize());
+        // Keep animation frames available even when another editor is open.
+        fixture.view.setFlag(Qt::WindowStaysOnTopHint);
         fixture.view.show();
         QVERIFY(QTest::qWaitForWindowExposed(&fixture.view));
-        fixture.view.requestActivate();
-        QVERIFY(QTest::qWaitForWindowActive(&fixture.view));
+        // This rendering test sends pointer events directly to the window and
+        // uses no keyboard shortcuts. It does not need desktop foreground focus.
         QTemporaryDir directory;
         const QString path = video ? QString::fromUtf8(TEST_VIDEO_FILE)
                                    : directory.filePath(QStringLiteral("cold.png"));
@@ -2843,12 +2855,13 @@ private slots:
                 if (fraction > 0.15 && fraction < 0.85) ++blendedPixels;
             }
         }
-        QVERIFY2(blendedPixels >= 4, "Rendered media must be blended between its skeleton and fully visible content");
         if (!artifactDir.isEmpty()) {
             const QString tag = QString::fromLatin1(QTest::currentDataTag());
+            QVERIFY(loadingFrame.save(QDir(artifactDir).filePath(QStringLiteral("media-loading-%1.png").arg(tag))));
             QVERIFY(fadingFrame.save(QDir(artifactDir).filePath(QStringLiteral("media-fading-%1.png").arg(tag))));
             QVERIFY(readyFrame.save(QDir(artifactDir).filePath(QStringLiteral("media-ready-%1.png").arg(tag))));
         }
+        QVERIFY2(blendedPixels >= 4, "Rendered media must be blended between its skeleton and fully visible content");
         QCOMPARE(media->sceneRect(), editedRect);
         QCOMPARE(findQuickItemWithProperty(root, "currentMediaId", media->mediaId()), delegate.data());
         fixture.controller.deleteSelectedMedia();
@@ -3207,7 +3220,7 @@ private slots:
         QCOMPARE(follower->position(), followerStart);
         auto* followerItem = findQuickItemWithProperty(root, "currentMediaId", follower->mediaId());
         QVERIFY(followerItem);
-        QCOMPARE(followerItem->position(), followerStart + QPointF(90,55));
+        QCOMPARE(followerItem->position(), followerStart);
         QTest::mouseRelease(&fixture.view, Qt::LeftButton,
                             Qt::NoModifier, end);
         QCoreApplication::processEvents();
@@ -3216,7 +3229,7 @@ private slots:
         QVERIFY(updated.count() > 0);
         QCOMPARE(ended.count(), 1);
         QCOMPARE(media->position(), originalPosition + QPointF(90, 55));
-        QCOMPARE(follower->position(), followerStart + QPointF(90, 55));
+        QCOMPARE(follower->position(), followerStart);
     }
 
     void pendingTextEditingRequestRespectsLifetime_data()

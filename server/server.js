@@ -4,6 +4,7 @@ const crypto = require('node:crypto');
 const { loadServerConfig } = require('./config');
 const { monotonicNow } = require('./suspend_inclusive_clock');
 const { PROTOCOL_VERSION, createChallenge, verifyAuthResponse } = require('./device_auth');
+const { MAXIMUM_DURATION_MS, isCanonicalElement, isCanonicalTimelineSettings, isCanonicalMediaTrack, isCanonicalTimelineSnapshot } = require('./scene_timeline_validation');
 const { RemoteSessionRegistry, TERMINAL_PHASES } = require('./remote_session_registry');
 const { ProtocolMetrics } = require('./protocol_metrics');
 const { isAllowedMediaExtension } = require('./media_format_contract');
@@ -16,7 +17,7 @@ const CURSOR_DEBUG = DEFAULT_CONFIG.cursorDebug;
 const CANONICAL_UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const OPAQUE_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
-// Protocol v7 is a hard cut-over. Obsolete names are rejected at the envelope
+// Protocol v8 is a hard cut-over. Obsolete names are rejected at the envelope
 // boundary and are never translated.
 const REMOVED_MESSAGE_TYPES = new Set([
     'register', 'device_register',
@@ -105,28 +106,6 @@ function normalizeScreens(value, maximumScreens) {
     return ids.size === screens.length ? screens : null;
 }
 
-const SCENE_COMMON_MEDIA_KEYS = Object.freeze([
-    'mediaId', 'fileId', 'fileName', 'type',
-    'x', 'y', 'width', 'height', 'baseWidth', 'baseHeight',
-    'visible', 'z', 'autoDisplay', 'autoDisplayDelayMs',
-    'autoHide', 'autoHideDelayMs', 'hideWhenVideoEnds',
-    'fadeInSeconds', 'fadeOutSeconds', 'contentOpacity', 'spans',
-]);
-const SCENE_TEXT_MEDIA_KEYS = Object.freeze([
-    'text', 'fontFamily', 'fontItalic',
-    'fontUnderline', 'fontUppercase', 'fontWeight', 'fontPixelSize',
-    'textColor', 'textOutlineWidthPx',
-    'textBorderColor', 'textFitToTextEnabled', 'textHighlightEnabled',
-    'textHighlightColor', 'horizontalAlignment',
-    'verticalAlignment',
-]);
-const SCENE_VIDEO_MEDIA_KEYS = Object.freeze([
-    'assetId', 'autoPlay', 'autoPlayDelayMs', 'autoPause',
-    'autoPauseDelayMs', 'muted', 'volume', 'continuousLoop',
-    'repeatEnabled', 'repeatCount', 'autoUnmute', 'autoUnmuteDelayMs',
-    'autoMute', 'autoMuteDelayMs', 'muteWhenVideoEnds',
-    'audioFadeInSeconds', 'audioFadeOutSeconds', 'startPositionMs',
-]);
 const SCENE_SPAN_KEYS = Object.freeze([
     'screenId', 'normX', 'normY', 'normW', 'normH',
     'spanDestNormX', 'spanDestNormY', 'spanDestNormW', 'spanDestNormH',
@@ -164,98 +143,31 @@ function isCanonicalSceneSpan(span, screenIds) {
     return true;
 }
 
-function isCanonicalSceneMedia(item, screenIds) {
+function isCanonicalSceneMedia(item, screenIds, maximumDurationMs) {
     if (!isPlainObject(item) || !OPAQUE_ID_PATTERN.test(item.mediaId)
-        || !['image', 'video', 'text'].includes(item.type)
         || typeof item.fileId !== 'string' || item.fileId.length > 128
         || typeof item.fileName !== 'string' || item.fileName.length > 1024
-        || !isFiniteInRange(item.x, -100_000_000, 100_000_000)
-        || !isFiniteInRange(item.y, -100_000_000, 100_000_000)
-        || !isFiniteInRange(item.width, Number.EPSILON, 10_000_000)
-        || !isFiniteInRange(item.height, Number.EPSILON, 10_000_000)
-        || !isBoundedInteger(item.baseWidth, 0, 10_000_000)
-        || !isBoundedInteger(item.baseHeight, 0, 10_000_000)
-        || typeof item.visible !== 'boolean'
-        || !isFiniteInRange(item.z, -100_000_000, 100_000_000)
-        || typeof item.autoDisplay !== 'boolean'
-        || !isBoundedInteger(item.autoDisplayDelayMs, 0, 604_800_000)
-        || typeof item.autoHide !== 'boolean'
-        || !isBoundedInteger(item.autoHideDelayMs, -604_800_000, 604_800_000)
-        || typeof item.hideWhenVideoEnds !== 'boolean'
-        || !isFiniteInRange(item.fadeInSeconds, 0, 3600)
-        || !isFiniteInRange(item.fadeOutSeconds, 0, 3600)
-        || !isFiniteInRange(item.contentOpacity, 0, 1)
-        || !Array.isArray(item.spans)
-        || item.spans.length > 64) {
-        return false;
-    }
+        || !isCanonicalElement(item, ['mediaId', 'fileId', 'fileName', 'spans', 'timeline',
+            ...(item.type === 'text' ? [] : ['assetId']),
+            ...(item.type === 'video' ? ['durationMs'] : [])])
+        || !isCanonicalMediaTrack(item.timeline, item.type, maximumDurationMs, item.durationMs)
+        || (item.type === 'video' && !isBoundedInteger(item.durationMs, 0, MAXIMUM_DURATION_MS))
+        || !Array.isArray(item.spans) || item.spans.length > 64) return false;
     const spanScreenIds = new Set();
     for (const span of item.spans) {
-        if (!isCanonicalSceneSpan(span, screenIds)
-            || spanScreenIds.has(span.screenId)) return false;
+        if (!isCanonicalSceneSpan(span, screenIds) || spanScreenIds.has(span.screenId)) return false;
         spanScreenIds.add(span.screenId);
     }
-
-    if (item.type === 'image') {
-        return hasOnlyKeys(item, [...SCENE_COMMON_MEDIA_KEYS, 'assetId'])
-            && SHA256_PATTERN.test(item.fileId)
-            && OPAQUE_ID_PATTERN.test(item.assetId)
-            && item.fileName.length > 0;
-    }
-    if (item.type === 'text') {
-        const horizontalAlignments = new Set(['left', 'center', 'right']);
-        const verticalAlignments = new Set(['top', 'center', 'bottom']);
-        return hasOnlyKeys(item, [...SCENE_COMMON_MEDIA_KEYS, ...SCENE_TEXT_MEDIA_KEYS])
-            && item.fileId === '' && item.fileName === ''
-            && typeof item.text === 'string' && item.text.length <= 1_000_000
-            && typeof item.fontFamily === 'string'
-            && item.fontFamily.length > 0 && item.fontFamily.length <= 1024
-            && typeof item.fontItalic === 'boolean'
-            && typeof item.fontUnderline === 'boolean'
-            && typeof item.fontUppercase === 'boolean'
-            && isBoundedInteger(item.fontWeight, 1, 900)
-            && isBoundedInteger(item.fontPixelSize, 1, 4096)
-            && typeof item.textColor === 'string' && item.textColor.length <= 64
-            && isFiniteInRange(item.textOutlineWidthPx, 0, 100_000)
-            && typeof item.textBorderColor === 'string'
-            && item.textBorderColor.length <= 64
-            && typeof item.textFitToTextEnabled === 'boolean'
-            && typeof item.textHighlightEnabled === 'boolean'
-            && typeof item.textHighlightColor === 'string'
-            && item.textHighlightColor.length <= 64
-            && horizontalAlignments.has(item.horizontalAlignment)
-            && verticalAlignments.has(item.verticalAlignment);
-    }
-    return hasOnlyKeys(item, [...SCENE_COMMON_MEDIA_KEYS, ...SCENE_VIDEO_MEDIA_KEYS], ['endPositionMs'])
-        && SHA256_PATTERN.test(item.fileId)
-        && OPAQUE_ID_PATTERN.test(item.assetId)
-        && item.fileName.length > 0
-        && typeof item.autoPlay === 'boolean'
-        && isBoundedInteger(item.autoPlayDelayMs, 0, 604_800_000)
-        && typeof item.autoPause === 'boolean'
-        && isBoundedInteger(item.autoPauseDelayMs, 0, 604_800_000)
-        && typeof item.muted === 'boolean'
-        && isFiniteInRange(item.volume, 0, 1)
-        && typeof item.continuousLoop === 'boolean'
-        && typeof item.repeatEnabled === 'boolean'
-        && isBoundedInteger(item.repeatCount, 0, 1_000_000)
-        && typeof item.autoUnmute === 'boolean'
-        && isBoundedInteger(item.autoUnmuteDelayMs, 0, 604_800_000)
-        && typeof item.autoMute === 'boolean'
-        && isBoundedInteger(item.autoMuteDelayMs, -604_800_000, 604_800_000)
-        && typeof item.muteWhenVideoEnds === 'boolean'
-        && isFiniteInRange(item.audioFadeInSeconds, 0, 3600)
-        && isFiniteInRange(item.audioFadeOutSeconds, 0, 3600)
-        && isBoundedInteger(item.startPositionMs, 0, 604_800_000)
-        && (item.endPositionMs === undefined
-            || (isBoundedInteger(item.endPositionMs, 1, 604_800_000)
-                && item.endPositionMs > item.startPositionMs));
+    if (item.type === 'text') return item.fileId === '' && item.fileName === '';
+    return SHA256_PATTERN.test(item.fileId) && OPAQUE_ID_PATTERN.test(item.assetId)
+        && item.fileName.length > 0;
 }
 
 function isCanonicalScene(scene, maximumScreens, maximumMedia) {
     if (!isPlainObject(scene)
-        || !hasOnlyKeys(scene, ['renderSchemaVersion', 'screens', 'media'])
-        || scene.renderSchemaVersion !== 2
+        || !hasOnlyKeys(scene, ['renderSchemaVersion', 'timeline', 'screens', 'media'])
+        || scene.renderSchemaVersion !== 3
+        || !isCanonicalTimelineSettings(scene.timeline)
         || !Array.isArray(scene.screens) || scene.screens.length < 1
         || scene.screens.length > maximumScreens
         || !Array.isArray(scene.media) || scene.media.length < 1
@@ -267,7 +179,7 @@ function isCanonicalScene(scene, maximumScreens, maximumMedia) {
     const mediaIds = new Set();
     let spanCount = 0;
     for (const item of scene.media) {
-        if (!isCanonicalSceneMedia(item, screenIds)
+        if (!isCanonicalSceneMedia(item, screenIds, scene.timeline.maxDurationMs)
             || mediaIds.has(item.mediaId)) return false;
         mediaIds.add(item.mediaId);
         spanCount += item.spans.length;
@@ -277,10 +189,10 @@ function isCanonicalScene(scene, maximumScreens, maximumMedia) {
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// MOUFFETTE SERVER - PROTOCOL V7 IDENTITY BOUNDARY
+// MOUFFETTE SERVER - PROTOCOL V8 IDENTITY BOUNDARY
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 //
-// Protocol v7 authenticates one installation key, derives one addressable
+// Protocol v8 authenticates one installation key, derives one addressable
 // endpoint per application instance, and keeps transport runtime identity
 // separate. Removed wire identifiers are never accepted as aliases.
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -310,7 +222,7 @@ class MouffetteServer {
         this.connectionGenerationSequence = 0;
         this.currentTransportByEndpoint = new Map();
         this.wss = null;
-        this.uploads = new Map(); // uploadId -> protocol-v7 endpoint/session state
+        this.uploads = new Map(); // uploadId -> protocol-v8 endpoint/session state
         this.uploadTombstones = new Map(); // uploadId -> bounded terminal result
         this.pendingAssetRemovals = new Map(); // removalId -> immutable session-scoped removal
         this.assetRemovalTombstones = new Map(); // removalId -> bounded committed/error result
@@ -1301,7 +1213,7 @@ class MouffetteServer {
             return this.sendSceneError(clientId, 'invalid_state_snapshot_timestamp',
                 'Invalid scene state snapshot timestamp', run);
         }
-        if (!isPlainObject(message.snapshot)
+        if (!isCanonicalTimelineSnapshot(message.snapshot, run.scene.timeline)
             || !this.serializedJsonWithinLimit(
                 message.snapshot, this.MAX_REMOTE_SCENE_STATE_SNAPSHOT_BYTES)) {
             return this.sendSceneError(clientId, 'invalid_state_snapshot', 'Invalid scene state snapshot', run);
@@ -1451,21 +1363,21 @@ class MouffetteServer {
             return;
         }
         if (!this.isValidOpaqueId(message.type)) {
-            this.sendError(clientId, 'Invalid protocol v7 message type',
+            this.sendError(clientId, 'Invalid protocol v8 message type',
                 'invalid_message_type');
             return;
         }
         if (REMOVED_MESSAGE_TYPES.has(message.type)
             || (typeof message.type === 'string' && message.type.startsWith('remote_scene_'))) {
             this.sendError(clientId,
-                `Obsolete message type is not supported by protocol v7: ${message.type}`,
+                `Obsolete message type is not supported by protocol v8: ${message.type}`,
                 'removed_message_type');
             return;
         }
         const removedField = findRemovedWireField(message);
         if (removedField) {
             this.sendError(clientId,
-                `Obsolete field is not supported by protocol v7: ${removedField}`,
+                `Obsolete field is not supported by protocol v8: ${removedField}`,
                 'removed_protocol_field');
             return;
         }
@@ -1645,7 +1557,7 @@ class MouffetteServer {
                 this.handleRemoteSessionTeardownAck(clientId, message);
                 break;
             default:
-                this.sendError(clientId, 'Unknown protocol v7 message type', 'unknown_message_type');
+                this.sendError(clientId, 'Unknown protocol v8 message type', 'unknown_message_type');
         }
     }
 
@@ -3342,7 +3254,7 @@ class MouffetteServer {
         }
     }
 
-    // Protocol v7 upload state. A transfer is immutable and belongs to one
+    // Protocol v8 upload state. A transfer is immutable and belongs to one
     // RemoteSession generation; authenticated socket identity supplies both
     // parties, so client-provided sender/target aliases are never consulted.
     uploadPayload(upload, type, extra = {}) {
@@ -4262,7 +4174,7 @@ class MouffetteServer {
             .reduce((total, other) => total + other.relayedBytes - other.durableBytes, 0);
         if (outstanding + decoded.length > this.MAX_UPLOAD_UNACKNOWLEDGED_BYTES
             || targetOutstanding + decoded.length > this.MAX_TARGET_BUFFERED_UPLOAD_BYTES) {
-            // Correct v7 senders wait for durable progress at the advertised
+            // Correct v8 senders wait for durable progress at the advertised
             // fixed 1 MiB window. Reject only a sender violating that bound.
             return this.rejectTrackedUpload(upload, 'upload_flow_control_violation');
         }

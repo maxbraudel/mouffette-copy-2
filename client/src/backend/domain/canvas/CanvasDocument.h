@@ -1,6 +1,7 @@
 #pragma once
 
 #include "backend/domain/models/ClientInfo.h"
+#include "backend/domain/scene/SceneTimeline.h"
 
 #include <QHash>
 #include <QJsonObject>
@@ -54,6 +55,14 @@ public:
 
     QStringList selectedMediaIds() const;
     CanvasMedia* selectedMedia() const;
+    QString primarySelectedMediaId() const { return m_primarySelectedMediaId; }
+    CanvasMedia* primarySelectedMedia() const;
+    bool setPrimarySelectedMedia(const QString& mediaId);
+    const SceneTimeline::SceneSettings& timelineSettings() const { return m_timelineSettings; }
+    bool setTimelineSettings(const SceneTimeline::SceneSettings& settings);
+    qint64 timelinePositionMs() const { return m_timelinePositionMs; }
+    void setTimelinePosition(qint64 timeMs);
+    void evaluateTimeline();
     void select(const QString& mediaId, bool additive = false);
     void clearSelection();
 
@@ -113,6 +122,10 @@ signals:
                            const QString& reason);
     void pendingImportsChanged();
     void selectionChanged();
+    void primarySelectedMediaChanged();
+    void timelineChanged();
+    void timelinePositionChanged();
+    void timelineEvaluated();
     void screensChanged();
     void cameraChanged();
     void remoteCursorChanged();
@@ -134,7 +147,8 @@ private:
     void adoptMedia(CanvasMedia* media);
     QStringList insertProjectMedia(const QJsonObject& state,
                                   const QHash<QString, QString>& sourcePaths,
-                                  QStringList* skippedMediaIds, bool freshIds);
+                                  QStringList* skippedMediaIds, bool freshIds,
+                                  QHash<QString, QString>* insertedIds = nullptr);
     void rebuildScreenRects();
     void setRemoteCursor(bool visible, const QPointF& scenePosition);
     qreal nextZ() const;
@@ -143,6 +157,11 @@ private:
     QHash<QString, PendingImport> m_pendingImports;
     QSet<QString> m_activeImports;
     QList<CanvasMedia*> m_media;
+    QString m_primarySelectedMediaId;
+    QStringList m_selectionActivationOrder;
+    SceneTimeline::SceneSettings m_timelineSettings;
+    qint64 m_timelinePositionMs = 0;
+    bool m_evaluatingTimeline = false;
     QList<ScreenInfo> m_screens;
     QHash<int, QRectF> m_screenRects;
     FileManager* m_fileManager = nullptr;

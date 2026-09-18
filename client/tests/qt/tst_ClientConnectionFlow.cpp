@@ -172,7 +172,7 @@ public:
                 QJsonObject message)
     {
         if (!socket) return false;
-        message.insert(QStringLiteral("protocolVersion"), 7);
+        message.insert(QStringLiteral("protocolVersion"), 8);
         message.insert(QStringLiteral("serverBootId"), socketBootId);
         completeV7TestEnvelope(message);
         if (message.value(QStringLiteral("messageId")).toString().isEmpty()) {
@@ -765,9 +765,7 @@ private slots:
         QVERIFY(canvas && runtime.activeProjectExists());
         CanvasMedia* media = canvas->document()->addText({}, QStringLiteral("Local demo"));
         QVERIFY(media);
-        auto settings = media->settings();
-        settings.displayAutomatically = false;
-        media->setSettings(settings);
+        media->setContentVisible(false);
         canvas->triggerTestSceneAction();
         QVERIFY(canvas->testSceneLaunched());
         QVERIFY(canvas->document()->editsLocked());
@@ -804,7 +802,7 @@ private slots:
         canvas->triggerTestSceneAction();
         QVERIFY(!canvas->testSceneLaunched());
         QVERIFY(!canvas->document()->editsLocked());
-        QVERIFY(media->contentVisible());
+        QVERIFY(!media->contentVisible());
 
         auto* workspace = runtime.findWorkspace(target);
         runtime.handleApplicationAboutToQuit();
@@ -1315,7 +1313,7 @@ private slots:
         QJsonObject authentication;
         auto sendServerMessage = [&](QJsonObject message) {
             QVERIFY2(peer, "The fake server has no authenticated peer");
-            message.insert(QStringLiteral("protocolVersion"), 7);
+            message.insert(QStringLiteral("protocolVersion"), 8);
             message.insert(QStringLiteral("serverBootId"), bootId);
             completeV7TestEnvelope(message);
             if (message.value(QStringLiteral("messageId")).toString().isEmpty()) {
@@ -3964,7 +3962,7 @@ private slots:
 
         auto sendServerMessage = [&](QJsonObject message) {
             QVERIFY2(peer, "The fake server has no authenticated peer");
-            message.insert(QStringLiteral("protocolVersion"), 7);
+            message.insert(QStringLiteral("protocolVersion"), 8);
             message.insert(QStringLiteral("serverBootId"), bootId);
             completeV7TestEnvelope(message);
             if (message.value(QStringLiteral("messageId")).toString().isEmpty()) {

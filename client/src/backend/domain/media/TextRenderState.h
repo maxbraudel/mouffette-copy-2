@@ -4,6 +4,8 @@
 #include <QFont>
 #include <QSize>
 #include <QString>
+#include <algorithm>
+#include <cmath>
 
 // Canonical, renderer-agnostic text state. Values are expressed in the same
 // logical pixels consumed by the Qt Quick TextItem before the outer media
@@ -33,7 +35,12 @@ constexpr qreal ContentMarginPx = 4.0;
 constexpr qreal HighlightPaddingPx = 2.0;
 
 int effectiveFontPixelSize(const QFont& font, qreal uniformScale = 1.0);
-qreal outlinePixels(qreal widthPercent, int effectiveFontPixelSize);
+inline qreal outlinePixels(qreal widthPercent, int fontPixelSize) {
+    if (!std::isfinite(widthPercent) || widthPercent <= 0.0) return 0.0;
+    const qreal pixels = widthPercent * std::max(1, fontPixelSize) / 100.0;
+    if (!std::isfinite(pixels)) return 0.0;
+    return std::max<qreal>(1.0, std::round(pixels));
+}
 qreal outlinePixels(const QFont& font, qreal widthPercent, qreal uniformScale = 1.0);
 qreal outlineSafetyPadding(qreal outlineWidthPixels);
 QSize fittedTextSize(const TextRenderState& state);

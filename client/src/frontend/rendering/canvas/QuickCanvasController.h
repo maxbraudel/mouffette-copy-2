@@ -25,6 +25,7 @@ class QTimer;
 class QuickCanvasController final : public QObject
 {
     Q_OBJECT
+    Q_PROPERTY(QString primarySelectedMediaId READ primarySelectedMediaId NOTIFY selectedMediaChanged)
     Q_PROPERTY(QObject* mediaModel READ mediaModel CONSTANT)
     Q_PROPERTY(bool editingEnabled READ editingEnabled NOTIFY editingEnabledChanged)
     Q_PROPERTY(QVariantMap liveTransforms READ liveTransforms NOTIFY liveTransformsChanged)
@@ -70,6 +71,8 @@ public:
     CanvasDocument* document() const { return m_document; }
     MediaListModel* mediaListModel() const { return m_mediaListModel; }
     CanvasMedia* selectedMediaItem() const;
+    QString primarySelectedMediaId() const;
+    void discardPendingEdits();
     QObject* mediaModel() const;
     QVariantList mediaSnapshot() const { return m_mediaSnapshot; }
     QVariantList selectionChromeModel() const { return m_selectionChromeModel; }
@@ -149,12 +152,8 @@ signals:
     void mediaBringForwardRequested(const QString& mediaId);
     void mediaBringBackwardRequested(const QString& mediaId);
     void mediaDeleteRequested(const QString& mediaId);
-    void mediaPlayPauseRequested(const QString& mediaId);
-    void mediaStopRequested(const QString& mediaId);
-    void mediaRepeatToggleRequested(const QString& mediaId);
     void mediaMuteToggleRequested(const QString& mediaId);
     void mediaVolumeChangeRequested(const QString& mediaId, qreal value);
-    void mediaSeekRequested(const QString& mediaId, qreal ratio);
     void mediaFitToTextToggleRequested(const QString& mediaId);
     void mediaHorizontalAlignRequested(const QString& mediaId,
                                        const QString& alignment);
@@ -165,8 +164,6 @@ public slots:
     void copySelectedMedia();
     void pasteMedia();
     void deleteSelectedMedia();
-    void handleVideoStartToggle(const QString& mediaId);
-    void handleVideoEndToggle(const QString& mediaId);
     void handleMediaSelectRequested(const QString& mediaId, bool additive);
     void handleClearSelectionRequested();
     void handleMediaMoveStarted(const QString& mediaId, qreal sceneX,
@@ -189,14 +186,8 @@ public slots:
     void handleOverlayBringForward(const QString& mediaId);
     void handleOverlayBringBackward(const QString& mediaId);
     void handleOverlayDelete(const QString& mediaId);
-    void handleOverlayPlayPause(const QString& mediaId);
-    void handleOverlayStop(const QString& mediaId);
-    void handleOverlayRepeatToggle(const QString& mediaId);
     void handleOverlayMuteToggle(const QString& mediaId);
     void handleOverlayVolumeChange(const QString& mediaId, qreal value);
-    void handleOverlaySeekBegin(const QString& mediaId, qreal ratio);
-    void handleOverlaySeekUpdate(const QString& mediaId, qreal ratio);
-    void handleOverlaySeekEnd(const QString& mediaId, qreal ratio);
     void handleOverlayFitToTextToggle(const QString& mediaId);
     void handleOverlayHorizontalAlign(const QString& mediaId,
                                       const QString& alignment);

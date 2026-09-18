@@ -200,6 +200,8 @@ QuickCanvasController::QuickCanvasController(CanvasDocument* document,
             }
         }
     });
+    connect(document, &CanvasDocument::timelineEvaluated,
+            this, &QuickCanvasController::publishMedia);
     connect(document, &CanvasDocument::mediaAdded,
             this, &QuickCanvasController::publishMedia);
     connect(document, &CanvasDocument::mediaRemoved,
@@ -219,7 +221,11 @@ QuickCanvasController::QuickCanvasController(CanvasDocument* document,
     });
     connect(document, &CanvasDocument::selectionChanged,
             this, [this]() {
-        finishSelectionScaleGesture();
+        // A media press promotes its target before starting the new drag.
+        // Cancel an existing transform, without revoking that fresh press.
+        if (m_scaleGestureActive || !m_transformStarts.isEmpty()
+            || !m_dragMediaId.isEmpty() || !m_resizeMediaId.isEmpty())
+            cancelPendingEdits();
         const QString id = m_document && m_document->selectedMedia()
             ? m_document->selectedMedia()->mediaId() : QString();
         if (id != m_lastSelectedId) {
@@ -287,7 +293,17 @@ QQuickWindow* QuickCanvasController::renderWindow() const
 
 CanvasMedia* QuickCanvasController::selectedMediaItem() const
 {
-    return m_document ? m_document->selectedMedia() : nullptr;
+    return m_document ? m_document->primarySelectedMedia() : nullptr;
+}
+
+QString QuickCanvasController::primarySelectedMediaId() const
+{
+    return m_document ? m_document->primarySelectedMediaId() : QString();
+}
+
+void QuickCanvasController::discardPendingEdits()
+{
+    cancelPendingEdits();
 }
 
 QObject* QuickCanvasController::mediaModel() const
@@ -346,6 +362,7 @@ void QuickCanvasController::publishSelection()
         if (!media || !media->selected()) continue;
         const QRectF rect = media->sceneRect();
         list.append(QVariantMap{{QStringLiteral("mediaId"), media->mediaId()},
+                                {QStringLiteral("isPrimary"), media->mediaId() == m_document->primarySelectedMediaId()},
                                 {QStringLiteral("x"), rect.x()},
                                 {QStringLiteral("y"), rect.y()},
                                 {QStringLiteral("width"), rect.width()},
@@ -421,19 +438,10 @@ void QuickCanvasController::publishVideoState()
     QVariantMap states;
     for (CanvasMedia* media : m_document->media()) {
         if (!media || !media->isVideo()) continue;
-        const qint64 duration = media->player() ? media->player()->duration() : 0;
-        const qreal progress = duration > 0
-            ? std::clamp<qreal>(media->positionMs() / qreal(duration), 0.0, 1.0) : 0.0;
         states.insert(media->mediaId(), QVariantMap{
             {QStringLiteral("mediaId"), media->mediaId()},
             {QStringLiteral("isPlaying"), media->isPlaying()},
             {QStringLiteral("isMuted"), media->muted()},
-            {QStringLiteral("isLooping"), media->repeatEnabled()},
-            {QStringLiteral("progress"), progress},
-            {QStringLiteral("startProgress"), duration > 0 && media->startMarkerMs() >= 0
-                ? media->startMarkerMs() / qreal(duration) : -1.0},
-            {QStringLiteral("endProgress"), duration > 0 && media->endMarkerMs() >= 0
-                ? media->endMarkerMs() / qreal(duration) : -1.0},
             {QStringLiteral("volume"), media->volume()}});
     }
     if (m_videoStateModel == states) return;
@@ -653,7 +661,7 @@ void QuickCanvasController::handleMediaMoveStarted(const QString& mediaId,
     finishSelectionScaleGesture();
     if (!editingEnabled()) return;
     CanvasMedia* media = m_document->mediaById(mediaId);
-    if (!media) return;
+    if (!media || mediaId != primarySelectedMediaId()) return;
     m_dragMediaId = mediaId;
     m_lastMoveSnapped = false;
     m_liveSnapDragMediaId.clear();
@@ -913,8 +921,7 @@ void QuickCanvasController::captureTransformSelection(CanvasMedia* activeMedia)
     m_transformStarts.clear();
     m_liveTransforms.clear();
     for (CanvasMedia* media : m_document->media()) {
-        if (media != activeMedia && !(activeMedia->selected() && media->selected()))
-            continue;
+        if (media != activeMedia) continue;
         m_transformStarts.insert(media->mediaId(),
             {media, media->sceneRect(), media->baseSize(), media->scale()});
     }
@@ -977,7 +984,9 @@ void QuickCanvasController::commitTransforms(bool resize, bool alt)
     for (auto it = starts.cbegin(); it != starts.cend(); ++it) {
         const QPointer<CanvasMedia> media = it->media;
         const QVariantMap geometry = transforms.value(it.key()).toMap();
-        if (!editingEnabled() || !media || geometry.isEmpty()) continue;
+        if (!editingEnabled() || !media || geometry.isEmpty()
+            || media->mediaId() != primarySelectedMediaId()) continue;
+        media->beginElementEdit();
         if (resize) {
             if (alt) {
                 if (media->isText()) media->setFitToTextEnabled(false);
@@ -1482,7 +1491,7 @@ void QuickCanvasController::handleMediaResizeRequested(
     CanvasMedia* media = m_document ? m_document->mediaById(mediaId) : nullptr;
     // Geometry edits do not depend on decoded content. Loading media shares
     // the same transform transaction as every other selected occurrence.
-    if (!media || editsLocked()) return;
+    if (!media || editsLocked() || mediaId != primarySelectedMediaId()) return;
     if (m_resizeMediaId != mediaId) {
         captureTransformSelection(media);
         m_resizeMediaId = mediaId;
@@ -1585,7 +1594,11 @@ void QuickCanvasController::handleTextLiveUpdateRequested(const QString& mediaId
 {
     if (!editingEnabled()) return;
     CanvasMedia* media = m_document ? m_document->mediaById(mediaId) : nullptr;
-    if (media && media->isText() && !editsLocked()) media->setText(text);
+    if (media && media->isText() && !editsLocked()
+        && mediaId == primarySelectedMediaId()) {
+        media->beginElementEdit();
+        media->setText(text);
+    }
 }
 
 void QuickCanvasController::handleTextCreateRequested(qreal viewX, qreal viewY)
@@ -1604,21 +1617,30 @@ void QuickCanvasController::handleOverlayVisibilityToggle(const QString& id, boo
 {
     if (!editingEnabled()) return;
     if (CanvasMedia* media = m_document ? m_document->mediaById(id) : nullptr;
-        media && !editsLocked()) media->setContentVisible(visible);
+        media && !editsLocked() && id == primarySelectedMediaId()) {
+        media->beginElementEdit();
+        media->setContentVisible(visible);
+    }
     emit mediaVisibilityToggleRequested(id, visible);
 }
 
 void QuickCanvasController::handleOverlayBringForward(const QString& id)
 {
     if (!editingEnabled()) return;
-    if (m_document) m_document->moveForward(id);
+    if (m_document && id == primarySelectedMediaId()) {
+        if (auto* media = m_document->mediaById(id)) media->beginElementEdit();
+        m_document->moveForward(id);
+    }
     emit mediaBringForwardRequested(id);
 }
 
 void QuickCanvasController::handleOverlayBringBackward(const QString& id)
 {
     if (!editingEnabled()) return;
-    if (m_document) m_document->moveBackward(id);
+    if (m_document && id == primarySelectedMediaId()) {
+        if (auto* media = m_document->mediaById(id)) media->beginElementEdit();
+        m_document->moveBackward(id);
+    }
     emit mediaBringBackwardRequested(id);
 }
 
@@ -1639,7 +1661,9 @@ void QuickCanvasController::copySelectedMedia()
             paths.insert(id, media->sourcePath());
     }
     // Capture authoring values at copy time; never retain pointers to live media.
-    const QJsonObject payload{{QStringLiteral("renderSchemaVersion"), 2},
+    const QJsonObject payload{{QStringLiteral("renderSchemaVersion"), 3},
+                              {QStringLiteral("primaryMediaId"), primarySelectedMediaId()},
+                              {QStringLiteral("timeline"), m_document->timelineSettings().toJson()},
                               {QStringLiteral("media"), entries},
                               {QStringLiteral("sourcePaths"), paths}};
     auto* mime = new QMimeData;
@@ -1678,44 +1702,6 @@ void QuickCanvasController::deleteSelectedMedia()
     for (const QString& id : selected) handleOverlayDelete(id);
 }
 
-void QuickCanvasController::handleVideoStartToggle(const QString& id)
-{
-    if (!editingEnabled() || !m_document) return;
-    CanvasMedia* media = m_document->mediaById(id);
-    if (!media || !media->isVideo() || !media->residencyReady()) return;
-    if (media->startMarkerMs() >= 0) {
-        media->setPlaybackRange(-1, media->endMarkerMs());
-    } else if (!media->player() || media->player()->duration() <= 0) {
-        TOAST_WARNING(QStringLiteral("Wait for the video to load before placing start."));
-    } else if (!media->canPlaceStart()) {
-        TOAST_WARNING(media->endMarkerMs() >= 0
-            ? QStringLiteral("Place start before end.")
-            : QStringLiteral("Place start before the end of the video."));
-    } else {
-        media->setPlaybackRange(media->positionMs(), media->endMarkerMs());
-    }
-    publishVideoState();
-}
-
-void QuickCanvasController::handleVideoEndToggle(const QString& id)
-{
-    if (!editingEnabled() || !m_document) return;
-    CanvasMedia* media = m_document->mediaById(id);
-    if (!media || !media->isVideo() || !media->residencyReady()) return;
-    if (media->endMarkerMs() >= 0) {
-        media->setPlaybackRange(media->startMarkerMs(), -1);
-    } else if (!media->player() || media->player()->duration() <= 0) {
-        TOAST_WARNING(QStringLiteral("Wait for the video to load before placing end."));
-    } else if (!media->canPlaceEnd()) {
-        TOAST_WARNING(media->startMarkerMs() >= 0
-            ? QStringLiteral("Place end after start.")
-            : QStringLiteral("Place end after the beginning of the video."));
-    } else {
-        media->setPlaybackRange(media->startMarkerMs(), media->positionMs());
-    }
-    publishVideoState();
-}
-
 void QuickCanvasController::handleOverlayDelete(const QString& id)
 {
     if (m_projectEditingEnabled && m_document && m_document->removeMedia(id)) {
@@ -1723,37 +1709,15 @@ void QuickCanvasController::handleOverlayDelete(const QString& id)
     }
 }
 
-void QuickCanvasController::handleOverlayPlayPause(const QString& id)
-{
-    if (!editingEnabled()) return;
-    if (CanvasMedia* media = m_document ? m_document->mediaById(id) : nullptr;
-        media && media->isVideo() && media->residencyReady() && !editsLocked()) media->togglePlayPause();
-    emit mediaPlayPauseRequested(id);
-}
-
-void QuickCanvasController::handleOverlayStop(const QString& id)
-{
-    if (!editingEnabled()) return;
-    if (CanvasMedia* media = m_document ? m_document->mediaById(id) : nullptr;
-        media && media->isVideo() && media->residencyReady() && !editsLocked()) media->stopToBeginning();
-    emit mediaStopRequested(id);
-}
-
-void QuickCanvasController::handleOverlayRepeatToggle(const QString& id)
-{
-    if (!editingEnabled()) return;
-    if (CanvasMedia* media = m_document ? m_document->mediaById(id) : nullptr;
-        media && media->isVideo() && media->residencyReady() && !editsLocked()) {
-        media->setRepeatEnabled(!media->repeatEnabled());
-    }
-    emit mediaRepeatToggleRequested(id);
-}
-
 void QuickCanvasController::handleOverlayMuteToggle(const QString& id)
 {
     if (!editingEnabled()) return;
     if (CanvasMedia* media = m_document ? m_document->mediaById(id) : nullptr;
-        media && media->isVideo() && media->residencyReady() && !editsLocked()) media->setMuted(!media->muted());
+        media && media->isVideo() && media->residencyReady() && !editsLocked()
+        && id == primarySelectedMediaId()) {
+        media->beginElementEdit();
+        media->setMuted(!media->muted());
+    }
     emit mediaMuteToggleRequested(id);
 }
 
@@ -1762,6 +1726,8 @@ void QuickCanvasController::handleOverlayVolumeChange(const QString& id, qreal v
     if (!editingEnabled()) return;
     if (CanvasMedia* media = m_document ? m_document->mediaById(id) : nullptr;
         media && media->isVideo() && media->residencyReady() && !editsLocked()) {
+        if (id != primarySelectedMediaId() || !std::isfinite(value)) return;
+        media->beginElementEdit();
         const int percent = qRound(std::clamp<qreal>(value, 0.0, 1.0) * 100.0);
         MediaSettingsState settings = media->settings();
         settings.volumeOverrideEnabled = true;
@@ -1774,31 +1740,12 @@ void QuickCanvasController::handleOverlayVolumeChange(const QString& id, qreal v
     emit mediaVolumeChangeRequested(id, value);
 }
 
-void QuickCanvasController::handleOverlaySeekBegin(const QString& id, qreal ratio)
-{
-    if (!editingEnabled()) return;
-    handleOverlaySeekUpdate(id, ratio);
-}
-
-void QuickCanvasController::handleOverlaySeekUpdate(const QString& id, qreal ratio)
-{
-    if (!editingEnabled()) return;
-    if (CanvasMedia* media = m_document ? m_document->mediaById(id) : nullptr;
-        media && media->isVideo() && media->residencyReady() && !editsLocked()) media->seekToRatio(ratio);
-}
-
-void QuickCanvasController::handleOverlaySeekEnd(const QString& id, qreal ratio)
-{
-    if (!editingEnabled()) return;
-    handleOverlaySeekUpdate(id, ratio);
-    emit mediaSeekRequested(id, ratio);
-}
-
 void QuickCanvasController::handleOverlayFitToTextToggle(const QString& id)
 {
     if (!editingEnabled()) return;
     if (CanvasMedia* media = m_document ? m_document->mediaById(id) : nullptr;
-        media && media->isText() && !editsLocked()) {
+        media && media->isText() && !editsLocked() && id == primarySelectedMediaId()) {
+        media->beginElementEdit();
         media->setFitToTextEnabled(!media->fitToTextEnabled());
     }
     emit mediaFitToTextToggleRequested(id);
@@ -1809,7 +1756,8 @@ void QuickCanvasController::handleOverlayHorizontalAlign(
 {
     if (!editingEnabled()) return;
     if (CanvasMedia* media = m_document ? m_document->mediaById(id) : nullptr;
-        media && media->isText() && !editsLocked()) {
+        media && media->isText() && !editsLocked() && id == primarySelectedMediaId()) {
+        media->beginElementEdit();
         media->setHorizontalAlignment(alignment);
     }
     emit mediaHorizontalAlignRequested(id, alignment);
@@ -1820,7 +1768,8 @@ void QuickCanvasController::handleOverlayVerticalAlign(
 {
     if (!editingEnabled()) return;
     if (CanvasMedia* media = m_document ? m_document->mediaById(id) : nullptr;
-        media && media->isText() && !editsLocked()) {
+        media && media->isText() && !editsLocked() && id == primarySelectedMediaId()) {
+        media->beginElementEdit();
         media->setVerticalAlignment(alignment);
     }
     emit mediaVerticalAlignRequested(id, alignment);

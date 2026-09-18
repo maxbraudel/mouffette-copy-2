@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Window
 import Mouffette.App
 import "../canvas"
 import "../components"
@@ -7,16 +8,18 @@ AppPanel {
     id: root
     required property var controller
     readonly property var session: controller.activeWorkspace
-    property int settingsTab: 0
 
     Loader {
         id: canvasLoader
         objectName: "activeCanvasLoader"
-        anchors.fill: parent
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.top: parent.top
+        anchors.bottom: timelinePanel.top
         active: root.session !== null && root.session !== undefined
         source: Qt.resolvedUrl("../../CanvasRoot.qml")
         onLoaded: {
-            item.shortcutScope = root
+            item.shortcutScope = item
             if (root.session) item.sessionViewModel = root.session
         }
         onActiveChanged: if (!active && item) item.sessionViewModel = null
@@ -57,10 +60,8 @@ AppPanel {
         sourceComponent: SceneElementPanel {
             id: sceneElementPanel
             objectName: "canvasSceneElementPanel"
-            maximumHeight: Math.max(0, root.height - settingsLoader.y - 10)
+            maximumHeight: Math.max(0, canvasLoader.height - settingsLoader.y - 10)
             session: root.session
-            activeTab: root.settingsTab
-            onActiveTabChanged: root.settingsTab = activeTab
             presentationReady: {
                 var canvas = canvasLoader.item
                 var media = canvas ? canvas.mediaDelegateById(sceneElementPanel.selectedMediaId) : null
@@ -71,10 +72,38 @@ AppPanel {
 
     MediaListPanel {
         objectName: "mediaListPanel"
+        maximumHeight: Math.max(0, canvasLoader.height - 32)
         anchors.right: parent.right
-        anchors.bottom: parent.bottom
+        anchors.bottom: timelinePanel.top
         anchors.margins: 16
         z: 100000
         session: root.session
+    }
+
+    TimelinePanel {
+        id: timelinePanel
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
+        height: visible ? Math.min(implicitHeight, Math.max(120, root.height * 0.55)) : 0
+        visible: !!root.session && root.session.hasProject
+        session: root.session
+    }
+
+    Shortcut {
+        sequence: "Space"
+        context: Qt.WindowShortcut
+        autoRepeat: false
+        enabled: !!root.session && !!root.session.timeline && !root.session.timeline.remoteActive
+            && root.visible && (function() {
+                var item = root.Window.window ? root.Window.window.activeFocusItem : null
+                while (item) {
+                    if (item instanceof TextInput || item instanceof TextEdit) return false
+                    if (item === root) return true
+                    item = item.parent
+                }
+                return false
+            })()
+        onActivated: root.session.timeline.togglePlayback()
     }
 }

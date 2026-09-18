@@ -82,36 +82,6 @@ QJsonValue sanitizeDurableValue(const QJsonValue& value)
     return result;
 }
 
-QJsonValue prepareRestoredValue(const QJsonValue& value)
-{
-    if (value.isArray()) {
-        QJsonArray result;
-        for (const QJsonValue& child : value.toArray()) {
-            result.append(prepareRestoredValue(child));
-        }
-        return result;
-    }
-    if (!value.isObject()) {
-        return value;
-    }
-
-    QJsonObject result;
-    const QJsonObject object = value.toObject();
-    for (auto it = object.constBegin(); it != object.constEnd(); ++it) {
-        result.insert(it.key(), prepareRestoredValue(it.value()));
-    }
-
-    const QString type = result.value(QStringLiteral("type")).toString().toLower();
-    if (type == QStringLiteral("video")) {
-        result.insert(QStringLiteral("playing"), false);
-        result.insert(QStringLiteral("playbackState"), QStringLiteral("paused"));
-    }
-    if (type == QStringLiteral("video") || type == QStringLiteral("image")) {
-        result.insert(QStringLiteral("uploadStatus"), QStringLiteral("not_uploaded"));
-    }
-    return result;
-}
-
 void setError(QString* error, const QString& value)
 {
     if (error) {
@@ -420,7 +390,7 @@ bool ProjectRecord::fromJson(const QJsonObject& json, ProjectRecord* project, QS
 QJsonObject ProjectRecord::canvasStateForRestore() const
 {
     QJsonObject restored =
-        prepareRestoredValue(sanitizeDurableValue(canvasState)).toObject();
+        sanitizeDurableValue(canvasState).toObject();
     QJsonArray screens;
     for (const ScreenInfo& screen : savedScreens) {
         screens.append(screen.toJson());

@@ -8,8 +8,6 @@
 MediaSettingsViewModel::MediaSettingsViewModel(QObject* parent)
     : QObject(parent)
 {
-    connect(this, &MediaSettingsViewModel::changed,
-            this, &MediaSettingsViewModel::videoRangeChanged);
 }
 
 void MediaSettingsViewModel::setController(QuickCanvasController* controller)
@@ -41,21 +39,6 @@ QString MediaSettingsViewModel::mediaName() const { return media() ? media()->di
 bool MediaSettingsViewModel::video() const { return media() && media()->isVideo(); }
 bool MediaSettingsViewModel::textMedia() const { return media() && media()->isText(); }
 
-bool MediaSettingsViewModel::hasVideoStart() const { return video() && media()->startMarkerMs() >= 0; }
-bool MediaSettingsViewModel::hasVideoEnd() const { return video() && media()->endMarkerMs() >= 0; }
-bool MediaSettingsViewModel::canPlaceVideoStart() const { return available() && video() && media()->canPlaceStart(); }
-bool MediaSettingsViewModel::canPlaceVideoEnd() const { return available() && video() && media()->canPlaceEnd(); }
-
-void MediaSettingsViewModel::toggleVideoStart()
-{
-    if (m_controller && media()) m_controller->handleVideoStartToggle(media()->mediaId());
-}
-
-void MediaSettingsViewModel::toggleVideoEnd()
-{
-    if (m_controller && media()) m_controller->handleVideoEndToggle(media()->mediaId());
-}
-
 #define MEDIA_STATE_BOOL_GETTER(name, field) \
 bool MediaSettingsViewModel::name() const { \
     return media() ? media()->settings().field : false; \
@@ -81,65 +64,11 @@ void MediaSettingsViewModel::set##Name(const QString& value) { \
     }); \
 }
 
-MEDIA_STATE_BOOL_GETTER(displayAutomatically, displayAutomatically)
-MEDIA_STATE_BOOL_GETTER(displayDelayEnabled, displayDelayEnabled)
-MEDIA_STATE_TEXT_GETTER(displayDelayText, displayDelayText, "1")
-MEDIA_STATE_BOOL_GETTER(playAutomatically, playAutomatically)
-MEDIA_STATE_BOOL_GETTER(playDelayEnabled, playDelayEnabled)
-MEDIA_STATE_TEXT_GETTER(playDelayText, playDelayText, "1")
-MEDIA_STATE_BOOL_GETTER(pauseDelayEnabled, pauseDelayEnabled)
-MEDIA_STATE_TEXT_GETTER(pauseDelayText, pauseDelayText, "1")
-MEDIA_STATE_BOOL_GETTER(repeatEnabled, repeatEnabled)
-MEDIA_STATE_TEXT_GETTER(repeatCountText, repeatCountText, "1")
-MEDIA_STATE_BOOL_GETTER(fadeInEnabled, fadeInEnabled)
-MEDIA_STATE_TEXT_GETTER(fadeInText, fadeInText, "1")
-MEDIA_STATE_BOOL_GETTER(fadeOutEnabled, fadeOutEnabled)
-MEDIA_STATE_TEXT_GETTER(fadeOutText, fadeOutText, "1")
 MEDIA_STATE_BOOL_GETTER(opacityOverrideEnabled, opacityOverrideEnabled)
 MEDIA_STATE_TEXT_GETTER(opacityText, opacityText, "100")
-MEDIA_STATE_BOOL_GETTER(hideDelayEnabled, hideDelayEnabled)
-MEDIA_STATE_TEXT_GETTER(hideDelayText, hideDelayText, "1")
-MEDIA_STATE_BOOL_GETTER(unmuteAutomatically, unmuteAutomatically)
-MEDIA_STATE_BOOL_GETTER(unmuteDelayEnabled, unmuteDelayEnabled)
-MEDIA_STATE_TEXT_GETTER(unmuteDelayText, unmuteDelayText, "0")
-MEDIA_STATE_BOOL_GETTER(muteDelayEnabled, muteDelayEnabled)
-MEDIA_STATE_TEXT_GETTER(muteDelayText, muteDelayText, "1")
-MEDIA_STATE_BOOL_GETTER(hideWhenVideoEnds, hideWhenVideoEnds)
-MEDIA_STATE_BOOL_GETTER(muteWhenVideoEnds, muteWhenVideoEnds)
-MEDIA_STATE_BOOL_GETTER(audioFadeInEnabled, audioFadeInEnabled)
-MEDIA_STATE_TEXT_GETTER(audioFadeInText, audioFadeInText, "1")
-MEDIA_STATE_BOOL_GETTER(audioFadeOutEnabled, audioFadeOutEnabled)
-MEDIA_STATE_TEXT_GETTER(audioFadeOutText, audioFadeOutText, "1")
 
-MEDIA_STATE_BOOL_SETTER(DisplayAutomatically, displayAutomatically)
-MEDIA_STATE_BOOL_SETTER(DisplayDelayEnabled, displayDelayEnabled)
-MEDIA_STATE_TEXT_SETTER(DisplayDelayText, displayDelayText)
-MEDIA_STATE_BOOL_SETTER(PlayAutomatically, playAutomatically)
-MEDIA_STATE_BOOL_SETTER(PlayDelayEnabled, playDelayEnabled)
-MEDIA_STATE_TEXT_SETTER(PlayDelayText, playDelayText)
-MEDIA_STATE_BOOL_SETTER(PauseDelayEnabled, pauseDelayEnabled)
-MEDIA_STATE_TEXT_SETTER(PauseDelayText, pauseDelayText)
-MEDIA_STATE_BOOL_SETTER(RepeatEnabled, repeatEnabled)
-MEDIA_STATE_TEXT_SETTER(RepeatCountText, repeatCountText)
-MEDIA_STATE_BOOL_SETTER(FadeInEnabled, fadeInEnabled)
-MEDIA_STATE_TEXT_SETTER(FadeInText, fadeInText)
-MEDIA_STATE_BOOL_SETTER(FadeOutEnabled, fadeOutEnabled)
-MEDIA_STATE_TEXT_SETTER(FadeOutText, fadeOutText)
 MEDIA_STATE_BOOL_SETTER(OpacityOverrideEnabled, opacityOverrideEnabled)
 MEDIA_STATE_TEXT_SETTER(OpacityText, opacityText)
-MEDIA_STATE_BOOL_SETTER(HideDelayEnabled, hideDelayEnabled)
-MEDIA_STATE_TEXT_SETTER(HideDelayText, hideDelayText)
-MEDIA_STATE_BOOL_SETTER(UnmuteAutomatically, unmuteAutomatically)
-MEDIA_STATE_BOOL_SETTER(UnmuteDelayEnabled, unmuteDelayEnabled)
-MEDIA_STATE_TEXT_SETTER(UnmuteDelayText, unmuteDelayText)
-MEDIA_STATE_BOOL_SETTER(MuteDelayEnabled, muteDelayEnabled)
-MEDIA_STATE_TEXT_SETTER(MuteDelayText, muteDelayText)
-MEDIA_STATE_BOOL_SETTER(HideWhenVideoEnds, hideWhenVideoEnds)
-MEDIA_STATE_BOOL_SETTER(MuteWhenVideoEnds, muteWhenVideoEnds)
-MEDIA_STATE_BOOL_SETTER(AudioFadeInEnabled, audioFadeInEnabled)
-MEDIA_STATE_TEXT_SETTER(AudioFadeInText, audioFadeInText)
-MEDIA_STATE_BOOL_SETTER(AudioFadeOutEnabled, audioFadeOutEnabled)
-MEDIA_STATE_TEXT_SETTER(AudioFadeOutText, audioFadeOutText)
 
 #undef MEDIA_STATE_BOOL_GETTER
 #undef MEDIA_STATE_TEXT_GETTER
@@ -213,6 +142,7 @@ void MediaSettingsViewModel::updateSettings(
     CanvasMedia* item = media();
     if (!item || !m_controller || !m_controller->projectEditingEnabled()
         || !item->residencyReady() || m_controller->editsLocked()) return;
+    item->beginElementEdit();
     update(item);
     m_controller->refreshMediaProjection();
     emit changed();
@@ -229,8 +159,8 @@ void MediaSettingsViewModel::refresh()
                     this, &MediaSettingsViewModel::changed);
             connect(m_observedMedia, &CanvasMedia::residencyChanged,
                     this, &MediaSettingsViewModel::changed);
-            connect(m_observedMedia, &CanvasMedia::runtimeStateChanged,
-                    this, &MediaSettingsViewModel::videoRangeChanged);
+            connect(m_observedMedia, &CanvasMedia::presentationChanged,
+                    this, &MediaSettingsViewModel::changed);
             connect(m_observedMedia, &CanvasMedia::audioStateChanged,
                     this, &MediaSettingsViewModel::changed);
         }

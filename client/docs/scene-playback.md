@@ -1,52 +1,89 @@
-# Scene playback
+# Scene timeline
 
-Test scenes and the local participant of remote scenes use the same
-`SceneMediaPlayback` timeline in `QuickCanvasHost`. The remote renderer follows
-the same timing rules after the synchronized activation barrier.
+The scene timeline is the only local preview and animation clock. A remote launch
+is a separate action and always starts at zero. Time is stored as integer
+milliseconds; there is no placement grid. The renderer advances from a monotonic
+clock independently of video position notifications.
 
-Local test playback is independent of the remote session. Peer loss, expired
-connection leases, terminal session messages and session inactivity cleanup
-stop only remote playback. Local tests retain their preparation, timers, video
-playback, draft state, editing lock and RAM protection until explicitly stopped.
-Invalid local media, project deletion, application shutdown and sustained memory
-pressure still stop the affected local test.
+## State and evaluation
 
-| Setting | Reference time |
-| --- | --- |
-| Display delay | Scene activation; starts the visual fade-in |
-| Hide delay | Start of appearance, including the fade-in |
-| Play delay | Scene activation |
-| Pause delay | Automatic playback start |
-| Unmute / mute delay | Scene activation; starts the corresponding audio fade |
-| Hide / mute when video ends | Final playback end, after all repeats, using the end marker when present |
+`SceneTimeline` defines element states, keyframes, source video clips and scene
+timing. Its pure C++ evaluator is shared by `QuickCanvasHost` and
+`RemoteSceneController`. Document authoring state, the uncaptured element draft,
+the evaluated presentation and the transport/player state are separate. Seeking
+and playback never emit document changes or trigger autosave.
 
-When an end action is enabled, its hide/mute delay becomes an offset from the
-end: negative runs before the end, zero at the end, positive after it. Without
-an end action, negative delays are treated as zero. Disabled automatic display,
-playback and unmute remain disabled even if their delay fields retain values.
-For simultaneous automatic unmute and mute, mute runs last.
+Each key captures every intrinsic visual/audio property, excluding media identity,
+loading and video position. Numeric geometry, opacity, volume, colours and text
+style values interpolate linearly. Text, font, visibility, mute, alignment, order
+and effect activation change at the key instant. Effective overrides are resolved
+before interpolation and materialized when capturing an intermediate state.
+Captured geometry governs playback; text auto-sizing is an editing operation.
 
-Visual opacity is the configured opacity multiplied by the animated envelope.
-The configured audio volume remains stable while the device volume is animated.
-The logical mute state changes at the start of its fade; the device is muted
-only after a fade-out completes. Periodic state snapshots must preserve active
-envelopes rather than jump to their final values.
+Without keys, normal edits change the saved static state. With keys, edits create
+a visible draft until captured or updated. Seeking, changing the primary media or
+starting playback abandons that draft. The first key holds before its instant,
+and the last holds afterwards. Deleting the last key keeps the currently displayed
+state as the new static state. Keys at an occupied instant replace that key.
 
-All local timers and animations belong to the scene lifetime. Stop destroys
-them before restoring draft visibility, position, playback and audio state.
-Scene preparation locks editing synchronously. QML loaders unload the toolbar,
-settings panel, selection chrome, guides and media controls while locked.
-The media list, remote cursor and scene stop actions remain available.
+## Clips and transport
 
-Regression coverage lives in `tst_RemoteSceneLifecycle`,
-`tst_VideoPlaybackBackend`, `tst_RemoteSceneControllerLifecycle` and
-`tst_MediaOverlay`. `tst_ClientConnectionFlow` exercises local test survival through
-actual remote-session cleanup and lease-expiry events. The server scene protocol
-tests cover signed end offsets and reject malformed delays before remote
-preparation.
+Clips refer to source intervals without producing new files. They play at normal
+speed. A move preserves duration and stays within project bounds. Pasting starts
+at the head and truncates at the project end. Insertion, movement and extension
+overwrite only the arrival interval, retaining correctly offset source fragments.
+Trimming shorter or deleting leaves a gap. Keys and clips remain independent.
 
-Remote scene surfaces take priority over Mouffette and its dialogs, while
-remaining transparent to input. Display loss hides only the affected output;
-its timeline and media keep running, and an unambiguously identified returning
-screen resumes the current frame. See [window presentation](window-presentation.md)
-for native ordering, topology handling and system limitations.
+Before the first clip, show its source entry image. In a gap or after the last
+clip, hold the preceding exit image. An empty track shows source time zero.
+Audio is audible only while the timeline advances inside an active clip, subject
+to evaluated mute and volume. Pausing and seeking silence the device without
+altering saved audio properties.
+
+`TimelineVideoPlayback` translates the evaluated source sample into asynchronous
+`ResidentVideoPlayer` seeks and normal playback. Pending seeks coalesce, stale
+responses are ignored and the last valid image remains visible. Contiguous source
+cuts do not cause another seek. Both renderers use the same synchronization policy.
+
+Play resumes at the head; at or past the effective end it restarts at zero. Pause
+retains the head and unlocks authoring. An optional Stop marker defines the
+playback end; without it the project maximum is the end. Editing past Stop remains
+possible. At Stop, local preview holds the final evaluated state silently. Remote
+playback closes through the existing scene/resource release lifecycle.
+
+## Editor and synchronization
+
+The timeline stays below the canvas during preparation, preview and remote
+playback. Its ruler, precise time field, zoom, horizontal scroll and fit command
+navigate the project. Shift temporarily snaps against all keys and clip boundaries;
+releasing it immediately restores free placement. Other media keys are decorative.
+Only the explicitly selected primary media is editable; canvas group copy/delete
+remain available. Clipboard and delete commands are routed by focus between text,
+canvas and timeline.
+
+Remote launch preserves preparation, first-image verification, a synchronized
+activation barrier and an immutable revision. Every media is prepared, including
+media initially outside screens. Screen intersections follow evaluated geometry.
+Periodic snapshots carry only the current timeline time, never presentation
+properties, and cannot overwrite animated states. Display loss hides the affected
+output while the clock continues; returning screens resume the current state.
+See [window presentation](window-presentation.md).
+
+## Configuration and formats
+
+`AppConfig` exposes the eight `MOUFFETTE_TIMELINE_*` settings documented in the
+[configuration registry](../src/backend/config/README.md). Maximum duration is
+captured in each new project (default 180000 ms); visual settings apply globally.
+The initial viewport spans 15000 ms and is independent of playback cadence.
+
+Project component version 5 replaces version 4 through the explicit bootstrap
+reset transition. Other profile components are preserved. Render schema 3 and
+wire protocol 8 require a coordinated client/server rollout. Legacy automation,
+video ranges and older render payloads are rejected, not converted. Timeline
+validation applies on both client and server, including time bounds, strict
+property schemas, source intervals and existing payload size limits.
+
+Regression coverage: `SceneTimeline`, `TimelineController`,
+`CanvasSelectionBackend`, `VideoPlaybackBackend`, `RemoteSceneLifecycle`,
+`RemoteSceneControllerLifecycle`, `RemoteSessionIntegration`, storage tests and
+server timeline/protocol tests. Native backend checks must run on each target OS.

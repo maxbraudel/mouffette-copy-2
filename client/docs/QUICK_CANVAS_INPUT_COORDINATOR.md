@@ -21,36 +21,28 @@ contain a text edit, style change, fit-to-text resize or newly created item.
 
 ## Selection transforms and scene locking
 
-A press on an already selected media preserves the selection for dragging.
-Double-click text activation and explicit list selection still replace it unless
-Shift is held. `QuickCanvasController` snapshots the selected media's geometry
-when a transform starts. Movement applies the active media's final displacement
-to every snapshot. Resize applies its width/height factors and relative anchor
-movement to each media's original rectangle. Alt changes base dimensions while
-preserving each media's existing scale. Modifier changes never accumulate drift.
+A press on an already selected media preserves the selection and promotes it to
+primary. Shift adds and promotes. `CanvasDocument::primarySelectedMediaId()` is
+the explicit authority; when it disappears, the most recently activated surviving
+selection takes over. Only the primary displays handles, buttons and editing
+overlays. Secondary selections retain their border and name, and have no hidden
+resize surfaces. The media list can select invisible items.
 
-Only the manipulated media resolves snap targets; the other members of the
-transform are excluded from those targets. The controller's `liveTransforms`
-projection supplies content, selection chrome and overlays with the same
-provisional geometry. Release commits the whole selection to `CanvasDocument`.
-Text fit mode changes only when a free resize commits.
+`QuickCanvasController` snapshots only the primary geometry. Movement, uniform
+resize, free resize and Alt/Option scroll affect this one occurrence; group copy
+and delete still act on all selected occurrences. Stationary secondary selections
+remain valid snap targets. Modifier changes always derive from the original
+geometry, without accumulated drift. Release commits the primary to the document
+or its timeline draft. Free resize disables text fit when committed.
 
-Alt/Option + vertical wheel/trackpad scroll scales selected media uniformly
-around each item's own center. Physical scroll up enlarges and down reduces,
-independently of natural scrolling. QML routes this before camera navigation;
-horizontal packets and an empty or locked selection never move the camera.
-The controller captures selection transform snapshots once per gesture and
-accumulates every input delta, preserving base dimensions, fit-to-text and
-relative scales. `QQuickWindow::afterAnimating` publishes only the latest
-`liveTransforms` preview before each frame, through a dedicated notification.
-No document changes, full media projections or selection-model replacements
-occur during input. Releasing Alt or `ScrollEnd` commits position and scale atomically once per
-media, even when its delta is zero or Alt was released first. Phase-less mouse
-wheels finish after 160 ms of inactivity; phased input has a 1500 ms recovery
-timeout for a missing end event. Selection changes, another transform, copying
-and window/app suspension finish the pending transaction; removal or editing
-revocation cancels it. Active pointer, text-edit and pinch gestures retain input
-ownership.
+Alt/Option vertical scroll scales the primary around its center, independently of
+natural scrolling. Input packets accumulate; `QQuickWindow::afterAnimating`
+publishes the latest provisional transform once per frame. No document changes
+occur during that preview. Releasing Alt or ScrollEnd commits once. Phase-less
+mouse wheels finish after 160 ms; phased input has a 1500 ms missing-end timeout.
+Changing selection or revoking editing cancels provisional transforms. Captured
+timeline media use an explicit unsaved draft, discarded on seeking, changing the
+primary or starting playback. Copy and window suspension finish scale gestures.
 
 Uniform previews also defer text-outline raster-density changes. The renderer
 keeps the existing glyph masks while their scene-graph transform changes, then
@@ -66,8 +58,7 @@ at resolution-bucket crossings and on release. The motion benchmark measures
 gesture frames, release, worker preparation and publication separately.
 
 Images and videos keep this same selectable, movable and resizable shell while
-their content is loading or waiting for memory. Uniform and Alt resize, including
-group transforms, operate on geometry independently of media residency. Loading
+their content is loading or waiting for memory. Uniform and Alt resize operate on geometry independently of media residency. Loading
 reveals the content inside the existing delegate without resetting edited geometry;
 content controls and settings still wait for media readiness.
 
@@ -147,15 +138,15 @@ media picker, independent of scaled renderer subtrees. The one TapHandler keeps
 the first tap's media/controller identity so taps on adjacent texts or across
 workspace switches cannot combine into an edit request.
 
-Only a selected, editable text can enter the canvas edit session. Opening B
+Only the primary, editable text can enter the canvas edit session. Opening B
 finishes A first. External deselection finishes the current editor too. Finishing
 snapshots the live document and releases ownership before emitting the commit:
 synchronous listeners may publish selection or open a newer editor. `begin()`
 rechecks selection and ownership after those callbacks. Destroying a visual
 abandons only that visual's session.
 
-A text commit changes content, never selection. A late commit cannot resurrect
-an old selection. Inspector style/focus changes do not themselves force an exit:
+A text commit changes content, never selection. A late commit to a non-primary
+or removed media is ignored. Inspector style/focus changes do not themselves force an exit:
 live text styling must remain usable while editing.
 
 One `TextEdit` document is retained across display/edit transitions. Suspending

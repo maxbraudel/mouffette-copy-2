@@ -30,7 +30,7 @@ function fixture() {
         return client;
     };
     const send = (id, type, fields = {}) => server.handleMessage(id, {
-        type, protocolVersion: 7, serverBootId: server.serverBootId,
+        type, protocolVersion: 8, serverBootId: server.serverBootId,
         messageId: crypto.randomUUID(), connectionGeneration: server.clients.get(id).connectionGeneration,
         ...fields,
     });

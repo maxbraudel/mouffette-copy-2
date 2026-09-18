@@ -1,6 +1,8 @@
 #pragma once
 
 #include "backend/domain/media/MediaSettingsState.h"
+#include "backend/domain/scene/SceneTimeline.h"
+#include <optional>
 #include "backend/media/ResidentVideoPlayer.h"
 
 #include <QColor>
@@ -20,8 +22,6 @@ class RemoteVideoFrameSource;
 class CanvasMedia final : public QObject
 {
     Q_OBJECT
-    Q_PROPERTY(qreal animatedDisplayOpacity READ animatedDisplayOpacity
-               WRITE setAnimatedDisplayOpacity NOTIFY changed)
 
 public:
     enum class Type { Image, Video, Text };
@@ -56,7 +56,7 @@ public:
     bool residencySuspended() const { return m_residencySuspended; }
     void retireResidency();
 
-    QSize baseSize() const { return m_baseSize; }
+    QSize baseSize() const { return m_baseSize.toSize(); }
     void setBaseSize(const QSize& size);
     QPointF position() const { return m_position; }
     void setPosition(const QPointF& position);
@@ -73,14 +73,24 @@ public:
     void setContentVisible(bool visible);
     qreal contentOpacity() const { return m_contentOpacity; }
     void setContentOpacity(qreal opacity);
-    qreal animatedDisplayOpacity() const { return m_animatedDisplayOpacity; }
-    void setAnimatedDisplayOpacity(qreal opacity);
 
     UploadState uploadState() const { return m_uploadState; }
     int uploadProgress() const { return m_uploadProgress; }
     void setUploadNotUploaded();
     void setUploadUploading(int progress);
     void setUploadUploaded();
+
+    SceneTimeline::ElementState authorElementState() const;
+    SceneTimeline::ElementState displayedElementState() const;
+    void setElementState(const SceneTimeline::ElementState& state);
+    void setEvaluatedElementState(const SceneTimeline::ElementState& state);
+    void clearEvaluatedElementState();
+    bool hasEvaluatedElementState() const { return m_authorElementState.has_value(); }
+    bool hasElementDraft() const { return m_elementDraft; }
+    void beginElementEdit();
+    const SceneTimeline::MediaTrack& timelineTrack() const { return m_timelineTrack; }
+    void setTimelineTrack(const SceneTimeline::MediaTrack& track);
+    void ensureDefaultVideoClip(qint64 maxDurationMs);
 
     const MediaSettingsState& settings() const { return m_settings; }
     void setSettings(const MediaSettingsState& settings);
@@ -138,23 +148,10 @@ public:
     void setMuted(bool muted, bool updateAudioOutput = true);
     qreal volume() const;
     void setVolume(qreal volume);
-    bool repeatEnabled() const { return m_repeatEnabled; }
-    void setRepeatEnabled(bool enabled);
-    qint64 startMarkerMs() const { return m_startMarkerMs; }
-    qint64 endMarkerMs() const { return m_endMarkerMs; }
-    bool setPlaybackRange(qint64 startMs, qint64 endMs);
-    bool canPlaceStart() const;
-    bool canPlaceEnd() const;
-    qint64 playbackStartMs() const;
-    qint64 playbackEndMs() const;
-    void beginScenePlayback();
-    void endScenePlayback();
-    bool repeatAvailable() const;
-    void togglePlayPause();
-    void stopToBeginning();
-    void seekToRatio(qreal ratio);
     void setPositionMs(qint64 positionMs);
     qint64 positionMs() const;
+    qint64 sourceDurationMs() const { return m_sourceDurationMs; }
+    void restoreSourceDurationMs(qint64 durationMs);
     bool hasRenderedFrame() const { return m_hasRenderedFrame; }
     bool firstFramePrimed() const { return m_firstFramePrimed; }
 
@@ -162,10 +159,10 @@ public:
 
 signals:
     void changed();
+    void presentationChanged();
+    void draftChanged();
     void uploadStateChanged();
     void runtimeStateChanged();
-    // Final natural or marked end, after all configured repeats are consumed.
-    void playbackFinished();
     void audioStateChanged();
     void residencyChanged();
     void identityReady(const QString& fileId);
@@ -173,10 +170,10 @@ signals:
 
 private:
     void notifyChanged();
+    SceneTimeline::ElementState captureElementFields() const;
+    void applyElementFields(const SceneTimeline::ElementState& state);
     bool updateFitToTextGeometry();
     void notifyTextMetricsChanged();
-    void updateVideoLoops();
-    void enforcePlaybackEnd(qint64 position, bool atEnd = false);
     void refreshResidency();
     void requestResidency();
     void releaseResidencyResources();
@@ -195,17 +192,20 @@ private:
     quint64 m_residencyGeneration = 0;
     QString m_residencyOwnerId;
     qint64 m_sourceSizeBytes = -1;
-    QSize m_baseSize;
+    QSizeF m_baseSize;
     QPointF m_position;
     qreal m_scale = 1.0;
     qreal m_z = 1.0;
     bool m_selected = false;
     bool m_contentVisible = true;
     qreal m_contentOpacity = 1.0;
-    qreal m_animatedDisplayOpacity = 1.0;
     UploadState m_uploadState = UploadState::NotUploaded;
     int m_uploadProgress = 0;
     MediaSettingsState m_settings;
+    SceneTimeline::MediaTrack m_timelineTrack;
+    std::optional<SceneTimeline::ElementState> m_authorElementState;
+    std::optional<SceneTimeline::ElementState> m_evaluatedElementState;
+    bool m_elementDraft = false;
 
     QString m_text = QStringLiteral("Text");
     QString m_fontFamily = QStringLiteral("Impact");
@@ -235,12 +235,7 @@ private:
     bool m_muted = false;
     qreal m_volume = 1.0;
     qint64 m_pendingPositionMs = -1;
-    bool m_repeatEnabled = false;
-    qint64 m_startMarkerMs = -1;
-    qint64 m_endMarkerMs = -1;
-    bool m_scenePlayback = false;
-    int m_repeatRemaining = 0;
-    bool m_handlingPlaybackEnd = false;
+    qint64 m_sourceDurationMs = 0;
     bool m_hasRenderedFrame = false;
     bool m_firstFramePrimed = false;
 };

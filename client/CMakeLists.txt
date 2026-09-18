@@ -202,6 +202,7 @@ set(SOURCES
     src/frontend/qml/ClientListModel.cpp
     src/frontend/qml/NotificationListModels.cpp
     src/frontend/qml/MediaSettingsViewModel.cpp
+    src/frontend/qml/TimelineController.cpp
     src/frontend/qml/QmlRuntime.cpp
     src/frontend/qml/WindowPresentation.cpp
     src/backend/platform/WindowStackingCoordinator.cpp
@@ -266,6 +267,7 @@ set(SOURCES
 
     # Domain - Live scene activity
     src/backend/domain/scene/SceneActivityModel.cpp
+    src/backend/domain/scene/SceneTimeline.cpp
     
     # Domain - Session
     src/backend/domain/session/IncomingSessionOrphanWatchdog.cpp
@@ -350,6 +352,7 @@ set(HEADERS
     src/frontend/qml/ClientListModel.h
     src/frontend/qml/NotificationListModels.h
     src/frontend/qml/MediaSettingsViewModel.h
+    src/frontend/qml/TimelineController.h
     src/frontend/qml/QmlRuntime.h
     src/frontend/qml/SceneActivityListModel.h
     
@@ -513,6 +516,7 @@ qt_add_qml_module(MouffetteClient
         resources/qml/app/canvas/MediaListPanel.qml
         resources/qml/app/canvas/OverlayActionButton.qml
         resources/qml/app/canvas/SceneElementPanel.qml
+        resources/qml/app/canvas/TimelinePanel.qml
         resources/qml/app/dialogs/BootstrapWindow.qml
         resources/qml/app/dialogs/MemoryUsagePopup.qml
         resources/qml/app/dialogs/SettingsDialog.qml
@@ -966,6 +970,26 @@ if(BUILD_TESTING)
         target_sources(tst_CanvasSelectionBackend PRIVATE tests/qt/FinderDropTestSupport.mm)
     endif()
 
+    add_executable(tst_SceneTimeline tests/qt/tst_SceneTimeline.cpp
+        src/backend/domain/scene/SceneTimeline.cpp)
+    target_include_directories(tst_SceneTimeline PRIVATE src)
+    target_link_libraries(tst_SceneTimeline PRIVATE Qt6::Gui Qt6::Test)
+    add_test(NAME SceneTimeline COMMAND tst_SceneTimeline)
+
+    add_executable(tst_TimelineController
+        tests/qt/tst_TimelineController.cpp
+        "$<FILTER:$<TARGET_OBJECTS:MouffetteClient>,EXCLUDE,/src/main[.]cpp[.](o|obj)$>")
+    target_include_directories(tst_TimelineController PRIVATE
+        "$<TARGET_PROPERTY:MouffetteClient,INCLUDE_DIRECTORIES>")
+    target_compile_definitions(tst_TimelineController PRIVATE
+        "$<TARGET_PROPERTY:MouffetteClient,COMPILE_DEFINITIONS>"
+        TEST_VIDEO_FILE="${CMAKE_SOURCE_DIR}/tests/fixtures/resident-timeline.mp4")
+    target_link_libraries(tst_TimelineController PRIVATE
+        "$<TARGET_PROPERTY:MouffetteClient,LINK_LIBRARIES>" Qt6::Test)
+    add_test(NAME TimelineController COMMAND tst_TimelineController)
+    add_test(NAME TimelineControllerScaled COMMAND tst_TimelineController)
+    set_tests_properties(TimelineControllerScaled PROPERTIES ENVIRONMENT "QT_SCALE_FACTOR=2")
+
     add_executable(tst_VideoPlaybackBackend
         tests/qt/tst_VideoPlaybackBackend.cpp
         "$<FILTER:$<TARGET_OBJECTS:MouffetteClient>,EXCLUDE,/src/main[.]cpp[.](o|obj)$>"
@@ -1056,7 +1080,7 @@ if(BUILD_TESTING)
     add_test(NAME SceneRunCoordinator COMMAND tst_SceneRunCoordinator)
     # Native window focus/grabs are part of these tests. Do not race other GUI
     # suites when CI invokes ctest with parallel jobs.
-    set_tests_properties(WindowPresentation TextOutlineMotion CanvasInteraction CanvasInteractionScaled CanvasSelectionBackend ClientConnectionFlow VideoPlaybackBackend UploadRemovalSecurity RemoteSceneControllerLifecycle RemoteSceneLifecycle MediaOverlay MediaOverlayScaled
+    set_tests_properties(WindowPresentation TextOutlineMotion CanvasInteraction CanvasInteractionScaled CanvasSelectionBackend TimelineController TimelineControllerScaled ClientConnectionFlow VideoPlaybackBackend UploadRemovalSecurity RemoteSceneControllerLifecycle RemoteSceneLifecycle MediaOverlay MediaOverlayScaled
         PROPERTIES RUN_SERIAL TRUE)
     # Match the production style explicitly. Loading the native Controls
     # plugin concurrently with asynchronous QML compilation is unstable on
@@ -1105,6 +1129,8 @@ if(BUILD_TESTING)
 
     add_executable(tst_ProjectManager
         tests/qt/tst_ProjectManager.cpp
+        src/backend/domain/scene/SceneTimeline.cpp
+        src/backend/domain/scene/SceneTimeline.h
         src/backend/domain/models/ClientInfo.cpp
         src/backend/domain/models/ClientInfo.h
         src/backend/domain/project/ProjectModel.cpp
@@ -1123,7 +1149,7 @@ if(BUILD_TESTING)
         src/backend/runtime/RuntimeProfile.h
     )
     target_include_directories(tst_ProjectManager PRIVATE src)
-    target_link_libraries(tst_ProjectManager PRIVATE Qt6::Core Qt6::Test)
+    target_link_libraries(tst_ProjectManager PRIVATE Qt6::Gui Qt6::Test)
     add_test(NAME ProjectManager COMMAND tst_ProjectManager)
 
     add_executable(tst_NotificationCenter

@@ -80,6 +80,14 @@ public:
         UiScrollbarHideDelayMs,
         UiInputWatchdogIntervalMs,
         UiSnapFreezeCleanupDelayMs,
+        TimelineMaxDurationMs,
+        TimelineHeightPx,
+        TimelineRulerHeightPx,
+        TimelineClipTrackHeightPx,
+        TimelineKeyframeSizePx,
+        TimelineOtherKeyframeOpacityPercent,
+        TimelineSnapDistancePx,
+        TimelineInitialViewDurationMs,
         CanvasTextInitialHeightPercent,
         RemoteCursorDiameterPx,
         ToastDefaultDurationMs,
@@ -205,6 +213,14 @@ public:
     int uiScrollbarHideDelayMs() const { return m_uiScrollbarHideDelayMs; }
     int uiInputWatchdogIntervalMs() const { return m_uiInputWatchdogIntervalMs; }
     int uiSnapFreezeCleanupDelayMs() const { return m_uiSnapFreezeCleanupDelayMs; }
+    int timelineMaxDurationMs() const { return m_timelineMaxDurationMs; }
+    int timelineHeightPx() const { return m_timelineHeightPx; }
+    int timelineRulerHeightPx() const { return m_timelineRulerHeightPx; }
+    int timelineClipTrackHeightPx() const { return m_timelineClipTrackHeightPx; }
+    int timelineKeyframeSizePx() const { return m_timelineKeyframeSizePx; }
+    int timelineOtherKeyframeOpacityPercent() const { return m_timelineOtherKeyframeOpacityPercent; }
+    int timelineSnapDistancePx() const { return m_timelineSnapDistancePx; }
+    int timelineInitialViewDurationMs() const { return m_timelineInitialViewDurationMs; }
     int remoteCursorDiameterPx() const { return m_remoteCursorDiameterPx; }
     int canvasTextInitialHeightPercent() const { return m_canvasTextInitialHeightPercent; }
     int toastDefaultDurationMs() const { return m_toastDefaultDurationMs; }
@@ -292,6 +308,14 @@ private:
     int m_toastWarningDurationMs = 3500;
     int m_toastErrorDurationMs = 5000;
     int m_toastAnimationDurationMs = 300;
+    int m_timelineMaxDurationMs = 180000;
+    int m_timelineHeightPx = 240;
+    int m_timelineRulerHeightPx = 28;
+    int m_timelineClipTrackHeightPx = 64;
+    int m_timelineKeyframeSizePx = 10;
+    int m_timelineOtherKeyframeOpacityPercent = 30;
+    int m_timelineSnapDistancePx = 10;
+    int m_timelineInitialViewDurationMs = 15000;
     int m_canvasTextInitialHeightPercent = 8;
     int m_remoteCursorDiameterPx = 30;
     int m_mediaRamReservePercent = 0;

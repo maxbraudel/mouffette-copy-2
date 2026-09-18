@@ -1,6 +1,7 @@
 #include "backend/domain/canvas/CanvasDocument.h"
 
 #include "backend/domain/media/CanvasMedia.h"
+#include "backend/config/AppConfig.h"
 #include "backend/domain/media/MediaSettingsState.h"
 #include "backend/files/FileManager.h"
 #include "backend/media/MediaDecoder.h"
@@ -22,7 +23,6 @@
 #include <utility>
 
 namespace {
-constexpr int kProjectTextSettingsSchemaVersion = 1;
 
 QThreadPool* importMetadataPool()
 {
@@ -75,6 +75,7 @@ QJsonObject spanForIntersection(int screenId, const QRectF& screen,
 CanvasDocument::CanvasDocument(QObject* parent)
     : QObject(parent)
 {
+    m_timelineSettings.maxDurationMs=AppConfig::instance().timelineMaxDurationMs();
 }
 
 CanvasDocument::~CanvasDocument()
@@ -195,8 +196,15 @@ void CanvasDocument::adoptMedia(CanvasMedia* media)
         emit mediaChanged(media->mediaId());
         emit documentChanged();
     });
+    connect(media, &CanvasMedia::presentationChanged, this, [this, media]() {
+        if (!m_evaluatingTimeline) emit mediaChanged(media->mediaId());
+    });
     connect(media, &CanvasMedia::residencyChanged, this, [this, media]() {
+        media->ensureDefaultVideoClip(m_timelineSettings.maxDurationMs);
         emit mediaChanged(media->mediaId());
+    });
+    connect(media, &CanvasMedia::runtimeStateChanged, this, [this, media]() {
+        media->ensureDefaultVideoClip(m_timelineSettings.maxDurationMs);
     });
     connect(media, &CanvasMedia::identityReady, this, [this, media](const QString& fileId) {
         if (m_fileManager) {
@@ -218,6 +226,7 @@ void CanvasDocument::adoptMedia(CanvasMedia* media)
         if (!m_projectId.isEmpty())
             m_fileManager->associateFileWithProject(media->fileId(), m_projectId);
     }
+    media->ensureDefaultVideoClip(m_timelineSettings.maxDurationMs);
     emit mediaAdded(media);
     emit documentChanged();
 }
@@ -281,8 +290,15 @@ bool CanvasDocument::removeMedia(const QString& mediaId)
         CanvasMedia* media = m_media.at(i);
         if (!media || media->mediaId() != mediaId) continue;
         const bool selected = media->selected();
+        const bool primary = mediaId == m_primarySelectedMediaId;
         emit mediaAboutToBeRemoved(media);
         m_media.removeAt(i);
+        m_selectionActivationOrder.removeAll(mediaId);
+        if (primary) {
+            evaluateTimeline();
+            m_primarySelectedMediaId = m_selectionActivationOrder.isEmpty() ? QString() : m_selectionActivationOrder.last();
+            emit primarySelectedMediaChanged();
+        }
         if (m_fileManager && !media->isText()) {
             m_fileManager->removeMediaAssociation(mediaId);
         }
@@ -303,6 +319,8 @@ void CanvasDocument::clear()
     m_pendingImports.clear();
     const QList<CanvasMedia*> previous = m_media;
     m_media.clear();
+    m_primarySelectedMediaId.clear(); m_selectionActivationOrder.clear();
+    emit primarySelectedMediaChanged();
     for (CanvasMedia* media : previous) {
         if (!media) continue;
         emit mediaAboutToBeRemoved(media);
@@ -359,38 +377,79 @@ QStringList CanvasDocument::selectedMediaIds() const
 
 CanvasMedia* CanvasDocument::selectedMedia() const
 {
-    for (CanvasMedia* item : m_media) {
-        if (item && item->selected()) return item;
-    }
-    return nullptr;
+    return primarySelectedMedia();
 }
-
+CanvasMedia* CanvasDocument::primarySelectedMedia() const
+{
+    CanvasMedia* media=mediaById(m_primarySelectedMediaId);
+    return media && media->selected() ? media : nullptr;
+}
+bool CanvasDocument::setPrimarySelectedMedia(const QString& id)
+{
+    if (m_editsLocked) return false;
+    CanvasMedia* media=mediaById(id);
+    if (!media || !media->selected()) return false;
+    if (id == m_primarySelectedMediaId) return true;
+    evaluateTimeline();
+    m_primarySelectedMediaId=id;
+    m_selectionActivationOrder.removeAll(id); m_selectionActivationOrder.append(id);
+    emit primarySelectedMediaChanged(); emit selectionChanged();
+    return true;
+}
 void CanvasDocument::select(const QString& mediaId, bool additive)
 {
     if (m_editsLocked) return;
-    CanvasMedia* target = mediaById(mediaId);
+    CanvasMedia* target=mediaById(mediaId);
     if (!target) return;
-    bool changed = false;
-    for (CanvasMedia* item : m_media) {
-        const bool selected = item == target || (additive && item->selected());
-        if (item->selected() != selected) {
-            item->setSelected(selected);
-            changed = true;
-        }
-    }
-    if (changed) emit selectionChanged();
+    // A selected secondary is promoted without destroying its group.
+    if (target->selected()) { setPrimarySelectedMedia(mediaId); return; }
+    evaluateTimeline();
+    if (!additive) m_selectionActivationOrder.clear();
+    for (CanvasMedia* item : m_media) item->setSelected(item==target || (additive && item->selected()));
+    m_primarySelectedMediaId=mediaId;
+    m_selectionActivationOrder.removeAll(mediaId); m_selectionActivationOrder.append(mediaId);
+    emit primarySelectedMediaChanged(); emit selectionChanged();
 }
-
 void CanvasDocument::clearSelection()
 {
-    bool changed = false;
-    for (CanvasMedia* item : m_media) {
-        if (item && item->selected()) {
-            item->setSelected(false);
-            changed = true;
-        }
+    const bool hadSelection=!m_primarySelectedMediaId.isEmpty();
+    evaluateTimeline();
+    for (CanvasMedia* item : m_media) if (item) item->setSelected(false);
+    m_primarySelectedMediaId.clear(); m_selectionActivationOrder.clear();
+    if (hadSelection) { emit primarySelectedMediaChanged(); emit selectionChanged(); }
+}
+bool CanvasDocument::setTimelineSettings(const SceneTimeline::SceneSettings& settings)
+{
+    SceneTimeline::SceneSettings validated;
+    if (m_editsLocked || !SceneTimeline::SceneSettings::fromJson(settings.toJson(),&validated)) return false;
+    if (validated.toJson()==m_timelineSettings.toJson()) return true;
+    for (CanvasMedia* item:m_media) {
+        const auto& t=item->timelineTrack();
+        for(const auto& k:t.keyframes) if(k.timeMs>validated.maxDurationMs) return false;
+        for(const auto& c:t.clips) if(c.endMs()>validated.maxDurationMs) return false;
     }
-    if (changed) emit selectionChanged();
+    m_timelineSettings=validated;
+    m_timelinePositionMs=qMin(m_timelinePositionMs,validated.maxDurationMs);
+    evaluateTimeline(); emit timelineChanged(); emit timelinePositionChanged(); emit documentChanged();
+    return true;
+}
+void CanvasDocument::setTimelinePosition(qint64 timeMs)
+{
+    const qint64 next=qBound<qint64>(0,timeMs,m_timelineSettings.maxDurationMs);
+    const bool changed=next!=m_timelinePositionMs;
+    m_timelinePositionMs=next; evaluateTimeline();
+    if(changed) emit timelinePositionChanged();
+}
+void CanvasDocument::evaluateTimeline()
+{
+    if (m_evaluatingTimeline) return;
+    m_evaluatingTimeline = true;
+    for(CanvasMedia* media:m_media) {
+        if(media->timelineTrack().keyframes.isEmpty()) media->clearEvaluatedElementState();
+        else media->setEvaluatedElementState(SceneTimeline::evaluate(media->authorElementState(),media->timelineTrack(),m_timelinePositionMs));
+    }
+    m_evaluatingTimeline = false;
+    emit timelineEvaluated();
 }
 
 void CanvasDocument::setScreens(const QList<ScreenInfo>& screens)
@@ -534,115 +593,31 @@ void CanvasDocument::setMediaResidencySuspended(bool suspended)
 
 QJsonObject CanvasDocument::serializeSceneState() const
 {
-    QJsonObject root{{QStringLiteral("renderSchemaVersion"), 2}};
+    QJsonObject root{{QStringLiteral("renderSchemaVersion"), SceneTimeline::RenderSchemaVersion},
+                     {QStringLiteral("timeline"), m_timelineSettings.toJson()}};
     QJsonArray screens;
     for (const ScreenInfo& screen : m_screens) screens.append(screen.toJson());
     root.insert(QStringLiteral("screens"), screens);
-
     QJsonArray serializedMedia;
-    QList<CanvasMedia*> ordered = m_media;
-    std::sort(ordered.begin(), ordered.end(), [](CanvasMedia* a, CanvasMedia* b) {
-        return a && b ? a->z() < b->z() : a < b;
-    });
-    for (CanvasMedia* media : ordered) {
-        if (!media) continue;
-        const QRectF bounds = media->sceneRect().normalized();
-        const MediaSettingsState& settings = media->settings();
-        QJsonObject item{
-            {QStringLiteral("mediaId"), media->mediaId()},
-            {QStringLiteral("fileId"), media->fileId()},
-            {QStringLiteral("fileName"), QFileInfo(media->sourcePath()).fileName()},
-            {QStringLiteral("type"), media->typeName()},
-            {QStringLiteral("x"), bounds.x()},
-            {QStringLiteral("y"), bounds.y()},
-            {QStringLiteral("width"), bounds.width()},
-            {QStringLiteral("height"), bounds.height()},
-            {QStringLiteral("baseWidth"), media->baseSize().width()},
-            {QStringLiteral("baseHeight"), media->baseSize().height()},
-            {QStringLiteral("visible"), media->contentVisible()},
-            {QStringLiteral("z"), media->z()},
-            {QStringLiteral("autoDisplay"), settings.displayAutomatically},
-            {QStringLiteral("autoDisplayDelayMs"),
-                 MediaSettingsSerialization::delayMilliseconds(
-                     settings.displayDelayEnabled, settings.displayDelayText)},
-            {QStringLiteral("autoHide"), settings.hideDelayEnabled},
-            {QStringLiteral("autoHideDelayMs"),
-                 MediaSettingsSerialization::signedDelayMilliseconds(
-                     settings.hideDelayEnabled, settings.hideDelayText)},
-            {QStringLiteral("hideWhenVideoEnds"), settings.hideWhenVideoEnds},
-            {QStringLiteral("fadeInSeconds"),
-                 MediaSettingsSerialization::durationSeconds(
-                     settings.fadeInEnabled, settings.fadeInText)},
-            {QStringLiteral("fadeOutSeconds"),
-                 MediaSettingsSerialization::durationSeconds(
-                     settings.fadeOutEnabled, settings.fadeOutText)},
-            {QStringLiteral("contentOpacity"), media->contentOpacity()}
-        };
+    QList<CanvasMedia*> ordered=m_media;
+    std::sort(ordered.begin(),ordered.end(),[](CanvasMedia* a,CanvasMedia* b){return a->authorElementState().z<b->authorElementState().z;});
+    for(CanvasMedia* media:ordered) {
+        const auto author=media->authorElementState();
+        QJsonObject item=author.toJson();
+        item.insert(QStringLiteral("mediaId"),media->mediaId());
+        item.insert(QStringLiteral("fileId"),media->fileId());
+        item.insert(QStringLiteral("fileName"),QFileInfo(media->sourcePath()).fileName());
+        item.insert(QStringLiteral("timeline"),media->timelineTrack().toJson());
+        if(media->isVideo()) item.insert(QStringLiteral("durationMs"),double(media->sourceDurationMs()));
         QJsonArray spans;
-        for (auto it = m_screenRects.cbegin(); it != m_screenRects.cend(); ++it) {
-            const QJsonObject span = spanForIntersection(it.key(), it.value(), bounds);
-            if (!span.isEmpty()) spans.append(span);
+        const QRectF bounds(author.position,author.size);
+        for(auto it=m_screenRects.cbegin();it!=m_screenRects.cend();++it) {
+            const auto span=spanForIntersection(it.key(),it.value(),bounds);
+            if(!span.isEmpty()) spans.append(span);
         }
-        item.insert(QStringLiteral("spans"), spans);
-
-        if (media->isText()) {
-            item.insert(QStringLiteral("text"), media->text());
-            item.insert(QStringLiteral("fontFamily"), media->fontFamily());
-            item.insert(QStringLiteral("fontPixelSize"), media->fontPixelSize());
-            item.insert(QStringLiteral("fontWeight"), media->renderedFontWeight());
-            item.insert(QStringLiteral("fontItalic"), media->italic());
-            item.insert(QStringLiteral("fontUnderline"), media->underline());
-            item.insert(QStringLiteral("fontUppercase"), media->uppercase());
-            item.insert(QStringLiteral("textColor"), media->renderedTextColor().name(QColor::HexArgb));
-            item.insert(QStringLiteral("textOutlineWidthPx"),
-                        media->renderedOutlineWidthPercent()
-                            * media->fontPixelSize() / 100.0);
-            item.insert(QStringLiteral("textBorderColor"), media->renderedOutlineColor().name(QColor::HexArgb));
-            item.insert(QStringLiteral("textHighlightEnabled"), media->highlightEnabled());
-            item.insert(QStringLiteral("textHighlightColor"), media->highlightColor().name(QColor::HexArgb));
-            item.insert(QStringLiteral("textFitToTextEnabled"), media->fitToTextEnabled());
-            item.insert(QStringLiteral("horizontalAlignment"), media->horizontalAlignment());
-            item.insert(QStringLiteral("verticalAlignment"), media->verticalAlignment());
-        } else if (media->isVideo()) {
-            item.insert(QStringLiteral("autoPlay"), settings.playAutomatically);
-            item.insert(QStringLiteral("autoPlayDelayMs"),
-                        MediaSettingsSerialization::delayMilliseconds(
-                            settings.playDelayEnabled, settings.playDelayText));
-            item.insert(QStringLiteral("autoPause"), settings.pauseDelayEnabled);
-            item.insert(QStringLiteral("autoPauseDelayMs"),
-                        MediaSettingsSerialization::delayMilliseconds(
-                            settings.pauseDelayEnabled, settings.pauseDelayText));
-            item.insert(QStringLiteral("muted"), media->muted());
-            item.insert(QStringLiteral("volume"), media->volume());
-            item.insert(QStringLiteral("continuousLoop"), media->repeatEnabled());
-            item.insert(QStringLiteral("repeatEnabled"), settings.repeatEnabled);
-            item.insert(QStringLiteral("repeatCount"),
-                        qMax(1, settings.repeatCountText.toInt()));
-            item.insert(QStringLiteral("autoUnmute"), settings.unmuteAutomatically);
-            item.insert(QStringLiteral("autoUnmuteDelayMs"),
-                        MediaSettingsSerialization::delayMilliseconds(
-                            settings.unmuteDelayEnabled, settings.unmuteDelayText));
-            item.insert(QStringLiteral("autoMute"), settings.muteDelayEnabled);
-            item.insert(QStringLiteral("autoMuteDelayMs"),
-                        MediaSettingsSerialization::signedDelayMilliseconds(
-                            settings.muteDelayEnabled, settings.muteDelayText));
-            item.insert(QStringLiteral("muteWhenVideoEnds"), settings.muteWhenVideoEnds);
-            item.insert(QStringLiteral("audioFadeInSeconds"),
-                        MediaSettingsSerialization::durationSeconds(
-                            settings.audioFadeInEnabled, settings.audioFadeInText));
-            item.insert(QStringLiteral("audioFadeOutSeconds"),
-                        MediaSettingsSerialization::durationSeconds(
-                            settings.audioFadeOutEnabled, settings.audioFadeOutText));
-            item.insert(QStringLiteral("startPositionMs"),
-                        static_cast<double>(media->playbackStartMs()));
-            if (media->endMarkerMs() >= 0)
-                item.insert(QStringLiteral("endPositionMs"),
-                            static_cast<double>(media->endMarkerMs()));
-        }
-        serializedMedia.append(item);
+        item.insert(QStringLiteral("spans"),spans); serializedMedia.append(item);
     }
-    root.insert(QStringLiteral("media"), serializedMedia);
-    return root;
+    root.insert(QStringLiteral("media"),serializedMedia); return root;
 }
 
 QJsonObject CanvasDocument::serializeProjectState() const
@@ -651,46 +626,6 @@ QJsonObject CanvasDocument::serializeProjectState() const
     // Screen topology has an explicit ProjectRecord field. Keeping a second
     // copy in the document made session-only discovery leak into persistence.
     root.remove(QStringLiteral("screens"));
-    QJsonArray media = root.value(QStringLiteral("media")).toArray();
-    for (qsizetype index = 0; index < media.size(); ++index) {
-        QJsonObject item = media.at(index).toObject();
-        CanvasMedia* source = mediaById(item.value(QStringLiteral("mediaId")).toString());
-        if (source) {
-            item.insert(QStringLiteral("projectMediaSettings"),
-                        MediaSettingsSerialization::toProjectJson(source->settings()));
-            if (source->isVideo()) {
-                item.insert(QStringLiteral("videoStartMarkerMs"),
-                            static_cast<double>(source->startMarkerMs()));
-                item.insert(QStringLiteral("videoEndMarkerMs"),
-                            static_cast<double>(source->endMarkerMs()));
-                item.insert(QStringLiteral("previewPositionMs"),
-                            static_cast<double>(source->positionMs()));
-            }
-            if (source->isText()) {
-                item.insert(QStringLiteral("projectTextSettings"), QJsonObject{
-                    {QStringLiteral("schemaVersion"),
-                         kProjectTextSettingsSchemaVersion},
-                    {QStringLiteral("textColorOverrideEnabled"),
-                         source->textColorOverrideEnabled()},
-                    {QStringLiteral("textColor"),
-                         source->textColor().name(QColor::HexArgb)},
-                    {QStringLiteral("textBorderWidthOverrideEnabled"),
-                         source->outlineWidthOverrideEnabled()},
-                    {QStringLiteral("textBorderWidthPercent"),
-                         source->outlineWidthPercent()},
-                    {QStringLiteral("textBorderColorOverrideEnabled"),
-                         source->outlineColorOverrideEnabled()},
-                    {QStringLiteral("textBorderColor"),
-                         source->outlineColor().name(QColor::HexArgb)},
-                    {QStringLiteral("fontWeightOverrideEnabled"),
-                         source->fontWeightOverrideEnabled()},
-                    {QStringLiteral("fontWeight"), source->fontWeight()}
-                });
-            }
-        }
-        media.replace(index, item);
-    }
-    root.insert(QStringLiteral("media"), media);
     if (!m_pendingImports.isEmpty()) {
         QJsonArray pendingImports;
         QStringList ids = m_pendingImports.keys();
@@ -735,9 +670,12 @@ bool CanvasDocument::restoreProjectState(
     QStringList* skippedMediaIds)
 {
     if (!m_media.isEmpty() || hasPendingImports()
-        || state.value(QStringLiteral("renderSchemaVersion")).toInt(-1) != 2) {
+        || state.value(QStringLiteral("renderSchemaVersion")).toInt(-1) != SceneTimeline::RenderSchemaVersion) {
         return false;
     }
+    SceneTimeline::SceneSettings settings;
+    if (!SceneTimeline::SceneSettings::fromJson(state.value(QStringLiteral("timeline")).toObject(),&settings)) return false;
+    m_timelineSettings=settings; m_timelinePositionMs=0;
     // Install the saved camera before publishing topology: screensChanged can
     // trigger the initial fit when a controller already has a viewport.
     const QJsonObject viewport = state.value(QStringLiteral("viewport")).toObject();
@@ -799,174 +737,65 @@ QStringList CanvasDocument::pasteMediaState(
     const QJsonObject& state, const QHash<QString, QString>& sourcePaths,
     QStringList* skippedMediaIds)
 {
-    if (m_editsLocked || state.value(QStringLiteral("renderSchemaVersion")).toInt(-1) != 2)
+    if (m_editsLocked || state.value(QStringLiteral("renderSchemaVersion")).toInt(-1) != SceneTimeline::RenderSchemaVersion)
         return {};
-    const QStringList inserted = insertProjectMedia(state, sourcePaths, skippedMediaIds, true);
+    QHash<QString,QString> insertedIds;
+    const QStringList inserted = insertProjectMedia(state, sourcePaths, skippedMediaIds, true, &insertedIds);
     if (!inserted.isEmpty()) {
         clearSelection();
         for (const QString& id : inserted) select(id, true);
+        const QString copiedPrimary=insertedIds.value(state.value(QStringLiteral("primaryMediaId")).toString());
+        setPrimarySelectedMedia(copiedPrimary.isEmpty()?inserted.first():copiedPrimary);
     }
     return inserted;
 }
 
 QStringList CanvasDocument::insertProjectMedia(
     const QJsonObject& state, const QHash<QString, QString>& sourcePathByMediaId,
-    QStringList* skippedMediaIds, bool freshIds)
+    QStringList* skippedMediaIds, bool freshIds, QHash<QString,QString>* insertedIds)
 {
     QStringList inserted;
-    const auto skip = [skippedMediaIds](const QString& id) {
-        if (skippedMediaIds && !id.isEmpty() && !skippedMediaIds->contains(id)) {
-            skippedMediaIds->append(id);
+    for(const QJsonValue& value:state.value(QStringLiteral("media")).toArray()) {
+        const auto source=value.toObject();
+        const QString id=source.value(QStringLiteral("mediaId")).toString();
+        const auto skip=[&]{if(skippedMediaIds && !id.isEmpty() && !skippedMediaIds->contains(id)) skippedMediaIds->append(id);};
+        SceneTimeline::ElementState element; SceneTimeline::MediaTrack track;
+        if(id.isEmpty() || (!freshIds && mediaById(id))
+            || !SceneTimeline::ElementState::fromMediaJson(source,&element)
+            || !SceneTimeline::MediaTrack::fromJson(source.value(QStringLiteral("timeline")).toObject(),&track,m_timelineSettings.maxDurationMs)) {skip();continue;}
+        bool compatible=true;
+        for(const auto& key:track.keyframes) if(key.state.type!=element.type) compatible=false;
+        if(element.type!=QLatin1String("video") && !track.clips.isEmpty()) compatible=false;
+        const bool text=element.type==QLatin1String("text"),video=element.type==QLatin1String("video");
+        qint64 sourceDuration=0;
+        if(video) {
+            const auto value=source.value(QStringLiteral("durationMs"));
+            const double duration=value.toDouble(-1);
+            if(!value.isDouble() || !std::isfinite(duration) || duration<0
+                || duration>SceneTimeline::MaximumSupportedDurationMs || std::floor(duration)!=duration) compatible=false;
+            else sourceDuration=static_cast<qint64>(duration);
+            for(const auto& clip:track.clips) if(clip.sourceOutMs>sourceDuration) compatible=false;
         }
-    };
-    for (const QJsonValue& value : state.value(QStringLiteral("media")).toArray()) {
-        const QJsonObject source = value.toObject();
-        const QString id = source.value(QStringLiteral("mediaId")).toString().trimmed();
-        const QString type = source.value(QStringLiteral("type")).toString().toLower();
-        if (id.isEmpty() || (type != QLatin1String("text")
-            && type != QLatin1String("image") && type != QLatin1String("video"))) {
-            skip(id);
-            continue;
+        if(!compatible){skip();continue;}
+        const QString path=sourcePathByMediaId.value(id);
+        if(!text && (path.isEmpty() || !QFileInfo::exists(path))){skip();continue;}
+        auto* media=new CanvasMedia(text?CanvasMedia::Type::Text:(video?CanvasMedia::Type::Video:CanvasMedia::Type::Image),element.baseSize.toSize());
+        if(!freshIds) media->restoreMediaId(id);
+        else {
+            for(auto& key:track.keyframes) key.id=SceneTimeline::newId();
+            for(auto& clip:track.clips) clip.id=SceneTimeline::newId();
         }
-        MediaSettingsState settings;
-        if (!MediaSettingsSerialization::fromProjectJson(
-                source.value(QStringLiteral("projectMediaSettings")).toObject(),
-                &settings)) {
-            skip(id);
-            continue;
-        }
-
-        QJsonObject projectText;
-        QColor storedTextColor;
-        QColor storedOutlineColor;
-        int storedFontWeight = 400;
-        qreal storedOutlineWidth = 0.0;
-        if (type == QLatin1String("text")) {
-            projectText = source.value(QStringLiteral("projectTextSettings")).toObject();
-            const QJsonValue fontWeightValue =
-                projectText.value(QStringLiteral("fontWeight"));
-            const QJsonValue outlineWidthValue =
-                projectText.value(QStringLiteral("textBorderWidthPercent"));
-            const double rawFontWeight = fontWeightValue.toDouble(-1.0);
-            storedOutlineWidth = outlineWidthValue.toDouble(-1.0);
-            storedTextColor = QColor(
-                projectText.value(QStringLiteral("textColor")).toString());
-            storedOutlineColor = QColor(
-                projectText.value(QStringLiteral("textBorderColor")).toString());
-            const bool textSettingsValid =
-                projectText.value(QStringLiteral("schemaVersion")).toInt(-1)
-                    == kProjectTextSettingsSchemaVersion
-                && projectText.value(QStringLiteral("textColorOverrideEnabled")).isBool()
-                && projectText.value(QStringLiteral("textColor")).isString()
-                && projectText.value(QStringLiteral("textBorderWidthOverrideEnabled")).isBool()
-                && outlineWidthValue.isDouble()
-                && std::isfinite(storedOutlineWidth)
-                && storedOutlineWidth >= 0.0 && storedOutlineWidth <= 100.0
-                && projectText.value(QStringLiteral("textBorderColorOverrideEnabled")).isBool()
-                && projectText.value(QStringLiteral("textBorderColor")).isString()
-                && projectText.value(QStringLiteral("fontWeightOverrideEnabled")).isBool()
-                && fontWeightValue.isDouble() && std::isfinite(rawFontWeight)
-                && std::floor(rawFontWeight) == rawFontWeight
-                && rawFontWeight >= 1.0 && rawFontWeight <= 1000.0
-                && storedTextColor.isValid() && storedOutlineColor.isValid();
-            if (!textSettingsValid) {
-                skip(id);
-                continue;
-            }
-            storedFontWeight = static_cast<int>(rawFontWeight);
-        }
-        const QSize base(qMax(1, source.value(QStringLiteral("baseWidth")).toInt(
-                                  qRound(source.value(QStringLiteral("width")).toDouble(1.0)))),
-                         qMax(1, source.value(QStringLiteral("baseHeight")).toInt(
-                                  qRound(source.value(QStringLiteral("height")).toDouble(1.0)))));
-        CanvasMedia* media = nullptr;
-        if (type == QLatin1String("text")) {
-            media = new CanvasMedia(CanvasMedia::Type::Text, base);
-            // Restore atomically. Fit mode is re-enabled only after all text
-            // metrics, alignment and persisted geometry have been applied.
-            media->setFitToTextEnabled(false);
-            media->setText(source.value(QStringLiteral("text")).toString(QStringLiteral("Text")));
-        } else {
-            const QString path = sourcePathByMediaId.value(id);
-            if (path.isEmpty() || !QFileInfo::exists(path)) {
-                skip(id);
-                continue;
-            }
-            media = new CanvasMedia(type == QLatin1String("video")
-                                        ? CanvasMedia::Type::Video
-                                        : CanvasMedia::Type::Image, base);
+        media->setElementState(element); media->setTimelineTrack(track);
+        if(video) media->restoreSourceDurationMs(sourceDuration);
+        if(!text) {
             media->setResidencySuspended(m_mediaResidencySuspended);
-            if (!freshIds) media->restoreMediaId(id);
-            media->setSourcePath(path, source.value(QStringLiteral("fileId")).toString());
-            if (media->isVideo()) media->initializeVideoRuntime();
+            media->setSourcePath(path,source.value(QStringLiteral("fileId")).toString());
+            if(video) media->initializeVideoRuntime();
         }
-        if (!freshIds) media->restoreMediaId(id);
-        if (m_fileManager && !media->isText() && !media->fileId().isEmpty()) {
-            m_fileManager->associateMediaWithFile(media->mediaId(), media->fileId());
-            if (!m_projectId.isEmpty()) {
-                m_fileManager->associateFileWithProject(media->fileId(), m_projectId);
-            }
-        }
-        media->setBaseSize(base);
-        media->setPosition({source.value(QStringLiteral("x")).toDouble(),
-                            source.value(QStringLiteral("y")).toDouble()});
-        qreal scale = source.value(QStringLiteral("width")).toDouble(base.width())
-            / qMax(1, base.width());
-        if (!std::isfinite(scale) || scale <= 0.0) scale = 1.0;
-        media->setScale(scale);
-        media->setZ(source.value(QStringLiteral("z")).toDouble(nextZ()));
-        media->setContentVisible(source.value(QStringLiteral("visible")).toBool(true));
-        media->setContentOpacity(std::clamp(
-            source.value(QStringLiteral("contentOpacity")).toDouble(1.0), 0.0, 1.0));
-
-        media->setSettings(settings);
-
-        if (media->isText()) {
-            media->setFontFamily(source.value(QStringLiteral("fontFamily")).toString(QStringLiteral("Impact")));
-            media->setFontPixelSize(qMax(1, source.value(QStringLiteral("fontPixelSize")).toInt(64)));
-            media->setFontWeight(storedFontWeight);
-            media->setItalic(source.value(QStringLiteral("fontItalic")).toBool(false));
-            media->setUnderline(source.value(QStringLiteral("fontUnderline")).toBool(false));
-            media->setUppercase(source.value(QStringLiteral("fontUppercase")).toBool(false));
-            media->setTextColor(storedTextColor);
-            media->setOutlineWidthPercent(storedOutlineWidth);
-            media->setOutlineColor(storedOutlineColor);
-            media->setFontWeightOverrideEnabled(
-                projectText.value(QStringLiteral("fontWeightOverrideEnabled")).toBool());
-            media->setTextColorOverrideEnabled(
-                projectText.value(QStringLiteral("textColorOverrideEnabled")).toBool());
-            media->setOutlineWidthOverrideEnabled(
-                projectText.value(QStringLiteral("textBorderWidthOverrideEnabled")).toBool());
-            media->setOutlineColorOverrideEnabled(
-                projectText.value(QStringLiteral("textBorderColorOverrideEnabled")).toBool());
-            media->setHighlightEnabled(source.value(QStringLiteral("textHighlightEnabled")).toBool(false));
-            media->setHighlightColor(QColor(source.value(QStringLiteral("textHighlightColor")).toString(QStringLiteral("#80FFFF00"))));
-            media->setHorizontalAlignment(source.value(QStringLiteral("horizontalAlignment")).toString());
-            media->setVerticalAlignment(source.value(QStringLiteral("verticalAlignment")).toString());
-            media->setFitToTextEnabled(source.value(QStringLiteral("textFitToTextEnabled")).toBool(true));
-            // Persisted project geometry remains authoritative on restore.
-            // Fit mode resumes for the next text/style edit, but loading must
-            // never silently move or resize an existing project element.
-            media->setBaseSize(base);
-            media->setPosition({source.value(QStringLiteral("x")).toDouble(),
-                                source.value(QStringLiteral("y")).toDouble()});
-        } else if (media->isVideo()) {
-            media->setMuted(source.value(QStringLiteral("muted")).toBool(false));
-            media->setVolume(source.value(QStringLiteral("volume")).toDouble(1.0));
-            media->setRepeatEnabled(source.value(QStringLiteral("continuousLoop")).toBool(false));
-            media->setPlaybackRange(
-                qRound64(source.value(QStringLiteral("videoStartMarkerMs")).toDouble(-1)),
-                qRound64(source.value(QStringLiteral("videoEndMarkerMs")).toDouble(-1)));
-            // Older projects stored the preview cursor as startPositionMs.
-            media->setPositionMs(qMax<qint64>(0, qRound64(
-                source.value(QStringLiteral("previewPositionMs")).toDouble(
-                    source.value(QStringLiteral("startPositionMs")).toDouble()))));
-        }
-        media->setUploadNotUploaded();
-        adoptMedia(media);
-        inserted.append(media->mediaId());
+        media->setUploadNotUploaded(); adoptMedia(media); inserted.append(media->mediaId());
+        if(insertedIds) insertedIds->insert(id,media->mediaId());
     }
-    return inserted;
+    evaluateTimeline(); return inserted;
 }
 
 qreal CanvasDocument::nextZ() const

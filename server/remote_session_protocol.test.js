@@ -22,7 +22,7 @@ const { MouffetteServer } = require('./server');
     const signature = crypto.sign(null,
         challengePayload({ ...challenge, runtimeId, instanceId, instanceOrdinal }), keys.privateKey);
     const response = {
-        protocolVersion: 7,
+        protocolVersion: 8,
         serverBootId,
         runtimeId,
         instanceId,
@@ -133,7 +133,7 @@ function addAuthenticationCandidate(server, connectionId, keyPair, runtimeId,
     };
     server.clients.set(connectionId, client);
     const response = {
-        protocolVersion: 7,
+        protocolVersion: 8,
         serverBootId: server.serverBootId,
         runtimeId,
         instanceId,
@@ -1803,7 +1803,7 @@ function cursorContext(prefix) {
     }];
     context.cursorMessage = (overrides = {}) => ({
         type: 'remote_session_cursor',
-        protocolVersion: 7,
+        protocolVersion: 8,
         serverBootId: context.server.serverBootId,
         messageId: crypto.randomUUID(),
         connectionGeneration: 1,

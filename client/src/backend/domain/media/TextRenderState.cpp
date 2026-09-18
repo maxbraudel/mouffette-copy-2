@@ -44,17 +44,6 @@ int effectiveFontPixelSize(const QFont& font, qreal uniformScale) {
     return std::max(1, qRound(pixelSize * std::abs(uniformScale)));
 }
 
-qreal outlinePixels(qreal widthPercent, int fontPixelSize) {
-    if (!std::isfinite(widthPercent) || widthPercent <= 0.0) {
-        return 0.0;
-    }
-    const qreal pixels = widthPercent * std::max(1, fontPixelSize) / 100.0;
-    if (!std::isfinite(pixels)) {
-        return 0.0;
-    }
-    return std::max<qreal>(1.0, std::round(pixels));
-}
-
 qreal outlinePixels(const QFont& font, qreal widthPercent, qreal uniformScale) {
     return outlinePixels(widthPercent, effectiveFontPixelSize(font, uniformScale));
 }

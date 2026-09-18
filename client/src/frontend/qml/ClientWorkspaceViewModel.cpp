@@ -4,6 +4,7 @@
 #include "frontend/rendering/canvas/QuickCanvasController.h"
 #include "frontend/rendering/canvas/QuickCanvasHost.h"
 #include "frontend/qml/MediaSettingsViewModel.h"
+#include "frontend/qml/TimelineController.h"
 #include "backend/network/UploadManager.h"
 #include "shared/rendering/ICanvasHost.h"
 
@@ -54,6 +55,7 @@ ClientWorkspaceViewModel::ClientWorkspaceViewModel(QString workspaceEndpointId,
     , m_hasUnuploadedFiles(std::move(hasUnuploadedFiles))
     , m_hasProject(std::move(hasProject))
     , m_mediaSettings(new MediaSettingsViewModel(this))
+    , m_timeline(new TimelineController(this))
     , m_overlayMediaModel(new WorkspaceMediaListModel([this](const QString& mediaId) {
         const auto* host = qobject_cast<QuickCanvasHost*>(m_canvas.data());
         return host && host->remoteMediaCached(mediaId);
@@ -96,6 +98,11 @@ int ClientWorkspaceViewModel::mediaCount() const
 QObject* ClientWorkspaceViewModel::mediaSettings() const
 {
     return m_mediaSettings;
+}
+
+QObject* ClientWorkspaceViewModel::timeline() const
+{
+    return m_timeline;
 }
 
 QObject* ClientWorkspaceViewModel::canvasController() const
@@ -228,7 +235,7 @@ QString ClientWorkspaceViewModel::remoteSceneUnavailableReason() const
 QString ClientWorkspaceViewModel::testSceneActionText() const
 {
     return testSceneActionState() == SceneActionState::Active
-        ? QStringLiteral("Stop Test Scene") : QStringLiteral("Launch Test Scene");
+        ? QStringLiteral("Pause Preview") : QStringLiteral("Play Preview");
 }
 
 ClientWorkspaceViewModel::SceneActionState
@@ -378,6 +385,7 @@ void ClientWorkspaceViewModel::setCanvas(ICanvasHost* canvas)
     }
     auto* host = qobject_cast<QuickCanvasHost*>(m_canvas.data());
     m_mediaSettings->setController(host ? host->controller() : nullptr);
+    m_timeline->setHost(host);
     if (host) connect(host->controller(), &QuickCanvasController::editingEnabledChanged,
                       this, &ClientWorkspaceViewModel::actionStateChanged, Qt::UniqueConnection);
     if (MediaListModel* model = typedMediaModel()) {

@@ -11,9 +11,10 @@ Rectangle {
     required property var session
     readonly property var mediaModel: session ? session.mediaModel : null
     readonly property int mediaCount: session ? session.mediaCount : 0
-    readonly property int actionAreaHeight: (Theme.overlayButtonHeight + 1) * 3
+    readonly property int actionAreaHeight: (Theme.overlayButtonHeight + 1) * 2
     readonly property bool sceneLocked: session && session.remoteSceneActionTone !== OverlayActionButton.Normal
     property real mediaNaturalWidth: 0
+    property real maximumHeight: parent ? Math.max(0, parent.height - 32) : implicitHeight
 
     function measureMediaWidth() {
         var measured = 0
@@ -34,10 +35,10 @@ Rectangle {
 
     visible: session && session.hasProject && mediaCount > 0
     implicitWidth: Math.max(200, mediaNaturalWidth, remoteButton.implicitWidth,
-                            testButton.implicitWidth, uploadButton.implicitWidth)
+                            uploadButton.implicitWidth)
     width: Math.min(implicitWidth, 420, parent ? Math.max(0, parent.width * 0.5) : 420)
     implicitHeight: mediaColumn.height + actionAreaHeight
-    height: Math.min(implicitHeight, parent ? Math.max(0, parent.height - 32) : implicitHeight)
+    height: Math.min(implicitHeight, maximumHeight)
     radius: Theme.overlayRadius
     color: Theme.overlayBackground
 
@@ -257,18 +258,6 @@ Rectangle {
                 enabled: root.session && root.session.remoteSceneActionEnabled
                 unavailableReason: root.session ? root.session.remoteSceneUnavailableReason : ""
                 onClicked: root.session.toggleRemoteScene()
-            }
-            Rectangle { width: parent.width; height: 1; color: Theme.overlayBorder }
-            OverlayActionButton {
-                id: testButton
-                objectName: "testSceneAction"
-                width: actions.width
-                text: root.session ? root.session.testSceneActionText : "Launch Test Scene"
-                textVariants: ["Launch Test Scene", "Stop Test Scene"]
-                tone: root.session ? root.session.testSceneActionTone : OverlayActionButton.Normal
-                enabled: root.session && root.session.testSceneActionEnabled
-                unavailableReason: root.session ? root.session.testSceneUnavailableReason : ""
-                onClicked: root.session.toggleTestScene()
             }
             Rectangle { width: parent.width; height: 1; color: Theme.overlayBorder }
             OverlayActionButton {

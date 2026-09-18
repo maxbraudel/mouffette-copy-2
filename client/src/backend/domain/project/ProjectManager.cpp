@@ -2,6 +2,8 @@
 #include "backend/domain/project/ProjectManager.h"
 
 #include "backend/domain/project/ProjectStore.h"
+#include "backend/config/AppConfig.h"
+#include "backend/domain/scene/SceneTimeline.h"
 
 #include <QDateTime>
 #include <QScopedValueRollback>
@@ -258,6 +260,13 @@ QString ProjectManager::createProjectFromSnapshot(
     project.updatedAtMs = current;
     project.lastCheckpointAtMs = current;
     project.hiddenAtMs = -1;
+    SceneTimeline::SceneSettings timeline;
+    timeline.maxDurationMs = AppConfig::instance().timelineMaxDurationMs();
+    project.canvasState = {
+        {QStringLiteral("renderSchemaVersion"), SceneTimeline::RenderSchemaVersion},
+        {QStringLiteral("timeline"), timeline.toJson()},
+        {QStringLiteral("media"), QJsonArray{}}
+    };
 
     const bool hadPendingChanges = m_dirty;
     m_projectsByTarget.insert(project.targetEndpointId, project);

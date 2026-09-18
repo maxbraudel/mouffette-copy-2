@@ -1,9 +1,11 @@
 #include "backend/media/MediaResidencyManager.h"
 #include "backend/media/ResidentVideoPlayer.h"
+#include "backend/media/TimelineVideoPlayback.h"
 #include <QUuid>
 #include "frontend/rendering/canvas/QuickCanvasHost.h"
 
 #include "backend/config/AppConfig.h"
+#include "backend/domain/scene/SceneTimeline.h"
 #include "backend/domain/canvas/CanvasDocument.h"
 #include "backend/domain/media/CanvasMedia.h"
 #include "backend/domain/media/MediaFilePolicy.h"
@@ -11,6 +13,7 @@
 #include "backend/network/SceneRunCoordinator.h"
 #include "backend/network/UploadManager.h"
 #include "backend/network/WebSocketClient.h"
+#include "backend/runtime/SuspendInclusiveClock.h"
 #include "frontend/rendering/canvas/QuickCanvasController.h"
 #include "frontend/ui/notifications/ToastNotificationSystem.h"
 
@@ -22,197 +25,10 @@
 #include <QQuickWindow>
 #include <QRegularExpression>
 #include <QStringList>
-#include <QVariantAnimation>
 
 #include <algorithm>
 
 namespace {
-// One cancellable timeline per occurrence, shared by test playback and the
-// local participant of a remote scene. Its parent is the scene lifetime, so
-// stopping a scene cancels every pending action and animation before restoring
-// the editor draft.
-class SceneMediaPlayback final : public QObject
-{
-public:
-    SceneMediaPlayback(CanvasMedia* media, QObject* scene)
-        : QObject(scene), m_media(media), m_settings(media->settings())
-    {
-        connect(&m_visualFade, &QVariantAnimation::valueChanged, this,
-                [this](const QVariant& value) {
-            if (m_media) m_media->setAnimatedDisplayOpacity(value.toReal());
-        });
-        connect(&m_visualFade, &QVariantAnimation::finished, this, [this]() {
-            if (m_media && m_hiding) m_media->setContentVisible(false);
-        });
-        connect(&m_audioFade, &QVariantAnimation::valueChanged, this,
-                [this](const QVariant& value) {
-            if (m_media && m_media->audioOutput())
-                m_media->audioOutput()->setVolume(value.toReal());
-        });
-        connect(&m_audioFade, &QVariantAnimation::finished, this, [this]() {
-            if (m_media && m_media->audioOutput())
-                m_media->audioOutput()->setMuted(m_media->muted());
-        });
-
-        media->setContentVisible(false);
-        media->setAnimatedDisplayOpacity(0.0);
-        if (m_settings.displayAutomatically) {
-            QTimer::singleShot(delay(m_settings.displayDelayEnabled,
-                                    m_settings.displayDelayText), this,
-                               [this]() { display(); });
-        }
-        if (!media->isVideo() || !media->player()) return;
-
-        media->beginScenePlayback();
-        media->setMuted(true);
-        if (media->audioOutput()) {
-            media->audioOutput()->setMuted(true);
-            media->audioOutput()->setVolume(0.0);
-        }
-        connect(media, &CanvasMedia::playbackFinished, this, [this]() {
-            if (m_endHandled) return;
-            m_endHandled = true;
-            if (m_settings.hideWhenVideoEnds && !m_hideEndTriggered) {
-                m_hideEndTriggered = true;
-                QTimer::singleShot(qMax(0, hideDelay()), this, [this]() { hide(); });
-            }
-            if (m_settings.muteWhenVideoEnds && !m_muteEndTriggered) {
-                m_muteEndTriggered = true;
-                QTimer::singleShot(qMax(0, muteDelay()), this,
-                                   [this]() { mute(true); });
-            }
-        });
-        connect(media->player(), &ResidentVideoPlayer::positionChanged, this,
-                [this]() { applyPreEndActions(); });
-
-        if (m_settings.playAutomatically) {
-            QTimer::singleShot(delay(m_settings.playDelayEnabled,
-                                    m_settings.playDelayText), this, [this]() {
-                if (!m_media || !m_media->player()) return;
-                m_media->player()->play();
-                applyPreEndActions();
-                if (m_settings.pauseDelayEnabled) {
-                    QTimer::singleShot(delay(true, m_settings.pauseDelayText), this,
-                                       [this]() {
-                        if (m_media && m_media->player()) m_media->player()->pause();
-                    });
-                }
-            });
-        }
-        if (m_settings.unmuteAutomatically) {
-            QTimer::singleShot(delay(m_settings.unmuteDelayEnabled,
-                                    m_settings.unmuteDelayText), this,
-                               [this]() { mute(false); });
-        }
-        if (m_settings.muteDelayEnabled && !m_settings.muteWhenVideoEnds) {
-            QTimer::singleShot(qMax(0, muteDelay()), this,
-                               [this]() { mute(true); });
-        }
-    }
-
-private:
-    static int delay(bool enabled, const QString& text)
-    {
-        return MediaSettingsSerialization::delayMilliseconds(enabled, text);
-    }
-    static int fadeDuration(bool enabled, const QString& text)
-    {
-        return qRound64(MediaSettingsSerialization::durationSeconds(enabled, text) * 1000.0);
-    }
-    int hideDelay() const
-    {
-        return MediaSettingsSerialization::signedDelayMilliseconds(
-            m_settings.hideDelayEnabled, m_settings.hideDelayText);
-    }
-    int muteDelay() const
-    {
-        return MediaSettingsSerialization::signedDelayMilliseconds(
-            m_settings.muteDelayEnabled, m_settings.muteDelayText);
-    }
-    void display()
-    {
-        if (!m_media) return;
-        m_hiding = false;
-        m_media->setContentVisible(true);
-        fadeVisual(1.0, fadeDuration(m_settings.fadeInEnabled, m_settings.fadeInText));
-        // Hide delay is relative to the start of appearance, including fade-in.
-        if (m_settings.hideDelayEnabled
-            && !(m_media->isVideo() && m_settings.hideWhenVideoEnds)) {
-            QTimer::singleShot(qMax(0, hideDelay()), this, [this]() { hide(); });
-        }
-    }
-    void hide()
-    {
-        if (!m_media || m_hiding) return;
-        m_hiding = true;
-        fadeVisual(0.0, fadeDuration(m_settings.fadeOutEnabled, m_settings.fadeOutText));
-    }
-    void fadeVisual(qreal target, int duration)
-    {
-        m_visualFade.stop();
-        if (duration <= 10) {
-            m_media->setAnimatedDisplayOpacity(target);
-            if (m_hiding) m_media->setContentVisible(false);
-            return;
-        }
-        m_visualFade.setStartValue(m_media->animatedDisplayOpacity());
-        m_visualFade.setEndValue(target);
-        m_visualFade.setDuration(duration);
-        m_visualFade.start();
-    }
-    void mute(bool muted)
-    {
-        if (!m_media) return;
-        QAudioOutput* audio = m_media->audioOutput();
-        const qreal start = audio && !audio->isMuted() ? audio->volume() : 0.0;
-        const qreal target = muted ? 0.0 : m_media->volume();
-        const int duration = muted
-            ? fadeDuration(m_settings.audioFadeOutEnabled, m_settings.audioFadeOutText)
-            : fadeDuration(m_settings.audioFadeInEnabled, m_settings.audioFadeInText);
-        m_audioFade.stop();
-        m_media->setMuted(muted, false);
-        if (!audio) return;
-        if (duration <= 0 || qFuzzyCompare(start, target)) {
-            audio->setVolume(target);
-            audio->setMuted(muted);
-            return;
-        }
-        audio->setVolume(start);
-        audio->setMuted(false);
-        m_audioFade.setStartValue(start);
-        m_audioFade.setEndValue(target);
-        m_audioFade.setDuration(duration);
-        m_audioFade.start();
-    }
-    void applyPreEndActions()
-    {
-        if (!m_media || !m_media->isPlaying() || m_media->repeatAvailable()
-            || m_endHandled || m_media->playbackEndMs() <= 0) return;
-        // Read the actual cursor after CanvasMedia has processed repeats. The
-        // position signal can still carry the end of the previous iteration.
-        const qint64 remaining = m_media->playbackEndMs() - m_media->positionMs();
-        if (m_settings.hideWhenVideoEnds && !m_hideEndTriggered
-            && hideDelay() < 0 && remaining <= -qint64(hideDelay())) {
-            m_hideEndTriggered = true;
-            hide();
-        }
-        if (m_settings.muteWhenVideoEnds && !m_muteEndTriggered
-            && muteDelay() < 0 && remaining <= -qint64(muteDelay())) {
-            m_muteEndTriggered = true;
-            mute(true);
-        }
-    }
-
-    QPointer<CanvasMedia> m_media;
-    const MediaSettingsState m_settings;
-    QVariantAnimation m_visualFade;
-    QVariantAnimation m_audioFade;
-    bool m_hiding = false;
-    bool m_endHandled = false;
-    bool m_hideEndTriggered = false;
-    bool m_muteEndTriggered = false;
-};
-
 void sceneToast(NotificationSeverity severity, const QString& message,
                 const QString& runId = {}, int duration = -1)
 {
@@ -318,6 +134,9 @@ QuickCanvasHost::QuickCanvasHost(CanvasDocument* document,
             failScene(message, m_sceneAccepted);
         }
     });
+    m_timelineTimer.setTimerType(Qt::PreciseTimer);
+    m_timelineTimer.setInterval(16);
+    connect(&m_timelineTimer, &QTimer::timeout, this, &QuickCanvasHost::advanceTimeline);
     m_videoSnapshotTimer.setInterval(
         AppConfig::instance().videoSnapshotIntervalMs());
     connect(&m_videoSnapshotTimer, &QTimer::timeout,
@@ -422,6 +241,7 @@ void QuickCanvasHost::connectWebSocketSignals()
             return;
         }
         m_sceneCommitScheduled = true;
+        m_remoteStartServerMs = start;
         const QString scheduledRunId = m_sceneRunId;
         const QString scheduledDigest = m_sceneDigest;
         const qint64 boundedDelay = std::max<qint64>(0, delay);
@@ -691,6 +511,12 @@ QString QuickCanvasHost::mediaReadinessReason(bool remote) const
         if (!media || media->isText()) continue;
         if (!manager.ready(media->residencyOwnerId()))
             return QStringLiteral("Wait until every media is validated and resident in memory (%1)").arg(media->displayName());
+        if (media->isVideo() && media->player()) {
+            const qint64 duration = media->player()->duration();
+            if (std::any_of(media->timelineTrack().clips.cbegin(), media->timelineTrack().clips.cend(),
+                            [duration](const auto& clip) { return clip.sourceOutMs > duration; }))
+                return QStringLiteral("A video clip exceeds its source duration (%1)").arg(media->displayName());
+        }
         if (remote && (!m_uploadManager || !m_uploadManager->remoteMediaReady(
                 m_targetClientId, manager.sha256(media->residencyOwnerId()))))
             return QStringLiteral("Wait until every media is validated and resident on the remote computer (%1)").arg(media->displayName());
@@ -818,26 +644,9 @@ QJsonArray QuickCanvasHost::localPreparationChecklist(
     return checklist;
 }
 
-void QuickCanvasHost::rememberDraftState()
-{
-    if (!m_draftState.isEmpty()) return;
-    for (CanvasMedia* media : m_document->media()) {
-        DraftMediaState draft;
-        draft.media = media;
-        draft.visible = media->contentVisible();
-        if (media->isVideo()) {
-            draft.muted = media->muted();
-            draft.playing = media->isPlaying();
-            draft.positionMs = media->positionMs();
-        }
-        m_draftState.append(draft);
-    }
-}
-
 void QuickCanvasHost::prepareSceneVideos(std::function<void()> ready)
 {
     if (m_videoPreparation) return;
-    rememberDraftState();
     m_document->setEditsLocked(true);
     const QPointer<QObject> context = new QObject(this);
     m_videoPreparation = context;
@@ -849,7 +658,8 @@ void QuickCanvasHost::prepareSceneVideos(std::function<void()> ready)
                 return;
             }
             if (media->isVideo() && (!media->player()
-                || !media->player()->preparedAt(media->playbackStartMs()))) return;
+                || !media->player()->preparedAt(SceneTimeline::evaluateVideo(
+                    media->timelineTrack(), timelinePositionMs(), media->player()->duration()).sourceTimeMs))) return;
         }
         m_videoPreparation = nullptr;
         context->deleteLater();
@@ -878,8 +688,10 @@ void QuickCanvasHost::prepareSceneVideos(std::function<void()> ready)
             // Replace any preview seek queued while this player's source was
             // loading. Its LoadedMedia handler must not restore the draft
             // cursor over the scene's prepared start frame.
-            media->setPositionMs(media->playbackStartMs());
-            media->player()->prepare(media->playbackStartMs());
+            const qint64 sourceTime = SceneTimeline::evaluateVideo(
+                media->timelineTrack(), timelinePositionMs(), media->player()->duration()).sourceTimeMs;
+            media->setPositionMs(sourceTime);
+            media->player()->prepare(sourceTime);
         }
     }
     finish();
@@ -947,6 +759,11 @@ void QuickCanvasHost::triggerRemoteSceneAction()
             handleRemoteConnectionLost();
             return;
         }
+        const qint64 stoppedAt = std::min(timelineNowMs(), timelineStopMs());
+        m_timelinePlaying = false;
+        m_timelineTimer.stop();
+        applyTimeline(stoppedAt, false, true);
+        cancelPresentationBarrier();
         m_sceneStopping = true;
         m_videoSnapshotTimer.stop();
         m_webSocket->sendSceneStop(m_sceneRunId);
@@ -956,6 +773,7 @@ void QuickCanvasHost::triggerRemoteSceneAction()
         return;
     }
     if (!remoteSceneActionEnabled()) return;
+    timelineSeek(0);
     QJsonObject scene = m_document->serializeSceneState();
     QJsonArray media = scene.value(QStringLiteral("media")).toArray();
     for (qsizetype i = 0; i < media.size(); ++i) {
@@ -1025,25 +843,131 @@ void QuickCanvasHost::triggerRemoteSceneAction()
 
 void QuickCanvasHost::triggerTestSceneAction()
 {
-    if (m_sceneLaunching || m_sceneStopping || m_sceneLaunched) return;
-    if (m_testSceneLaunched) {
+    if (m_testSceneLaunched) timelinePause();
+    else timelinePlay();
+}
+
+qint64 QuickCanvasHost::timelinePositionMs() const
+{
+    return m_document->timelinePositionMs();
+}
+
+qint64 QuickCanvasHost::timelineStopMs() const
+{
+    SceneTimeline::SceneSettings settings;
+    SceneTimeline::SceneSettings::fromJson(
+        (m_runningSceneDefinition.isEmpty() ? m_document->serializeSceneState()
+                                           : m_runningSceneDefinition)
+            .value(QStringLiteral("timeline")).toObject(), &settings);
+    return settings.effectiveStopMs();
+}
+
+qint64 QuickCanvasHost::timelineNowMs() const
+{
+    if (!m_timelinePlaying) return timelinePositionMs();
+    if (m_timelineRemote && m_webSocket && m_remoteStartServerMs >= 0) {
+        const qint64 now = m_webSocket->estimatedServerMonotonicMs();
+        if (now >= 0) return std::max<qint64>(0, now - m_remoteStartServerMs);
+    }
+    return m_timelineAnchorPositionMs + (m_timelineClock.isValid() ? m_timelineClock.elapsed() : 0);
+}
+
+void QuickCanvasHost::timelineSeek(qint64 positionMs)
+{
+    if (m_sceneLaunching || m_sceneLaunched || m_sceneStopping || m_timelinePlaying) return;
+    applyTimeline(positionMs, false, true);
+}
+
+void QuickCanvasHost::timelinePlay()
+{
+    if (m_sceneLaunching || m_sceneLaunched || m_sceneStopping || m_testSceneLaunched
+        || !testSceneActionEnabled()) return;
+    if (timelinePositionMs() >= timelineStopMs()) timelineSeek(0);
+    else timelineSeek(timelinePositionMs()); // Discard unrecorded property edits.
+    m_residencyGroup = QStringLiteral("canvas-preview:%1").arg(QUuid::createUuid().toString(QUuid::WithoutBraces));
+    if (!MediaResidencyManager::instance().pinOwners(residencyOwners(), m_residencyGroup)) {
+        m_residencyGroup.clear();
+        sceneToast(NotificationSeverity::Error, QStringLiteral("Insufficient RAM remains for scene playback buffers"));
+        return;
+    }
+    m_testSceneLaunched = true;
+    m_runningSceneDefinition = m_document->serializeSceneState();
+    prepareSceneVideos([this] {
+        if (m_testSceneLaunched) beginScenePresentation(false);
+        publishActionState();
+    });
+    publishActionState();
+    emit timelineTransportChanged();
+}
+
+void QuickCanvasHost::timelinePause()
+{
+    if (!m_testSceneLaunched || m_timelineRemote) return;
+    stopScenePresentation();
+    m_testSceneLaunched = false;
+    publishActionState();
+}
+
+void QuickCanvasHost::applyTimeline(qint64 positionMs, bool playing, bool forceSeek)
+{
+    m_document->setTimelinePosition(positionMs);
+    const qint64 time = timelinePositionMs();
+    const qint64 clock = MouffetteClock::nowMs();
+    for (CanvasMedia* media : m_document->media()) {
+        if (!media->isVideo() || !media->player()) continue;
+        auto* player = media->player();
+        const auto sample = SceneTimeline::evaluateVideo(media->timelineTrack(), time, player->duration());
+        const bool shouldPlay = playing && sample.playing;
+        const QString previousClip = m_timelineClipIds.value(media->mediaId());
+        const bool changedClip = previousClip != sample.clipId;
+        const bool discontinuity = changedClip
+            && !contiguousTimelineClips(media->timelineTrack(), previousClip, sample.clipId);
+        const bool transition = shouldPlay != m_timelineVideoPlaying.value(media->mediaId(), false);
+        if (!shouldPlay) player->pause();
+        const qint64 error = qAbs(player->position() - sample.sourceTimeMs);
+        const bool drift = shouldPlay && error > AppConfig::instance().sceneVideoSyncPositionToleranceMs()
+            && clock >= m_timelineSeekGuards.value(media->mediaId(), 0);
+        const bool heldFrameMissing = !shouldPlay && error > 0
+            && !player->preparedAt(sample.sourceTimeMs)
+            && clock >= m_timelineSeekGuards.value(media->mediaId(), 0);
+        if (forceSeek || discontinuity || transition || drift || heldFrameMissing) {
+            player->setPosition(sample.sourceTimeMs);
+            m_timelineSeekGuards.insert(media->mediaId(), clock + AppConfig::instance().sceneAuthoritativeSeekGuardMs());
+        }
+        m_timelineClipIds.insert(media->mediaId(), sample.clipId);
+        m_timelineVideoPlaying.insert(media->mediaId(), shouldPlay);
+        if (shouldPlay && !player->isPlaying() && (forceSeek || transition || discontinuity || drift))
+            player->play();
+        if (auto* audio = player->audioOutput()) {
+            audio->setVolume(media->volume());
+            audio->setMuted(!shouldPlay || media->muted());
+        }
+    }
+    emit timelineTransportChanged();
+}
+
+void QuickCanvasHost::advanceTimeline()
+{
+    if (!m_timelinePlaying) return;
+    const qint64 stop = timelineStopMs();
+    const qint64 time = std::min(std::max(timelineNowMs(), timelinePositionMs()), stop);
+    applyTimeline(time, time < stop);
+    if (time < stop) return;
+    m_timelinePlaying = false;
+    m_timelineTimer.stop();
+    if (m_timelineRemote && m_webSocket && !m_sceneRunId.isEmpty()) {
+        m_sceneStopping = true;
+        cancelPresentationBarrier();
+        m_videoSnapshotTimer.stop();
+        m_webSocket->sendSceneStop(m_sceneRunId, QStringLiteral("timeline_finished"));
+        m_sceneTimeout.start(m_webSocket->serverPolicy()
+            .value(QStringLiteral("sceneStopTimeoutMs")).toInt());
+    } else {
         stopScenePresentation();
         m_testSceneLaunched = false;
-    } else if (testSceneActionEnabled()) {
-        m_residencyGroup = QStringLiteral("canvas-test:%1").arg(QUuid::createUuid().toString(QUuid::WithoutBraces));
-        if (!MediaResidencyManager::instance().pinOwners(residencyOwners(), m_residencyGroup)) {
-            m_residencyGroup.clear();
-            sceneToast(NotificationSeverity::Error, QStringLiteral("Insufficient RAM remains for scene playback buffers"));
-            publishActionState();
-            return;
-        }
-        m_testSceneLaunched = true; // Stop is available while frames are priming.
-        prepareSceneVideos([this] {
-            if (m_testSceneLaunched) beginScenePresentation(false);
-            publishActionState();
-        });
     }
     publishActionState();
+    emit timelineTransportChanged();
 }
 
 void QuickCanvasHost::beginScenePresentation(bool remote)
@@ -1051,7 +975,6 @@ void QuickCanvasHost::beginScenePresentation(bool remote)
     if (m_sceneContext) return;
     m_document->setEditsLocked(true);
     m_sceneContext = new QObject(this);
-    rememberDraftState();
     for (CanvasMedia* media : m_document->media()) {
         if (media->isVideo() && media->player()) {
             const QPointer<QObject> context(m_sceneContext);
@@ -1061,15 +984,28 @@ void QuickCanvasHost::beginScenePresentation(bool remote)
                     failScene(message, m_sceneAccepted);
             }, Qt::QueuedConnection);
         }
-        new SceneMediaPlayback(media, m_sceneContext);
     }
-    m_document->clearSelection();
-    m_document->setEditsLocked(true);
-    if (remote) emit localScenePresentationRequested(m_sceneRevision);
+    m_timelineRemote = remote;
+    m_timelineAnchorPositionMs = remote ? 0 : timelinePositionMs();
+    if (remote && m_webSocket && m_remoteStartServerMs >= 0) {
+        const qint64 now = m_webSocket->estimatedServerMonotonicMs();
+        if (now >= 0) m_timelineAnchorPositionMs = std::max<qint64>(0, now - m_remoteStartServerMs);
+    }
+    m_timelineClock.start();
+    m_timelinePlaying = true;
+    const qint64 now = timelineNowMs();
+    applyTimeline(std::min(now, timelineStopMs()), now < timelineStopMs(), true);
+    m_timelineTimer.start();
+    if (now >= timelineStopMs()) advanceTimeline();
+    if (remote && m_timelinePlaying) emit localScenePresentationRequested(m_sceneRevision);
+    emit timelineTransportChanged();
 }
 
 void QuickCanvasHost::stopScenePresentation()
 {
+    const qint64 stoppedAt = std::min(timelineNowMs(), timelineStopMs());
+    m_timelinePlaying = false;
+    m_timelineTimer.stop();
     if (m_videoPreparation) delete m_videoPreparation.data();
     m_videoPreparation = nullptr;
     m_localVideosPrepared = false;
@@ -1078,29 +1014,18 @@ void QuickCanvasHost::stopScenePresentation()
         delete m_sceneContext;
         m_sceneContext = nullptr;
     }
-    for (const DraftMediaState& draft : std::as_const(m_draftState)) {
-        CanvasMedia* media = draft.media;
-        if (!media) continue;
-        media->setContentVisible(draft.visible);
-        media->setAnimatedDisplayOpacity(1.0);
-        if (media->isVideo()) {
-            media->player()->pause();
-            media->endScenePlayback();
-            media->setPositionMs(draft.positionMs);
-            media->setMuted(draft.muted);
-            if (media->audioOutput()) {
-                media->audioOutput()->setVolume(media->volume());
-                media->audioOutput()->setMuted(draft.muted);
-            }
-            if (draft.playing) media->player()->play();
-        }
-    }
-    m_draftState.clear();
+    applyTimeline(stoppedAt, false, true);
+    m_timelineRemote = false;
+    m_remoteStartServerMs = -1;
+    m_timelineClipIds.clear();
+    m_timelineVideoPlaying.clear();
+    m_timelineSeekGuards.clear();
     MediaResidencyManager::instance().unpinGroup(m_residencyGroup);
     m_residencyGroup.clear();
     m_document->setEditsLocked(false);
     cancelPresentationBarrier();
     m_runningSceneDefinition = {};
+    emit timelineTransportChanged();
 }
 
 void QuickCanvasHost::startPresentationBarrier()
@@ -1211,43 +1136,10 @@ void QuickCanvasHost::publishActionState()
 void QuickCanvasHost::sendVideoSnapshot()
 {
     if (!m_sceneLaunched || !m_webSocket || m_sceneRunId.isEmpty()) return;
-    QJsonArray videos;
-    for (CanvasMedia* media : m_document->media()) {
-        if (!media || !media->isVideo()) continue;
-        videos.append(QJsonObject{
-            {QStringLiteral("mediaId"), media->mediaId()},
-            {QStringLiteral("positionMs"), static_cast<double>(media->positionMs())},
-            {QStringLiteral("durationMs"), static_cast<double>(
-                 media->player() ? media->player()->duration() : 0)},
-            {QStringLiteral("playing"), media->isPlaying()},
-            {QStringLiteral("muted"), media->muted()},
-            {QStringLiteral("visible"), media->contentVisible()},
-            {QStringLiteral("repeatAvailable"), media->repeatAvailable()}});
-    }
     static quint64 sequence = 0;
-    // Topology shown by the editor is live. A running scene, however, retains
-    // its accepted outputs and normalized spans even if all displays vanish.
-    QJsonObject scene = m_runningSceneDefinition;
-    QJsonArray mediaStates = scene.value(QStringLiteral("media")).toArray();
-    for (qsizetype i = 0; i < mediaStates.size(); ++i) {
-        QJsonObject state = mediaStates[i].toObject();
-        const auto* media = m_document->mediaById(state.value(QStringLiteral("mediaId")).toString());
-        if (!media) continue;
-        state.insert(QStringLiteral("visible"), media->contentVisible());
-        state.insert(QStringLiteral("contentOpacity"), media->contentOpacity());
-        if (media->isVideo()) {
-            state.insert(QStringLiteral("muted"), media->muted());
-            state.insert(QStringLiteral("volume"), media->volume());
-        }
-        mediaStates.replace(i, state);
-    }
-    scene.insert(QStringLiteral("media"), mediaStates);
     m_webSocket->sendSceneStateSnapshot(m_sceneRunId, ++sequence,
         m_webSocket->estimatedServerMonotonicMs(),
-        QJsonObject{{QStringLiteral("scene"), scene},
-                    {QStringLiteral("videos"), videos},
-                    {QStringLiteral("capturedEpochMs"),
-                     static_cast<double>(QDateTime::currentMSecsSinceEpoch())}});
+        QJsonObject{{QStringLiteral("timelinePositionMs"), static_cast<double>(timelinePositionMs())}});
 }
 
 QJsonObject QuickCanvasHost::serializeProjectState() const

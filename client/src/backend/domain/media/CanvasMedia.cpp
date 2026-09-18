@@ -103,7 +103,7 @@ void CanvasMedia::restoreMediaId(const QString& id)
 {
     if (!id.trimmed().isEmpty() && m_mediaId != id.trimmed()) {
         m_mediaId = id.trimmed();
-        notifyChanged();
+        emit changed();
     }
 }
 
@@ -113,7 +113,7 @@ void CanvasMedia::setFileId(const QString& id)
     m_fileId = id;
     const QFileInfo source(m_sourcePath);
     m_sourceSizeBytes = source.isFile() ? source.size() : -1;
-    notifyChanged();
+    emit changed();
 }
 
 void CanvasMedia::setSourcePath(const QString& path, const QString& expectedSha256)
@@ -134,7 +134,7 @@ void CanvasMedia::setSourcePath(const QString& path, const QString& expectedSha2
         if (!path.isEmpty()) requestResidency();
         refreshResidency();
     }
-    notifyChanged();
+    emit changed();
 }
 
 void CanvasMedia::requestResidency()
@@ -274,7 +274,7 @@ void CanvasMedia::setSelected(bool selected)
 {
     if (m_selected == selected) return;
     m_selected = selected;
-    notifyChanged();
+    emit presentationChanged();
 }
 
 void CanvasMedia::setContentVisible(bool visible)
@@ -292,21 +292,13 @@ void CanvasMedia::setContentOpacity(qreal opacity)
     notifyChanged();
 }
 
-void CanvasMedia::setAnimatedDisplayOpacity(qreal opacity)
-{
-    opacity = std::clamp<qreal>(opacity, 0.0, 1.0);
-    if (qFuzzyCompare(1.0 + m_animatedDisplayOpacity, 1.0 + opacity)) return;
-    m_animatedDisplayOpacity = opacity;
-    notifyChanged();
-}
-
 void CanvasMedia::setUploadNotUploaded()
 {
     if (m_uploadState == UploadState::NotUploaded && m_uploadProgress == 0) return;
     m_uploadState = UploadState::NotUploaded;
     m_uploadProgress = 0;
     emit uploadStateChanged();
-    notifyChanged();
+    emit presentationChanged();
 }
 
 void CanvasMedia::setUploadUploading(int progress)
@@ -316,7 +308,7 @@ void CanvasMedia::setUploadUploading(int progress)
     m_uploadState = UploadState::Uploading;
     m_uploadProgress = progress;
     emit uploadStateChanged();
-    notifyChanged();
+    emit presentationChanged();
 }
 
 void CanvasMedia::setUploadUploaded()
@@ -325,7 +317,7 @@ void CanvasMedia::setUploadUploaded()
     m_uploadState = UploadState::Uploaded;
     m_uploadProgress = 100;
     emit uploadStateChanged();
-    notifyChanged();
+    emit presentationChanged();
 }
 
 void CanvasMedia::setSettings(const MediaSettingsState& settings)
@@ -361,21 +353,25 @@ CANVAS_MEDIA_SETTER(bool, setHighlightEnabled, m_highlightEnabled)
 
 int CanvasMedia::renderedFontWeight() const
 {
+    if (m_evaluatedElementState && !m_elementDraft) return qRound(m_evaluatedElementState->fontWeight);
     return m_fontWeightOverride ? m_fontWeight : 400;
 }
 
 QColor CanvasMedia::renderedTextColor() const
 {
+    if (m_evaluatedElementState && !m_elementDraft) return m_evaluatedElementState->textColor;
     return m_textColorOverride ? m_textColor : QColor(Qt::white);
 }
 
 qreal CanvasMedia::renderedOutlineWidthPercent() const
 {
+    if (m_evaluatedElementState && !m_elementDraft) return m_evaluatedElementState->outlineWidthPercent;
     return m_outlineWidthOverride ? m_outlineWidthPercent : 0.0;
 }
 
 QColor CanvasMedia::renderedOutlineColor() const
 {
+    if (m_evaluatedElementState && !m_elementDraft) return m_evaluatedElementState->outlineColor;
     return m_outlineColorOverride ? m_outlineColor : QColor(Qt::black);
 }
 
@@ -513,7 +509,7 @@ bool CanvasMedia::updateFitToTextGeometry()
     QSize fitted = TextRenderMetrics::fittedTextSize(state);
     if (qAbs(fitted.width() - m_baseSize.width()) <= 1
         && qAbs(fitted.height() - m_baseSize.height()) <= 1) {
-        fitted = m_baseSize;
+        fitted = m_baseSize.toSize();
     }
     if (fitted == m_baseSize) return false;
 
@@ -570,8 +566,6 @@ void CanvasMedia::initializeVideoRuntime()
             this, &CanvasMedia::runtimeStateChanged);
     connect(m_player, &ResidentVideoPlayer::positionChanged,
             this, &CanvasMedia::runtimeStateChanged);
-    connect(m_player, &ResidentVideoPlayer::positionChanged, this,
-            [this](qint64 position) { enforcePlaybackEnd(position); });
     connect(m_player, &ResidentVideoPlayer::mediaStatusChanged, this,
             [this](QMediaPlayer::MediaStatus status) {
         if ((status == QMediaPlayer::LoadedMedia || status == QMediaPlayer::BufferedMedia)
@@ -581,21 +575,14 @@ void CanvasMedia::initializeVideoRuntime()
             m_player->setPosition(target);
             emit runtimeStateChanged();
         }
-        if (status == QMediaPlayer::EndOfMedia) {
-            // The multimedia backend still finalizes its stopped state while
-            // delivering EndOfMedia. Restart after that transition has settled.
-            QMetaObject::invokeMethod(this, [this]() {
-                if (!m_residencyRetired && !m_residencySuspended
-                    && m_player->mediaStatus() == QMediaPlayer::EndOfMedia)
-                    enforcePlaybackEnd(m_player->duration(), true);
-            }, Qt::QueuedConnection);
-        }
+
     });
-    connect(m_player, &ResidentVideoPlayer::durationChanged,
-            this, &CanvasMedia::runtimeStateChanged);
+    connect(m_player, &ResidentVideoPlayer::durationChanged, this, [this](qint64 duration) {
+        if (duration > 0) m_sourceDurationMs = duration;
+        emit runtimeStateChanged();
+    });
     connect(m_player, &ResidentVideoPlayer::errorChanged,
             this, &CanvasMedia::runtimeStateChanged);
-    updateVideoLoops();
     initializeVideoOutputs();
 }
 
@@ -640,8 +627,7 @@ bool CanvasMedia::isPlaying() const
 
 bool CanvasMedia::muted() const
 {
-    // The device can remain audible during a scene fade-out. Synchronization
-    // and persistence consume the requested state, not that transient envelope.
+    // Timeline playback gates the device independently of authored mute.
     return m_muted;
 }
 
@@ -650,6 +636,7 @@ void CanvasMedia::setMuted(bool muted, bool updateAudioOutput)
     if (this->muted() == muted) return;
     m_muted = muted;
     if (m_audioOutput && updateAudioOutput) m_audioOutput->setMuted(muted);
+    notifyChanged();
     emit audioStateChanged();
     emit runtimeStateChanged();
 }
@@ -666,138 +653,9 @@ void CanvasMedia::setVolume(qreal volume)
     if (qFuzzyCompare(this->volume(), normalized)) return;
     m_volume = normalized;
     if (m_audioOutput) m_audioOutput->setVolume(normalized);
+    notifyChanged();
     emit audioStateChanged();
     emit runtimeStateChanged();
-}
-
-void CanvasMedia::setRepeatEnabled(bool enabled)
-{
-    if (m_repeatEnabled == enabled) return;
-    m_repeatEnabled = enabled;
-    updateVideoLoops();
-    emit runtimeStateChanged();
-}
-
-bool CanvasMedia::setPlaybackRange(qint64 startMs, qint64 endMs)
-{
-    constexpr qint64 maximum = 7LL * 24 * 60 * 60 * 1000;
-    if (!isVideo() || startMs < -1 || endMs < -1
-        || startMs > maximum || endMs > maximum
-        || (endMs >= 0 && endMs <= qMax<qint64>(0, startMs))) return false;
-    if (m_startMarkerMs == startMs && m_endMarkerMs == endMs) return true;
-    m_startMarkerMs = startMs;
-    m_endMarkerMs = endMs;
-    updateVideoLoops();
-    notifyChanged();
-    emit runtimeStateChanged();
-    return true;
-}
-
-bool CanvasMedia::canPlaceStart() const
-{
-    return m_player && m_player->duration() > 0
-        && positionMs() < playbackEndMs();
-}
-
-bool CanvasMedia::canPlaceEnd() const
-{
-    return m_player && m_player->duration() > 0
-        && positionMs() > playbackStartMs();
-}
-
-qint64 CanvasMedia::playbackStartMs() const
-{
-    const qint64 start = qMax<qint64>(0, m_startMarkerMs);
-    return m_player && m_player->duration() > 0
-        ? qMin(start, m_player->duration() - 1) : start;
-}
-
-qint64 CanvasMedia::playbackEndMs() const
-{
-    const qint64 duration = m_player ? m_player->duration() : 0;
-    return m_endMarkerMs >= 0 ? (duration > 0 ? qMin(m_endMarkerMs, duration)
-                                                           : m_endMarkerMs)
-                             : duration;
-}
-
-void CanvasMedia::updateVideoLoops()
-{
-    if (m_player) m_player->setLoops(m_repeatEnabled
-        && m_startMarkerMs < 0 && m_endMarkerMs < 0
-        ? QMediaPlayer::Infinite : QMediaPlayer::Once);
-}
-
-bool CanvasMedia::repeatAvailable() const
-{
-    return m_repeatEnabled || (m_scenePlayback && m_repeatRemaining > 0);
-}
-
-void CanvasMedia::beginScenePlayback()
-{
-    if (!m_player) return;
-    m_player->pause();
-    m_scenePlayback = true;
-    m_repeatRemaining = m_settings.repeatEnabled
-        ? qMax(1, m_settings.repeatCountText.toInt()) : 0;
-    setPositionMs(playbackStartMs());
-}
-
-void CanvasMedia::endScenePlayback()
-{
-    m_scenePlayback = false;
-    m_repeatRemaining = 0;
-}
-
-void CanvasMedia::enforcePlaybackEnd(qint64 position, bool atEnd)
-{
-    if (!m_player || m_handlingPlaybackEnd || (!isPlaying() && !atEnd)) return;
-    const qint64 end = playbackEndMs();
-    if (end <= 0 || position < end
-        || (atEnd && m_player->mediaStatus() != QMediaPlayer::EndOfMedia)) return;
-    if (m_repeatEnabled && m_startMarkerMs < 0 && m_endMarkerMs < 0) return;
-    // Natural EOF has its own deferred status handler. Seeking during the last
-    // position notification would let the backend stop our newly started loop.
-    if (!atEnd && end >= m_player->duration()) return;
-    // Paused scrubbing remains unrestricted; only active playback consumes a range.
-    m_handlingPlaybackEnd = true;
-    if (repeatAvailable()) {
-        if (!m_repeatEnabled) --m_repeatRemaining;
-        setPositionMs(playbackStartMs());
-        m_player->play();
-    } else {
-        if (m_endMarkerMs >= 0) {
-            m_player->pause();
-            m_player->setPosition(end);
-        }
-        emit playbackFinished();
-    }
-    m_handlingPlaybackEnd = false;
-}
-
-void CanvasMedia::togglePlayPause()
-{
-    if (!m_player) return;
-    if (isPlaying()) {
-        m_player->pause();
-    } else {
-        if (positionMs() < playbackStartMs() || positionMs() >= playbackEndMs())
-            setPositionMs(playbackStartMs());
-        m_player->play();
-    }
-}
-
-void CanvasMedia::stopToBeginning()
-{
-    if (!m_player) return;
-    m_player->pause();
-    setPositionMs(playbackStartMs());
-}
-
-void CanvasMedia::seekToRatio(qreal ratio)
-{
-    if (!m_player || m_player->duration() <= 0) return;
-    ratio = std::clamp<qreal>(ratio, 0.0, 1.0);
-    setPositionMs(qRound64(ratio * m_player->duration()));
 }
 
 void CanvasMedia::setPositionMs(qint64 positionMs)
@@ -849,7 +707,6 @@ QVariantMap CanvasMedia::toModelMap(qreal unit) const
         {QStringLiteral("displayName"), displayName()},
         {QStringLiteral("contentVisible"), m_contentVisible},
         {QStringLiteral("contentOpacity"), m_contentOpacity},
-        {QStringLiteral("animatedDisplayOpacity"), m_animatedDisplayOpacity},
         {QStringLiteral("textContent"), isText() ? m_text : QString()},
         {QStringLiteral("textEditable"), isText()},
         {QStringLiteral("textHorizontalAlignment"), m_horizontalAlignment},
@@ -886,5 +743,112 @@ QVariantMap CanvasMedia::toModelMap(qreal unit) const
 
 void CanvasMedia::notifyChanged()
 {
+    if (m_authorElementState) {
+        const bool wasDraft=m_elementDraft;
+        m_elementDraft = true;
+        emit presentationChanged();
+        if (!wasDraft) emit draftChanged();
+    } else {
+        emit changed();
+    }
+}
+
+SceneTimeline::ElementState CanvasMedia::captureElementFields() const
+{
+    SceneTimeline::ElementState s;
+    s.type = typeName(); s.position = m_position; s.baseSize = m_baseSize;
+    s.scale = m_scale; s.size = m_baseSize * m_scale; s.z = m_z;
+    s.visible = m_contentVisible; s.opacity = m_contentOpacity;
+    s.opacityOverrideEnabled = m_settings.opacityOverrideEnabled;
+    bool ok = false; s.rawOpacity = m_settings.opacityText.toDouble(&ok) / 100.0;
+    if (!ok || !std::isfinite(s.rawOpacity)) s.rawOpacity = 1.0;
+    s.rawOpacity = qBound<qreal>(0.0, s.rawOpacity, 1.0);
+    s.muted = m_muted; s.volume = m_volume;
+    s.text = m_text; s.fontFamily = m_fontFamily; s.fontPixelSize = m_fontPixelSize;
+    s.fontWeight = renderedFontWeight(); s.rawFontWeight = m_fontWeight;
+    s.fontWeightOverrideEnabled = m_fontWeightOverride;
+    s.italic = m_italic; s.underline = m_underline; s.uppercase = m_uppercase;
+    s.textColor = renderedTextColor(); s.rawTextColor = m_textColor; s.textColorOverrideEnabled = m_textColorOverride;
+    s.highlightEnabled = m_highlightEnabled; s.highlightColor = m_highlightColor;
+    s.outlineWidthPercent = renderedOutlineWidthPercent(); s.rawOutlineWidthPercent = m_outlineWidthPercent;
+    s.outlineWidthOverrideEnabled = m_outlineWidthOverride;
+    s.outlineColor = renderedOutlineColor(); s.rawOutlineColor = m_outlineColor; s.outlineColorOverrideEnabled = m_outlineColorOverride;
+    s.fitToText = m_fitToText; s.horizontalAlignment = m_horizontalAlignment; s.verticalAlignment = m_verticalAlignment;
+    return s;
+}
+SceneTimeline::ElementState CanvasMedia::authorElementState() const
+{
+    return m_authorElementState ? *m_authorElementState : captureElementFields();
+}
+SceneTimeline::ElementState CanvasMedia::displayedElementState() const
+{
+    return m_evaluatedElementState && !m_elementDraft ? *m_evaluatedElementState : captureElementFields();
+}
+void CanvasMedia::applyElementFields(const SceneTimeline::ElementState& s)
+{
+    m_position=s.position; m_scale=s.scale; m_baseSize=s.size/s.scale; m_z=s.z;
+    m_contentVisible=s.visible; m_contentOpacity=s.opacity;
+    m_settings.opacityOverrideEnabled=s.opacityOverrideEnabled;
+    m_settings.opacityText=QString::number(s.rawOpacity*100.0,'g',15);
+    m_muted=s.muted; m_volume=s.volume;
+    m_settings.volumeOverrideEnabled=true; m_settings.volumeText=QString::number(s.volume*100.0,'g',15);
+    m_text=s.text; m_fontFamily=s.fontFamily; m_fontPixelSize=qRound(s.fontPixelSize);
+    m_fontWeight=qRound(s.rawFontWeight); m_fontWeightOverride=s.fontWeightOverrideEnabled;
+    m_italic=s.italic; m_underline=s.underline; m_uppercase=s.uppercase;
+    m_textColor=s.rawTextColor; m_textColorOverride=s.textColorOverrideEnabled;
+    m_highlightEnabled=s.highlightEnabled; m_highlightColor=s.highlightColor;
+    m_outlineWidthPercent=s.rawOutlineWidthPercent; m_outlineWidthOverride=s.outlineWidthOverrideEnabled;
+    m_outlineColor=s.rawOutlineColor; m_outlineColorOverride=s.outlineColorOverrideEnabled;
+    m_fitToText=s.fitToText; m_horizontalAlignment=s.horizontalAlignment; m_verticalAlignment=s.verticalAlignment;
+}
+void CanvasMedia::setElementState(const SceneTimeline::ElementState& state)
+{
+    const auto author=SceneTimeline::materialize(state);
+    if (m_authorElementState) m_authorElementState=author;
+    else applyElementFields(author);
+    const bool wasDraft=m_elementDraft; m_elementDraft=false;
+    emit changed(); if (wasDraft) emit draftChanged();
+}
+void CanvasMedia::setEvaluatedElementState(const SceneTimeline::ElementState& state)
+{
+    if (!m_authorElementState) m_authorElementState=captureElementFields();
+    const bool wasDraft=m_elementDraft;
+    m_evaluatedElementState=state; m_elementDraft=false;
+    applyElementFields(state);
+    emit presentationChanged(); if (wasDraft) emit draftChanged();
+}
+void CanvasMedia::clearEvaluatedElementState()
+{
+    if (!m_authorElementState) return;
+    const auto author=*m_authorElementState; const bool wasDraft=m_elementDraft;
+    m_authorElementState.reset(); m_evaluatedElementState.reset(); m_elementDraft=false;
+    applyElementFields(author);
+    emit presentationChanged(); if (wasDraft) emit draftChanged();
+}
+void CanvasMedia::beginElementEdit()
+{
+    if (!m_authorElementState || m_elementDraft) return;
+    const auto materialized=SceneTimeline::materialize(displayedElementState());
+    m_evaluatedElementState=materialized;
+    applyElementFields(materialized);
+}
+void CanvasMedia::setTimelineTrack(const SceneTimeline::MediaTrack& track)
+{
+    if (m_timelineTrack.toJson()==track.toJson()) return;
+    m_timelineTrack=track;
     emit changed();
+}
+void CanvasMedia::ensureDefaultVideoClip(qint64 maximum)
+{
+    if (!isVideo() || m_timelineTrack.clipsInitialized || !m_player || m_player->duration()<=0) return;
+    auto track=m_timelineTrack;
+    track.clipsInitialized=true;
+    track.clips.append({SceneTimeline::newId(),0,0,qMin(maximum,m_player->duration())});
+    setTimelineTrack(track);
+}
+
+void CanvasMedia::restoreSourceDurationMs(qint64 duration)
+{
+    if (isVideo() && duration >= 0 && duration <= SceneTimeline::MaximumSupportedDurationMs)
+        m_sourceDurationMs = duration;
 }

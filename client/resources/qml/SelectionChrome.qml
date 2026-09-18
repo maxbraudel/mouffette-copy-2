@@ -11,6 +11,7 @@ Item {
 
     property var inputCoordinator: null
     property var selectionModel: []
+    property string primaryMediaId: ""
     property var mediaModel: []
     property var mediaIndexById: ({})
     property Item contentItem: null
@@ -176,7 +177,7 @@ Item {
         var radius = Math.max(handleSize, handleHitboxSize) * 0.5
         for (var entryIndex = selectionModel.length - 1; entryIndex >= 0; --entryIndex) {
             var entry = selectionModel[entryIndex]
-            if (!entry)
+            if (!entry || entry.mediaId !== primaryMediaId)
                 continue
 
             var geom = resolveEntryGeometry(entry)
@@ -432,7 +433,7 @@ Item {
                 Rectangle { x: chrome.width - chrome._bw; y: chrome._bw; width: chrome._bw; height: Math.max(0, chrome.height - 2 * chrome._bw); color: AppStyle.Theme.selectionBorder; antialiasing: false }
 
                 Repeater {
-                    model: root.handleDefs
+                    model: chrome.entry && chrome.entry.mediaId === root.primaryMediaId ? root.handleDefs : []
 
                     delegate: Rectangle {
                         width: root.handleSize / chrome._viewScale

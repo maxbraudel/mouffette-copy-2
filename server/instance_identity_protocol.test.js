@@ -74,10 +74,10 @@ function envelope(ctx, client, type, values = {}) {
     const value = candidate(ctx, keys, 2);
     const { challenge, response } = value;
     assert.equal(challengePayload({ ...challenge, ...response }).toString(),
-        `mouffette-v7\n${challenge.serverBootId}\n${challenge.nonce}\n${response.runtimeId}\ninstance-2\n2`);
+        `mouffette-v8\n${challenge.serverBootId}\n${challenge.nonce}\n${response.runtimeId}\ninstance-2\n2`);
     const verify = response => verifyAuthResponse(challenge, response, ctx.now(), 10000);
     assert.equal(verify(response).ok, true);
-    assert.equal(verify({ ...response, protocolVersion: 6 }).error, 'protocol_version_mismatch');
+    assert.equal(verify({ ...response, protocolVersion: 7 }).error, 'protocol_version_mismatch');
     for (const instanceOrdinal of [undefined, null, false, '2', 0, -1, 1.5,
         2147483648, Number.MAX_SAFE_INTEGER, Infinity, NaN]) {
         assert.equal(verify({ ...response, instanceOrdinal }).error, 'invalid_instance_ordinal');
@@ -273,4 +273,4 @@ function envelope(ctx, client, type, values = {}) {
     assert.notEqual(reboot.server.serverBootId, ctx.server.serverBootId);
 }
 
-console.log('instance identity protocol v7 tests passed');
+console.log('instance identity protocol v8 tests passed');

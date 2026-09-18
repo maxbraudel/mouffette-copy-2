@@ -1,6 +1,7 @@
 #include <QFile>
 #include <QJsonDocument>
 #include <QSignalSpy>
+#include <QScopeGuard>
 #include <QTemporaryDir>
 #include <QtTest>
 
@@ -8,6 +9,8 @@
 #include "backend/domain/project/ProjectStore.h"
 #include "backend/domain/session/IncomingSessionOrphanWatchdog.h"
 #include "backend/domain/workspace/WorkspaceManager.h"
+#include "backend/config/AppConfig.h"
+#include "backend/domain/scene/SceneTimeline.h"
 
 namespace {
 ClientInfo client(const QString& endpointId,
@@ -61,6 +64,40 @@ class ProjectManagerTest final : public QObject {
     Q_OBJECT
 
 private slots:
+    void newProjectPersistsItsTimelineBeforeTheFirstCheckpoint()
+    {
+        QTemporaryDir directory;
+        auto& config=AppConfig::instance();
+        const AppConfig previous=config;
+        const auto restoreConfig=qScopeGuard([&]{config=previous;});
+        AppConfig::LoadOptions options;
+        options.defaultEnvFilePath=directory.filePath(QStringLiteral("timeline.env"));
+        QFile env(options.defaultEnvFilePath);QVERIFY(env.open(QIODevice::WriteOnly));
+        env.close();
+        options.processEnvironment.insert(QStringLiteral("MOUFFETTE_TIMELINE_MAX_DURATION_MS"),QStringLiteral("300000"));
+        QString error;QVERIFY2(config.load(options,&error),qPrintable(error));
+        ProjectStore store(directory.filePath(QStringLiteral("projects.json")));
+        ProjectManager writer(&store);writer.stopAutomaticTimersForTesting();
+        const QString endpoint=QStringLiteral("timeline-project");
+        QVERIFY(!createProject(writer,target(endpoint,QStringLiteral("Timeline")),ProjectLifecycleState::Visible,1000).isEmpty());
+        QList<ProjectRecord> durable;QVERIFY(store.load(&durable));QCOMPARE(durable.size(),1);
+        const auto initial=durable.first().canvasStateForRestore();
+        QCOMPARE(initial.value("renderSchemaVersion").toInt(),SceneTimeline::RenderSchemaVersion);
+        QVERIFY(initial.value("media").isArray());QVERIFY(initial.value("media").toArray().isEmpty());
+        SceneTimeline::SceneSettings settings;
+        QVERIFY(SceneTimeline::SceneSettings::fromJson(initial.value("timeline").toObject(),&settings));
+        QCOMPARE(settings.maxDurationMs,300000);QCOMPARE(settings.stopTimeMs,-1);
+
+        options.processEnvironment.insert(QStringLiteral("MOUFFETTE_TIMELINE_MAX_DURATION_MS"),QStringLiteral("90000"));
+        QVERIFY2(config.load(options,&error),qPrintable(error));
+        ProjectManager reader(&store);reader.stopAutomaticTimersForTesting();
+        reader.setNowProviderForTesting([]{return qint64(1001);});QVERIFY(reader.load());
+        const auto* restored=reader.projectForTarget(endpoint);QVERIFY(restored);
+        QCOMPARE(restored->canvasState.value("timeline").toObject().value("maxDurationMs").toInt(),300000);
+        QVERIFY(!createProject(reader,target(QStringLiteral("new-project"),QStringLiteral("New")),ProjectLifecycleState::Visible,1002).isEmpty());
+        QCOMPARE(reader.projectForTarget(QStringLiteral("new-project"))->canvasState.value("timeline").toObject().value("maxDurationMs").toInt(),90000);
+    }
+
     void unavailableDiscoveryRequiresAnExistingProject_data()
     {
         QTest::addColumn<QString>("status");
@@ -241,7 +278,7 @@ private slots:
         source.sourceIdentity = QStringLiteral("size:mtime");
         source.mediaType = QStringLiteral("image");
         source.pendingImport = true;
-        QJsonObject canvas{{QStringLiteral("renderSchemaVersion"), 2},
+        QJsonObject canvas{{QStringLiteral("renderSchemaVersion"), 3},
             {QStringLiteral("media"), QJsonArray{QJsonObject{
                 {QStringLiteral("mediaId"), source.mediaId}, {QStringLiteral("type"), source.mediaType},
                 {QStringLiteral("fileId"), QString()}, {QStringLiteral("baseWidth"), 640},
@@ -380,11 +417,9 @@ private slots:
         const QJsonObject restoredVideo = project->canvasStateForRestore()
                                               .value(QStringLiteral("media"))
                                               .toArray().first().toObject();
-        QCOMPARE(restoredVideo.value(QStringLiteral("playing")).toBool(), false);
-        QCOMPARE(restoredVideo.value(QStringLiteral("playbackState")).toString(),
-                 QStringLiteral("paused"));
-        QCOMPARE(restoredVideo.value(QStringLiteral("uploadStatus")).toString(),
-                 QStringLiteral("not_uploaded"));
+        QVERIFY(!restoredVideo.contains(QStringLiteral("playing")));
+        QVERIFY(!restoredVideo.contains(QStringLiteral("playbackState")));
+        QVERIFY(!restoredVideo.contains(QStringLiteral("uploadStatus")));
         QCOMPARE(restoredVideo.value(QStringLiteral("startPositionMs")).toInt(), 4210);
     }
 

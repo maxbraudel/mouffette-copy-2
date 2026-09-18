@@ -212,7 +212,7 @@ private slots:
         QTRY_VERIFY_WITH_TIMEOUT(!host->testSceneLaunched(), 4500);
         QVERIFY(pressureDuration.elapsed() >= 1900);
         QCOMPARE(pressureStop.size(), 1);
-        QVERIFY(pressureStop.first().at(0).toString().startsWith(QStringLiteral("canvas-test:")));
+        QVERIFY(pressureStop.first().at(0).toString().startsWith(QStringLiteral("canvas-preview:")));
         QTRY_COMPARE_WITH_TIMEOUT(media->residencyState(), QStringLiteral("waiting_for_memory"), 1500);
         QVERIFY(media->residencyError().contains(QStringLiteral("RAM")));
         QVERIFY(!host->document()->editsLocked());
@@ -546,9 +546,9 @@ private slots:
         QCOMPARE(readyCount, checklist.size());
         QCOMPARE(stopCount, 0);
 
-        // Device snapshots can arrive during PREPARE or playback. The scene
-        // serialization used by periodic state_snapshot messages must retain
-        // the accepted screen definitions AND their normalized media spans.
+        // Device snapshots can arrive during PREPARE or playback. The accepted
+        // immutable scene retains its geometry; periodic snapshots carry only
+        // the common timeline position.
         const auto frozenScene = host->document()->serializeSceneState();
         const auto mediaRect = host->document()->media().first()->sceneRect();
         host->setScreens({});
@@ -563,7 +563,9 @@ private slots:
         QCOMPARE(host->document()->screens(), QList<ScreenInfo>{replacement});
         QCOMPARE(host->document()->media().first()->sceneRect(), mediaRect);
         QTRY_VERIFY_WITH_TIMEOUT(!stateSnapshot.isEmpty(), 2500);
-        const auto transmittedScene = stateSnapshot.value("scene").toObject();
+        QCOMPARE(stateSnapshot.keys(),QStringList{QStringLiteral("timelinePositionMs")});
+        QVERIFY(stateSnapshot.value("timelinePositionMs").toDouble(-1)>=0);
+        const auto transmittedScene = scenePrepare.value("scene").toObject();
         QCOMPARE(transmittedScene.value("screens"), frozenScene.value("screens"));
         QCOMPARE(transmittedScene.value("media").toArray().first().toObject().value("spans"),
                  frozenScene.value("media").toArray().first().toObject().value("spans"));
@@ -1075,8 +1077,10 @@ private slots:
             if (entry.value(QStringLiteral("type")) != QLatin1String("text"))
                 entry.insert(QStringLiteral("assetId"), entry.value(QStringLiteral("fileId")));
             if (entry.value(QStringLiteral("type")) == QLatin1String("video")) {
-                entry.insert(QStringLiteral("startPositionMs"), startMs);
-                entry.remove(QStringLiteral("displayedFrameTimestampMs"));
+                SceneTimeline::MediaTrack track;
+                QVERIFY(SceneTimeline::insertClip(track,{SceneTimeline::newId(),0,startMs,
+                    qRound64(entry.value(QStringLiteral("durationMs")).toDouble())},180000));
+                entry.insert(QStringLiteral("timeline"),track.toJson());
                 QCOMPARE(entry.value(QStringLiteral("spans")).toArray().isEmpty(), offscreen);
             }
             entries.replace(index, entry);
@@ -1190,17 +1194,16 @@ private slots:
         QTRY_VERIFY_WITH_TIMEOUT(media->residencyReady(), 5000);
         media->setContentVisible(true);
         media->setMuted(true);
-        auto settings = media->settings();
-        settings.displayDelayEnabled = true;
-        settings.displayDelayText = QStringLiteral("0.2");
-        settings.hideDelayEnabled = true;
-        settings.hideDelayText = QStringLiteral("0.4");
-        settings.playAutomatically = true;
-        settings.unmuteAutomatically = false;
-        media->setSettings(settings);
+        auto track=media->timelineTrack();
+        auto hidden=media->authorElementState(),shown=hidden;
+        hidden.visible=false; shown.visible=true;
+        SceneTimeline::upsertKeyframe(track,{"hidden",0,hidden},180000);
+        SceneTimeline::upsertKeyframe(track,{"shown",200,shown},180000);
+        SceneTimeline::upsertKeyframe(track,{"hidden-again",600,hidden},180000);
+        media->setTimelineTrack(track);
         bool sceneHidden = false, sceneDisplayed = false, sceneHiddenAgain = false;
         QObject timelineObserver;
-        connect(media, &CanvasMedia::changed, &timelineObserver, [&] {
+        connect(media, &CanvasMedia::presentationChanged, &timelineObserver, [&] {
             if (!media->contentVisible()) {
                 if (sceneDisplayed) sceneHiddenAgain = true;
                 else sceneHidden = true;
@@ -1236,7 +1239,7 @@ private slots:
         host->triggerTestSceneAction();
         QVERIFY(!host->testSceneLaunched());
         QVERIFY(!host->document()->editsLocked());
-        QVERIFY(media->contentVisible()); // Draft restored only on explicit stop.
+        QVERIFY(media->authorElementState().visible); // Playback never overwrites author state.
         if (video) QVERIFY(!media->isPlaying());
 
         host->triggerTestSceneAction();
@@ -1244,39 +1247,25 @@ private slots:
         host->stopScenesForSourceInvalidation();
         QVERIFY(!host->testSceneLaunched());
         QVERIFY(!host->document()->editsLocked());
-        QVERIFY(media->contentVisible());
+        QVERIFY(media->authorElementState().visible);
     }
 
-    void testSceneRestoresImmutableDraftState()
+    void testScenePreservesAuthorAndFreezesAtPause()
     {
         std::unique_ptr<QuickCanvasHost> host(QuickCanvasHost::create());
-        QVERIFY(host);
-        host->setProjectEditingEnabled(true);
-        CanvasMedia* media = host->document()->addText(
-            QPointF(40, 60), QStringLiteral("Scene title"));
-        QVERIFY(media);
-        media->setContentVisible(true);
-        MediaSettingsState settings = media->settings();
-        settings.displayAutomatically = false;
-        settings.displayDelayEnabled = false;
-        media->setSettings(settings);
-        host->document()->select(media->mediaId());
-        host->setOverlayActionsEnabled(true);
-        QVERIFY(host->testSceneActionEnabled());
-
-        host->triggerTestSceneAction();
-        QVERIFY(host->testSceneLaunched());
-        QVERIFY(host->document()->editsLocked());
-        QVERIFY(host->document()->selectedMediaIds().isEmpty());
-        QTRY_VERIFY(!media->contentVisible());
-
-        // Scene playback may mutate runtime state, but stop restores the draft.
-        media->setAnimatedDisplayOpacity(0.35);
-        host->triggerTestSceneAction();
-        QVERIFY(!host->testSceneLaunched());
-        QVERIFY(!host->document()->editsLocked());
-        QVERIFY(media->contentVisible());
-        QCOMPARE(media->animatedDisplayOpacity(), 1.0);
+        QVERIFY(host);host->setProjectEditingEnabled(true);
+        auto* media=host->document()->addText({40,60},"Scene title");
+        auto a=media->authorElementState(),b=a;a.opacity=0;b.opacity=1;
+        SceneTimeline::MediaTrack track;
+        SceneTimeline::upsertKeyframe(track,{"a",0,SceneTimeline::materialize(a)},180000);
+        SceneTimeline::upsertKeyframe(track,{"b",1000,SceneTimeline::materialize(b)},180000);
+        media->setTimelineTrack(track);const auto saved=host->serializeProjectState();
+        host->timelinePlay();QTRY_VERIFY(host->timelinePlaying());
+        QTRY_VERIFY(host->timelinePositionMs()>100);
+        host->timelinePause();QVERIFY(!host->document()->editsLocked());
+        const auto position=host->timelinePositionMs();const auto displayed=media->displayedElementState().toJson();
+        QTest::qWait(80);QCOMPARE(host->timelinePositionMs(),position);QCOMPARE(media->displayedElementState().toJson(),displayed);
+        QCOMPARE(host->serializeProjectState(),saved);
     }
 
     void testSceneAppliesDisplayAndHideFades_data()
@@ -1312,185 +1301,56 @@ private slots:
         }
         QVERIFY(media);
         QTRY_VERIFY_WITH_TIMEOUT(media->residencyReady(), 5000);
-        auto settings = media->settings();
-        settings.playAutomatically = false;
-        settings.unmuteAutomatically = false;
-        settings.displayDelayEnabled = true;
-        settings.displayDelayText = QStringLiteral("0.25");
-        settings.fadeInEnabled = true;
-        settings.fadeInText = QStringLiteral("0.3");
-        settings.hideDelayEnabled = true;
-        settings.hideDelayText = QStringLiteral("0.65");
-        settings.fadeOutEnabled = true;
-        settings.fadeOutText = QStringLiteral("0.25");
-        settings.opacityOverrideEnabled = true;
-        settings.opacityText = QStringLiteral("40");
-        media->setSettings(settings);
-        QElapsedTimer displayedFor;
-        const auto displayConnection = connect(media, &CanvasMedia::changed, this, [&] {
-            if (media->contentVisible() && !displayedFor.isValid()) displayedFor.start();
-        });
-        const auto disconnectDisplay = qScopeGuard([displayConnection] {
-            QObject::disconnect(displayConnection);
-        });
-
-        host->triggerTestSceneAction();
-        QVERIFY(host->testSceneLaunched());
-        QTRY_VERIFY_WITH_TIMEOUT(!media->contentVisible(), 5000);
-        QCOMPARE(media->animatedDisplayOpacity(), 0.0);
-        QTest::qWait(100);
-        QVERIFY(!media->contentVisible());
-        QTRY_VERIFY_WITH_TIMEOUT(media->contentVisible()
-            && media->animatedDisplayOpacity() > 0.05
-            && media->animatedDisplayOpacity() < 0.95, 1000);
-        QCOMPARE(media->contentOpacity(), 0.4);
-        QTRY_COMPARE_WITH_TIMEOUT(media->animatedDisplayOpacity(), 1.0, 1000);
-        QVERIFY(media->contentVisible());
-        QTRY_VERIFY_WITH_TIMEOUT(media->contentVisible()
-            && media->animatedDisplayOpacity() > 0.0
-            && media->animatedDisplayOpacity() < 0.95, 1000);
-        // Hide starts relative to appearance, including the fade-in duration.
-        QVERIFY(displayedFor.elapsed() >= 580);
-        QTRY_VERIFY_WITH_TIMEOUT(!media->contentVisible(), 1000);
-        QCOMPARE(media->animatedDisplayOpacity(), 0.0);
-        QCOMPARE(media->contentOpacity(), 0.4);
-
-        host->triggerTestSceneAction();
-        QVERIFY(media->contentVisible());
-        QCOMPARE(media->animatedDisplayOpacity(), 1.0);
-        QCOMPARE(media->contentOpacity(), 0.4);
+        auto a=media->authorElementState(),b=a,c=a;
+        a.opacity=0;b.opacity=.4;c.opacity=0;
+        SceneTimeline::MediaTrack track=media->timelineTrack();
+        SceneTimeline::upsertKeyframe(track,{"start",0,SceneTimeline::materialize(a)},180000);
+        SceneTimeline::upsertKeyframe(track,{"middle",1000,SceneTimeline::materialize(b)},180000);
+        SceneTimeline::upsertKeyframe(track,{"end",2000,SceneTimeline::materialize(c)},180000);
+        media->setTimelineTrack(track);
+        const auto saved=host->serializeProjectState();
+        host->timelineSeek(250);QVERIFY(qAbs(media->contentOpacity()-.1)<.0001);
+        host->timelineSeek(1500);QVERIFY(qAbs(media->contentOpacity()-.2)<.0001);
+        host->timelineSeek(0);QCOMPARE(media->contentOpacity(),0.0);
+        QCOMPARE(host->serializeProjectState(),saved);
     }
 
-    void testSceneRelaunchCancelsPreviousDisplayTimersAndFades_data()
-    {
-        QTest::addColumn<bool>("stopDuringFade");
-        QTest::newRow("pending-display") << false;
-        QTest::newRow("active-fade") << true;
-    }
 
-    void testSceneRelaunchCancelsPreviousDisplayTimersAndFades()
+
+    void repeatedPreviewUsesOneTimelineClock()
     {
-        QFETCH(bool, stopDuringFade);
         std::unique_ptr<QuickCanvasHost> host(QuickCanvasHost::create());
-        QVERIFY(host);
-        host->setProjectEditingEnabled(true);
-        auto* media = host->document()->addText({}, QStringLiteral("Relaunch"));
-        QVERIFY(media);
-        auto settings = media->settings();
-        settings.displayDelayEnabled = true;
-        settings.displayDelayText = QStringLiteral("0.25");
-        settings.fadeInEnabled = true;
-        settings.fadeInText = QStringLiteral("0.6");
-        settings.hideDelayEnabled = true;
-        settings.hideDelayText = QStringLiteral("0.8");
-        settings.fadeOutEnabled = true;
-        settings.fadeOutText = QStringLiteral("0.4");
-        media->setSettings(settings);
-        host->triggerTestSceneAction();
-        QVERIFY(host->testSceneLaunched());
-        if (stopDuringFade) {
-            QTRY_VERIFY_WITH_TIMEOUT(media->contentVisible()
-                && media->animatedDisplayOpacity() > 0.1
-                && media->animatedDisplayOpacity() < 0.9, 1500);
-        } else {
-            QVERIFY(!media->contentVisible());
+        QVERIFY(host);host->setProjectEditingEnabled(true);
+        auto* media=host->document()->addText({},"Restart");
+        auto a=media->authorElementState(),b=a;a.position={0,0};b.position={100,0};
+        SceneTimeline::MediaTrack track;
+        SceneTimeline::upsertKeyframe(track,{"a",0,a},180000);SceneTimeline::upsertKeyframe(track,{"b",1000,b},180000);
+        media->setTimelineTrack(track);
+        for(int run=0;run<3;++run) {
+            host->timelineSeek(0);host->timelinePlay();QTRY_VERIFY(host->timelinePositionMs()>80);
+            host->timelinePause();const auto t=host->timelinePositionMs();
+            QTest::qWait(100);QCOMPARE(host->timelinePositionMs(),t);
+            QVERIFY(qAbs(media->position().x()-qMin<qreal>(100,t/10.0))<.001);
         }
-        host->triggerTestSceneAction();
-        QVERIFY(!host->testSceneLaunched());
-        QVERIFY(media->contentVisible());
-        QCOMPARE(media->animatedDisplayOpacity(), 1.0);
-
-        settings.displayAutomatically = false;
-        media->setSettings(settings);
-        host->triggerTestSceneAction();
-        QVERIFY(host->testSceneLaunched());
-        QVERIFY(!media->contentVisible());
-        bool appearedUnexpectedly = false;
-        const auto appearanceConnection = connect(media, &CanvasMedia::changed, this, [&] {
-            appearedUnexpectedly |= media->contentVisible() || media->animatedDisplayOpacity() > 0.0;
-        });
-        const auto disconnectAppearance = qScopeGuard([appearanceConnection] {
-            QObject::disconnect(appearanceConnection);
-        });
-        // Pass every deadline of the first scene: its callbacks and animations
-        // must neither expose the new scene nor overwrite the restored draft.
-        QTest::qWait(1600);
-        QVERIFY(!appearedUnexpectedly);
-        QVERIFY(!media->contentVisible());
-        QCOMPARE(media->animatedDisplayOpacity(), 0.0);
-        host->triggerTestSceneAction();
-        QVERIFY(media->contentVisible());
-        QCOMPARE(media->animatedDisplayOpacity(), 1.0);
     }
 
-    void sceneSerializationNormalizesTimingWithoutChangingEditorValues_data()
-    {
-        QTest::addColumn<QString>("rawSeconds");
-        QTest::addColumn<bool>("enabled");
-        QTest::addColumn<int>("signedDelayMs");
-        QTest::addColumn<double>("fadeSeconds");
-        QTest::newRow("negative-end-offset") << QStringLiteral(" -0.25 ") << true << -250 << 0.0;
-        QTest::newRow("positive-delay") << QStringLiteral("0.375") << true << 375 << 0.375;
-        QTest::newRow("disabled-value") << QStringLiteral("4.25") << false << 0 << 0.0;
-        QTest::newRow("invalid-value") << QStringLiteral("invalid") << true << 0 << 0.0;
-        QTest::newRow("non-finite-value") << QStringLiteral("nan") << true << 0 << 0.0;
-        QTest::newRow("positive-cap") << QStringLiteral("100000") << true << 86400000 << 3600.0;
-        QTest::newRow("negative-cap") << QStringLiteral("-100000") << true << -86400000 << 0.0;
-    }
 
-    void sceneSerializationNormalizesTimingWithoutChangingEditorValues()
+
+    void sceneSerializationSeparatesAuthorEvaluationAndUnrecordedDraft()
     {
-        QFETCH(QString, rawSeconds);
-        QFETCH(bool, enabled);
-        QFETCH(int, signedDelayMs);
-        QFETCH(double, fadeSeconds);
-        CanvasDocument document;
-        const QString override = qEnvironmentVariable("MOUFFETTE_TEST_VIDEO_FILE");
-        const QString fixture = override.isEmpty() ? QString::fromUtf8(TEST_VIDEO_FILE) : override;
-        auto* video = document.addPreparedFile(fixture, QSize(160, 90), true, {});
-        QVERIFY(video);
-        auto settings = video->settings();
-        settings.displayDelayEnabled = enabled;
-        settings.playDelayEnabled = enabled;
-        settings.pauseDelayEnabled = enabled;
-        settings.unmuteDelayEnabled = enabled;
-        settings.hideDelayEnabled = enabled;
-        settings.muteDelayEnabled = enabled;
-        settings.hideWhenVideoEnds = true;
-        settings.muteWhenVideoEnds = true;
-        settings.fadeInEnabled = enabled;
-        settings.fadeOutEnabled = enabled;
-        settings.audioFadeInEnabled = enabled;
-        settings.audioFadeOutEnabled = enabled;
-        settings.displayDelayText = rawSeconds;
-        settings.playDelayText = rawSeconds;
-        settings.pauseDelayText = rawSeconds;
-        settings.unmuteDelayText = rawSeconds;
-        settings.hideDelayText = rawSeconds;
-        settings.muteDelayText = rawSeconds;
-        settings.fadeInText = rawSeconds;
-        settings.fadeOutText = rawSeconds;
-        settings.audioFadeInText = rawSeconds;
-        settings.audioFadeOutText = rawSeconds;
-        video->setSettings(settings);
-        const QJsonObject scene = document.serializeSceneState()
-            .value(QStringLiteral("media")).toArray().first().toObject();
-        QCOMPARE(scene.value(QStringLiteral("autoHideDelayMs")).toInt(), signedDelayMs);
-        QCOMPARE(scene.value(QStringLiteral("autoMuteDelayMs")).toInt(), signedDelayMs);
-        for (const char* key : {"autoDisplayDelayMs", "autoPlayDelayMs",
-                                "autoPauseDelayMs", "autoUnmuteDelayMs"}) {
-            QCOMPARE(scene.value(QLatin1String(key)).toInt(), qMax(0, signedDelayMs));
-        }
-        for (const char* key : {"fadeInSeconds", "fadeOutSeconds",
-                                "audioFadeInSeconds", "audioFadeOutSeconds"}) {
-            QCOMPARE(scene.value(QLatin1String(key)).toDouble(), fadeSeconds);
-        }
-        const QJsonObject saved = MediaSettingsSerialization::toProjectJson(video->settings());
-        for (const char* key : {"displayDelayText", "playDelayText", "pauseDelayText",
-                                "unmuteDelayText", "hideDelayText", "muteDelayText",
-                                "fadeInText", "fadeOutText", "audioFadeInText", "audioFadeOutText"}) {
-            QCOMPARE(saved.value(QLatin1String(key)).toString(), rawSeconds);
-        }
+        CanvasDocument document;auto* media=document.addText({},"Persistent");
+        auto a=media->authorElementState(),b=a;b.position={700,100};b.uppercase=true;
+        SceneTimeline::MediaTrack track;
+        SceneTimeline::upsertKeyframe(track,{"a",123,a},180000);SceneTimeline::upsertKeyframe(track,{"b",1123,b},180000);
+        media->setTimelineTrack(track);const auto saved=document.serializeProjectState();
+        QSignalSpy writes(&document,&CanvasDocument::documentChanged);
+        document.setTimelinePosition(623);QCOMPARE(media->position(),(a.position+b.position)/2);
+        media->beginElementEdit();media->setUppercase(true);QVERIFY(media->hasElementDraft());
+        QCOMPARE(document.serializeProjectState(),saved);QCOMPARE(writes.count(),0);
+        document.setTimelinePosition(623);QVERIFY(!media->hasElementDraft());QVERIFY(!media->uppercase());
+        QCOMPARE(document.serializeSceneState().value("renderSchemaVersion").toInt(),3);
+        const auto serialized=document.serializeSceneState().value("media").toArray()[0].toObject();
+        QVERIFY(!serialized.contains("autoDisplay"));QVERIFY(!serialized.contains("projectMediaSettings"));
     }
 
     void projectRoundTripPreservesTypedSettingsGeometryAndText()
@@ -1510,10 +1370,6 @@ private slots:
         text->setItalic(true);
         text->setUppercase(true);
         MediaSettingsState settings = text->settings();
-        settings.displayDelayEnabled = true;
-        settings.displayDelayText = QStringLiteral("1.375");
-        settings.fadeInEnabled = true;
-        settings.fadeInText = QStringLiteral("0.45");
         settings.opacityOverrideEnabled = true;
         settings.opacityText = QStringLiteral("72.5");
         text->setSettings(settings);
@@ -1535,8 +1391,6 @@ private slots:
         QCOMPARE(copy->position(), expectedPosition);
         QCOMPARE(copy->baseSize(), expectedBaseSize);
         QCOMPARE(copy->scale(), 1.25);
-        QCOMPARE(copy->settings().displayDelayText, QStringLiteral("1.375"));
-        QCOMPARE(copy->settings().fadeInText, QStringLiteral("0.45"));
         QCOMPARE(copy->settings().opacityText, QStringLiteral("72.5"));
         QVERIFY(copy->textColorOverrideEnabled());
         QVERIFY(copy->outlineWidthOverrideEnabled());
@@ -1592,16 +1446,15 @@ private slots:
         QCOMPARE(serializedText.value(
                      QStringLiteral("textBorderWidthPercent")).toDouble(),
                  0.0);
-        const QJsonObject rawTextSettings = serializedText.value(
-            QStringLiteral("projectTextSettings")).toObject();
-        QCOMPARE(rawTextSettings.value(QStringLiteral("fontWeight")).toInt(), 900);
+        const QJsonObject rawTextSettings = serializedText;
+        QCOMPARE(rawTextSettings.value(QStringLiteral("rawFontWeight")).toInt(), 900);
         QCOMPARE(rawTextSettings.value(
-                     QStringLiteral("textBorderWidthPercent")).toDouble(),
+                     QStringLiteral("rawOutlineWidthPercent")).toDouble(),
                  100.0);
         QVERIFY(!rawTextSettings.value(
                      QStringLiteral("fontWeightOverrideEnabled")).toBool(true));
         QVERIFY(!rawTextSettings.value(
-                     QStringLiteral("textBorderWidthOverrideEnabled")).toBool(true));
+                     QStringLiteral("outlineWidthOverrideEnabled")).toBool(true));
 
         std::unique_ptr<QuickCanvasHost> restored(QuickCanvasHost::create());
         QVERIFY(restored);

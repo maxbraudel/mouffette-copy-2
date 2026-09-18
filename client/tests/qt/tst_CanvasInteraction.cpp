@@ -33,6 +33,8 @@ public:
     QQuickItem* root = nullptr;
     QVariantList media;
     QStringList selected;
+    QStringList selectionHistory;
+    QString primarySelection;
     int commitCount = 0;
     int selectionRequestCount = 0;
     int textCreateCount = 0;
@@ -111,7 +113,7 @@ public:
         media.append(QVariantMap {{"rowKey", id}, {"mediaId", id}, {"mediaType", type},
             {"x", x}, {"y", y}, {"width", 280}, {"height", 170}, {"scale", 1.0}, {"z", 1},
             {"contentVisible", true}, {"contentOpacity", 1.0},
-            {"animatedDisplayOpacity", 1.0}, {"displayName", id},
+            {"displayName", id},
             {"sourceUrl", ""}, {"residencyReady", true},
             {"textContent", "Canvas text"}, {"textFontPixelSize", 40},
             {"textFontFamily", "Impact"}, {"textFontWeight", 400},
@@ -143,6 +145,7 @@ public:
             const qreal scale = entry.value("scale", 1.0).toReal();
             chrome.append(QVariantMap {
                 {"mediaId", entry.value("mediaId")},
+                {"isPrimary", entry.value("mediaId").toString() == primarySelection},
                 {"x", entry.value("x")}, {"y", entry.value("y")},
                 {"width", entry.value("width").toReal() * scale},
                 {"height", entry.value("height").toReal() * scale}});
@@ -173,6 +176,8 @@ public:
     void remove(const QString& id)
     {
         selected.removeAll(id);
+        selectionHistory.removeAll(id);
+        if (primarySelection == id) primarySelection = selectionHistory.isEmpty() ? QString() : selectionHistory.last();
         for (qsizetype i = media.size(); i > 0; --i) {
             if (media.at(i - 1).toMap().value("mediaId") == id) media.removeAt(i - 1);
         }
@@ -239,11 +244,12 @@ public slots:
     void select(const QString& id, bool additive)
     {
         ++selectionRequestCount;
-        if (!additive) selected.clear();
+        if (!additive && !selected.contains(id)) { selected.clear(); selectionHistory.clear(); }
         if (!selected.contains(id)) selected.append(id);
+        selectionHistory.removeAll(id); selectionHistory.append(id); primarySelection = id;
         publishSelection();
     }
-    void clear() { ++clearRequestCount; selected.clear(); publishSelection(); }
+    void clear() { ++clearRequestCount; selected.clear(); selectionHistory.clear(); primarySelection.clear(); publishSelection(); }
     void liveText(const QString& id, const QString& text)
     {
         bool found = false;
@@ -1015,6 +1021,33 @@ private slots:
         }
     }
 
+    void onlyPrimarySelectionHasResizeHandlesAndActions()
+    {
+        CanvasFixture scene;
+        QVERIFY2(scene.initialize(), qPrintable(scene.error));
+        scene.add("a", "text", 100, 150);
+        scene.change("a", {{"width", 160.0}});
+        scene.add("b", "text", 350, 150);
+        scene.change("b", {{"width", 160.0}});
+        scene.select("a", false);
+        scene.select("b", true);
+        QCOMPARE(scene.root->property("primarySelectedMediaId").toString(), QString("b"));
+        QTest::mouseMove(&scene.window, {260, 320});
+        QTRY_COMPARE(scene.window.cursor().shape(), Qt::ArrowCursor);
+        QTest::mouseMove(&scene.window, {510, 320});
+        QTRY_COMPARE(scene.window.cursor().shape(), Qt::SizeFDiagCursor);
+        scene.click({180, 230});
+        QCOMPARE(scene.selected, (QStringList {"a", "b"}));
+        QCOMPARE(scene.primarySelection, QString("a"));
+        QTest::mouseMove(&scene.window, {510, 320});
+        QTRY_COMPARE(scene.window.cursor().shape(), Qt::ArrowCursor);
+        QTest::mouseMove(&scene.window, {260, 320});
+        QTRY_COMPARE(scene.window.cursor().shape(), Qt::SizeFDiagCursor);
+        scene.remove("a");
+        QCOMPARE(scene.primarySelection, QString("b"));
+        QCOMPARE(scene.root->property("primarySelectedMediaId").toString(), QString("b"));
+    }
+
     void doubleClickOnResizeHandleDoesNotEnterEditing()
     {
         CanvasFixture scene;
@@ -1747,7 +1780,8 @@ private slots:
         scene.doubleClick({690, 230});
         QVERIFY(b->property("editing").toBool());
         QVERIFY(!a->property("editing").toBool());
-        QCOMPARE(scene.selected, QStringList {"b"});
+        QCOMPARE(scene.selected, (QStringList {"a", "b"}));
+        QCOMPARE(scene.primarySelection, QString("b"));
         scene.clear();
         QVERIFY(!scene.root->property("anyMediaEditing").toBool());
     }

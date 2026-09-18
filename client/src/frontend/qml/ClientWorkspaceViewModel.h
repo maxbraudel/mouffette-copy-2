@@ -8,6 +8,7 @@
 class ICanvasHost;
 class MediaListModel;
 class MediaSettingsViewModel;
+class TimelineController;
 class UploadManager;
 class WorkspaceMediaListModel;
 
@@ -18,6 +19,7 @@ class ClientWorkspaceViewModel : public QObject
     Q_PROPERTY(QObject* mediaModel READ mediaModel NOTIFY mediaModelChanged)
     Q_PROPERTY(int mediaCount READ mediaCount NOTIFY mediaCountChanged)
     Q_PROPERTY(QObject* mediaSettings READ mediaSettings CONSTANT)
+    Q_PROPERTY(QObject* timeline READ timeline CONSTANT)
     Q_PROPERTY(QObject* canvasController READ canvasController NOTIFY mediaModelChanged)
     Q_PROPERTY(bool loading READ loading NOTIFY loadingChanged)
     Q_PROPERTY(bool hasScreens READ hasScreens NOTIFY actionStateChanged)
@@ -83,6 +85,7 @@ public:
     QObject* mediaModel() const;
     int mediaCount() const;
     QObject* mediaSettings() const;
+    QObject* timeline() const;
     QObject* canvasController() const;
     bool loading() const { return m_loading; }
     bool hasScreens() const;
@@ -167,6 +170,7 @@ private:
     bool m_actionPending = false;
     bool m_settingsVisible = false;
     MediaSettingsViewModel* m_mediaSettings = nullptr;
+    TimelineController* m_timeline = nullptr;
     WorkspaceMediaListModel* m_overlayMediaModel = nullptr;
     int m_uploadPercent = 0;
     int m_uploadFilesCompleted = 0;

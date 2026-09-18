@@ -11,6 +11,8 @@
 #include <QImage>
 #include <QPointer>
 #include <QVariantList>
+#include <QElapsedTimer>
+#include "backend/domain/scene/SceneTimeline.h"
 #include <memory>
 
 #include "backend/network/RemoteCacheStore.h"
@@ -22,7 +24,6 @@ class ResidentVideoPlayer;
 class QVideoSink;
 class QAudioOutput;
 class QQuickWindow;
-class QVariantAnimation;
 class MediaListModel;
 class RemoteVideoFrameSource;
 
@@ -62,11 +63,6 @@ private slots:
 	                          const QString& sceneInstanceId,
 	                          qint64 activationEpochMs,
 	                          int activationDelayMs);
-	void onRemoteSceneVideoSync(const QString& senderClientId,
-	                            const QString& sceneInstanceId,
-	                            qint64 sequence,
-	                            qint64 sampledEpochMs,
-	                            const QJsonArray& videos);
 	void onRemoteSceneStop(const QString& senderClientId,
 	                      const QString& sceneInstanceId);
 	void onConnectionLost();
@@ -97,6 +93,13 @@ private:
 		quint64 sceneEpoch = 0;
 	};
 	struct RemoteMediaItem {
+		SceneTimeline::ElementState baseState;
+		SceneTimeline::MediaTrack timeline;
+		QString timelineClipId;
+		qint64 timelineSeekGuardUntilMs = 0;
+		qint64 timelineRequestedSourceMs = 0;
+		bool timelineVideoPlaying = false;
+		bool timelinePixelsVisible = false;
 		QString mediaId;
 		QString fileId;
 		QString fileName;
@@ -108,8 +111,8 @@ private:
 		bool fontItalic = false;
 		bool fontUnderline = false;
 		bool fontUppercase = false;
-		int fontWeight = 400;
-		int fontPixelSize = 1;
+		qreal fontWeight = 400;
+		qreal fontPixelSize = 1;
 		QString textColor;
 		double textOutlineWidthPx = 0.0;
 		QString textBorderColor;
@@ -133,69 +136,24 @@ private:
 			double destNx = 0, destNy = 0, destNw = 0, destNh = 0;
 			double srcNx = 0, srcNy = 0, srcNw = 1, srcNh = 1;
 			QString spanId;
+			qsizetype modelRow = -1;
 			bool qmlReady = false;
 		};
 		QList<Span> spans;
-		bool autoDisplay=false; int autoDisplayDelayMs=0;
-		bool autoPlay=false; int autoPlayDelayMs=0;
-		bool autoPause=false; int autoPauseDelayMs=0;
-		bool autoHide=false; int autoHideDelayMs=0;
-		bool hideWhenVideoEnds=false;
-	bool autoMute=false; int autoMuteDelayMs=0;
-	bool muteWhenVideoEnds=false;
-		double fadeInSeconds=0.0; double fadeOutSeconds=0.0; double contentOpacity = 1.0;
-		// Audio state from host (videos)
-		bool muted = false; double volume = 1.0; // 0..1
-		bool autoUnmute = false; int autoUnmuteDelayMs = 0;
-		double audioFadeInSeconds = 0.0; double audioFadeOutSeconds = 0.0;
-		QPointer<QVariantAnimation> audioFadeAnimation;
-		QPointer<QVariantAnimation> visualFadeAnimation;
-		bool continuousLoop = false;
-		bool repeatEnabled = false; int repeatCount = 0; int repeatRemaining = 0; bool repeatActive = false;
-		qint64 lastRepeatTriggerMs = 0;
-		qint64 authoritativeSeekGuardUntilMs = 0;
-		bool primedFirstFrame = false; bool playAuthorized = false;
-		bool displayReady = false; bool displayStarted = false;
-		bool hiding = false;
-		bool pausedAtEnd = false;
-		bool loaded = false; // true once the complete resident asset is attached
-		bool readyNotified = false; // true after controller counts this media as ready
-		bool fadeInPending = false; // true when fade requested before global activation
-		qint64 startPositionMs = 0; bool hasStartPosition = false;
-        qint64 endPositionMs = -1;
-		qint64 displayTimestampMs = -1; bool hasDisplayTimestamp = false;
-		bool awaitingStartFrame = false;
-		QVideoFrame primedFrame;
-		bool awaitingDecoderSync = false;
-		qint64 decoderSyncTargetMs = -1;
-		bool awaitingLivePlayback = false;
-		bool livePlaybackStarted = false;
-		int liveWarmupFramesRemaining = 0;
-		qint64 lastLiveFrameTimestampMs = -1;
-		QTimer* displayTimer = nullptr; QTimer* playTimer = nullptr; QTimer* pauseTimer = nullptr; QTimer* hideTimer = nullptr;
-		// Video only
-		ResidentVideoPlayer* player = nullptr; QAudioOutput* audio = nullptr;
-		QMetaObject::Connection deferredStartConn; // one-shot start after load
-		QMetaObject::Connection primingConn; // one-shot first-frame priming when autoPlay=false
-		QMetaObject::Connection mirrorConn; // multi-span frame mirroring
-		quint64 sceneEpoch = 0; // generation token to guard delayed actions
-		int pendingDisplayDelayMs = -1;
-		int pendingPlayDelayMs = -1;
-		int pendingPauseDelayMs = -1;
-		QVideoSink* primingSink = nullptr;
-		QVideoSink* liveSink = nullptr;
-		bool videoOutputsAttached = false;
-		bool primedFrameSticky = false;
-		QTimer* muteTimer = nullptr;
-		QTimer* hideEndDelayTimer = nullptr;
-		QTimer* muteEndDelayTimer = nullptr;
-		// Explicitly-owned retry/automation timers. Avoid untrackable
-		// QTimer::singleShot functors surviving a RemoteSession teardown.
-		QList<QPointer<QTimer>> auxiliaryTimers;
-		bool hideEndTriggered = false;
-		bool muteEndTriggered = false;
-		bool holdLastFrameAtEnd = false;
-		QImage lastFrameImage;
+        double contentOpacity = 1.0;
+        bool muted = false;
+        double volume = 1.0;
+        bool primedFirstFrame = false;
+        bool loaded = false;
+        bool readyNotified = false;
+        QVideoFrame primedFrame;
+        ResidentVideoPlayer* player = nullptr;
+        QAudioOutput* audio = nullptr;
+        QMetaObject::Connection mirrorConn;
+        quint64 sceneEpoch = 0;
+        QVideoSink* liveSink = nullptr;
+        bool videoOutputsAttached = false;
+        QImage lastFrameImage;
 		QPointer<RemoteVideoFrameSource> frameSource;
 	};
 
@@ -214,13 +172,6 @@ private:
 	void updateScreenGeometry(int screenId, QScreen* screen, const QRect& geometry);
 	void buildMedia(const QJsonArray& mediaArray);
 	void scheduleMedia(const std::shared_ptr<RemoteMediaItem>& item);
-	void scheduleMediaMulti(const std::shared_ptr<RemoteMediaItem>& item);
-	void fadeIn(const std::shared_ptr<RemoteMediaItem>& item);
-	void fadeOutAndHide(const std::shared_ptr<RemoteMediaItem>& item);
-	void scheduleHideTimer(const std::shared_ptr<RemoteMediaItem>& item);
-	void scheduleMuteTimer(const std::shared_ptr<RemoteMediaItem>& item);
-	void cancelAudioFade(const std::shared_ptr<RemoteMediaItem>& item, bool applyFinalState);
-	void applyAudioMuteState(const std::shared_ptr<RemoteMediaItem>& item, bool muted, bool skipFade = false);
 	void clearScene();
 	void dispatchDeferredSceneStart();
 	void teardownMediaItem(const std::shared_ptr<RemoteMediaItem>& item);
@@ -233,26 +184,12 @@ private:
     void evaluateItemReadiness(const std::shared_ptr<RemoteMediaItem>& item);
     void startSceneActivationIfReady();
     void activateScene();
-    void startDeferredTimers();
     void handleSceneReadyTimeout();
     void resetSceneSynchronization();
-    void seekToConfiguredStart(const std::shared_ptr<RemoteMediaItem>& item);
-    qint64 effectiveEndPosition(const std::shared_ptr<RemoteMediaItem>& item) const;
-    qint64 effectiveStartPosition(const std::shared_ptr<RemoteMediaItem>& item) const;
-	void startPendingPauseTimerIfEligible(const std::shared_ptr<RemoteMediaItem>& item);
-	void triggerAutoPlayNow(const std::shared_ptr<RemoteMediaItem>& item, quint64 epoch);
-	void applyPrimedFrameToSinks(const std::shared_ptr<RemoteMediaItem>& item);
-	bool autoDisplayDelayActive(const std::shared_ptr<RemoteMediaItem>& item) const;
-	void clearRenderedFrames(const std::shared_ptr<RemoteMediaItem>& item);
 	void ensureVideoOutputsAttached(const std::shared_ptr<RemoteMediaItem>& item);
-	void finalizeLivePlaybackStart(const std::shared_ptr<RemoteMediaItem>& item, const QVideoFrame& frame);
-    qint64 targetDisplayTimestamp(const std::shared_ptr<RemoteMediaItem>& item) const;
-	void freezeVideoOutput(const std::shared_ptr<RemoteMediaItem>& item);
-	void restoreVideoOutput(const std::shared_ptr<RemoteMediaItem>& item);
 	void applyImageToSpans(const std::shared_ptr<RemoteMediaItem>& item, const QImage& image) const;
 	void publishScreenModel(int screenId);
 	void publishMediaSpan(const std::shared_ptr<RemoteMediaItem>& item, RemoteMediaItem::Span& span);
-	void setRemoteMediaVisualState(const std::shared_ptr<RemoteMediaItem>& item, qreal opacity, bool visible);
 	bool allSpansReady(const std::shared_ptr<RemoteMediaItem>& item) const;
 	bool matchesSceneEnvelope(const QJsonObject& envelope) const;
 	void sendPrepareResult(bool success, const QString& message = QString());
@@ -260,6 +197,10 @@ private:
 	void sendFirstFramePresented(bool forceReplay = false);
 	void disconnectFirstFrameObservers();
 	void updatePrepareProgress();
+	void advanceTimeline();
+	void evaluateTimelineAt(qint64 positionMs, bool playing);
+	void updateTimelineGeometry(const std::shared_ptr<RemoteMediaItem>& item,
+	                            const SceneTimeline::ElementState& state);
 	QString receivedFilePath(const QString& fileId) const;
 	RemoteCacheStore::Scope receivedFileScope() const;
 
@@ -315,4 +256,13 @@ private:
 	QString m_teardownGraphRemoteSessionId;
 	bool m_sceneStartInProgress = false;
 	PendingSceneRequest m_deferredSceneStart;
+	SceneTimeline::SceneSettings m_timelineSettings;
+	QTimer m_timelineTimer;
+	QElapsedTimer m_timelineClock;
+	qint64 m_timelineStartServerMs = -1;
+	qint64 m_timelineAnchorMs = 0;
+	qint64 m_timelinePositionMs = 0;
+	bool m_timelineFinished = false;
+	bool m_batchTimelinePublishing = false;
+	QSet<int> m_dirtyTimelineScreens;
 };

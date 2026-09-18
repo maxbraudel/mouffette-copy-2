@@ -35,6 +35,7 @@ class AppConfigTest final : public QObject {
 
 private slots:
     void loadsEmbeddedDefaults();
+    void configuresTimeline();
     void appAlwaysOnTopIsOptionalAndPersistent();
     void configuresMediaRamReserve();
     void configuresProjectMediaHiddenTimeout();
@@ -51,6 +52,33 @@ private slots:
     void validatesIncomingSessionOrphanTimeoutFromCli();
     void warnsAndIgnoresUnknownNamespacedEnvKey();
 };
+
+void AppConfigTest::configuresTimeline() {
+    QTemporaryDir directory;
+    const QString path = writeEnvFile(directory, QStringLiteral("timeline.env"),
+        "MOUFFETTE_TIMELINE_MAX_DURATION_MS=240000\n"
+        "MOUFFETTE_TIMELINE_OTHER_KEYFRAME_OPACITY_PERCENT=45\n"
+        "MOUFFETTE_TIMELINE_SNAP_DISTANCE_PX=0\n");
+    QVERIFY(!path.isEmpty());
+    auto options = isolatedOptions(path);
+    AppConfig config;
+    QString error;
+    QVERIFY2(config.load(options, &error), qPrintable(error));
+    QCOMPARE(config.timelineMaxDurationMs(), 240000);
+    QCOMPARE(config.timelineOtherKeyframeOpacityPercent(), 45);
+    QCOMPARE(config.timelineSnapDistancePx(), 0);
+    QCOMPARE(config.timelineHeightPx(), 240);
+    QCOMPARE(config.timelineRulerHeightPx(), 28);
+    QCOMPARE(config.timelineClipTrackHeightPx(), 64);
+    QCOMPARE(config.timelineKeyframeSizePx(), 10);
+    QCOMPARE(config.timelineInitialViewDurationMs(), 15000);
+    options.processEnvironment.insert(QStringLiteral("MOUFFETTE_TIMELINE_OTHER_KEYFRAME_OPACITY_PERCENT"), QStringLiteral("101"));
+    QVERIFY(!config.load(options, &error));
+    QVERIFY(error.contains(QStringLiteral("MOUFFETTE_TIMELINE_OTHER_KEYFRAME_OPACITY_PERCENT")));
+    options.processEnvironment.remove(QStringLiteral("MOUFFETTE_TIMELINE_OTHER_KEYFRAME_OPACITY_PERCENT"));
+    options.processEnvironment.insert(QStringLiteral("MOUFFETTE_TIMELINE_MAX_DURATION_MS"), QStringLiteral("0"));
+    QVERIFY(!config.load(options, &error));
+}
 
 void AppConfigTest::appAlwaysOnTopIsOptionalAndPersistent() {
     AppConfig config;

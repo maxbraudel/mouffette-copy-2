@@ -26,16 +26,8 @@ Rectangle {
     signal overlayBringForwardRequested(string mediaId)
     signal overlayBringBackwardRequested(string mediaId)
     signal overlayDeleteRequested(string mediaId)
-    signal overlayPlayPauseRequested(string mediaId)
-    signal overlayStopRequested(string mediaId)
-    signal overlayRepeatToggleRequested(string mediaId)
     signal overlayMuteToggleRequested(string mediaId)
     signal overlayVolumeChangeRequested(string mediaId, real value)
-    // Three-phase seek protocol. C++ coalesces frequent updates and releases
-    // the scrub session only when the final native frame is acknowledged.
-    signal overlaySeekBeginRequested(string mediaId, real ratio)
-    signal overlaySeekUpdateRequested(string mediaId, real ratio)
-    signal overlaySeekEndRequested(string mediaId, real ratio)
     signal overlayFitToTextToggleRequested(string mediaId)
     signal overlayHorizontalAlignRequested(string mediaId, string alignment)
     signal overlayVerticalAlignRequested(string mediaId, string alignment)
@@ -46,6 +38,12 @@ Rectangle {
     readonly property bool editingEnabled: canvasController ? canvasController.editingEnabled : true
     readonly property var selectionChrome: selectionLayerLoader.item
                                            ? selectionLayerLoader.item.chromeItem : null
+    readonly property string primarySelectedMediaId: {
+        if (canvasController) return canvasController.primarySelectedMediaId
+        for (var i = 0; i < selectionChromeModel.length; ++i)
+            if (selectionChromeModel[i].isPrimary) return selectionChromeModel[i].mediaId
+        return ""
+    }
     readonly property var liveTransforms: canvasController ? canvasController.liveTransforms : ({})
     readonly property var hostingWindow: root.Window.window
     property bool remoteActive: canvasController
@@ -163,9 +161,8 @@ Rectangle {
                                                   && !!canvasController && !anyMediaEditing
                                                   && shortcutScopeFocused && !textInputFocused
                                                   && interactionMode === "idle"
-    readonly property string selectedVideoId: selectionChromeModel.length === 1
-        && videoStateModel[selectionChromeModel[0].mediaId] !== undefined
-        ? selectionChromeModel[0].mediaId : ""
+    readonly property string selectedVideoId: primarySelectedMediaId !== ""
+        && videoStateModel[primarySelectedMediaId] !== undefined ? primarySelectedMediaId : ""
 
     component CanvasShortcut: Shortcut {
         property bool applicable: true
@@ -189,24 +186,9 @@ Rectangle {
         onActivated: root.canvasController.deleteSelectedMedia()
     }
     CanvasShortcut {
-        sequence: "Space"
-        applicable: root.selectedVideoId !== ""
-        onActivated: root.canvasController.handleOverlayPlayPause(root.selectedVideoId)
-    }
-    CanvasShortcut {
         sequence: "M"
         applicable: root.selectedVideoId !== ""
         onActivated: root.canvasController.handleOverlayMuteToggle(root.selectedVideoId)
-    }
-    CanvasShortcut {
-        sequence: "S"
-        applicable: root.selectedVideoId !== ""
-        onActivated: root.canvasController.handleVideoStartToggle(root.selectedVideoId)
-    }
-    CanvasShortcut {
-        sequence: "E"
-        applicable: root.selectedVideoId !== ""
-        onActivated: root.canvasController.handleVideoEndToggle(root.selectedVideoId)
     }
 
     function synchronizeTransientState() {
@@ -275,8 +257,8 @@ Rectangle {
     function requestTextEditing(mediaId, selectAll, additive, sceneX, sceneY) {
         if (!root.editingEnabled || !mediaId)
             return
-        // Creation has already selected the new media in the document. A
-        // double-click explicitly replaces selection unless Shift is held.
+        // Creation already selected the new media. Double-click promotes an
+        // existing selection; Shift adds a previously unselected media.
         if (!selectAll)
             root.mediaSelectRequested(mediaId, !!additive)
         var controller = root.canvasController
@@ -372,14 +354,8 @@ Rectangle {
     onOverlayBringForwardRequested: mediaId => canvasController?.handleOverlayBringForward(mediaId)
     onOverlayBringBackwardRequested: mediaId => canvasController?.handleOverlayBringBackward(mediaId)
     onOverlayDeleteRequested: mediaId => canvasController?.handleOverlayDelete(mediaId)
-    onOverlayPlayPauseRequested: mediaId => canvasController?.handleOverlayPlayPause(mediaId)
-    onOverlayStopRequested: mediaId => canvasController?.handleOverlayStop(mediaId)
-    onOverlayRepeatToggleRequested: mediaId => canvasController?.handleOverlayRepeatToggle(mediaId)
     onOverlayMuteToggleRequested: mediaId => canvasController?.handleOverlayMuteToggle(mediaId)
     onOverlayVolumeChangeRequested: (mediaId, value) => canvasController?.handleOverlayVolumeChange(mediaId, value)
-    onOverlaySeekBeginRequested: (mediaId, ratio) => canvasController?.handleOverlaySeekBegin(mediaId, ratio)
-    onOverlaySeekUpdateRequested: (mediaId, ratio) => canvasController?.handleOverlaySeekUpdate(mediaId, ratio)
-    onOverlaySeekEndRequested: (mediaId, ratio) => canvasController?.handleOverlaySeekEnd(mediaId, ratio)
     onOverlayFitToTextToggleRequested: mediaId => canvasController?.handleOverlayFitToTextToggle(mediaId)
     onOverlayHorizontalAlignRequested: (mediaId, alignment) => canvasController?.handleOverlayHorizontalAlign(mediaId, alignment)
     onOverlayVerticalAlignRequested: (mediaId, alignment) => canvasController?.handleOverlayVerticalAlign(mediaId, alignment)
@@ -438,9 +414,9 @@ Rectangle {
     function requestMediaSelection(mediaId, additive) {
         if (!editingEnabled || !mediaId || mediaId.length === 0)
             return
-        // Pressing an existing selection begins a group gesture. Explicit
-        // selection commands (inspector/list) retain their replace semantics.
-        if (textEditSession.isSelected(mediaId))
+        // Secondary selection bodies stay selectable so a press promotes the
+        // media before beginning its individual transform gesture.
+        if (mediaId === root.primarySelectedMediaId)
             return
         root.mediaSelectRequested(mediaId, !!additive)
     }
@@ -1024,7 +1000,7 @@ Rectangle {
                     transformOrigin: Item.TopLeft
                     z: media ? media.z : 0
                     visible: !!media && media.contentVisible
-                    opacity: media ? media.contentOpacity * media.animatedDisplayOpacity : 1.0
+                    opacity: media ? media.contentOpacity : 1.0
                     // Opacity alone does not disable Qt input. Match the picker
                     // for the whole subtree, including TextEdit and MouseArea,
                     // so invisible content cannot swallow another item's press.
@@ -1129,6 +1105,7 @@ Rectangle {
                     inputCoordinator: inputLayer ? inputLayer.inputCoordinator : null
                     mediaModel: root.mediaModel
                     selectionModel: root.selectionChromeModel
+                    primaryMediaId: root.primarySelectedMediaId
                     // Live drag offset: chrome visually follows the moving item without model repush
                     draggedMediaId: root.liveDragMediaId
                     dragOffsetViewX: root.liveDragViewOffsetX
@@ -1736,6 +1713,7 @@ Rectangle {
                     // selectionChromeModel entry — has baked width/height
                     readonly property var chromeEntry: modelData
                     readonly property string mid: chromeEntry ? (chromeEntry.mediaId || "") : ""
+                    readonly property bool isPrimary: mid === root.primarySelectedMediaId
                     readonly property var liveTransform: root.liveTransforms[mid] || null
 
                     // Look up the matching mediaModel entry for metadata
@@ -1823,7 +1801,7 @@ Rectangle {
                         id: topOverlay
                         mediaId: overlayDelegate.mid
                         displayName: overlayDelegate.mediaEntry ? (overlayDelegate.mediaEntry.displayName || "") : ""
-                        actionsAvailable: !!overlayDelegate.mediaEntry
+                        actionsAvailable: overlayDelegate.isPrimary && !!overlayDelegate.mediaEntry
                         contentVisible: overlayDelegate.mediaEntry ? (overlayDelegate.mediaEntry.contentVisible !== false) : true
                         visible: true
 
@@ -1842,30 +1820,19 @@ Rectangle {
                         id: bottomOverlay
                         objectName: "mediaVideoOverlay"
                         mediaId: overlayDelegate.mid
-                        visible: root.mediaPlaybackControlsReady(overlayDelegate.mid, overlayDelegate.mediaEntry)
+                        visible: overlayDelegate.isPrimary && root.mediaPlaybackControlsReady(overlayDelegate.mid, overlayDelegate.mediaEntry)
                                  && overlayDelegate.mediaEntry.mediaType === "video"
                         enabled: visible
 
-                        isPlaying: overlayDelegate.videoState ? !!overlayDelegate.videoState.isPlaying : false
                         isMuted:   overlayDelegate.videoState ? !!overlayDelegate.videoState.isMuted   : false
-                        isLooping: overlayDelegate.videoState ? !!overlayDelegate.videoState.isLooping : false
-                        progress:  overlayDelegate.videoState ? (overlayDelegate.videoState.progress || 0.0) : 0.0
-                        startProgress: overlayDelegate.videoState ? overlayDelegate.videoState.startProgress : -1.0
-                        endProgress: overlayDelegate.videoState ? overlayDelegate.videoState.endProgress : -1.0
                         volume: overlayDelegate.videoState && overlayDelegate.videoState.volume !== undefined
                                 ? overlayDelegate.videoState.volume : 1.0
 
                         x: overlayDelegate.screenCentreX - panelWidth * 0.5
                         y: overlayDelegate.screenBottom   + 8
 
-                        onPlayPauseRequested:    function(m)    { root.overlayPlayPauseRequested(m) }
-                        onStopRequested:         function(m)    { root.overlayStopRequested(m) }
-                        onRepeatToggleRequested: function(m)    { root.overlayRepeatToggleRequested(m) }
                         onMuteToggleRequested:   function(m)    { root.overlayMuteToggleRequested(m) }
                         onVolumeChangeRequested:  function(m, v) { root.overlayVolumeChangeRequested(m, v) }
-                        onSeekBeginRequested:     function(m, r) { root.overlaySeekBeginRequested(m, r) }
-                        onSeekUpdateRequested:    function(m, r) { root.overlaySeekUpdateRequested(m, r) }
-                        onSeekEndRequested:       function(m, r) { root.overlaySeekEndRequested(m, r) }
                         onOverlayHoveredChanged:  function(h)    { /* input handled by overlay's own MouseArea */ }
                     }
 
@@ -1874,7 +1841,7 @@ Rectangle {
                         id: textOverlay
                         objectName: "mediaTextOverlay"
                         mediaId: overlayDelegate.mid
-                        visible: overlayDelegate.mediaEntry
+                        visible: overlayDelegate.isPrimary && overlayDelegate.mediaEntry
                                  && overlayDelegate.mediaEntry.mediaType === "text"
 
                         fitToTextEnabled: {

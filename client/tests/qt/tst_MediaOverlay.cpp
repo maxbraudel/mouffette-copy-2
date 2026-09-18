@@ -24,6 +24,7 @@
 #include "frontend/qml/ClientWorkspaceViewModel.h"
 #include "frontend/qml/ApplicationController.h"
 #include "frontend/qml/MediaSettingsViewModel.h"
+#include "frontend/qml/TimelineController.h"
 #include "backend/domain/canvas/CanvasDocument.h"
 #include "backend/domain/media/CanvasMedia.h"
 #include "backend/media/MediaResidencyManager.h"
@@ -66,8 +67,8 @@ private slots:
     void toolbarToolsAndGlobalMemoryUsage();
     void scenePlaybackUnloadsEditorOverlays_data();
     void scenePlaybackUnloadsEditorOverlays();
-    void mediaSettingsPanelRestoresTabsAndBindings_data();
-    void mediaSettingsPanelRestoresTabsAndBindings();
+    void mediaSettingsElementBindings_data();
+    void mediaSettingsElementBindings();
     void videoVolumeAndMuteStayIndependentAndSyncWithSettings();
     void toastUsesBottomLeftDoubleBackground();
     void themeTracksApplicationPalette();
@@ -709,7 +710,10 @@ void MediaOverlayTest::emptyScreenHintStaysBehindMediaAndCenteredInViewport()
     const QPointF center = hint->mapToScene({hint->width() / 2, hint->height() / 2});
     // Qt's centered anchors align text to logical pixels (up to half a pixel
     // per axis when the text's implicit height is odd).
-    QVERIFY(QLineF(center, QPointF(page->width() / 2, page->height() / 2)).length() <= 1.0);
+    auto* canvasLoader = findVisualItem(page, QStringLiteral("activeCanvasLoader"));
+    QVERIFY(canvasLoader);
+    const QPointF canvasCenter = canvasLoader->mapToScene({canvasLoader->width() / 2, canvasLoader->height() / 2});
+    QVERIFY(QLineF(center, canvasCenter).length() <= 1.0);
 
     QTemporaryDir directory;
     const QString path = directory.filePath("foreground.png");
@@ -1242,7 +1246,13 @@ void MediaOverlayTest::activationDuringBootstrapKeepsMainWindowHidden()
     auto* bootstrap = qobject_cast<QWindow*>(root->property("bootstrap").value<QObject*>());
     auto* window = qobject_cast<QWindow*>(root->property("window").value<QObject*>());
     QVERIFY(bootstrap && window);
+#ifdef Q_OS_MACOS
+    // AppKit supplies decorations for a standard Qt window; the presenter
+    // deliberately does not request the Windows-only title-hint flags.
+    QCOMPARE(window->flags() & Qt::WindowType_Mask, Qt::WindowFlags(Qt::Window));
+#else
     QVERIFY(window->flags().testFlag(Qt::WindowTitleHint));
+#endif
     QVERIFY(window->flags().testFlag(Qt::WindowStaysOnTopHint));
     QVERIFY(!controller.ready());
     QVERIFY(!window->isVisible());
@@ -1577,7 +1587,6 @@ void MediaOverlayTest::scenePlaybackUnloadsEditorOverlays()
         QStringLiteral("mediaTopOverlay"),
         QStringLiteral("mediaVideoOverlay"),
         QStringLiteral("mediaTextOverlay"),
-        QStringLiteral("videoProgressSlider"),
         QStringLiteral("videoVolumeSlider")};
     QList<QPointer<QQuickItem>> previousControls;
     for (const auto& name : editorNames) {
@@ -1592,19 +1601,17 @@ void MediaOverlayTest::scenePlaybackUnloadsEditorOverlays()
     QPointer<QQuickItem> remoteCursor = findVisualItem(
         page, QStringLiteral("canvasRemoteCursor"));
     QVERIFY(remoteCursor && remoteCursor->isVisible());
-    auto* panel = findVisualItem(page, QStringLiteral("canvasSceneElementPanel"));
-    panel->setProperty("activeTab", 1);
     QPointer<QQuickItem> mediaList = findVisualItem(page, QStringLiteral("mediaListPanel"));
     QVERIFY(mediaList);
     QVERIFY(mediaList->isVisible());
     if (videoSelected) {
-        QTRY_VERIFY_WITH_TIMEOUT(findVisualItem(page, QStringLiteral("videoProgressSlider"))->isVisible(), 8000);
+        QTRY_VERIFY_WITH_TIMEOUT(findVisualItem(page, QStringLiteral("videoVolumeSlider"))->isVisible(), 8000);
     }
 
     if (launchTestScene) {
         QTRY_VERIFY(host->testSceneActionEnabled());
-        host->triggerTestSceneAction();
-        QVERIFY(host->testSceneLaunched());
+        qobject_cast<TimelineController*>(session.timeline())->togglePlayback();
+        QVERIFY(qobject_cast<TimelineController*>(session.timeline())->playing());
     } else {
         host->document()->setEditsLocked(true);
     }
@@ -1627,7 +1634,7 @@ void MediaOverlayTest::scenePlaybackUnloadsEditorOverlays()
     QCOMPARE(host->document()->selectedMedia(), selectionBeforeInput);
 
     if (launchTestScene)
-        host->triggerTestSceneAction();
+        qobject_cast<TimelineController*>(session.timeline())->togglePlayback();
     else
         host->document()->setEditsLocked(false);
     QTRY_VERIFY(host->controller()->editingEnabled());
@@ -1635,19 +1642,19 @@ void MediaOverlayTest::scenePlaybackUnloadsEditorOverlays()
     for (const auto& name : editorNames)
         QTRY_VERIFY2(findVisualItem(page, name), qPrintable(name));
     QVERIFY(remoteCursor && remoteCursor->isVisible());
-    QCOMPARE(findVisualItem(page, QStringLiteral("canvasSceneElementPanel"))
-                 ->property("activeTab").toInt(), 1);
+    QVERIFY(findVisualItem(page, QStringLiteral("sceneTimeline"))->isVisible());
+    QVERIFY(!findVisualItem(page, QStringLiteral("sceneSettingsTab")));
     QCOMPARE(findVisualItem(page, QStringLiteral("mediaListPanel")), mediaList.data());
 }
 
-void MediaOverlayTest::mediaSettingsPanelRestoresTabsAndBindings_data()
+void MediaOverlayTest::mediaSettingsElementBindings_data()
 {
     QTest::addColumn<bool>("dark");
     QTest::newRow("light") << false;
     QTest::newRow("dark") << true;
 }
 
-void MediaOverlayTest::mediaSettingsPanelRestoresTabsAndBindings()
+void MediaOverlayTest::mediaSettingsElementBindings()
 {
     QFETCH(bool, dark);
     const QPalette original = QGuiApplication::palette();
@@ -1672,19 +1679,12 @@ void MediaOverlayTest::mediaSettingsPanelRestoresTabsAndBindings()
 
     auto* panel = findVisualItem(
         harness.get(), QStringLiteral("realMediaSettingsPanel"));
-    auto* sceneTab = findVisualItem(
-        harness.get(), QStringLiteral("sceneSettingsTab"));
-    auto* elementTab = findVisualItem(
-        harness.get(), QStringLiteral("elementSettingsTab"));
-    auto* scenePage = findVisualItem(
-        harness.get(), QStringLiteral("sceneSettingsPage"));
-    auto* elementPage = findVisualItem(
-        harness.get(), QStringLiteral("elementSettingsPage"));
+    auto* elementPage = findVisualItem(harness.get(), QStringLiteral("elementSettingsPage"));
     QVERIFY(panel);
-    QVERIFY(sceneTab);
-    QVERIFY(elementTab);
-    QVERIFY(scenePage);
     QVERIFY(elementPage);
+    QVERIFY(!findVisualItem(harness.get(), QStringLiteral("sceneSettingsTab")));
+    QVERIFY(!findVisualItem(harness.get(), QStringLiteral("sceneSettingsPage")));
+    QVERIFY(findVisualItem(harness.get(), QStringLiteral("elementSettingsTitle")));
 
     window.show();
     QVERIFY(QTest::qWaitForWindowExposed(&window));
@@ -1708,113 +1708,27 @@ void MediaOverlayTest::mediaSettingsPanelRestoresTabsAndBindings()
     QCOMPARE(panel->y(), 52.0);
     QVERIFY(panel->height() > 41.0);
     QVERIFY(panel->height() <= 418.0);
-    QCOMPARE(panel->property("activeTab").toInt(), 0);
-    QVERIFY(scenePage->isVisible());
-    QVERIFY(!elementPage->isVisible());
-
-    // Hovered/pressed tab backgrounds must not paint into either rounded
-    // outer corner. A contrasting canvas reveals any rectangular overflow.
-    for (auto* tab : {sceneTab, elementTab}) {
-        const QPoint center = tab->mapToScene({tab->width() / 2, tab->height() / 2}).toPoint();
-        QTest::mouseMove(&window, center);
-        for (const bool pressed : {false, true}) {
-            if (pressed) QTest::mousePress(&window, Qt::LeftButton, Qt::NoModifier, center);
-            const QImage frame = window.grabWindow();
-            QVERIFY(nearColor(imagePixel(frame, window.size(), panel->mapToScene({1.1, 1.1})), window.color()));
-            QVERIFY(nearColor(imagePixel(frame, window.size(), panel->mapToScene({panel->width() - 2.1, 1.1})), window.color()));
-            if (pressed) QTest::mouseRelease(&window, Qt::LeftButton, Qt::NoModifier, center);
-        }
-    }
-    panel->setProperty("activeTab", 0);
-    auto* contentFlick = findVisualItem(
-        harness.get(), QStringLiteral("settingsContentFlick"));
-    auto* scrollBar = findVisualItem(
-        harness.get(), QStringLiteral("settingsOverlayScrollBar"));
+    QVERIFY(elementPage->isVisible());
+    const QImage frame = window.grabWindow();
+    QVERIFY(nearColor(imagePixel(frame, window.size(), panel->mapToScene({1.1, 1.1})), window.color()));
+    QVERIFY(nearColor(imagePixel(frame, window.size(), panel->mapToScene({panel->width() - 2.1, 1.1})), window.color()));
+    auto* contentFlick = findVisualItem(harness.get(), QStringLiteral("settingsContentFlick"));
+    auto* scrollBar = findVisualItem(harness.get(), QStringLiteral("settingsOverlayScrollBar"));
     QVERIFY(contentFlick);
     QVERIFY(scrollBar);
-    QTRY_VERIFY(!contentFlick->property("overflowing").toBool());
-    QVERIFY(qAbs(contentFlick->property("contentHeight").toReal()
-                 - contentFlick->height()) <= 0.5);
-    QVERIFY(!scrollBar->isVisible());
-
-    const QStringList restoredControls{
-        QStringLiteral("displayAutomaticallyCheck"),
-        QStringLiteral("displayDelayCheck"),
-        QStringLiteral("hideDelayCheck"),
-        QStringLiteral("hideWhenVideoEndsCheck"),
-        QStringLiteral("unmuteAutomaticallyCheck"),
-        QStringLiteral("unmuteDelayCheck"),
-        QStringLiteral("muteDelayCheck"),
-        QStringLiteral("muteWhenVideoEndsCheck"),
-        QStringLiteral("playAutomaticallyCheck"),
-        QStringLiteral("playDelayCheck"),
-        QStringLiteral("pauseDelayCheck"),
-        QStringLiteral("repeatCheck"),
-        QStringLiteral("imageFadeInCheck"),
-        QStringLiteral("imageFadeOutCheck"),
-        QStringLiteral("opacityCheck"),
-        QStringLiteral("volumeCheck"),
-        QStringLiteral("audioFadeInCheck"),
-        QStringLiteral("audioFadeOutCheck"),
-        QStringLiteral("textColorCheck"),
-        QStringLiteral("highlightCheck"),
-        QStringLiteral("textBorderWidthCheck"),
-        QStringLiteral("textBorderColorCheck"),
-        QStringLiteral("fontWeightCheck"),
-        QStringLiteral("underlineCheck"),
-        QStringLiteral("italicCheck"),
-        QStringLiteral("uppercaseCheck")};
-    for (const QString& objectName : restoredControls) {
-        QVERIFY2(findVisualItem(harness.get(), objectName),
-                 qPrintable(QStringLiteral("missing restored setting: %1")
-                                .arg(objectName)));
-    }
-
-    auto* displayAutomaticallyCheck = findVisualItem(
-        harness.get(), QStringLiteral("displayAutomaticallyCheck"));
-    auto* displayDelayCheck = findVisualItem(
-        harness.get(), QStringLiteral("displayDelayCheck"));
-    auto* displayDelayField = findVisualItem(
-        harness.get(), QStringLiteral("displayDelayField"));
-    QVERIFY(displayAutomaticallyCheck);
-    QVERIFY(displayDelayCheck);
-    QVERIFY(displayDelayField);
-    QVERIFY(displayDelayCheck->isEnabled());
-    QTest::mouseClick(
-        &window, Qt::LeftButton, Qt::NoModifier,
-        displayDelayCheck->mapToScene(
-            QPointF(displayDelayCheck->width() / 2.0,
-                    displayDelayCheck->height() / 2.0)).toPoint());
-    QTRY_VERIFY(media->settings().displayDelayEnabled);
-    QTest::mouseClick(
-        &window, Qt::LeftButton, Qt::NoModifier,
-        displayAutomaticallyCheck->mapToScene(
-            QPointF(displayAutomaticallyCheck->width() / 2.0,
-                    displayAutomaticallyCheck->height() / 2.0)).toPoint());
-    QTRY_VERIFY(!media->settings().displayAutomatically);
-    QTRY_VERIFY(!media->settings().displayDelayEnabled);
-    QTRY_VERIFY(!displayDelayCheck->isEnabled());
-
-    const int canvasPressesBeforeDisabledInput =
-        harness->property("canvasPrimaryPressCount").toInt();
-    QTest::mouseClick(
-        &window, Qt::LeftButton, Qt::NoModifier,
-        displayDelayField->mapToScene(
-            QPointF(displayDelayField->width() / 2.0,
-                    displayDelayField->height() / 2.0)).toPoint());
-    QCOMPARE(harness->property("canvasPrimaryPressCount").toInt(),
-             canvasPressesBeforeDisabledInput);
-    QVERIFY(!displayDelayField->hasActiveFocus());
-    QCOMPARE(host->document()->selectedMedia(), media);
-
-    const QPoint elementTabCenter = elementTab->mapToScene(
-        QPointF(elementTab->width() / 2.0,
-                elementTab->height() / 2.0)).toPoint();
-    QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier,
-                      elementTabCenter);
-    QTRY_COMPARE(panel->property("activeTab").toInt(), 1);
-    QVERIFY(!scenePage->isVisible());
-    QVERIFY(elementPage->isVisible());
+    for (const auto* name : {"opacityCheck", "volumeCheck", "textColorCheck", "highlightCheck",
+             "textBorderWidthCheck", "textBorderColorCheck", "fontWeightCheck", "underlineCheck",
+             "italicCheck", "uppercaseCheck"})
+        QVERIFY2(findVisualItem(harness.get(), QString::fromLatin1(name)), name);
+    for (const auto* name : {"displayAutomaticallyCheck", "displayDelayCheck", "hideDelayCheck",
+             "hideWhenVideoEndsCheck", "unmuteAutomaticallyCheck", "playAutomaticallyCheck",
+             "repeatCheck", "imageFadeInCheck", "imageFadeOutCheck", "audioFadeInCheck",
+             "audioFadeOutCheck", "videoStartButton", "videoEndButton"})
+        QVERIFY2(!findVisualItem(harness.get(), QString::fromLatin1(name)), name);
+    window.resize(640, 230);
+    harness->setSize(window.size());
+    QTRY_VERIFY(contentFlick->property("overflowing").toBool());
+    QVERIFY(scrollBar->isVisible());
 
     window.resize(640, 800);
     harness->setSize(window.size());
@@ -1979,7 +1893,6 @@ void MediaOverlayTest::videoVolumeAndMuteStayIndependentAndSyncWithSettings()
         qPrintable(video->residencyState() + ": " + video->residencyError()), 30000);
     auto* panel = findVisualItem(page, QStringLiteral("canvasSceneElementPanel"));
     QVERIFY(panel);
-    panel->setProperty("activeTab", 1);
     QQuickItem* slider = nullptr;
     QTRY_VERIFY((slider = findVisualItem(page, QStringLiteral("videoVolumeSlider"))));
     auto* mute = findVisualItem(page, QStringLiteral("videoMuteButton"));
@@ -2094,49 +2007,28 @@ void MediaOverlayTest::videoVolumeAndMuteStayIndependentAndSyncWithSettings()
         QCOMPARE(slider->property("progress").toReal(), right ? 1.0 : 0.0);
     }
 
-    auto* progress = findVisualItem(page, QStringLiteral("videoProgressSlider"));
-    QVERIFY(progress);
-    video->stopToBeginning();
-    QTRY_VERIFY(video->player()->duration() > 0);
-    QSignalSpy seeks(host->controller(), &QuickCanvasController::mediaSeekRequested);
-    for (bool right : {true, false}) {
-        dragOutside(progress, right);
-        QVERIFY(!progress->property("_dragging").toBool());
-        QCOMPARE(seeks.last().at(1).toReal(), right ? 1.0 : 0.0);
-        QTRY_VERIFY(qAbs(progress->property("_visualValue").toReal() - (right ? 1.0 : 0.0)) < .01);
-        QTRY_VERIFY(qAbs(video->positionMs() - (right ? video->player()->duration() : 0)) < 100);
-    }
-
-    auto* startButton = findVisualItem(page, QStringLiteral("videoStartButton"));
-    auto* endButton = findVisualItem(page, QStringLiteral("videoEndButton"));
-    QVERIFY(startButton && endButton);
-    video->setPositionMs(1200);
-    QTRY_VERIFY(startButton->isEnabled() && endButton->isEnabled());
-    click(startButton);
-    QTRY_COMPARE(video->startMarkerMs(), 1200);
-    QCOMPARE(startButton->property("text").toString(), QStringLiteral("Remove start"));
-    QVERIFY(endButton->isEnabled());
-    click(endButton);
-    QCOMPARE(video->endMarkerMs(), -1);
-    video->setPositionMs(2400);
-    QTRY_VERIFY(endButton->isEnabled());
-    click(endButton);
-    QTRY_COMPARE(video->endMarkerMs(), 2400);
-    auto* startMarker = findVisualItem(page, QStringLiteral("videoStartMarker"));
-    auto* endMarker = findVisualItem(page, QStringLiteral("videoEndMarker"));
-    QVERIFY(startMarker && endMarker);
-    QTRY_VERIFY(startMarker->isVisible() && endMarker->isVisible());
-    QTRY_VERIFY(qAbs(startMarker->x() - progress->width() * 1200 / video->player()->duration()) < 1);
-    QTRY_VERIFY(qAbs(endMarker->x() - progress->width() * 2400 / video->player()->duration()) < 1);
-    click(startButton);
-    QTRY_VERIFY(!startMarker->isVisible());
-    video->setPositionMs(2500);
-    QTRY_VERIFY(startButton->isEnabled());
-    click(startButton);
-    QCOMPARE(video->startMarkerMs(), -1);
-    click(endButton);
-    QTRY_VERIFY(!endMarker->isVisible());
-    QTRY_VERIFY(startButton->isEnabled());
+    // Video transport belongs exclusively to the persistent scene timeline.
+    for (const auto* name : {"videoProgressSlider", "videoStartButton", "videoEndButton",
+                            "videoStartMarker", "videoEndMarker", "testSceneAction"})
+        QVERIFY2(!findVisualItem(page, QString::fromLatin1(name)), name);
+    auto* timelinePanel = findVisualItem(page, QStringLiteral("sceneTimeline"));
+    auto* clipTrack = findVisualItem(page, QStringLiteral("timelineClipTrack"));
+    QVERIFY(timelinePanel && timelinePanel->isVisible());
+    QVERIFY(clipTrack && clipTrack->isVisible());
+    QVERIFY(findVisualItem(page, QStringLiteral("timelinePlayPause")));
+    QCOMPARE(timelinePanel->width(), page->width());
+    auto* canvasLoader = findVisualItem(page, QStringLiteral("activeCanvasLoader"));
+    QVERIFY(canvasLoader);
+    QCOMPARE(canvasLoader->height(), timelinePanel->y());
+    QTRY_VERIFY(!qobject_cast<TimelineController*>(session.timeline())->clips().isEmpty());
+    qobject_cast<TimelineController*>(session.timeline())->seek(1200);
+    QTRY_COMPARE(qobject_cast<TimelineController*>(session.timeline())->positionMs(), 1200);
+    QVERIFY(!video->isPlaying());
+    qobject_cast<TimelineController*>(session.timeline())->placeStop();
+    QCOMPARE(qobject_cast<TimelineController*>(session.timeline())->stopTimeMs(), 1200);
+    QVERIFY(findVisualItem(page, QStringLiteral("timelineStopMarker"))->isVisible());
+    qobject_cast<TimelineController*>(session.timeline())->removeStop();
+    QVERIFY(!findVisualItem(page, QStringLiteral("timelineStopMarker"))->isVisible());
 
 }
 
