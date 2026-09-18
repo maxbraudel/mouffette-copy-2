@@ -514,7 +514,7 @@ QString QuickCanvasHost::mediaReadinessReason(bool remote) const
         if (media->isVideo() && media->player()) {
             const qint64 duration = media->player()->duration();
             if (std::any_of(media->timelineTrack().clips.cbegin(), media->timelineTrack().clips.cend(),
-                            [duration](const auto& clip) { return clip.sourceOutMs > duration; }))
+                            [this, duration](const auto& clip) { return clip.sourceEndSlot() > m_document->timelineSettings().sourceSlots(duration); }))
                 return QStringLiteral("A video clip exceeds its source duration (%1)").arg(media->displayName());
         }
         if (remote && (!m_uploadManager || !m_uploadManager->remoteMediaReady(
@@ -659,7 +659,7 @@ void QuickCanvasHost::prepareSceneVideos(std::function<void()> ready)
             }
             if (media->isVideo() && (!media->player()
                 || !media->player()->preparedAt(SceneTimeline::evaluateVideo(
-                    media->timelineTrack(), timelinePositionMs(), media->player()->duration()).sourceTimeMs))) return;
+                    media->timelineTrack(), timelinePositionMs(), media->player()->duration(), m_document->timelineSettings()).sourceTimeMs))) return;
         }
         m_videoPreparation = nullptr;
         context->deleteLater();
@@ -689,7 +689,7 @@ void QuickCanvasHost::prepareSceneVideos(std::function<void()> ready)
             // loading. Its LoadedMedia handler must not restore the draft
             // cursor over the scene's prepared start frame.
             const qint64 sourceTime = SceneTimeline::evaluateVideo(
-                media->timelineTrack(), timelinePositionMs(), media->player()->duration()).sourceTimeMs;
+                media->timelineTrack(), timelinePositionMs(), media->player()->duration(), m_document->timelineSettings()).sourceTimeMs;
             media->setPositionMs(sourceTime);
             media->player()->prepare(sourceTime);
         }
@@ -759,7 +759,7 @@ void QuickCanvasHost::triggerRemoteSceneAction()
             handleRemoteConnectionLost();
             return;
         }
-        const qint64 stoppedAt = std::min(timelineNowMs(), timelineStopMs());
+        const qreal stoppedAt = std::min(timelineNowMs(), timelineStopMs());
         m_timelinePlaying = false;
         m_timelineTimer.stop();
         applyTimeline(stoppedAt, false, true);
@@ -847,12 +847,12 @@ void QuickCanvasHost::triggerTestSceneAction()
     else timelinePlay();
 }
 
-qint64 QuickCanvasHost::timelinePositionMs() const
+qreal QuickCanvasHost::timelinePositionMs() const
 {
     return m_document->timelinePositionMs();
 }
 
-qint64 QuickCanvasHost::timelineStopMs() const
+qreal QuickCanvasHost::timelineStopMs() const
 {
     SceneTimeline::SceneSettings settings;
     SceneTimeline::SceneSettings::fromJson(
@@ -862,7 +862,7 @@ qint64 QuickCanvasHost::timelineStopMs() const
     return settings.effectiveStopMs();
 }
 
-qint64 QuickCanvasHost::timelineNowMs() const
+qreal QuickCanvasHost::timelineNowMs() const
 {
     if (!m_timelinePlaying) return timelinePositionMs();
     if (m_timelineRemote && m_webSocket && m_remoteStartServerMs >= 0) {
@@ -872,10 +872,11 @@ qint64 QuickCanvasHost::timelineNowMs() const
     return m_timelineAnchorPositionMs + (m_timelineClock.isValid() ? m_timelineClock.elapsed() : 0);
 }
 
-void QuickCanvasHost::timelineSeek(qint64 positionMs)
+void QuickCanvasHost::timelineSeek(qreal positionMs)
 {
     if (m_sceneLaunching || m_sceneLaunched || m_sceneStopping || m_timelinePlaying) return;
-    applyTimeline(positionMs, false, true);
+    const auto& grid = m_document->timelineSettings();
+    applyTimeline(grid.timeMs(grid.nearestSlot(positionMs)), false, true);
 }
 
 void QuickCanvasHost::timelinePlay()
@@ -904,19 +905,21 @@ void QuickCanvasHost::timelinePause()
 {
     if (!m_testSceneLaunched || m_timelineRemote) return;
     stopScenePresentation();
+    const auto& grid = m_document->timelineSettings();
+    applyTimeline(grid.timeMs(grid.slotAt(timelinePositionMs())), false, true);
     m_testSceneLaunched = false;
     publishActionState();
 }
 
-void QuickCanvasHost::applyTimeline(qint64 positionMs, bool playing, bool forceSeek)
+void QuickCanvasHost::applyTimeline(qreal positionMs, bool playing, bool forceSeek)
 {
     m_document->setTimelinePosition(positionMs);
-    const qint64 time = timelinePositionMs();
+    const qreal time = timelinePositionMs();
     const qint64 clock = MouffetteClock::nowMs();
     for (CanvasMedia* media : m_document->media()) {
         if (!media->isVideo() || !media->player()) continue;
         auto* player = media->player();
-        const auto sample = SceneTimeline::evaluateVideo(media->timelineTrack(), time, player->duration());
+        const auto sample = SceneTimeline::evaluateVideo(media->timelineTrack(), time, player->duration(), m_document->timelineSettings());
         const bool shouldPlay = playing && sample.playing;
         const QString previousClip = m_timelineClipIds.value(media->mediaId());
         const bool changedClip = previousClip != sample.clipId;
@@ -949,8 +952,8 @@ void QuickCanvasHost::applyTimeline(qint64 positionMs, bool playing, bool forceS
 void QuickCanvasHost::advanceTimeline()
 {
     if (!m_timelinePlaying) return;
-    const qint64 stop = timelineStopMs();
-    const qint64 time = std::min(std::max(timelineNowMs(), timelinePositionMs()), stop);
+    const qreal stop = timelineStopMs();
+    const qreal time = std::min(std::max(timelineNowMs(), timelinePositionMs()), stop);
     applyTimeline(time, time < stop);
     if (time < stop) return;
     m_timelinePlaying = false;
@@ -993,7 +996,7 @@ void QuickCanvasHost::beginScenePresentation(bool remote)
     }
     m_timelineClock.start();
     m_timelinePlaying = true;
-    const qint64 now = timelineNowMs();
+    const qreal now = timelineNowMs();
     applyTimeline(std::min(now, timelineStopMs()), now < timelineStopMs(), true);
     m_timelineTimer.start();
     if (now >= timelineStopMs()) advanceTimeline();
@@ -1003,7 +1006,7 @@ void QuickCanvasHost::beginScenePresentation(bool remote)
 
 void QuickCanvasHost::stopScenePresentation()
 {
-    const qint64 stoppedAt = std::min(timelineNowMs(), timelineStopMs());
+    const qreal stoppedAt = std::min(timelineNowMs(), timelineStopMs());
     m_timelinePlaying = false;
     m_timelineTimer.stop();
     if (m_videoPreparation) delete m_videoPreparation.data();

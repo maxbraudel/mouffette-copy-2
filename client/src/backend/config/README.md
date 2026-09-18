@@ -7,11 +7,12 @@ version inventory, ownership boundaries, upgrade procedure and tests.
 
 ## Timeline
 
-The maximum duration is copied to each new project. Existing projects retain their saved duration. Other timeline settings apply to every project. Editing uses milliseconds with no temporal grid; these settings never determine rendering frame rate.
+Maximum duration and slot cadence are copied to each new project. Existing projects retain both saved values. Other timeline settings apply to every project. Editing uses integer slot indices; properties are evaluated at the started slot while videos retain their native cadence and normal speed. The last usable boundary is `floor(maxDurationMs * slotsPerSecond / 1000)`. Configurations containing no complete slot are rejected.
 
 | Environment variable | Default | Allowed range |
 | --- | ---: | ---: |
 | `MOUFFETTE_TIMELINE_MAX_DURATION_MS` | 180000 | 1–604800000 |
+| `MOUFFETTE_TIMELINE_SLOTS_PER_SECOND` | 30 | integer 1–240 |
 | `MOUFFETTE_TIMELINE_HEIGHT_PX` | 240 | 120–1200 |
 | `MOUFFETTE_TIMELINE_RULER_HEIGHT_PX` | 28 | 16–160 |
 | `MOUFFETTE_TIMELINE_CLIP_TRACK_HEIGHT_PX` | 64 | 24–600 |

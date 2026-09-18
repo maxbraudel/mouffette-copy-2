@@ -1,6 +1,6 @@
 # Mouffette Server
 
-Node.js WebSocket coordinator for Mouffette protocol v8.
+Node.js WebSocket coordinator for Mouffette protocol v9.
 
 ## Run and test
 
@@ -16,7 +16,7 @@ override it. Invalid critical values fail startup.
 ## Protocol envelope
 
 The server sends `auth_challenge` first. The client signs
-`mouffette-v8\n<serverBootId>\n<nonce>\n<runtimeId>\n<instanceId>\n<instanceOrdinal>` with its
+`mouffette-v9\n<serverBootId>\n<nonce>\n<runtimeId>\n<instanceId>\n<instanceOrdinal>` with its
 Ed25519 installation key and returns the SPKI public key and signature as
 base64url. The SHA-256 of the SPKI key is the stable `installationId`; the
 server domain-separates and hashes `installationId + instanceId` to derive and
@@ -46,7 +46,7 @@ Every subsequent message uses:
 ```json
 {
   "type": "message_type",
-  "protocolVersion": 8,
+  "protocolVersion": 9,
   "serverBootId": "uuid-from-welcome",
   "messageId": "unique-uuid",
   "connectionGeneration": 1
@@ -64,7 +64,7 @@ An owner opens `remote_session_open` with `targetEndpointId` and a stable
 same endpoint. An existing scene, another controller, or local UI activity does
 not make the endpoint unavailable for another session.
 
-The v8 welcome uses timing policy version 4:
+The v9 welcome uses timing policy version 4:
 
 - `heartbeatIntervalMs`: 750 ms. Two missed intervals detect silent loss;
   `transportSuspectAfterMs` and `leaseTimeoutMs` both equal 1,500 ms (derived).
@@ -145,7 +145,7 @@ a bounded 4,096-entry presence cache. Pair cleanup and scene ownership remain
 private and do not label an endpoint Busy. Offline entries retain the entire
 authenticated identity tuple; `lastSeenAt` uses epoch milliseconds.
 
-Protocol v8 is a coordinated client/server cut-over. Older versions receive an
+Protocol v9 is a coordinated client/server cut-over. Older versions receive an
 explicit protocol-version rejection; the server does not silently translate
 lease or cleanup semantics. Run `npm test` before deploying both artifacts.
 
@@ -210,24 +210,31 @@ Scene messages include `prepare_progress`, `state_snapshot`, `stop`, and
 rejects stale generations, and preserves terminal tombstones for idempotent
 retries. Removed `remote_scene_*` message routes do not exist.
 
-Render schema 3 stores a scene `timeline` (`maxDurationMs`, `stopTimeMs`) and,
+The grid uses integer indices for keys (`slot`), clips (`startSlot`,
+`sourceStartSlot`, `durationSlots`) and Stop. Cadence is an integer from 1 to 240
+and is persisted per project. Video source coverage rounds up; its final partial
+slot holds the last frame silently. Snapshots retain continuous milliseconds.
+Projects v1–5 reset to v6 without resetting other profile components.
+
+Render schema 4 stores a scene `timeline` (`maxDurationMs`, `slotsPerSecond`, `stopSlot`) and,
 for each media, a complete intrinsic element state plus a `timeline` containing
 full-state `keyframes`, non-overlapping source `clips`, and `clipsInitialized`.
-Times are integer milliseconds; the maximum supported duration is seven days.
+Slot indices are integers; source duration and the configured maximum use milliseconds.
+The maximum supported duration is seven days.
 Each project normally uses the client's configured three-minute maximum.
-A Stop is either absent (`-1`) or a nonnegative time within that maximum. Keyframes
+A Stop is either absent (`-1`) or a nonnegative slot at or before the last complete boundary. Keyframes
 may exist beyond Stop. Clip intervals are exclusive at their source-out/end.
-Video `durationMs` bounds all source ranges; the receiver also validates actual
+Video `durationMs` bounds real playback; occupied source ranges end at its ceiling slot; the receiver also validates actual
 loaded media before declaring preparation ready. Initially offscreen media still
 participate in preparation because their keyframes can move them onto a screen.
 
-Schema 2 and automatic display/play/mute delays, fades, repeat and source-range
+Schemas 2–3 and automatic display/play/mute delays, fades, repeat and source-range
 markers are rejected. State snapshots now contain only
-`{ "timelinePositionMs": <integer> }`, sampled at the enclosing
+`{ "timelinePositionMs": <finite milliseconds> }`, sampled at the enclosing
 `sampledServerMonotonicMs`. The receiver advances its immutable timeline from
 that clock correction; snapshots cannot replace media properties or programming.
 
-## Fully resident media (v8)
+## Fully resident media (v9)
 
 Upload validation only confirms the durable file identity. The target then decodes
 all image pixels, or validates the entire video/audio while retaining the original
@@ -244,7 +251,7 @@ States are `analysing`, `queued`, `decoding`, `ready`, `waiting_for_memory`,
 both endpoints must acknowledge the `media_memory_ready` checklist stage. A new
 report that invalidates a preparing or running scene stops that scene. Transfers
 and memory reports remain independent so completion does not wait for RAM space.
-Clients using a protocol version other than 8 are rejected; deploy the client
+Clients using a protocol version other than 9 are rejected; deploy the client
 and server version together.
 
 Targets publish full `remote_session_snapshot` updates on change and refresh

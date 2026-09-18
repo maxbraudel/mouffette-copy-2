@@ -65,6 +65,7 @@ void AppConfigTest::configuresTimeline() {
     QString error;
     QVERIFY2(config.load(options, &error), qPrintable(error));
     QCOMPARE(config.timelineMaxDurationMs(), 240000);
+    QCOMPARE(config.timelineSlotsPerSecond(), 30);
     QCOMPARE(config.timelineOtherKeyframeOpacityPercent(), 45);
     QCOMPARE(config.timelineSnapDistancePx(), 0);
     QCOMPARE(config.timelineHeightPx(), 240);
@@ -76,6 +77,19 @@ void AppConfigTest::configuresTimeline() {
     QVERIFY(!config.load(options, &error));
     QVERIFY(error.contains(QStringLiteral("MOUFFETTE_TIMELINE_OTHER_KEYFRAME_OPACITY_PERCENT")));
     options.processEnvironment.remove(QStringLiteral("MOUFFETTE_TIMELINE_OTHER_KEYFRAME_OPACITY_PERCENT"));
+    for (const QString rate : {QStringLiteral("1"), QStringLiteral("60"), QStringLiteral("240")}) {
+        options.processEnvironment.insert(QStringLiteral("MOUFFETTE_TIMELINE_SLOTS_PER_SECOND"), rate);
+        QVERIFY(config.load(options, &error)); QCOMPARE(config.timelineSlotsPerSecond(), rate.toInt());
+    }
+    for (const QString rate : {QStringLiteral("0"), QStringLiteral("241"), QStringLiteral("29.97")}) {
+        options.processEnvironment.insert(QStringLiteral("MOUFFETTE_TIMELINE_SLOTS_PER_SECOND"), rate);
+        QVERIFY(!config.load(options, &error));
+    }
+    options.processEnvironment.insert(QStringLiteral("MOUFFETTE_TIMELINE_SLOTS_PER_SECOND"), QStringLiteral("30"));
+    options.processEnvironment.insert(QStringLiteral("MOUFFETTE_TIMELINE_MAX_DURATION_MS"), QStringLiteral("33"));
+    QVERIFY(!config.load(options, &error)); QVERIFY(error.contains(QStringLiteral("complete slot")));
+    options.processEnvironment.insert(QStringLiteral("MOUFFETTE_TIMELINE_MAX_DURATION_MS"), QStringLiteral("34"));
+    QVERIFY(config.load(options, &error));
     options.processEnvironment.insert(QStringLiteral("MOUFFETTE_TIMELINE_MAX_DURATION_MS"), QStringLiteral("0"));
     QVERIFY(!config.load(options, &error));
 }

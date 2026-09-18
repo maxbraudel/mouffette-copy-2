@@ -5,7 +5,7 @@ using namespace SceneTimeline;
 class SceneTimelineTest final : public QObject {
     Q_OBJECT
 private slots:
-    void continuousEvaluationDoesNotQuantizeTime() {
+    void linearEvaluationUsesSlotIndices() {
         ElementState a,b; a.position={0,10}; a.size={100,200}; a.baseSize=a.size;
         b=a;b.position={100,110};b.size={300,400};b.scale=2;b.baseSize=b.size/b.scale;
         MediaTrack t; QVERIFY(upsertKeyframe(t,{"a",100,a},180000));QVERIFY(upsertKeyframe(t,{"b",1100,b},180000));
@@ -47,29 +47,95 @@ private slots:
         QCOMPARE(state.toJson()["textOutlineWidthPx"].toDouble(),25.0);
     }
     void overwritePreservesSourceCorrectFragments() {
-        MediaTrack t;QVERIFY(insertClip(t,{"old",100,1000,2000},5000));
+        MediaTrack t;QVERIFY(insertClip(t,{"old",100,1000,1000},5000));
         QVERIFY(insertClip(t,{"new",300,0,200},5000));
         QCOMPARE(t.clips.size(),3);
-        QCOMPARE(t.clips[0].startMs,100);QCOMPARE(t.clips[0].sourceInMs,1000);QCOMPARE(t.clips[0].sourceOutMs,1200);
+        QCOMPARE(t.clips[0].startSlot,100);QCOMPARE(t.clips[0].sourceStartSlot,1000);QCOMPARE(t.clips[0].sourceEndSlot(),1200);
         QCOMPARE(t.clips[1].id,QString("new"));
-        QCOMPARE(t.clips[2].startMs,500);QCOMPARE(t.clips[2].sourceInMs,1400);QCOMPARE(t.clips[2].sourceOutMs,2000);
+        QCOMPARE(t.clips[2].startSlot,500);QCOMPARE(t.clips[2].sourceStartSlot,1400);QCOMPARE(t.clips[2].sourceEndSlot(),2000);
         QVERIFY(splitClip(t,"new",400));QCOMPARE(t.clips.size(),4);
         auto restored=MediaTrack{};QVERIFY(MediaTrack::fromJson(t.toJson(),&restored,5000));QCOMPARE(restored.toJson(),t.toJson());
     }
     void clipSamplesHoldFramesAndSilenceGaps() {
-        MediaTrack t;insertClip(t,{"a",400,100,300},2000);insertClip(t,{"b",900,700,1000},2000);
-        auto before=evaluateVideo(t,0,1500);QCOMPARE(before.sourceTimeMs,100);QVERIFY(!before.playing);
-        auto start=evaluateVideo(t,400,1500);QCOMPARE(start.sourceTimeMs,100);QVERIFY(start.playing);
-        auto gap=evaluateVideo(t,700,1500);QCOMPARE(gap.sourceTimeMs,299);QVERIFY(!gap.playing);
-        auto end=evaluateVideo(t,1200,1500);QCOMPARE(end.sourceTimeMs,999);QVERIFY(!end.playing);
-        removeClip(t,"a");removeClip(t,"b");QVERIFY(t.clipsInitialized);QCOMPARE(evaluateVideo(t,900,1500).sourceTimeMs,0);
+        SceneSettings grid;
+        MediaTrack t;insertClip(t,{"a",12,3,6},60);insertClip(t,{"b",27,21,9},60);
+        auto before=evaluateVideo(t,0,1500,grid);QCOMPARE(before.sourceTimeMs,100);QVERIFY(!before.playing);
+        auto start=evaluateVideo(t,400,1500,grid);QCOMPARE(start.sourceTimeMs,100);QVERIFY(start.playing);
+        auto gap=evaluateVideo(t,700,1500,grid);QCOMPARE(gap.sourceTimeMs,299);QVERIFY(!gap.playing);
+        auto end=evaluateVideo(t,1200,1500,grid);QCOMPARE(end.sourceTimeMs,999);QVERIFY(!end.playing);
+        removeClip(t,"a");removeClip(t,"b");QVERIFY(t.clipsInitialized);QCOMPARE(evaluateVideo(t,900,1500,grid).sourceTimeMs,0);
+    }
+    void steppedInterpolationMatchesBothExamplesAndReversePlayback() {
+        SceneSettings grid; ElementState a,b; a.opacity=0; b.opacity=1; b.uppercase=true;
+        for (qint64 distance : {1,2}) {
+            MediaTrack t; upsertKeyframe(t,{"a",10,a},100); upsertKeyframe(t,{"b",10+distance,b},100);
+            for (int direction : {1,-1}) for(int n=0;n<=distance;++n) {
+                const auto slot = 10 + (direction==1 ? n : distance-n);
+                const auto at = evaluate(a,t,grid.slotAt(grid.timeMs(slot)));
+                QCOMPARE(at.opacity,qreal(slot-10)/distance);
+                QCOMPARE(evaluate(a,t,grid.slotAt(grid.timeMs(slot)+1)).toJson(),at.toJson());
+                QCOMPARE(at.uppercase,slot==10+distance);
+            }
+        }
+    }
+    void gridConversionsAreExactAndBounded() {
+        SceneSettings grid;
+        for (int rate : {1, 24, 30, 60, 144, 240}) {
+            grid.slotsPerSecond=rate;
+            for(qint64 n=0;n<=grid.maxSlot();++n) {
+                QCOMPARE(grid.slotAt(grid.timeMs(n)),n);
+                QCOMPARE(grid.nearestSlot(grid.timeMs(n)),n);
+                if (n<grid.maxSlot()) {
+                    QCOMPARE(grid.nearestSlot(grid.timeMs(n)+grid.timeMs(1)/2),n+1);
+                    QCOMPARE(grid.slotAt(grid.timeMs(n+1)-0.000001),n);
+                }
+            }
+        }
+        grid.slotsPerSecond=30; grid.maxDurationMs=999;
+        QCOMPARE(grid.maxSlot(),29); QCOMPARE(grid.nearestSlot(999),29);
+        QCOMPARE(grid.slotAt(-50),0); QCOMPARE(grid.nearestSlot(1e100),29);
+        SceneSettings parsed;
+        grid.maxDurationMs=33; QVERIFY(!SceneSettings::fromJson(grid.toJson(),&parsed));
+        grid.maxDurationMs=34; QVERIFY(SceneSettings::fromJson(grid.toJson(),&parsed));
+        grid.slotsPerSecond=241; QVERIFY(!SceneSettings::fromJson(grid.toJson(),&parsed));
+    }
+    void videoCompensationIsSilentAndNeverMultipliedByCuts() {
+        SceneSettings grid;
+        for (qint64 duration : {1, 250, 300}) {
+            MediaTrack t;
+            const qint64 occupied=grid.sourceSlots(duration);
+            QVERIFY(insertClip(t,{"clip",0,0,occupied},grid.maxSlot()));
+            const auto before=evaluateVideo(t,duration-0.1,duration,grid);
+            QVERIFY(before.playing);
+            const auto after=evaluateVideo(t,duration,duration,grid);
+            QVERIFY(!after.playing); QCOMPARE(after.sourceTimeMs,duration-1);
+            if (duration==250) {
+                QCOMPARE(occupied,8); QVERIFY(qAbs(grid.timeMs(occupied)-266.6666666667)<1e-7);
+                QVERIFY(splitClip(t,"clip",4));
+                QCOMPARE(t.clips[0].durationSlots,4); QCOMPARE(t.clips[1].durationSlots,4);
+                QCOMPARE(t.clips[1].sourceStartSlot,4);
+                QVERIFY(evaluateVideo(t,249,250,grid).playing);
+                QVERIFY(!evaluateVideo(t,250,250,grid).playing);
+                const QString tail=t.clips[1].id;
+                QVERIFY(trimClip(t,tail,4,100,100,occupied));
+                QCOMPARE(t.clips[1].endSlot(),8); // No arbitrary frozen extension.
+                QVERIFY(moveClip(t,tail,10,100)); QCOMPARE(t.clips[1].durationSlots,4);
+                auto copy=t.clips[1]; copy.id="copy"; copy.startSlot=20;
+                QVERIFY(insertClip(t,copy,100)); QCOMPARE(t.clips.last().sourceEndSlot(),8);
+                QVERIFY(insertClip(t,{"overwrite",22,0,1},100));
+                QCOMPARE(t.clips.last().startSlot,23); QCOMPARE(t.clips.last().sourceStartSlot,7);
+                QCOMPARE(t.clips.last().durationSlots,1); // Only this source tail pads.
+                QVERIFY(!evaluateVideo(t,grid.timeMs(23)+20,250,grid).playing);
+            }
+            if(duration==300) QCOMPARE(occupied,9);
+        }
     }
     void moveAndTrimAreBoundedAndDoNotRipple() {
-        MediaTrack t;insertClip(t,{"a",100,500,1000},2000);insertClip(t,{"b",1000,0,200},2000);
-        QVERIFY(moveClip(t,"a",1900,2000));QCOMPARE(t.clips.last().startMs,1500);
+        MediaTrack t;insertClip(t,{"a",100,500,500},2000);insertClip(t,{"b",1000,0,200},2000);
+        QVERIFY(moveClip(t,"a",1900,2000));QCOMPARE(t.clips.last().startSlot,1500);
         QVERIFY(trimClip(t,"a",1400,1800,2000,3000));
-        QCOMPARE(t.clips.last().sourceInMs,400);QCOMPARE(t.clips.last().sourceOutMs,800);
-        QCOMPARE(t.clips.first().startMs,1000);
+        QCOMPARE(t.clips.last().sourceStartSlot,400);QCOMPARE(t.clips.last().sourceEndSlot(),800);
+        QCOMPARE(t.clips.first().startSlot,1000);
     }
     void canonicalSchemasRejectUnknownFieldsAndNoncanonicalColors() {
         ElementState e;e.type="text";ElementState parsed;
@@ -93,9 +159,9 @@ private slots:
     }
 
     void validationRejectsDuplicatesOverlapAndInvalidStop() {
-        SceneSettings s;auto settings=s.toJson();settings["stopTimeMs"]=0;QVERIFY(SceneSettings::fromJson(settings,&s));
+        SceneSettings s;auto settings=s.toJson();settings["stopSlot"]=0;QVERIFY(SceneSettings::fromJson(settings,&s));
         QCOMPARE(s.effectiveStopMs(),0);
-        settings["stopTimeMs"]=-2;QVERIFY(!SceneSettings::fromJson(settings,&s));
+        settings["stopSlot"]=-2;QVERIFY(!SceneSettings::fromJson(settings,&s));
         MediaTrack t;ElementState e;upsertKeyframe(t,{"a",10,e},100);
         auto json=t.toJson();auto keys=json["keyframes"].toArray();auto dup=keys[0].toObject();dup["id"]="other";keys.append(dup);json["keyframes"]=keys;
         QVERIFY(!MediaTrack::fromJson(json,&t,100));

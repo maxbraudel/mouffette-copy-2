@@ -75,6 +75,7 @@ private slots:
         QFile env(options.defaultEnvFilePath);QVERIFY(env.open(QIODevice::WriteOnly));
         env.close();
         options.processEnvironment.insert(QStringLiteral("MOUFFETTE_TIMELINE_MAX_DURATION_MS"),QStringLiteral("300000"));
+        options.processEnvironment.insert(QStringLiteral("MOUFFETTE_TIMELINE_SLOTS_PER_SECOND"),QStringLiteral("60"));
         QString error;QVERIFY2(config.load(options,&error),qPrintable(error));
         ProjectStore store(directory.filePath(QStringLiteral("projects.json")));
         ProjectManager writer(&store);writer.stopAutomaticTimersForTesting();
@@ -86,16 +87,19 @@ private slots:
         QVERIFY(initial.value("media").isArray());QVERIFY(initial.value("media").toArray().isEmpty());
         SceneTimeline::SceneSettings settings;
         QVERIFY(SceneTimeline::SceneSettings::fromJson(initial.value("timeline").toObject(),&settings));
-        QCOMPARE(settings.maxDurationMs,300000);QCOMPARE(settings.stopTimeMs,-1);
+        QCOMPARE(settings.maxDurationMs,300000);QCOMPARE(settings.stopSlot,-1);QCOMPARE(settings.slotsPerSecond,60);
 
         options.processEnvironment.insert(QStringLiteral("MOUFFETTE_TIMELINE_MAX_DURATION_MS"),QStringLiteral("90000"));
+        options.processEnvironment.insert(QStringLiteral("MOUFFETTE_TIMELINE_SLOTS_PER_SECOND"),QStringLiteral("24"));
         QVERIFY2(config.load(options,&error),qPrintable(error));
         ProjectManager reader(&store);reader.stopAutomaticTimersForTesting();
         reader.setNowProviderForTesting([]{return qint64(1001);});QVERIFY(reader.load());
         const auto* restored=reader.projectForTarget(endpoint);QVERIFY(restored);
         QCOMPARE(restored->canvasState.value("timeline").toObject().value("maxDurationMs").toInt(),300000);
+        QCOMPARE(restored->canvasState.value("timeline").toObject().value("slotsPerSecond").toInt(),60);
         QVERIFY(!createProject(reader,target(QStringLiteral("new-project"),QStringLiteral("New")),ProjectLifecycleState::Visible,1002).isEmpty());
         QCOMPARE(reader.projectForTarget(QStringLiteral("new-project"))->canvasState.value("timeline").toObject().value("maxDurationMs").toInt(),90000);
+        QCOMPARE(reader.projectForTarget(QStringLiteral("new-project"))->canvasState.value("timeline").toObject().value("slotsPerSecond").toInt(),24);
     }
 
     void unavailableDiscoveryRequiresAnExistingProject_data()
@@ -278,7 +282,7 @@ private slots:
         source.sourceIdentity = QStringLiteral("size:mtime");
         source.mediaType = QStringLiteral("image");
         source.pendingImport = true;
-        QJsonObject canvas{{QStringLiteral("renderSchemaVersion"), 3},
+        QJsonObject canvas{{QStringLiteral("renderSchemaVersion"), 4},
             {QStringLiteral("media"), QJsonArray{QJsonObject{
                 {QStringLiteral("mediaId"), source.mediaId}, {QStringLiteral("type"), source.mediaType},
                 {QStringLiteral("fileId"), QString()}, {QStringLiteral("baseWidth"), 640},

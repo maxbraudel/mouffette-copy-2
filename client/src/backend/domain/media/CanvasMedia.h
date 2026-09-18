@@ -90,7 +90,7 @@ public:
     void beginElementEdit();
     const SceneTimeline::MediaTrack& timelineTrack() const { return m_timelineTrack; }
     void setTimelineTrack(const SceneTimeline::MediaTrack& track);
-    void ensureDefaultVideoClip(qint64 maxDurationMs);
+    void ensureDefaultVideoClip(const SceneTimeline::SceneSettings& settings);
 
     const MediaSettingsState& settings() const { return m_settings; }
     void setSettings(const MediaSettingsState& settings);

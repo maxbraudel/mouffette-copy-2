@@ -838,12 +838,12 @@ void CanvasMedia::setTimelineTrack(const SceneTimeline::MediaTrack& track)
     m_timelineTrack=track;
     emit changed();
 }
-void CanvasMedia::ensureDefaultVideoClip(qint64 maximum)
+void CanvasMedia::ensureDefaultVideoClip(const SceneTimeline::SceneSettings& settings)
 {
     if (!isVideo() || m_timelineTrack.clipsInitialized || !m_player || m_player->duration()<=0) return;
     auto track=m_timelineTrack;
     track.clipsInitialized=true;
-    track.clips.append({SceneTimeline::newId(),0,0,qMin(maximum,m_player->duration())});
+    track.clips.append({SceneTimeline::newId(),0,0,qMin(settings.maxSlot(),settings.sourceSlots(m_player->duration()))});
     setTimelineTrack(track);
 }
 

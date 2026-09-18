@@ -1607,7 +1607,7 @@ private slots:
         if (original->isVideo()) {
             QTRY_VERIFY(original->player()->duration() > 3000);
             auto track = original->timelineTrack();
-            track.clips = {{SceneTimeline::newId(), 0, 500, 2500}};
+            track.clips = {{SceneTimeline::newId(), 0, 15, 60}};
             track.clipsInitialized = true;
             original->setTimelineTrack(track);
             original->setPositionMs(1500);
@@ -1654,7 +1654,7 @@ private slots:
             QVERIFY(copy->player() != original->player());
             QVERIFY(!copy->isPlaying());
             QTRY_VERIFY(copy->residencyReady());
-            QCOMPARE(copy->timelineTrack().clips.first().sourceInMs, 500);
+            QCOMPARE(copy->timelineTrack().clips.first().sourceStartSlot, 15);
         }
         QCOMPARE(toasts.size(), 1);
         QCOMPARE(toasts.last()[0].toString(), QStringLiteral("Media pasted."));

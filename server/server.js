@@ -143,14 +143,14 @@ function isCanonicalSceneSpan(span, screenIds) {
     return true;
 }
 
-function isCanonicalSceneMedia(item, screenIds, maximumDurationMs) {
+function isCanonicalSceneMedia(item, screenIds, settings) {
     if (!isPlainObject(item) || !OPAQUE_ID_PATTERN.test(item.mediaId)
         || typeof item.fileId !== 'string' || item.fileId.length > 128
         || typeof item.fileName !== 'string' || item.fileName.length > 1024
         || !isCanonicalElement(item, ['mediaId', 'fileId', 'fileName', 'spans', 'timeline',
             ...(item.type === 'text' ? [] : ['assetId']),
             ...(item.type === 'video' ? ['durationMs'] : [])])
-        || !isCanonicalMediaTrack(item.timeline, item.type, maximumDurationMs, item.durationMs)
+        || !isCanonicalMediaTrack(item.timeline, item.type, settings, item.durationMs)
         || (item.type === 'video' && !isBoundedInteger(item.durationMs, 0, MAXIMUM_DURATION_MS))
         || !Array.isArray(item.spans) || item.spans.length > 64) return false;
     const spanScreenIds = new Set();
@@ -166,7 +166,7 @@ function isCanonicalSceneMedia(item, screenIds, maximumDurationMs) {
 function isCanonicalScene(scene, maximumScreens, maximumMedia) {
     if (!isPlainObject(scene)
         || !hasOnlyKeys(scene, ['renderSchemaVersion', 'timeline', 'screens', 'media'])
-        || scene.renderSchemaVersion !== 3
+        || scene.renderSchemaVersion !== 4
         || !isCanonicalTimelineSettings(scene.timeline)
         || !Array.isArray(scene.screens) || scene.screens.length < 1
         || scene.screens.length > maximumScreens
@@ -179,7 +179,7 @@ function isCanonicalScene(scene, maximumScreens, maximumMedia) {
     const mediaIds = new Set();
     let spanCount = 0;
     for (const item of scene.media) {
-        if (!isCanonicalSceneMedia(item, screenIds, scene.timeline.maxDurationMs)
+        if (!isCanonicalSceneMedia(item, screenIds, scene.timeline)
             || mediaIds.has(item.mediaId)) return false;
         mediaIds.add(item.mediaId);
         spanCount += item.spans.length;
@@ -189,7 +189,7 @@ function isCanonicalScene(scene, maximumScreens, maximumMedia) {
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// MOUFFETTE SERVER - PROTOCOL V8 IDENTITY BOUNDARY
+// MOUFFETTE SERVER - PROTOCOL V9 IDENTITY BOUNDARY
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 //
 // Protocol v8 authenticates one installation key, derives one addressable
@@ -1363,21 +1363,21 @@ class MouffetteServer {
             return;
         }
         if (!this.isValidOpaqueId(message.type)) {
-            this.sendError(clientId, 'Invalid protocol v8 message type',
+            this.sendError(clientId, 'Invalid protocol v9 message type',
                 'invalid_message_type');
             return;
         }
         if (REMOVED_MESSAGE_TYPES.has(message.type)
             || (typeof message.type === 'string' && message.type.startsWith('remote_scene_'))) {
             this.sendError(clientId,
-                `Obsolete message type is not supported by protocol v8: ${message.type}`,
+                `Obsolete message type is not supported by protocol v9: ${message.type}`,
                 'removed_message_type');
             return;
         }
         const removedField = findRemovedWireField(message);
         if (removedField) {
             this.sendError(clientId,
-                `Obsolete field is not supported by protocol v8: ${removedField}`,
+                `Obsolete field is not supported by protocol v9: ${removedField}`,
                 'removed_protocol_field');
             return;
         }
@@ -1557,7 +1557,7 @@ class MouffetteServer {
                 this.handleRemoteSessionTeardownAck(clientId, message);
                 break;
             default:
-                this.sendError(clientId, 'Unknown protocol v8 message type', 'unknown_message_type');
+                this.sendError(clientId, 'Unknown protocol v9 message type', 'unknown_message_type');
         }
     }
 

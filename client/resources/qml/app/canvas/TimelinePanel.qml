@@ -15,12 +15,11 @@ FocusScope {
     readonly property real rulerHeight: timeline ? timeline.rulerHeightPx : 28
     readonly property real clipHeight: timeline && timeline.primaryIsVideo ? timeline.clipTrackHeightPx : 0
     readonly property real keyHeight: Math.max(30, trackViewport.height - rulerHeight - clipHeight - 16)
-    readonly property real tickStep: {
-        var desired = 80 / pixelsPerMs
-        var magnitude = Math.pow(10, Math.floor(Math.log(Math.max(1, desired)) / Math.LN10))
-        var units = desired / magnitude
-        return magnitude * (units <= 1 ? 1 : units <= 2 ? 2 : units <= 5 ? 5 : 10)
-    }
+    readonly property real slotMs: 1000 / (timeline ? timeline.slotsPerSecond : 30)
+    // Visual grouping only: authoring always retains the project slot size.
+    readonly property int gridStride: Math.max(1, Math.ceil(8 / (slotMs * pixelsPerMs)))
+    readonly property real gridStep: gridStride * slotMs
+    readonly property real tickStep: Math.max(1, Math.ceil(80 / (gridStep * pixelsPerMs))) * gridStep
     property bool shiftHeld: false
     property var activeDrag: null
     property real snapGuideMs: -1
@@ -47,12 +46,12 @@ FocusScope {
         return Math.round((parts.length === 2 ? Number(parts[0]) * 60 + Number(parts[1]) : Number(parts[0])) * 1000)
     }
     function focusTrack() { timeField.focus = false; root.forceActiveFocus() }
-    function clampTime(ms) { return Math.max(0, Math.min(maximumMs, Math.round(ms))) }
+    function clampTime(ms) { return timeline ? timeline.gridTime(ms) : 0 }
     function snapTime(ms, excludeId, duration) {
         snapGuideMs = -1
         snapGuideLabel = ""
         if (!shiftHeld || !timeline) return clampTime(ms)
-        var result = timeline.snapTime(Math.round(ms), pixelsPerMs, excludeId || "", duration || 0)
+        var result = timeline.snapTime(ms, pixelsPerMs, excludeId || "", duration || 0)
         if (result.snapped) {
             snapGuideMs = result.targetTimeMs
             snapGuideLabel = result.mediaName
@@ -160,7 +159,10 @@ FocusScope {
             }
             Text {
                 height: 28
-                text: "/ " + root.formatTime(root.timeline ? root.timeline.effectiveEndMs : root.maximumMs)
+                objectName: "timelineSlotLabel"
+                text: "#" + (root.timeline ? root.timeline.positionSlot : 0) + " · "
+                    + (root.timeline ? root.timeline.slotsPerSecond : 30) + " slots/s  / "
+                    + root.formatTime(root.timeline ? root.timeline.effectiveEndMs : root.maximumMs)
                 color: Theme.overlayDisabledText; font.pixelSize: 12; verticalAlignment: Text.AlignVCenter
             }
             TimelineButton { text: "−"; Accessible.name: "Zoom out timeline"; onClicked: root.zoom(2) }
@@ -278,6 +280,19 @@ FocusScope {
                 onPositionChanged: mouse => { if (pressed) root.timeline.seek(root.clampTime((mouse.x - 12) / root.pixelsPerMs)) }
             }
             Repeater {
+                model: Math.ceil(trackViewport.width / (root.gridStep * root.pixelsPerMs)) + 2
+                Rectangle {
+                    required property int index
+                    readonly property real timeMs: (Math.floor(Math.max(0, trackViewport.contentX - 12) / root.pixelsPerMs / root.gridStep) + index) * root.gridStep
+                    objectName: "timelineGridLine"
+                    x: 12 + timeMs * root.pixelsPerMs
+                    y: root.rulerHeight
+                    visible: timeMs <= root.maximumMs
+                    width: 1; height: timeContent.height - y
+                    color: Theme.overlayBorder; opacity: 0.45
+                }
+            }
+            Repeater {
                 model: Math.ceil(trackViewport.width / (root.tickStep * root.pixelsPerMs)) + 2
                 Item {
                     required property int index
@@ -353,7 +368,7 @@ FocusScope {
                             onReleased: {
                                 var id = keyItem.modelData.id; var ms = keyItem.previewMs
                                 keyItem.dragging = false; root.endDrag()
-                                if (Math.round(ms) !== initialMs) root.timeline.moveKeyframe(id, Math.round(ms))
+                                if (ms !== initialMs) root.timeline.moveKeyframe(id, ms)
                             }
                             onCanceled: { keyItem.dragging = false; root.endDrag() }
                         }
@@ -394,11 +409,11 @@ FocusScope {
                                 previewEnd = previewStart + (initialEnd - initialStart)
                             } else if (editEdge < 0) {
                                 previewStart = Math.max(0, initialStart - modelData.sourceInMs,
-                                    Math.min(initialEnd - 1, root.snapTime(rawMs, modelData.id, 0)))
+                                    Math.min(initialEnd - root.slotMs, root.snapTime(rawMs, modelData.id, 0)))
                                 previewEnd = initialEnd
                             } else {
                                 previewStart = initialStart
-                                previewEnd = Math.max(initialStart + 1, Math.min(root.maximumMs,
+                                previewEnd = Math.max(initialStart + root.slotMs, Math.min(root.maximumMs,
                                     initialStart + modelData.sourceDurationMs - modelData.sourceInMs,
                                     root.snapTime(rawMs, modelData.id, 0)))
                             }
@@ -419,7 +434,7 @@ FocusScope {
                             refreshPreview()
                         }
                         function finishEdit() {
-                            var id = modelData.id; var start = Math.round(previewStart); var end = Math.round(previewEnd); var edge = editEdge
+                            var id = modelData.id; var start = root.clampTime(previewStart); var end = root.clampTime(previewEnd); var edge = editEdge
                             dragging = false; root.endDrag()
                             if (start === initialStart && end === initialEnd) return
                             if (edge === 0) root.timeline.moveClip(id, start)
@@ -433,6 +448,21 @@ FocusScope {
                         color: root.timeline && root.timeline.selectedClipId === modelData.id ? Theme.accent : Theme.overlayHover
                         border.color: Theme.overlayText
                         clip: true
+                        Rectangle {
+                            objectName: "timelineClipPadding"
+                            // Resizing left or moving preserves the source exit; trimming right changes it.
+                            readonly property real paddingMs: Math.max(0, clipItem.modelData.sourceEndMs
+                                - clipItem.modelData.actualSourceDurationMs + (clipItem.dragging && clipItem.editEdge > 0 ? clipItem.shownEnd - clipItem.initialEnd : 0))
+                            visible: paddingMs > 0
+                            anchors.right: parent.right
+                            width: Math.min(parent.width, Math.max(2, paddingMs * root.pixelsPerMs))
+                            height: parent.height
+                            color: Theme.overlayText; opacity: 0.4
+                            border.color: Theme.overlayBackground
+                        }
+                        ToolTip.visible: clipHover.hovered && modelData.paddingMs > 0
+                        ToolTip.text: "Final frame held silently for " + modelData.paddingMs.toFixed(3) + " ms"
+                        HoverHandler { id: clipHover }
                         Text {
                             anchors.fill: parent; anchors.margins: 8
                             text: root.formatTime(clipItem.modelData.sourceInMs) + " → " + root.formatTime(clipItem.modelData.sourceOutMs)
@@ -512,7 +542,7 @@ FocusScope {
                     }
                     onReleased: {
                         var ms = stopMarker.previewMs
-                        stopMarker.dragging = false; root.endDrag(); root.timeline.setStopTime(Math.round(ms))
+                        stopMarker.dragging = false; root.endDrag(); root.timeline.setStopTime(ms)
                     }
                     onCanceled: { stopMarker.dragging = false; root.endDrag() }
                 }
@@ -538,6 +568,8 @@ FocusScope {
         context: Qt.WindowShortcut
         autoRepeat: false
     }
+    TimelineShortcut { sequence: "Left"; autoRepeat: true; onActivated: root.timeline.stepSlots(-1) }
+    TimelineShortcut { sequence: "Right"; autoRepeat: true; onActivated: root.timeline.stepSlots(1) }
     TimelineShortcut {
         sequences: ["Delete", "Backspace", "Ctrl+Backspace"]
         onActivated: root.timeline.deleteSelected()

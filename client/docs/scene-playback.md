@@ -1,8 +1,8 @@
 # Scene timeline
 
 The scene timeline is the only local preview and animation clock. A remote launch
-is a separate action and always starts at zero. Time is stored as integer
-milliseconds; there is no placement grid. The renderer advances from a monotonic
+is a separate action and always starts at zero. Keys, clip positions and lengths, and Stop are stored as integer slot indices.
+The project cadence defaults to 30 slots/s; boundary `n` is exactly `n / cadence` seconds. The renderer advances from a monotonic
 clock independently of video position notifications.
 
 ## State and evaluation
@@ -15,7 +15,9 @@ and playback never emit document changes or trigger autosave.
 
 Each key captures every intrinsic visual/audio property, excluding media identity,
 loading and video position. Numeric geometry, opacity, volume, colours and text
-style values interpolate linearly. Text, font, visibility, mute, alignment, order
+style values interpolate linearly between slot indices and hold until the next slot.
+For opacity keys at `x:0` and `x+1:1` the change is immediate at `x+1`; with the
+second key at `x+2`, slot `x+1` holds `0.5`. Text, font, visibility, mute, alignment, order
 and effect activation change at the key instant. Effective overrides are resolved
 before interpolation and materialized when capturing an intermediate state.
 Captured geometry governs playback; text auto-sizing is an editing operation.
@@ -29,7 +31,12 @@ state as the new static state. Keys at an occupied instant replace that key.
 ## Clips and transport
 
 Clips refer to source intervals without producing new files. They play at normal
-speed. A move preserves duration and stays within project bounds. Pasting starts
+speed and native video cadence. Source offsets also use the project grid, not native
+video frame numbers. Source length rounds up once: 250 ms at 30 slots/s occupies
+8 slots (266⅔ ms), ending with 16⅔ ms of silent frozen video. Only a fragment
+reaching the actual source end contains this compensation. Splitting cannot add
+more compensation; extension cannot exceed the last slot covering the source.
+A move preserves occupied duration and stays within project bounds. Pasting starts
 at the head and truncates at the project end. Insertion, movement and extension
 overwrite only the arrival interval, retaining correctly offset source fragments.
 Trimming shorter or deleting leaves a gap. Keys and clips remain independent.
@@ -46,7 +53,8 @@ responses are ignored and the last valid image remains visible. Contiguous sourc
 cuts do not cause another seek. Both renderers use the same synchronization policy.
 
 Play resumes at the head; at or past the effective end it restarts at zero. Pause
-retains the head and unlocks authoring. An optional Stop marker defines the
+returns to the beginning of the started slot, silently reseeks video and unlocks authoring.
+Manual placement and precise time entry choose the nearest slot (ties go forward). An optional Stop marker defines the
 playback end; without it the project maximum is the end. Editing past Stop remains
 possible. At Stop, local preview holds the final evaluated state silently. Remote
 playback closes through the existing scene/resource release lifecycle.
@@ -56,29 +64,35 @@ playback closes through the existing scene/resource release lifecycle.
 The timeline stays below the canvas during preparation, preview and remote
 playback. Its ruler, precise time field, zoom, horizontal scroll and fit command
 navigate the project. Shift temporarily snaps against all keys and clip boundaries;
-releasing it immediately restores free placement. Other media keys are decorative.
+releasing it immediately restores ordinary grid alignment. The ruler groups grid
+lines when zoomed out; it never changes the actual slot size. Left/right arrows
+move one slot when the timeline has focus; the transport displays the current slot.
+Clip tails show their silent compensation. Other media keys are decorative.
 Only the explicitly selected primary media is editable; canvas group copy/delete
 remain available. Clipboard and delete commands are routed by focus between text,
-canvas and timeline.
+canvas and timeline. A canvas paste between projects requires matching cadence;
+an animation is never silently reinterpreted on a different grid.
 
 Remote launch preserves preparation, first-image verification, a synchronized
 activation barrier and an immutable revision. Every media is prepared, including
 media initially outside screens. Screen intersections follow evaluated geometry.
-Periodic snapshots carry only the current timeline time, never presentation
+Periodic snapshots carry only the continuous timeline time (including fractional
+milliseconds and the position within a slot), never presentation
 properties, and cannot overwrite animated states. Display loss hides the affected
 output while the clock continues; returning screens resume the current state.
 See [window presentation](window-presentation.md).
 
 ## Configuration and formats
 
-`AppConfig` exposes the eight `MOUFFETTE_TIMELINE_*` settings documented in the
+`AppConfig` exposes the nine `MOUFFETTE_TIMELINE_*` settings documented in the
 [configuration registry](../src/backend/config/README.md). Maximum duration is
-captured in each new project (default 180000 ms); visual settings apply globally.
+captured in each new project (default 180000 ms), together with cadence
+(`MOUFFETTE_TIMELINE_SLOTS_PER_SECOND`, integer 1–240, default 30); visual settings apply globally.
 The initial viewport spans 15000 ms and is independent of playback cadence.
 
-Project component version 5 replaces version 4 through the explicit bootstrap
-reset transition. Other profile components are preserved. Render schema 3 and
-wire protocol 8 require a coordinated client/server rollout. Legacy automation,
+Project component version 6 replaces versions 1–5 through the explicit bootstrap
+reset transition. Other profile components are preserved. Render schema 4 and
+wire protocol 9 require a coordinated client/server rollout. Legacy automation,
 video ranges and older render payloads are rejected, not converted. Timeline
 validation applies on both client and server, including time bounds, strict
 property schemas, source intervals and existing payload size limits.

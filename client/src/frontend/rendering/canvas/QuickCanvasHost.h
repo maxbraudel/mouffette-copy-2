@@ -68,8 +68,8 @@ public:
     void triggerTestSceneAction() override;
     void timelinePlay();
     void timelinePause();
-    void timelineSeek(qint64 positionMs);
-    qint64 timelinePositionMs() const;
+    void timelineSeek(qreal positionMs);
+    qreal timelinePositionMs() const;
     bool timelinePlaying() const { return m_timelinePlaying; }
 
 signals:
@@ -102,9 +102,9 @@ private:
     void connectWebSocketSignals();
     void sendVideoSnapshot();
     void advanceTimeline();
-    void applyTimeline(qint64 positionMs, bool playing, bool forceSeek = false);
-    qint64 timelineStopMs() const;
-    qint64 timelineNowMs() const;
+    void applyTimeline(qreal positionMs, bool playing, bool forceSeek = false);
+    qreal timelineStopMs() const;
+    qreal timelineNowMs() const;
 
     QStringList residencyOwners() const;
     QString m_residencyGroup;
@@ -142,7 +142,7 @@ private:
     int m_framesRemaining = 0;
     QTimer m_timelineTimer;
     QElapsedTimer m_timelineClock;
-    qint64 m_timelineAnchorPositionMs = 0;
+    qreal m_timelineAnchorPositionMs = 0;
     qint64 m_remoteStartServerMs = -1;
     bool m_timelinePlaying = false;
     bool m_timelineRemote = false;

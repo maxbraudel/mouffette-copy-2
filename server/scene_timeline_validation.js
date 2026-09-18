@@ -1,6 +1,6 @@
 'use strict';
 
-// Canonical render schema 3. Keep numeric bounds in sync with SceneTimeline.cpp.
+// Canonical render schema 4. Keep numeric bounds in sync with SceneTimeline.cpp.
 const MAXIMUM_DURATION_MS = 604_800_000;
 const COMMON_ELEMENT_KEYS = Object.freeze([
     'type', 'x', 'y', 'width', 'height', 'baseWidth', 'baseHeight', 'scale',
@@ -53,40 +53,47 @@ function isCanonicalElement(value, extraKeys = []) {
         && ['left', 'center', 'right'].includes(value.horizontalAlignment)
         && ['top', 'center', 'bottom'].includes(value.verticalAlignment);
 }
+const maximumSlot = settings => Math.floor(settings.maxDurationMs * settings.slotsPerSecond / 1000);
+const sourceSlots = (duration, rate) => Math.ceil(duration * rate / 1000);
 function isCanonicalTimelineSettings(value) {
-    return onlyKeys(value, ['maxDurationMs', 'stopTimeMs'])
+    return onlyKeys(value, ['maxDurationMs', 'stopSlot', 'slotsPerSecond'])
         && integer(value.maxDurationMs, 1, MAXIMUM_DURATION_MS)
-        && integer(value.stopTimeMs, -1, value.maxDurationMs);
+        && integer(value.slotsPerSecond, 1, 240) && maximumSlot(value) >= 1
+        && integer(value.stopSlot, -1, maximumSlot(value));
 }
-function isCanonicalMediaTrack(value, type, maximum, sourceDuration = 0) {
-    if (!onlyKeys(value, ['keyframes', 'clips', 'clipsInitialized'])
+function isCanonicalMediaTrack(value, type, settings, sourceDuration = 0) {
+    if (!isCanonicalTimelineSettings(settings)
+        || !onlyKeys(value, ['keyframes', 'clips', 'clipsInitialized'])
         || !Array.isArray(value.keyframes) || value.keyframes.length > 10_000
         || !Array.isArray(value.clips) || value.clips.length > 10_000
         || !boolean(value.clipsInitialized)
-        || ((!value.clipsInitialized || type !== 'video') && value.clips.length > 0)) return false;
+        || ((!value.clipsInitialized || type !== 'video') && value.clips.length > 0)
+        || (type === 'video' && !integer(sourceDuration, 0, MAXIMUM_DURATION_MS))) return false;
+    const maximum = maximumSlot(settings);
+    const sourceLength = sourceSlots(sourceDuration, settings.slotsPerSecond);
     const ids = new Set(); const times = new Set();
     for (const key of value.keyframes) {
-        if (!onlyKeys(key, ['id', 'timeMs', 'state']) || !identifier(key.id) || ids.has(key.id)
-            || !integer(key.timeMs, 0, maximum) || times.has(key.timeMs)
+        if (!onlyKeys(key, ['id', 'slot', 'state']) || !identifier(key.id) || ids.has(key.id)
+            || !integer(key.slot, 0, maximum) || times.has(key.slot)
             || !isCanonicalElement(key.state) || key.state.type !== type) return false;
-        ids.add(key.id); times.add(key.timeMs);
+        ids.add(key.id); times.add(key.slot);
     }
     for (const clip of value.clips) {
-        if (!onlyKeys(clip, ['id', 'startMs', 'sourceInMs', 'sourceOutMs'])
-            || !identifier(clip.id) || ids.has(clip.id) || !integer(clip.startMs, 0, maximum)
-            || !integer(clip.sourceInMs, 0, MAXIMUM_DURATION_MS)
-            || !integer(clip.sourceOutMs, clip.sourceInMs + 1, sourceDuration)
-            || clip.startMs + clip.sourceOutMs - clip.sourceInMs > maximum) return false;
+        if (!onlyKeys(clip, ['id', 'startSlot', 'sourceStartSlot', 'durationSlots'])
+            || !identifier(clip.id) || ids.has(clip.id) || !integer(clip.startSlot, 0, maximum)
+            || !integer(clip.sourceStartSlot, 0, sourceLength)
+            || !integer(clip.durationSlots, 1, sourceLength - clip.sourceStartSlot)
+            || clip.startSlot + clip.durationSlots > maximum) return false;
         ids.add(clip.id);
     }
-    const clips = [...value.clips].sort((a, b) => a.startMs - b.startMs);
+    const clips = [...value.clips].sort((a, b) => a.startSlot - b.startSlot);
     return clips.every((clip, i) => i === 0
-        || clips[i - 1].startMs + clips[i - 1].sourceOutMs - clips[i - 1].sourceInMs <= clip.startMs);
+        || clips[i - 1].startSlot + clips[i - 1].durationSlots <= clip.startSlot);
 }
 function isCanonicalTimelineSnapshot(snapshot, settings) {
     return isCanonicalTimelineSettings(settings) && onlyKeys(snapshot, ['timelinePositionMs'])
-        && integer(snapshot.timelinePositionMs, 0,
-            settings.stopTimeMs < 0 ? settings.maxDurationMs : settings.stopTimeMs);
+        && finite(snapshot.timelinePositionMs, 0,
+            (settings.stopSlot < 0 ? maximumSlot(settings) : settings.stopSlot) * 1000 / settings.slotsPerSecond);
 }
 module.exports = { MAXIMUM_DURATION_MS, isCanonicalElement,
     isCanonicalTimelineSettings, isCanonicalMediaTrack, isCanonicalTimelineSnapshot };

@@ -247,6 +247,7 @@ void RuntimeStorageBootstrapTest::componentMismatch_data()
     }
     QTest::newRow("projects-explicit-reset") << QStringLiteral("projects") << 2;
     QTest::newRow("projects-timeline-reset") << QStringLiteral("projects") << 4;
+    QTest::newRow("projects-grid-reset") << QStringLiteral("projects") << 5;
 }
 
 void RuntimeStorageBootstrapTest::componentMismatch()

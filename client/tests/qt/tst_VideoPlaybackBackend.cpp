@@ -62,7 +62,7 @@ private slots:
         video->setVolume(0.27);
         video->setPositionMs(1234);
         SceneTimeline::MediaTrack track;
-        QVERIFY(SceneTimeline::insertClip(track,{"clip",1000,1000,2400},180000));
+        QVERIFY(SceneTimeline::insertClip(track,{"clip",30,30,42},5400));
         video->setTimelineTrack(track);
         if (!whileLoading)
             QTRY_VERIFY(player->asset() && video->hasRenderedFrame());
@@ -95,8 +95,8 @@ private slots:
         QVERIFY(!video->isPlaying());
         QVERIFY(video->muted());
         QCOMPARE(video->volume(), 0.27);
-        QCOMPARE(video->timelineTrack().clips.first().sourceInMs,1000);
-        QCOMPARE(video->timelineTrack().clips.first().sourceOutMs,2400);
+        QCOMPARE(video->timelineTrack().clips.first().sourceStartSlot,30);
+        QCOMPARE(video->timelineTrack().clips.first().sourceEndSlot(),72);
     }
 
     void restoredVideoHasNoPersistedTransportCursor()
@@ -216,8 +216,8 @@ private slots:
         auto* video=host->document()->addPreparedFile(videoFixture(),QSize(160,90),true,{});
         QTRY_VERIFY_WITH_TIMEOUT(video->residencyReady() && video->player()->duration()>3000,5000);
         SceneTimeline::MediaTrack track;
-        QVERIFY(SceneTimeline::insertClip(track,{"first",400,100,700},180000));
-        QVERIFY(SceneTimeline::insertClip(track,{"second",1400,2000,2500},180000));
+        QVERIFY(SceneTimeline::insertClip(track,{"first",12,3,18},5400));
+        QVERIFY(SceneTimeline::insertClip(track,{"second",42,60,15},5400));
         video->setTimelineTrack(track);
         const auto saved=host->serializeProjectState();
         QSignalSpy writes(host->document(),&CanvasDocument::documentChanged);
@@ -239,9 +239,9 @@ private slots:
         auto* video=host->document()->addPreparedFile(videoFixture(),QSize(160,90),true,{});
         QTRY_VERIFY_WITH_TIMEOUT(video->residencyReady() && video->player()->duration()>3000,5000);
         video->setMuted(true);
-        SceneTimeline::MediaTrack track;SceneTimeline::insertClip(track,{"clip",350,500,1000},180000);
+        SceneTimeline::MediaTrack track;SceneTimeline::insertClip(track,{"clip",11,15,15},5400);
         video->setTimelineTrack(track);
-        auto settings=host->document()->timelineSettings();settings.stopTimeMs=1200;QVERIFY(host->document()->setTimelineSettings(settings));
+        auto settings=host->document()->timelineSettings();settings.stopSlot=36;QVERIFY(host->document()->setTimelineSettings(settings));
         host->timelineSeek(0);QTRY_COMPARE(video->positionMs(),qint64(500));
         QVERIFY(!video->isPlaying());host->timelinePlay();
         QTRY_VERIFY_WITH_TIMEOUT(video->isPlaying(),5000);
@@ -259,7 +259,7 @@ private slots:
         QTRY_VERIFY_WITH_TIMEOUT(video->residencyReady() && video->audioOutput(),5000);
         auto track=video->timelineTrack();auto a=video->authorElementState(),b=a;
         a.muted=false;a.volume=0;b.muted=false;b.volume=1;
-        SceneTimeline::upsertKeyframe(track,{"a",0,a},180000);SceneTimeline::upsertKeyframe(track,{"b",1000,b},180000);
+        SceneTimeline::upsertKeyframe(track,{"a",0,a},180000);SceneTimeline::upsertKeyframe(track,{"b",30,b},5400);
         video->setTimelineTrack(track);
         const auto saved=host->serializeProjectState();
         host->timelineSeek(500);QVERIFY(qAbs(video->volume()-.5)<.001);

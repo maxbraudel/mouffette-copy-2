@@ -81,6 +81,7 @@ public:
         UiInputWatchdogIntervalMs,
         UiSnapFreezeCleanupDelayMs,
         TimelineMaxDurationMs,
+        TimelineSlotsPerSecond,
         TimelineHeightPx,
         TimelineRulerHeightPx,
         TimelineClipTrackHeightPx,
@@ -214,6 +215,7 @@ public:
     int uiInputWatchdogIntervalMs() const { return m_uiInputWatchdogIntervalMs; }
     int uiSnapFreezeCleanupDelayMs() const { return m_uiSnapFreezeCleanupDelayMs; }
     int timelineMaxDurationMs() const { return m_timelineMaxDurationMs; }
+    int timelineSlotsPerSecond() const { return m_timelineSlotsPerSecond; }
     int timelineHeightPx() const { return m_timelineHeightPx; }
     int timelineRulerHeightPx() const { return m_timelineRulerHeightPx; }
     int timelineClipTrackHeightPx() const { return m_timelineClipTrackHeightPx; }
@@ -309,6 +311,7 @@ private:
     int m_toastErrorDurationMs = 5000;
     int m_toastAnimationDurationMs = 300;
     int m_timelineMaxDurationMs = 180000;
+    int m_timelineSlotsPerSecond = 30;
     int m_timelineHeightPx = 240;
     int m_timelineRulerHeightPx = 28;
     int m_timelineClipTrackHeightPx = 64;

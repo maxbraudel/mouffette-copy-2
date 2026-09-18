@@ -26,7 +26,7 @@
 #include <utility>
 
 namespace {
-constexpr auto kCanvasClipboardMime = "application/x-mouffette-media-v1";
+constexpr auto kCanvasClipboardMime = "application/x-mouffette-media-v2";
 constexpr qreal kSnapDistancePx = 10.0;
 constexpr qreal kCornerSnapDistancePx = 20.0;
 constexpr qreal kSnapReleaseFactor = 1.4;
@@ -1661,7 +1661,7 @@ void QuickCanvasController::copySelectedMedia()
             paths.insert(id, media->sourcePath());
     }
     // Capture authoring values at copy time; never retain pointers to live media.
-    const QJsonObject payload{{QStringLiteral("renderSchemaVersion"), 3},
+    const QJsonObject payload{{QStringLiteral("renderSchemaVersion"), SceneTimeline::RenderSchemaVersion},
                               {QStringLiteral("primaryMediaId"), primarySelectedMediaId()},
                               {QStringLiteral("timeline"), m_document->timelineSettings().toJson()},
                               {QStringLiteral("media"), entries},
@@ -1692,7 +1692,7 @@ void QuickCanvasController::pasteMedia()
             : QStringLiteral("%1 media pasted.").arg(inserted.size()));
     }
     if (!skipped.isEmpty())
-        TOAST_WARNING(QStringLiteral("Some media could not be pasted. Check that their source files are still available."));
+        TOAST_WARNING(QStringLiteral("Some media could not be pasted. Check source files, project duration and matching timeline cadence."));
 }
 
 void QuickCanvasController::deleteSelectedMedia()

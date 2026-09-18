@@ -62,6 +62,32 @@ private slots:
         QCOMPARE(document->serializeProjectState(), saved);
     }
 
+    void seeksUseNearestSlotsAndContinuousTransportDoesNotSave()
+    {
+        std::unique_ptr<QuickCanvasHost> host(QuickCanvasHost::create());
+        QVERIFY(host); host->setProjectEditingEnabled(true);
+        auto* doc=host->document(); auto* media=doc->addText({}, "Grid"); doc->select(media->mediaId());
+        TimelineController timeline; timeline.setHost(host.get());
+        timeline.seek(1000.0/60); QCOMPARE(timeline.positionSlot(),1);
+        QCOMPARE(timeline.positionMs(),1000.0/30);
+        timeline.placeKeyframe(); timeline.seek(48); timeline.placeKeyframe();
+        QCOMPARE(media->timelineTrack().keyframes.size(),1);
+        timeline.stepSlots(1); QCOMPARE(timeline.positionSlot(),2);
+        timeline.stepSlots(-1); QCOMPARE(timeline.positionSlot(),1);
+        timeline.setStopTime(1500.0/30); QCOMPARE(doc->timelineSettings().stopSlot,2);
+        timeline.removeStop();
+        QSignalSpy writes(doc,&CanvasDocument::documentChanged);
+        doc->setTimelinePosition(49.125);
+        QCOMPARE(doc->timelinePositionMs(),49.125); QCOMPARE(timeline.positionSlot(),1);
+        QCOMPARE(writes.count(),0);
+        timeline.seek(1000.0/30); timeline.togglePlayback();
+        QTRY_VERIFY(host->timelinePlaying());
+        QTest::qWait(95); timeline.togglePlayback();
+        QVERIFY(!timeline.playing());
+        QCOMPARE(doc->timelinePositionMs(),doc->timelineSettings().timeMs(timeline.positionSlot()));
+        QCOMPARE(writes.count(),0);
+    }
+
     void primarySelectionOwnsTransformsAndDiscardsPreviousDraft()
     {
         std::unique_ptr<QuickCanvasHost> host(QuickCanvasHost::create());
@@ -127,18 +153,18 @@ private slots:
         auto* a = host->document()->addText({}, QStringLiteral("A"));
         auto* b = host->document()->addText({}, QStringLiteral("B"));
         SceneTimeline::MediaTrack track;
-        track.keyframes = {{QStringLiteral("target"), 1337, b->authorElementState()}};
+        track.keyframes = {{QStringLiteral("target"), 40, b->authorElementState()}};
         b->setTimelineTrack(track);
         host->document()->select(a->mediaId());
         TimelineController timeline;
         timeline.setHost(host.get());
-        auto snap = timeline.snapTime(1327, 1, QString());
+        auto snap = timeline.snapTime(1324, 1, QString());
         QVERIFY(snap.value(QStringLiteral("snapped")).toBool());
-        QCOMPARE(snap.value(QStringLiteral("timeMs")).toLongLong(), 1337);
-        QVERIFY(!timeline.snapTime(1326, 1, QString()).value(QStringLiteral("snapped")).toBool());
-        QVERIFY(!timeline.snapTime(1337, 1, QStringLiteral("target")).value(QStringLiteral("snapped")).toBool());
-        snap = timeline.snapTime(1000, 1, QString(), 340);
-        QCOMPARE(snap.value(QStringLiteral("timeMs")).toLongLong(), 997);
+        QCOMPARE(snap.value(QStringLiteral("timeMs")).toDouble(), 4000.0/3);
+        QVERIFY(!timeline.snapTime(1323, 1, QString()).value(QStringLiteral("snapped")).toBool());
+        QVERIFY(!timeline.snapTime(4000.0/3, 1, QStringLiteral("target")).value(QStringLiteral("snapped")).toBool());
+        snap = timeline.snapTime(997, 1, QString(), 1000.0/3);
+        QCOMPARE(snap.value(QStringLiteral("timeMs")).toDouble(), 1000.0);
     }
 
     void clipboardCannotChangeTheOccurrenceType()
@@ -153,7 +179,7 @@ private slots:
         SceneTimeline::ElementState wrongType;
         wrongType.type = QStringLiteral("image");
         auto* mime = new QMimeData;
-        mime->setData("application/x-mouffette-timeline-v3", QJsonDocument(QJsonObject{
+        mime->setData("application/x-mouffette-timeline-v4", QJsonDocument(QJsonObject{
             {"mediaId", media->mediaId()}, {"projectId", host->document()->projectId()},
             {"kind", "keyframe"}, {"state", wrongType.toJson()}}).toJson());
         QGuiApplication::clipboard()->setMimeData(mime);
@@ -179,7 +205,7 @@ private slots:
         host->document()->select(media->mediaId());
         SceneTimeline::MediaTrack track;
         track.clipsInitialized = true;
-        track.clips = {{QStringLiteral("original"), 0, 0, 2000}};
+        track.clips = {{QStringLiteral("original"), 0, 0, 60}};
         media->setTimelineTrack(track);
         TimelineController timeline;
         timeline.setHost(host.get());
@@ -190,21 +216,25 @@ private slots:
         timeline.seek(1750);
         timeline.paste();
         QCOMPARE(media->timelineTrack().clips.size(), 2);
-        QCOMPARE(media->timelineTrack().clips.first().sourceOutMs, 1750);
-        QCOMPARE(media->timelineTrack().clips.last().durationMs(), 750);
-        QCOMPARE(media->timelineTrack().clips.last().endMs(), 2500);
+        QCOMPARE(media->timelineTrack().clips.first().sourceEndSlot(), 53);
+        QCOMPARE(media->timelineTrack().clips.last().durationSlots, 22);
+        QCOMPARE(media->timelineTrack().clips.last().endSlot(), 75);
         QCOMPARE(media->timelineTrack().keyframes.first().id, key);
-        QCOMPARE(media->timelineTrack().keyframes.first().timeMs, 0);
+        QCOMPARE(media->timelineTrack().keyframes.first().slot, 0);
         host.reset();
         MediaResidencyManager::instance().clearMemorySnapshotForTesting();
     }
 
-    void productionTimelineQmlLoadsAndCapturesAtFreeTime()
+    void productionTimelineQmlLoadsAndCapturesOnGrid()
     {
         std::unique_ptr<QuickCanvasHost> host(QuickCanvasHost::create());
         QVERIFY(host);
         host->setProjectEditingEnabled(true);
         auto* media = host->document()->addText({}, QStringLiteral("Timeline UI"));
+        auto* other=host->document()->addText({},"Magnetic target");
+        SceneTimeline::MediaTrack otherTrack;
+        otherTrack.keyframes={{"target",40,other->authorElementState()}};
+        other->setTimelineTrack(otherTrack);
         host->document()->select(media->mediaId());
         TimelineController timeline;
         timeline.setHost(host.get());
@@ -223,7 +253,7 @@ private slots:
         QTest::mouseClick(&view, Qt::LeftButton, Qt::NoModifier,
             capture->mapToScene(QPointF(capture->width()/2, capture->height()/2)).toPoint());
         QTRY_COMPARE(media->timelineTrack().keyframes.size(), 1);
-        QCOMPARE(media->timelineTrack().keyframes.first().timeMs, 1337);
+        QCOMPARE(media->timelineTrack().keyframes.first().slot, 40);
         auto* timeField = view.rootObject()->findChild<QQuickItem*>(QStringLiteral("timelineTimeField"));
         QVERIFY(timeField);
         timeField->forceActiveFocus();
@@ -235,10 +265,29 @@ private slots:
         };
         findKey(findKey, view.rootObject());
         QVERIFY(keyItem);
+        const qreal slotMs=1000.0/30;
+        QVERIFY(view.rootObject()->property("gridStep").toDouble()>slotMs);
+        // Shift release immediately restores the grid preview, never free time.
+        keyItem->setProperty("dragging",true); keyItem->setProperty("rawMs",1309.0);
+        view.rootObject()->setProperty("activeDrag",QVariant::fromValue(keyItem));
+        view.rootObject()->setProperty("shiftHeld",true);
+        QCOMPARE(keyItem->property("previewMs").toDouble(),4000.0/3);
+        view.rootObject()->setProperty("shiftHeld",false);
+        QCOMPARE(keyItem->property("previewMs").toDouble(),1300.0);
+        keyItem->setProperty("dragging",false);
+        QVERIFY(QMetaObject::invokeMethod(view.rootObject(),"endDrag"));
+        view.rootObject()->setProperty("viewDurationMs",500.0);
+        QCOMPARE(view.rootObject()->property("gridStep").toDouble(),slotMs);
+        view.rootObject()->setProperty("viewDurationMs",15000.0);
         QTest::mouseClick(&view, Qt::LeftButton, Qt::NoModifier,
             keyItem->mapToScene(QPointF(keyItem->width()/2, keyItem->height()/2)).toPoint());
         QTRY_VERIFY(!view.rootObject()->property("textInputFocused").toBool());
         QCOMPARE(timeline.selectedKeyframeId(), media->timelineTrack().keyframes.first().id);
+        QTest::keyClick(&view, Qt::Key_Right); QTRY_COMPARE(timeline.positionSlot(),41);
+        QTest::keyClick(&view, Qt::Key_Left); QTRY_COMPARE(timeline.positionSlot(),40);
+        timeField->forceActiveFocus(); timeField->setProperty("text", "00:00.050");
+        QTest::keyClick(&view, Qt::Key_Return); QTRY_COMPARE(timeline.positionSlot(),2);
+        host->document()->removeMedia(other->mediaId());
         QCOMPARE(host->document()->media().size(), 1);
         QVERIFY(view.rootObject()->findChild<QQuickItem*>(QStringLiteral("timelinePlayPause")));
         QVERIFY(!view.rootObject()->findChild<QQuickItem*>(QStringLiteral("videoProgressSlider")));

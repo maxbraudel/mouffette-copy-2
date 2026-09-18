@@ -44,7 +44,7 @@ function addClient(server, connectionId, endpointId, options = {}) {
 function envelope(server, type, extra = {}) {
     return {
         type,
-        protocolVersion: 8,
+        protocolVersion: 9,
         serverBootId: server.serverBootId,
         messageId: crypto.randomUUID(),
         connectionGeneration: 1,
@@ -119,7 +119,7 @@ function containsRemovedWireKey(value, forbidden) {
         connectionGeneration: 99,
     }));
     const outbound = lastMessage(recipient.ws, 'test_outbound');
-    assert.equal(outbound.protocolVersion, 8);
+    assert.equal(outbound.protocolVersion, 9);
     assert.equal(outbound.serverBootId, server.serverBootId);
     assert.equal(outbound.connectionGeneration, 99);
     assert.match(outbound.messageId,
@@ -131,7 +131,7 @@ function containsRemovedWireKey(value, forbidden) {
 
 // Version negotiation precedes authentication: an old client always receives
 // the single explicit mismatch result and the server closes its connection.
-{
+for (const obsoleteVersion of [1, 7, 8]) {
     const server = new MouffetteServer(0);
     const old = addClient(server, 'old-connection', null, {
         authenticated: false,
@@ -140,11 +140,11 @@ function containsRemovedWireKey(value, forbidden) {
     });
     server.handleMessage('old-connection', {
         type: 'device_register',
-        protocolVersion: 1,
+        protocolVersion: obsoleteVersion,
     });
     const mismatch = lastMessage(old.ws, 'error');
     assert.equal(mismatch.code, 'protocol_version_mismatch');
-    assert.equal(mismatch.protocolVersion, 8);
+    assert.equal(mismatch.protocolVersion, 9);
     assert.equal(mismatch.serverBootId, server.serverBootId);
     assert.equal(typeof mismatch.messageId, 'string');
     assert.deepEqual(old.ws.closes, [{ code: 1002, reason: 'Protocol version mismatch' }]);

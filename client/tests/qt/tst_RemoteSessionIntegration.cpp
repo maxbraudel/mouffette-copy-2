@@ -68,7 +68,7 @@ QJsonObject liveTextScene()
     media[QStringLiteral("timeline")] = SceneTimeline::MediaTrack{}.toJson();
 
     QJsonObject scene;
-    scene[QStringLiteral("renderSchemaVersion")] = 3;
+    scene[QStringLiteral("renderSchemaVersion")] = SceneTimeline::RenderSchemaVersion;
     scene[QStringLiteral("timeline")] = SceneTimeline::SceneSettings{}.toJson();
     scene[QStringLiteral("screens")] = QJsonArray{screen};
     scene[QStringLiteral("media")] = QJsonArray{media};

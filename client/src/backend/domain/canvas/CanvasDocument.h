@@ -60,8 +60,8 @@ public:
     bool setPrimarySelectedMedia(const QString& mediaId);
     const SceneTimeline::SceneSettings& timelineSettings() const { return m_timelineSettings; }
     bool setTimelineSettings(const SceneTimeline::SceneSettings& settings);
-    qint64 timelinePositionMs() const { return m_timelinePositionMs; }
-    void setTimelinePosition(qint64 timeMs);
+    qreal timelinePositionMs() const { return m_timelinePositionMs; }
+    void setTimelinePosition(qreal timeMs);
     void evaluateTimeline();
     void select(const QString& mediaId, bool additive = false);
     void clearSelection();
@@ -160,7 +160,7 @@ private:
     QString m_primarySelectedMediaId;
     QStringList m_selectionActivationOrder;
     SceneTimeline::SceneSettings m_timelineSettings;
-    qint64 m_timelinePositionMs = 0;
+    qreal m_timelinePositionMs = 0;
     bool m_evaluatingTimeline = false;
     QList<ScreenInfo> m_screens;
     QHash<int, QRectF> m_screenRects;

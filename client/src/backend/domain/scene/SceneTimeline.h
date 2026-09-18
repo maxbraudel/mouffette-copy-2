@@ -9,7 +9,7 @@
 
 // Authoring data and the deterministic, clock-independent scene evaluator.
 namespace SceneTimeline {
-inline constexpr int RenderSchemaVersion = 3;
+inline constexpr int RenderSchemaVersion = 4;
 inline constexpr qint64 MaximumSupportedDurationMs = 604800000;
 
 struct ElementState {
@@ -57,31 +57,39 @@ struct ElementState {
     static bool fromMediaJson(const QJsonObject&, ElementState*, QString* error = nullptr);
 };
 
+// Positions are indices in the project grid, never native video frame numbers.
 struct Keyframe {
     QString id;
-    qint64 timeMs = 0;
+    qint64 slot = 0;
     ElementState state;
 };
 struct VideoClip {
     QString id;
-    qint64 startMs = 0;
-    qint64 sourceInMs = 0;
-    qint64 sourceOutMs = 0; // exclusive
-    qint64 durationMs() const { return sourceOutMs - sourceInMs; }
-    qint64 endMs() const { return startMs + durationMs(); }
+    qint64 startSlot = 0;
+    qint64 sourceStartSlot = 0;
+    qint64 durationSlots = 0;
+    qint64 endSlot() const { return startSlot + durationSlots; }
+    qint64 sourceEndSlot() const { return sourceStartSlot + durationSlots; }
 };
 struct MediaTrack {
     QList<Keyframe> keyframes;
     QList<VideoClip> clips;
     bool clipsInitialized = false;
     QJsonObject toJson() const;
-    static bool fromJson(const QJsonObject&, MediaTrack*, qint64 maxDurationMs,
+    static bool fromJson(const QJsonObject&, MediaTrack*, qint64 maxSlot,
                          QString* error = nullptr);
 };
 struct SceneSettings {
     qint64 maxDurationMs = 180000;
-    qint64 stopTimeMs = -1;
-    qint64 effectiveStopMs() const { return stopTimeMs < 0 ? maxDurationMs : stopTimeMs; }
+    qint64 stopSlot = -1;
+    int slotsPerSecond = 30;
+    qint64 maxSlot() const { return maxDurationMs * slotsPerSecond / 1000; }
+    qint64 effectiveStopSlot() const { return stopSlot < 0 ? maxSlot() : stopSlot; }
+    qreal timeMs(qint64 slot) const { return qreal(slot) * 1000.0 / slotsPerSecond; }
+    qreal effectiveStopMs() const { return timeMs(effectiveStopSlot()); }
+    qint64 slotAt(qreal timeMs) const;
+    qint64 nearestSlot(qreal timeMs) const;
+    qint64 sourceSlots(qint64 durationMs) const;
     QJsonObject toJson() const;
     static bool fromJson(const QJsonObject&, SceneSettings*, QString* error = nullptr);
 };
@@ -91,20 +99,21 @@ struct VideoSample {
     QString clipId;
 };
 
-ElementState evaluate(const ElementState& base, const MediaTrack&, qint64 timeMs);
+ElementState evaluate(const ElementState& base, const MediaTrack&, qint64 slot);
 ElementState materialize(const ElementState& evaluated);
-VideoSample evaluateVideo(const MediaTrack&, qint64 timeMs, qint64 sourceDurationMs);
-QJsonObject evaluateMedia(const QJsonObject& media, qint64 timeMs);
+VideoSample evaluateVideo(const MediaTrack&, qreal timeMs, qint64 sourceDurationMs,
+                          const SceneSettings&);
+QJsonObject evaluateMedia(const QJsonObject& media, qreal timeMs, const SceneSettings&);
 QString newId();
-bool upsertKeyframe(MediaTrack&, Keyframe, qint64 maxDurationMs);
+bool upsertKeyframe(MediaTrack&, Keyframe, qint64 maxSlot);
 bool removeKeyframe(MediaTrack&, const QString& id);
-bool moveKeyframe(MediaTrack&, const QString& id, qint64 timeMs, qint64 maxDurationMs);
+bool moveKeyframe(MediaTrack&, const QString& id, qint64 slot, qint64 maxSlot);
 // Insertion/movement/extension overwrite only their occupied interval, keeping
 // source-correct fragments on either side. Operations are atomic.
-bool insertClip(MediaTrack&, VideoClip, qint64 maxDurationMs);
+bool insertClip(MediaTrack&, VideoClip, qint64 maxSlot);
 bool removeClip(MediaTrack&, const QString& id);
-bool moveClip(MediaTrack&, const QString& id, qint64 startMs, qint64 maxDurationMs);
-bool splitClip(MediaTrack&, const QString& id, qint64 timeMs);
-bool trimClip(MediaTrack&, const QString& id, qint64 startMs, qint64 endMs,
-              qint64 maxDurationMs, qint64 sourceDurationMs);
+bool moveClip(MediaTrack&, const QString& id, qint64 startSlot, qint64 maxSlot);
+bool splitClip(MediaTrack&, const QString& id, qint64 slot);
+bool trimClip(MediaTrack&, const QString& id, qint64 startSlot, qint64 endSlot,
+              qint64 maxSlot, qint64 sourceSlots);
 }

@@ -44,7 +44,7 @@ function messages(ws, type) {
 
 function envelope(session, extra = {}) {
     return {
-        protocolVersion: 8,
+        protocolVersion: 9,
         serverBootId: session.serverBootId,
         messageId: crypto.randomUUID(),
         remoteSessionId: session.remoteSessionId,
@@ -59,8 +59,8 @@ const asset = Object.freeze({
     mediaIds: ['media-1'], sha256: 'a'.repeat(64), size: 128,
 });
 const scene = Object.freeze({
-    renderSchemaVersion: 3,
-            timeline: { maxDurationMs: 180000, stopTimeMs: -1 },
+    renderSchemaVersion: 4,
+            timeline: { maxDurationMs: 180000, stopSlot: -1, slotsPerSecond: 30 },
     screens: [{ id: 1, x: 0, y: 0, width: 1920, height: 1080, primary: true }],
     media: [{
         mediaId: 'media-1', assetId: 'asset-1', fileId: 'a'.repeat(64),
@@ -660,7 +660,7 @@ for (const invalidCase of [
         'an absent or implausibly future server timestamp must fail closed');
 
     for (const snapshot of [{ timelinePositionMs: -1 }, { timelinePositionMs: 180001 },
-        { timelinePositionMs: 1.5 }, { timelinePositionMs: '100' },
+        { timelinePositionMs: '100' },
         { timelinePositionMs: 100, media: [] }, { videos: [] }]) {
         server.handleMessage('owner-connection', envelope(session, {
             type: 'state_snapshot', sceneRunId: 'run-wire-1', digest, sequence: 2,
@@ -670,7 +670,7 @@ for (const invalidCase of [
         assert.equal(messages(target, 'state_snapshot').length, snapshotCountBeforeInvalidTimestamp);
     }
 
-    const authoritativeSnapshot = { timelinePositionMs: 9000 };
+    const authoritativeSnapshot = { timelinePositionMs: 9000.125 };
     server.handleMessage('owner-connection', envelope(session, {
         type: 'state_snapshot', sceneRunId: 'run-wire-1', digest, sequence: 2,
         sampledServerMonotonicMs: wireMonotonic,
@@ -707,7 +707,7 @@ for (const invalidCase of [
     assert.equal(messages(owner, 'stopped').at(-1).success, true);
 
     server.handleMessage('owner-connection', {
-        protocolVersion: 8, serverBootId: server.serverBootId,
+        protocolVersion: 9, serverBootId: server.serverBootId,
         messageId: crypto.randomUUID(),
         type: 'remote_scene_start',
     });
@@ -787,17 +787,17 @@ for (const invalidCase of [
 }
 
 // Timeline clips and keyframes are validated before creating a remote graph.
-const clip = { id: 'clip-1', startMs: 4000, sourceInMs: 1000, sourceOutMs: 3000 };
+const clip = { id: 'clip-1', startSlot: 120, sourceStartSlot: 30, durationSlots: 60 };
 for (const [overrides, accepted] of [
     [{}, true],
     [{ timeline: { clipsInitialized: true, keyframes: [], clips: [] } }, true],
     [{ timeline: { clipsInitialized: false, keyframes: [], clips: [clip] } }, false],
-    [{ timeline: { clipsInitialized: true, keyframes: [], clips: [{ ...clip, sourceOutMs: 5001 }] } }, false],
-    [{ timeline: { clipsInitialized: true, keyframes: [], clips: [{ ...clip, startMs: 179000 }] } }, false],
-    [{ timeline: { clipsInitialized: true, keyframes: [], clips: [{ ...clip, sourceOutMs: 1000 }] } }, false],
-    [{ timeline: { clipsInitialized: true, keyframes: [], clips: [{ ...clip, startMs: 0.5 }] } }, false],
-    [{ timeline: { clipsInitialized: true, keyframes: [], clips: [clip, { ...clip, id: 'clip-2', startMs: 4500 }] } }, false],
-    [{ timeline: { clipsInitialized: true, keyframes: [], clips: [clip, { ...clip, id: 'clip-2', startMs: 6000 }] } }, true],
+    [{ timeline: { clipsInitialized: true, keyframes: [], clips: [{ ...clip, durationSlots: 121 }] } }, false],
+    [{ timeline: { clipsInitialized: true, keyframes: [], clips: [{ ...clip, startSlot: 5370 }] } }, false],
+    [{ timeline: { clipsInitialized: true, keyframes: [], clips: [{ ...clip, durationSlots: 0 }] } }, false],
+    [{ timeline: { clipsInitialized: true, keyframes: [], clips: [{ ...clip, startSlot: 0.5 }] } }, false],
+    [{ timeline: { clipsInitialized: true, keyframes: [], clips: [clip, { ...clip, id: 'clip-2', startSlot: 135 }] } }, false],
+    [{ timeline: { clipsInitialized: true, keyframes: [], clips: [clip, { ...clip, id: 'clip-2', startSlot: 180 }] } }, true],
     [{ autoPlay: true }, false], [{ startPositionMs: 1000 }, false],
     [{ endPositionMs: 1800 }, false], [{ fadeInSeconds: 1 }, false],
     [{ durationMs: -1 }, false], [{ durationMs: 604_800_001 }, false],
@@ -841,7 +841,7 @@ for (const [overrides, accepted] of [
     }
 }
 
-console.log('scene protocol v8 tests passed');
+console.log('scene protocol v9 tests passed');
 
 // Residency is a separate, authenticated barrier; upload completion never implies it.
 {

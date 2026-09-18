@@ -6,6 +6,7 @@
 #include <QUuid>
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace SceneTimeline {
 namespace {
@@ -43,12 +44,12 @@ QColor blendColor(const QColor& a, const QColor& b, qreal f) {
                             blend(a.blueF(), b.blueF(), f), blend(a.alphaF(), b.alphaF(), f));
 }
 void sortTrack(MediaTrack& t) {
-    std::sort(t.keyframes.begin(), t.keyframes.end(), [](const Keyframe& a, const Keyframe& b) { return a.timeMs < b.timeMs; });
-    std::sort(t.clips.begin(), t.clips.end(), [](const VideoClip& a, const VideoClip& b) { return a.startMs < b.startMs; });
+    std::sort(t.keyframes.begin(), t.keyframes.end(), [](const Keyframe& a, const Keyframe& b) { return a.slot < b.slot; });
+    std::sort(t.clips.begin(), t.clips.end(), [](const VideoClip& a, const VideoClip& b) { return a.startSlot < b.startSlot; });
 }
 bool validClip(const VideoClip& c, qint64 maximum) {
-    return !c.id.isEmpty() && c.startMs >= 0 && c.sourceInMs >= 0 && c.sourceOutMs > c.sourceInMs
-        && c.sourceOutMs <= MaximumSupportedDurationMs && c.endMs() <= maximum;
+    return !c.id.isEmpty() && c.startSlot >= 0 && c.sourceStartSlot >= 0 && c.durationSlots > 0
+        && c.sourceEndSlot() <= MaximumSupportedDurationMs * 240 / 1000 && c.endSlot() <= maximum;
 }
 }
 QString newId() { return QUuid::createUuid().toString(QUuid::WithoutBraces); }
@@ -131,55 +132,83 @@ bool ElementState::fromMediaJson(const QJsonObject& media,ElementState* output,Q
 }
 QJsonObject MediaTrack::toJson() const {
     QJsonArray keys, segments;
-    for (const auto& k : keyframes) keys.append(QJsonObject{{"id",k.id},{"timeMs",double(k.timeMs)},{"state",k.state.toJson()}});
-    for (const auto& c : clips) segments.append(QJsonObject{{"id",c.id},{"startMs",double(c.startMs)},
-        {"sourceInMs",double(c.sourceInMs)},{"sourceOutMs",double(c.sourceOutMs)}});
+    for (const auto& k : keyframes) keys.append(QJsonObject{{"id",k.id},{"slot",double(k.slot)},{"state",k.state.toJson()}});
+    for (const auto& c : clips) segments.append(QJsonObject{{"id",c.id},{"startSlot",double(c.startSlot)},
+        {"sourceStartSlot",double(c.sourceStartSlot)},{"durationSlots",double(c.durationSlots)}});
     return {{"keyframes",keys},{"clips",segments},{"clipsInitialized",clipsInitialized}};
 }
 bool MediaTrack::fromJson(const QJsonObject& o, MediaTrack* out, qint64 maximum, QString* error) {
-    if (!out || !onlyKeys(o,{"keyframes","clips","clipsInitialized"}) || maximum < 1 || maximum > MaximumSupportedDurationMs || !o.value("keyframes").isArray()
+    if (!out || !onlyKeys(o,{"keyframes","clips","clipsInitialized"}) || maximum < 1 || maximum > MaximumSupportedDurationMs * 240 / 1000 || !o.value("keyframes").isArray()
         || !o.value("clips").isArray() || !o.value("clipsInitialized").isBool()) return fail(error,"Invalid media timeline");
     MediaTrack t; t.clipsInitialized = o.value("clipsInitialized").toBool(); QSet<QString> ids; QSet<qint64> times;
     auto keys = o.value("keyframes").toArray(), clips = o.value("clips").toArray();
     if (keys.size() > 10000 || clips.size() > 10000) return fail(error,"Timeline exceeds item limit");
     for (auto v : keys) {
         auto k = v.toObject(); Keyframe key; key.id = k.value("id").toString();
-        if (!onlyKeys(k,{"id","timeMs","state"}) || key.id.isEmpty() || key.id.size() > 128 || ids.contains(key.id)
-            || !integer(k,"timeMs",0,maximum,&key.timeMs) || times.contains(key.timeMs)
+        if (!onlyKeys(k,{"id","slot","state"}) || key.id.isEmpty() || key.id.size() > 128 || ids.contains(key.id)
+            || !integer(k,"slot",0,maximum,&key.slot) || times.contains(key.slot)
             || !k.value("state").isObject() || !ElementState::fromJson(k.value("state").toObject(),&key.state,error))
             return fail(error,"Invalid or duplicate keyframe");
-        ids.insert(key.id); times.insert(key.timeMs); t.keyframes.append(key);
+        ids.insert(key.id); times.insert(key.slot); t.keyframes.append(key);
     }
     for (auto v : clips) {
         auto c = v.toObject(); VideoClip clip; clip.id = c.value("id").toString();
-        if (!onlyKeys(c,{"id","startMs","sourceInMs","sourceOutMs"}) || clip.id.isEmpty() || clip.id.size() > 128 || ids.contains(clip.id)
-            || !integer(c,"startMs",0,maximum,&clip.startMs)
-            || !integer(c,"sourceInMs",0,MaximumSupportedDurationMs,&clip.sourceInMs)
-            || !integer(c,"sourceOutMs",1,MaximumSupportedDurationMs,&clip.sourceOutMs) || !validClip(clip,maximum))
+        if (!onlyKeys(c,{"id","startSlot","sourceStartSlot","durationSlots"}) || clip.id.isEmpty() || clip.id.size() > 128 || ids.contains(clip.id)
+            || !integer(c,"startSlot",0,maximum,&clip.startSlot)
+            || !integer(c,"sourceStartSlot",0,MaximumSupportedDurationMs * 240 / 1000,&clip.sourceStartSlot)
+            || !integer(c,"durationSlots",1,MaximumSupportedDurationMs * 240 / 1000,&clip.durationSlots) || !validClip(clip,maximum))
             return fail(error,"Invalid video clip");
         ids.insert(clip.id); t.clips.append(clip);
     }
     sortTrack(t);
-    for (qsizetype i=1;i<t.clips.size();++i) if(t.clips[i-1].endMs()>t.clips[i].startMs) return fail(error,"Overlapping clips");
+    for (qsizetype i=1;i<t.clips.size();++i) if(t.clips[i-1].endSlot()>t.clips[i].startSlot) return fail(error,"Overlapping clips");
     if (!t.clipsInitialized && !t.clips.isEmpty()) return fail(error,"Uninitialized clip list is not empty");
     *out=t; return true;
 }
-QJsonObject SceneSettings::toJson() const { return {{"maxDurationMs",double(maxDurationMs)},{"stopTimeMs",double(stopTimeMs)}}; }
+qint64 SceneSettings::slotAt(qreal ms) const {
+    if (!std::isfinite(ms)) return 0;
+    const qreal bounded = qBound(0.0, ms, timeMs(maxSlot()));
+    qint64 slot = qBound<qint64>(0, qint64(std::floor(bounded * slotsPerSecond / 1000.0)), maxSlot());
+    // Correct binary roundoff against the canonical boundary itself, without
+    // moving genuinely earlier timestamps into the following slot.
+    if (slot > 0 && bounded < timeMs(slot)) --slot;
+    else if (slot < maxSlot() && bounded >= timeMs(slot + 1)) ++slot;
+    return slot;
+}
+qint64 SceneSettings::nearestSlot(qreal ms) const {
+    if (!std::isfinite(ms)) return 0;
+    const qint64 slot = slotAt(ms);
+    if (slot == maxSlot()) return slot;
+    const qreal midpoint = (qreal(slot) + 0.5) * 1000.0 / slotsPerSecond;
+    // A mathematical tie may arrive one ULP below the represented midpoint.
+    return std::nextafter(ms, std::numeric_limits<qreal>::infinity()) >= midpoint ? slot + 1 : slot;
+}
+qint64 SceneSettings::sourceSlots(qint64 duration) const {
+    return duration > 0 && duration <= MaximumSupportedDurationMs
+        ? (duration * slotsPerSecond + 999) / 1000 : 0;
+}
+QJsonObject SceneSettings::toJson() const {
+    return {{"maxDurationMs", maxDurationMs}, {"stopSlot", stopSlot}, {"slotsPerSecond", slotsPerSecond}};
+}
 bool SceneSettings::fromJson(const QJsonObject& o, SceneSettings* out, QString* error) {
-    SceneSettings s;
-    if(!out || !onlyKeys(o,{"maxDurationMs","stopTimeMs"}) || !integer(o,"maxDurationMs",1,MaximumSupportedDurationMs,&s.maxDurationMs)
-        || !integer(o,"stopTimeMs",-1,s.maxDurationMs,&s.stopTimeMs)) return fail(error,"Invalid scene timeline settings");
-    *out=s; return true;
+    SceneSettings s; qint64 rate;
+    if (!out || !onlyKeys(o, {"maxDurationMs", "stopSlot", "slotsPerSecond"})
+        || !integer(o, "maxDurationMs", 1, MaximumSupportedDurationMs, &s.maxDurationMs)
+        || !integer(o, "slotsPerSecond", 1, 240, &rate)) return fail(error, "Invalid scene grid settings");
+    s.slotsPerSecond = int(rate);
+    if (s.maxSlot() < 1 || !integer(o, "stopSlot", -1, s.maxSlot(), &s.stopSlot))
+        return fail(error, "Scene duration must contain a complete slot and Stop must be inside it");
+    *out = s; return true;
 }
 ElementState evaluate(const ElementState& base, const MediaTrack& track, qint64 time) {
     if (track.keyframes.isEmpty()) return base;
-    if (time <= track.keyframes.first().timeMs) return track.keyframes.first().state;
-    if (time >= track.keyframes.last().timeMs) return track.keyframes.last().state;
+    if (time <= track.keyframes.first().slot) return track.keyframes.first().state;
+    if (time >= track.keyframes.last().slot) return track.keyframes.last().state;
     auto right = std::upper_bound(track.keyframes.cbegin(),track.keyframes.cend(),time,
-        [](qint64 t,const Keyframe& k){return t<k.timeMs;});
+        [](qint64 t,const Keyframe& k){return t<k.slot;});
     const auto& a=*(right-1); const auto& b=*right;
-    if(time==a.timeMs) return a.state;
-    qreal f=qreal(time-a.timeMs)/qreal(b.timeMs-a.timeMs); ElementState s=a.state;
+    if(time==a.slot) return a.state;
+    qreal f=qreal(time-a.slot)/qreal(b.slot-a.slot); ElementState s=a.state;
     s.position = a.state.position+(b.state.position-a.state.position)*f;
     s.size = QSizeF(blend(a.state.size.width(),b.state.size.width(),f),blend(a.state.size.height(),b.state.size.height(),f));
     s.scale=blend(a.state.scale,b.state.scale,f); s.baseSize=s.size/s.scale;
@@ -198,37 +227,52 @@ ElementState materialize(const ElementState& value) {
     if(s.outlineColorOverrideEnabled || s.outlineColor != QColor(Qt::black)) {s.outlineColorOverrideEnabled=true;s.rawOutlineColor=s.outlineColor;}
     return s;
 }
-VideoSample evaluateVideo(const MediaTrack& track,qint64 time,qint64 duration) {
+VideoSample evaluateVideo(const MediaTrack& track, qreal time, qint64 duration, const SceneSettings& settings) {
     VideoSample result;
-    if(track.clips.isEmpty()) return result;
-    const VideoClip* previous=nullptr;
-    for(const auto& c:track.clips) {
-        if(time<c.startMs) {result.sourceTimeMs=previous?previous->sourceOutMs-1:c.sourceInMs;break;}
-        if(time<c.endMs()) {result.sourceTimeMs=c.sourceInMs+time-c.startMs;result.playing=true;result.clipId=c.id;break;}
-        previous=&c; result.sourceTimeMs=c.sourceOutMs-1;
+    if (track.clips.isEmpty() || duration <= 0) return result;
+    const auto exitTime = [&](const VideoClip& clip) {
+        return qMax<qint64>(0, qCeil(qMin(qreal(duration), settings.timeMs(clip.sourceEndSlot()))) - 1);
+    };
+    const VideoClip* previous = nullptr;
+    for (const auto& clip : track.clips) {
+        if (time < settings.timeMs(clip.startSlot)) {
+            result.sourceTimeMs = previous ? exitTime(*previous) : qRound64(settings.timeMs(clip.sourceStartSlot));
+            break;
+        }
+        if (time < settings.timeMs(clip.endSlot())) {
+            const qreal source = time + settings.timeMs(clip.sourceStartSlot - clip.startSlot);
+            result.playing = source < qMin(qreal(duration), settings.timeMs(clip.sourceEndSlot()));
+            result.sourceTimeMs = result.playing ? qRound64(source) : exitTime(clip);
+            result.clipId = clip.id;
+            break;
+        }
+        previous = &clip;
+        result.sourceTimeMs = exitTime(clip);
     }
-    if(duration>0) result.sourceTimeMs=qBound<qint64>(0,result.sourceTimeMs,duration-1);
+    result.sourceTimeMs = qBound<qint64>(0, result.sourceTimeMs, duration - 1);
     return result;
 }
-QJsonObject evaluateMedia(const QJsonObject& media,qint64 time) {
+QJsonObject evaluateMedia(const QJsonObject& media, qreal time, const SceneSettings& settings) {
     ElementState base; MediaTrack track;
-    if(!ElementState::fromMediaJson(media,&base) || !MediaTrack::fromJson(media.value("timeline").toObject(),&track,MaximumSupportedDurationMs)) return {};
-    QJsonObject result=media;const auto evaluated=evaluate(base,track,time).toJson();
-    for(auto it=evaluated.begin();it!=evaluated.end();++it) result.insert(it.key(),it.value());
+    if (!ElementState::fromMediaJson(media, &base)
+        || !MediaTrack::fromJson(media.value("timeline").toObject(), &track, settings.maxSlot())) return {};
+    QJsonObject result = media;
+    const auto evaluated = evaluate(base, track, settings.slotAt(time)).toJson();
+    for (auto it = evaluated.begin(); it != evaluated.end(); ++it) result.insert(it.key(), it.value());
     return result;
 }
 bool upsertKeyframe(MediaTrack& track,Keyframe key,qint64 maximum) {
-    if(key.timeMs<0 || key.timeMs>maximum) return false;
+    if(key.slot<0 || key.slot>maximum) return false;
     ElementState checked;if(!ElementState::fromJson(key.state.toJson(),&checked)) return false;
     if(key.id.isEmpty()) key.id=newId();
-    for(qsizetype i=track.keyframes.size();i-->0;) if(track.keyframes[i].timeMs==key.timeMs || track.keyframes[i].id==key.id) track.keyframes.removeAt(i);
+    for(qsizetype i=track.keyframes.size();i-->0;) if(track.keyframes[i].slot==key.slot || track.keyframes[i].id==key.id) track.keyframes.removeAt(i);
     track.keyframes.append(key);sortTrack(track);return true;
 }
 bool removeKeyframe(MediaTrack& track,const QString& id) {
     for(qsizetype i=0;i<track.keyframes.size();++i) if(track.keyframes[i].id==id){track.keyframes.removeAt(i);return true;}return false;
 }
 bool moveKeyframe(MediaTrack& track,const QString& id,qint64 time,qint64 maximum) {
-    for(const auto& k:track.keyframes) if(k.id==id){auto copy=k;copy.timeMs=qBound<qint64>(0,time,maximum);return upsertKeyframe(track,copy,maximum);}return false;
+    for(const auto& k:track.keyframes) if(k.id==id){auto copy=k;copy.slot=qBound<qint64>(0,time,maximum);return upsertKeyframe(track,copy,maximum);}return false;
 }
 bool insertClip(MediaTrack& track,VideoClip clip,qint64 maximum) {
     if(clip.id.isEmpty()) clip.id=newId();
@@ -236,9 +280,9 @@ bool insertClip(MediaTrack& track,VideoClip clip,qint64 maximum) {
     QList<VideoClip> result;
     for(const auto& old:track.clips) {
         if(old.id==clip.id) continue;
-        if(old.endMs()<=clip.startMs || old.startMs>=clip.endMs()){result.append(old);continue;}
-        if(old.startMs<clip.startMs) {auto left=old;left.sourceOutMs=left.sourceInMs+clip.startMs-left.startMs;result.append(left);}
-        if(old.endMs()>clip.endMs()) {auto right=old;right.id=newId();right.sourceInMs+=clip.endMs()-right.startMs;right.startMs=clip.endMs();result.append(right);}
+        if(old.endSlot()<=clip.startSlot || old.startSlot>=clip.endSlot()){result.append(old);continue;}
+        if(old.startSlot<clip.startSlot) {auto left=old;left.durationSlots=clip.startSlot-left.startSlot;result.append(left);}
+        if(old.endSlot()>clip.endSlot()) {auto right=old;right.id=newId();right.durationSlots=old.endSlot()-clip.endSlot();right.sourceStartSlot+=clip.endSlot()-right.startSlot;right.startSlot=clip.endSlot();result.append(right);}
     }
     result.append(clip);track.clips=result;track.clipsInitialized=true;sortTrack(track);return true;
 }
@@ -246,26 +290,26 @@ bool removeClip(MediaTrack& track,const QString& id) {
     for(qsizetype i=0;i<track.clips.size();++i) if(track.clips[i].id==id){track.clips.removeAt(i);track.clipsInitialized=true;return true;}return false;
 }
 bool moveClip(MediaTrack& track,const QString& id,qint64 start,qint64 maximum) {
-    for(const auto& c:track.clips) if(c.id==id){if(maximum<c.durationMs())return false;auto moved=c;moved.startMs=qBound<qint64>(0,start,maximum-c.durationMs());return insertClip(track,moved,maximum);}return false;
+    for(const auto& c:track.clips) if(c.id==id){if(maximum<c.durationSlots)return false;auto moved=c;moved.startSlot=qBound<qint64>(0,start,maximum-c.durationSlots);return insertClip(track,moved,maximum);}return false;
 }
 bool splitClip(MediaTrack& track,const QString& id,qint64 time) {
     for(qsizetype i=0;i<track.clips.size();++i) if(track.clips[i].id==id) {
-        const auto old=track.clips[i];if(time<=old.startMs || time>=old.endMs()) return false;
-        auto left=old,right=old;left.sourceOutMs=old.sourceInMs+time-old.startMs;
-        right.id=newId();right.startMs=time;right.sourceInMs=left.sourceOutMs;
+        const auto old=track.clips[i];if(time<=old.startSlot || time>=old.endSlot()) return false;
+        auto left=old,right=old;left.durationSlots=time-old.startSlot;
+        right.id=newId();right.startSlot=time;right.sourceStartSlot=old.sourceStartSlot+left.durationSlots;right.durationSlots=old.durationSlots-left.durationSlots;
         track.clips[i]=left;track.clips.insert(i+1,right);return true;
     }return false;
 }
 bool trimClip(MediaTrack& track,const QString& id,qint64 start,qint64 end,qint64 maximum,qint64 duration) {
     if (duration <= 0 || maximum <= 0) return false;
     for(const auto& c:track.clips) if(c.id==id) {
-        auto trimmed=c;const qint64 minimum=qMax<qint64>(0,c.startMs-c.sourceInMs);
-        const qint64 maximumEnd=qMin(maximum,c.startMs+duration-c.sourceInMs);
+        auto trimmed=c;const qint64 minimum=qMax<qint64>(0,c.startSlot-c.sourceStartSlot);
+        const qint64 maximumEnd=qMin(maximum,c.startSlot+duration-c.sourceStartSlot);
         if (maximumEnd <= minimum) return false;
-        trimmed.startMs=qBound(minimum,start,qMax(minimum,maximumEnd-1));
-        end=qBound(trimmed.startMs+1,end,maximumEnd);
-        trimmed.sourceInMs=c.sourceInMs+trimmed.startMs-c.startMs;
-        trimmed.sourceOutMs=trimmed.sourceInMs+end-trimmed.startMs;
+        trimmed.startSlot=qBound(minimum,start,qMax(minimum,maximumEnd-1));
+        end=qBound(trimmed.startSlot+1,end,maximumEnd);
+        trimmed.sourceStartSlot=c.sourceStartSlot+trimmed.startSlot-c.startSlot;
+        trimmed.durationSlots=end-trimmed.startSlot;
         return insertClip(track,trimmed,maximum);
     }return false;
 }

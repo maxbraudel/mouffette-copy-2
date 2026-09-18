@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QObject>
+#include "backend/domain/scene/SceneTimeline.h"
 #include <QPointer>
 #include <QVariantList>
 #include <QVariantMap>
@@ -15,10 +16,12 @@ namespace SceneTimeline { struct MediaTrack; }
 class TimelineController final : public QObject
 {
     Q_OBJECT
-    Q_PROPERTY(qint64 positionMs READ positionMs NOTIFY transportChanged)
-    Q_PROPERTY(qint64 maxDurationMs READ maxDurationMs NOTIFY changed)
-    Q_PROPERTY(qint64 stopTimeMs READ stopTimeMs NOTIFY changed)
-    Q_PROPERTY(qint64 effectiveEndMs READ effectiveEndMs NOTIFY changed)
+    Q_PROPERTY(qreal positionMs READ positionMs NOTIFY transportChanged)
+    Q_PROPERTY(qreal maxDurationMs READ maxDurationMs NOTIFY changed)
+    Q_PROPERTY(qreal stopTimeMs READ stopTimeMs NOTIFY changed)
+    Q_PROPERTY(qreal effectiveEndMs READ effectiveEndMs NOTIFY changed)
+    Q_PROPERTY(qint64 positionSlot READ positionSlot NOTIFY transportChanged)
+    Q_PROPERTY(int slotsPerSecond READ slotsPerSecond NOTIFY changed)
     Q_PROPERTY(bool playing READ playing NOTIFY transportChanged)
     Q_PROPERTY(bool remoteActive READ remoteActive NOTIFY transportChanged)
     Q_PROPERTY(bool editable READ editable NOTIFY transportChanged)
@@ -47,10 +50,14 @@ class TimelineController final : public QObject
 public:
     explicit TimelineController(QObject* parent = nullptr);
     void setHost(QuickCanvasHost* host);
-    qint64 positionMs() const;
-    qint64 maxDurationMs() const;
-    qint64 stopTimeMs() const;
-    qint64 effectiveEndMs() const;
+    qreal positionMs() const;
+    qreal maxDurationMs() const;
+    qreal stopTimeMs() const;
+    qreal effectiveEndMs() const;
+    qint64 positionSlot() const;
+    int slotsPerSecond() const;
+    Q_INVOKABLE qreal gridTime(qreal timeMs) const;
+    Q_INVOKABLE void stepSlots(int delta);
     bool playing() const;
     bool remoteActive() const;
     bool editable() const;
@@ -76,28 +83,28 @@ public:
     int snapDistancePx() const;
     int initialViewDurationMs() const;
 
-    Q_INVOKABLE void seek(qint64 timeMs);
+    Q_INVOKABLE void seek(qreal timeMs);
     Q_INVOKABLE void togglePlayback();
     Q_INVOKABLE void goToStart();
     Q_INVOKABLE void goToEnd();
     Q_INVOKABLE void placeKeyframe();
     Q_INVOKABLE void selectKeyframe(const QString& id);
-    Q_INVOKABLE void moveKeyframe(const QString& id, qint64 timeMs);
+    Q_INVOKABLE void moveKeyframe(const QString& id, qreal timeMs);
     Q_INVOKABLE void selectClip(const QString& id);
-    Q_INVOKABLE void moveClip(const QString& id, qint64 startMs);
-    Q_INVOKABLE void trimClip(const QString& id, qint64 startMs, qint64 endMs);
+    Q_INVOKABLE void moveClip(const QString& id, qreal startMs);
+    Q_INVOKABLE void trimClip(const QString& id, qreal startMs, qreal endMs);
     Q_INVOKABLE void splitClip();
     Q_INVOKABLE void insertFullClip();
     Q_INVOKABLE void deleteSelected();
     Q_INVOKABLE void copySelected();
     Q_INVOKABLE void paste();
     Q_INVOKABLE void placeStop();
-    Q_INVOKABLE void setStopTime(qint64 timeMs);
+    Q_INVOKABLE void setStopTime(qreal timeMs);
     Q_INVOKABLE void removeStop();
     Q_INVOKABLE void clearSelection();
-    Q_INVOKABLE QVariantMap snapTime(qint64 timeMs, qreal pixelsPerMs,
+    Q_INVOKABLE QVariantMap snapTime(qreal timeMs, qreal pixelsPerMs,
                                     const QString& excludeId,
-                                    qint64 clipDurationMs = 0) const;
+                                    qreal clipDurationMs = 0) const;
 
 signals:
     void changed();
@@ -105,6 +112,7 @@ signals:
     void tracksChanged();
 
 private:
+    SceneTimeline::SceneSettings grid() const;
     CanvasMedia* primary() const;
     void refresh();
     void reevaluate();

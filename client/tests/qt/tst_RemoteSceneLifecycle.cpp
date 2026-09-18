@@ -1078,8 +1078,9 @@ private slots:
                 entry.insert(QStringLiteral("assetId"), entry.value(QStringLiteral("fileId")));
             if (entry.value(QStringLiteral("type")) == QLatin1String("video")) {
                 SceneTimeline::MediaTrack track;
-                QVERIFY(SceneTimeline::insertClip(track,{SceneTimeline::newId(),0,startMs,
-                    qRound64(entry.value(QStringLiteral("durationMs")).toDouble())},180000));
+                QVERIFY(SceneTimeline::insertClip(track,{SceneTimeline::newId(),0,SceneTimeline::SceneSettings{}.nearestSlot(startMs),
+                    SceneTimeline::SceneSettings{}.sourceSlots(entry.value(QStringLiteral("durationMs")).toInteger())
+                        -SceneTimeline::SceneSettings{}.nearestSlot(startMs)},5400));
                 entry.insert(QStringLiteral("timeline"),track.toJson());
                 QCOMPARE(entry.value(QStringLiteral("spans")).toArray().isEmpty(), offscreen);
             }
@@ -1108,7 +1109,7 @@ private slots:
 
         QTRY_COMPARE_WITH_TIMEOUT(controller.findChildren<ResidentVideoPlayer*>().size(), videoCount, 3000);
         for (auto* player : controller.findChildren<ResidentVideoPlayer*>()) {
-            QTRY_VERIFY_WITH_TIMEOUT(player->preparedAt(startMs), 3000);
+            QTRY_VERIFY_WITH_TIMEOUT(player->preparedAt(qRound64(SceneTimeline::SceneSettings{}.timeMs(SceneTimeline::SceneSettings{}.nearestSlot(startMs)))), 3000);
             QCOMPARE(player->playbackState(), QMediaPlayer::PausedState);
         }
         QTRY_COMPARE_WITH_TIMEOUT(successfulPreparedCount, 1, 3000);
@@ -1198,8 +1199,8 @@ private slots:
         auto hidden=media->authorElementState(),shown=hidden;
         hidden.visible=false; shown.visible=true;
         SceneTimeline::upsertKeyframe(track,{"hidden",0,hidden},180000);
-        SceneTimeline::upsertKeyframe(track,{"shown",200,shown},180000);
-        SceneTimeline::upsertKeyframe(track,{"hidden-again",600,hidden},180000);
+        SceneTimeline::upsertKeyframe(track,{"shown",6,shown},180000);
+        SceneTimeline::upsertKeyframe(track,{"hidden-again",18,hidden},180000);
         media->setTimelineTrack(track);
         bool sceneHidden = false, sceneDisplayed = false, sceneHiddenAgain = false;
         QObject timelineObserver;
@@ -1258,7 +1259,7 @@ private slots:
         auto a=media->authorElementState(),b=a;a.opacity=0;b.opacity=1;
         SceneTimeline::MediaTrack track;
         SceneTimeline::upsertKeyframe(track,{"a",0,SceneTimeline::materialize(a)},180000);
-        SceneTimeline::upsertKeyframe(track,{"b",1000,SceneTimeline::materialize(b)},180000);
+        SceneTimeline::upsertKeyframe(track,{"b",30,SceneTimeline::materialize(b)},180000);
         media->setTimelineTrack(track);const auto saved=host->serializeProjectState();
         host->timelinePlay();QTRY_VERIFY(host->timelinePlaying());
         QTRY_VERIFY(host->timelinePositionMs()>100);
@@ -1305,11 +1306,11 @@ private slots:
         a.opacity=0;b.opacity=.4;c.opacity=0;
         SceneTimeline::MediaTrack track=media->timelineTrack();
         SceneTimeline::upsertKeyframe(track,{"start",0,SceneTimeline::materialize(a)},180000);
-        SceneTimeline::upsertKeyframe(track,{"middle",1000,SceneTimeline::materialize(b)},180000);
-        SceneTimeline::upsertKeyframe(track,{"end",2000,SceneTimeline::materialize(c)},180000);
+        SceneTimeline::upsertKeyframe(track,{"middle",30,SceneTimeline::materialize(b)},180000);
+        SceneTimeline::upsertKeyframe(track,{"end",60,SceneTimeline::materialize(c)},180000);
         media->setTimelineTrack(track);
         const auto saved=host->serializeProjectState();
-        host->timelineSeek(250);QVERIFY(qAbs(media->contentOpacity()-.1)<.0001);
+        host->timelineSeek(250);QVERIFY(qAbs(media->contentOpacity()-(.4*8/30))<.0001);
         host->timelineSeek(1500);QVERIFY(qAbs(media->contentOpacity()-.2)<.0001);
         host->timelineSeek(0);QCOMPARE(media->contentOpacity(),0.0);
         QCOMPARE(host->serializeProjectState(),saved);
@@ -1324,7 +1325,7 @@ private slots:
         auto* media=host->document()->addText({},"Restart");
         auto a=media->authorElementState(),b=a;a.position={0,0};b.position={100,0};
         SceneTimeline::MediaTrack track;
-        SceneTimeline::upsertKeyframe(track,{"a",0,a},180000);SceneTimeline::upsertKeyframe(track,{"b",1000,b},180000);
+        SceneTimeline::upsertKeyframe(track,{"a",0,a},180000);SceneTimeline::upsertKeyframe(track,{"b",30,b},180000);
         media->setTimelineTrack(track);
         for(int run=0;run<3;++run) {
             host->timelineSeek(0);host->timelinePlay();QTRY_VERIFY(host->timelinePositionMs()>80);
@@ -1341,14 +1342,14 @@ private slots:
         CanvasDocument document;auto* media=document.addText({},"Persistent");
         auto a=media->authorElementState(),b=a;b.position={700,100};b.uppercase=true;
         SceneTimeline::MediaTrack track;
-        SceneTimeline::upsertKeyframe(track,{"a",123,a},180000);SceneTimeline::upsertKeyframe(track,{"b",1123,b},180000);
+        SceneTimeline::upsertKeyframe(track,{"a",3,a},180000);SceneTimeline::upsertKeyframe(track,{"b",33,b},180000);
         media->setTimelineTrack(track);const auto saved=document.serializeProjectState();
         QSignalSpy writes(&document,&CanvasDocument::documentChanged);
-        document.setTimelinePosition(623);QCOMPARE(media->position(),(a.position+b.position)/2);
+        document.setTimelinePosition(600);QCOMPARE(media->position(),(a.position+b.position)/2);
         media->beginElementEdit();media->setUppercase(true);QVERIFY(media->hasElementDraft());
         QCOMPARE(document.serializeProjectState(),saved);QCOMPARE(writes.count(),0);
-        document.setTimelinePosition(623);QVERIFY(!media->hasElementDraft());QVERIFY(!media->uppercase());
-        QCOMPARE(document.serializeSceneState().value("renderSchemaVersion").toInt(),3);
+        document.setTimelinePosition(600);QVERIFY(!media->hasElementDraft());QVERIFY(!media->uppercase());
+        QCOMPARE(document.serializeSceneState().value("renderSchemaVersion").toInt(),4);
         const auto serialized=document.serializeSceneState().value("media").toArray()[0].toObject();
         QVERIFY(!serialized.contains("autoDisplay"));QVERIFY(!serialized.contains("projectMediaSettings"));
     }

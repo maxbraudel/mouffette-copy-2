@@ -57,7 +57,7 @@ QJsonObject scene()
              {QStringLiteral("type"), QStringLiteral("image")},
              {QStringLiteral("fileId"), kFileHash}
          }}},
-        {QStringLiteral("renderSchemaVersion"), 3}
+        {QStringLiteral("renderSchemaVersion"), 4}
     };
 }
 }
@@ -125,7 +125,7 @@ private slots:
         const QJsonArray normalized = SceneRunCoordinator::normalizeManifest(manifest(), &error);
         QVERIFY2(error.isEmpty(), qPrintable(error));
         QCOMPARE(SceneRunCoordinator::computeDigest(1, normalized, scene()),
-                 QStringLiteral("66eaa56c6a3af5bb30269f4ea70fbf78144b1dee7dfb26c7b97d6a913ef77649"));
+                 QStringLiteral("771abd192f4e4bfce15786329ce75f10880a764bc75a6b0ab5c08aa103bd376d"));
     }
 
     void sessionIdentityAndResumeTokenAreMemoryOnlyBindings()
@@ -282,7 +282,7 @@ private slots:
         RemoteSessionCoordinator sessions;
         sessions.setLocalEndpointId(kOwner);
         auto opened = sessionEnvelope();
-        opened.insert("protocolVersion", 8);
+        opened.insert("protocolVersion", 9);
         opened.insert("stateRevision", 1);
         opened.insert("validUntilServerMonotonicMs", 5000);
         opened.insert("snapshotSequence", 1);
@@ -311,7 +311,7 @@ private slots:
         coordinator.setLocalEndpointId(kTarget);
         QVERIFY(coordinator.upsertSession(sessionEnvelope(), 1));
         auto terminal = sessionEnvelope(3, "CleanupPending", "remote_session_terminating");
-        terminal.insert("protocolVersion", 8);
+        terminal.insert("protocolVersion", 9);
         terminal.insert("stateRevision", 8);
         terminal.insert("teardownId", "missed_generation_cleanup");
         QVERIFY(coordinator.upsertSession(terminal, 3));

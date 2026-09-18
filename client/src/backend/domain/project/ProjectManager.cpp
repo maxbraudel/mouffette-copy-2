@@ -262,6 +262,7 @@ QString ProjectManager::createProjectFromSnapshot(
     project.hiddenAtMs = -1;
     SceneTimeline::SceneSettings timeline;
     timeline.maxDurationMs = AppConfig::instance().timelineMaxDurationMs();
+    timeline.slotsPerSecond = AppConfig::instance().timelineSlotsPerSecond();
     project.canvasState = {
         {QStringLiteral("renderSchemaVersion"), SceneTimeline::RenderSchemaVersion},
         {QStringLiteral("timeline"), timeline.toJson()},

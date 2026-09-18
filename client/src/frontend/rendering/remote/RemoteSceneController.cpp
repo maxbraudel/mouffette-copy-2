@@ -648,7 +648,8 @@ bool RemoteSceneController::applyAuthoritativeStateSnapshot(
         emit authoritativeSnapshotRejected(sequence, reason);
         return false;
     };
-    qint64 position = 0;
+    const auto positionValue = snapshot.value(QStringLiteral("timelinePositionMs"));
+    const qreal position = positionValue.toDouble(-1);
     if (!m_enabled || m_pendingSceneInstanceId.isEmpty() || m_teardownInProgress)
         return reject(QStringLiteral("No active renderer graph"));
     if (sequence < 1 || sequence > 9007199254740991ULL
@@ -656,8 +657,8 @@ bool RemoteSceneController::applyAuthoritativeStateSnapshot(
         return reject(QStringLiteral("Snapshot sequence is stale"));
     if (sampleAgeMs < 0 || sampleAgeMs > kMaxSafeJsonInteger
         || snapshot.size() != 1
-        || !readBoundedInt64(snapshot, "timelinePositionMs", 0,
-                            m_timelineSettings.effectiveStopMs(), position))
+        || !positionValue.isDouble() || !std::isfinite(position) || position < 0
+        || position > m_timelineSettings.effectiveStopMs())
         return reject(QStringLiteral("Invalid timeline snapshot"));
     m_lastVideoSyncSequence = static_cast<qint64>(sequence);
     // The immutable COMMIT remains authoritative. This anchor only supplies a
@@ -829,12 +830,12 @@ void RemoteSceneController::onRemoteSceneStart(const QString& senderClientId, co
         }
     };
 
-    if (!readBoundedInteger(scene, "renderSchemaVersion", 3, 3,
+    if (!readBoundedInteger(scene, "renderSchemaVersion", SceneTimeline::RenderSchemaVersion, SceneTimeline::RenderSchemaVersion,
                             renderSchemaVersion)
         || !scene.value(QStringLiteral("screens")).isArray()
         || !scene.value(QStringLiteral("media")).isArray()
         || sceneInstanceId.isEmpty()) {
-        rejectStart(QStringLiteral("Scene does not conform to render schema 3"));
+        rejectStart(QStringLiteral("Scene does not conform to render schema 4"));
         return;
     }
 
@@ -993,7 +994,7 @@ void RemoteSceneController::onRemoteSceneStart(const QString& senderClientId, co
             || declaredMediaIds.contains(id)
             || !SceneTimeline::ElementState::fromMediaJson(object, &state, &timelineError)
             || !SceneTimeline::MediaTrack::fromJson(object.value(QStringLiteral("timeline")).toObject(),
-                                                    &track, timelineSettings.maxDurationMs, &timelineError)
+                                                    &track, timelineSettings.maxSlot(), &timelineError)
             || (type != QLatin1String("video") && !track.clips.isEmpty())
             || std::any_of(track.keyframes.cbegin(), track.keyframes.cend(),
                            [&type](const auto& key) { return key.state.type != type; })) {
@@ -1004,7 +1005,7 @@ void RemoteSceneController::onRemoteSceneStart(const QString& senderClientId, co
             qint64 durationMs = 0;
             if (!readBoundedInt64(object, "durationMs", 0, 604800000, durationMs)
                 || std::any_of(track.clips.cbegin(), track.clips.cend(),
-                               [durationMs](const auto& clip) { return clip.sourceOutMs > durationMs; })) {
+                               [durationMs, &timelineSettings](const auto& clip) { return clip.sourceEndSlot() > timelineSettings.sourceSlots(durationMs); })) {
                 failWithMessage(QStringLiteral("Invalid timeline video duration"));
                 return;
             }
@@ -2228,7 +2229,7 @@ void RemoteSceneController::buildMedia(const QJsonArray& mediaArray)
         item->sceneEpoch = m_sceneEpoch;
         SceneTimeline::ElementState::fromMediaJson(media, &item->baseState);
         SceneTimeline::MediaTrack::fromJson(media.value(QStringLiteral("timeline")).toObject(),
-                                           &item->timeline, m_timelineSettings.maxDurationMs);
+                                           &item->timeline, m_timelineSettings.maxSlot());
         if (item->type != QLatin1String("text")) {
             item->frameSource = new RemoteVideoFrameSource(this);
             const auto resident = MediaResidencyManager::instance().asset(item->residencyOwner);
@@ -2255,7 +2256,7 @@ void RemoteSceneController::scheduleMedia(const std::shared_ptr<RemoteMediaItem>
     }
     const qint64 duration = (resident->durationUs + 999) / 1000;
     for (const auto& clip : item->timeline.clips) {
-        if (clip.sourceOutMs > duration) {
+        if (clip.sourceEndSlot() > m_timelineSettings.sourceSlots(duration)) {
             sendPrepareResult(false, QStringLiteral("Video clip exceeds the validated source duration"));
             return;
         }
@@ -2264,7 +2265,7 @@ void RemoteSceneController::scheduleMedia(const std::shared_ptr<RemoteMediaItem>
     item->audio = new QAudioOutput(this);
     item->audio->setMuted(true);
     item->player->setAudioOutput(item->audio);
-    item->timelineRequestedSourceMs = SceneTimeline::evaluateVideo(item->timeline, 0, duration).sourceTimeMs;
+    item->timelineRequestedSourceMs = SceneTimeline::evaluateVideo(item->timeline, 0, duration, m_timelineSettings).sourceTimeMs;
     const quint64 epoch = item->sceneEpoch;
     std::weak_ptr<RemoteMediaItem> weak = item;
     connect(item->player, &ResidentVideoPlayer::errorOccurred, this,
@@ -2382,18 +2383,18 @@ void RemoteSceneController::updateTimelineGeometry(
     item->timelinePixelsVisible = pixelsVisible;
 }
 
-void RemoteSceneController::evaluateTimelineAt(qint64 positionMs, bool playing)
+void RemoteSceneController::evaluateTimelineAt(qreal positionMs, bool playing)
 {
-    m_timelinePositionMs = std::clamp<qint64>(positionMs, 0, m_timelineSettings.effectiveStopMs());
+    m_timelinePositionMs = std::clamp<qreal>(positionMs, 0, m_timelineSettings.effectiveStopMs());
     // Updating a media row must not rescan every output model for every media.
     // All geometry and intrinsic changes become visible together for this tick.
     m_batchTimelinePublishing = true;
     const qint64 clock = localSteadyMilliseconds();
     for (const auto& item : m_mediaItems) {
-        const auto state = SceneTimeline::evaluate(item->baseState, item->timeline, m_timelinePositionMs);
+        const auto state = SceneTimeline::evaluate(item->baseState, item->timeline, m_timelineSettings.slotAt(m_timelinePositionMs));
         updateTimelineGeometry(item, state);
         if (!item->player) continue;
-        const auto video = SceneTimeline::evaluateVideo(item->timeline, m_timelinePositionMs, item->player->duration());
+        const auto video = SceneTimeline::evaluateVideo(item->timeline, m_timelinePositionMs, item->player->duration(), m_timelineSettings);
         const bool shouldPlay = playing && video.playing;
         const bool changedClip = item->timelineClipId != video.clipId;
         const bool discontinuity = changedClip
@@ -2426,13 +2427,13 @@ void RemoteSceneController::evaluateTimelineAt(qint64 positionMs, bool playing)
 void RemoteSceneController::advanceTimeline()
 {
     if (!m_sceneActivated || m_timelineFinished) return;
-    qint64 time = m_timelineAnchorMs + (m_timelineClock.isValid() ? m_timelineClock.elapsed() : 0);
+    qreal time = m_timelineAnchorMs + (m_timelineClock.isValid() ? m_timelineClock.elapsed() : 0);
     if (m_ws && m_timelineStartServerMs >= 0) {
         const qint64 now = m_ws->estimatedServerMonotonicMs();
         if (now >= 0) time = std::max<qint64>(0, now - m_timelineStartServerMs);
     }
     time = std::max(time, m_timelinePositionMs);
-    const qint64 stop = m_timelineSettings.effectiveStopMs();
+    const qreal stop = m_timelineSettings.effectiveStopMs();
     evaluateTimelineAt(std::min(time, stop), time < stop);
     if (time < stop) return;
     m_timelineFinished = true;

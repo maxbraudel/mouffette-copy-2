@@ -13,7 +13,7 @@ legacy `-v1`/`-v2` suffixes are not compatibility versions.
 | Component | Owner | Durable version | Expected | Upgrade policy |
 |---|---|---|---:|---|
 | `settings` | `SettingsManager` / `AppConfig` | `settings/settings.ini`, `[storage] schemaVersion` | 1 | Unversioned valid INI: migrate 0 → 1 |
-| `projects` | `ProjectStore` | `projects/projects-v2.json`, `schemaVersion` | 5 | Versions 1, 2, 3, 4: explicit reset to 5 |
+| `projects` | `ProjectStore` | `projects/projects-v2.json`, `schemaVersion` | 6 | Versions 1, 2, 3, 4, 5: explicit reset to 6 |
 | `history` | `HistoryStore` | `notification-history-v1.json`, `schemaVersion` | 1 | Unknown formats: reset |
 | `cache` | `RemoteCacheStore` | `cache/storage.json`, `schemaVersion` | 1 | Unknown formats: reset; session contents also purged on every launch |
 

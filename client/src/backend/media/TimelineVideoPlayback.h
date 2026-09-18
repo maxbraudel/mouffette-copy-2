@@ -14,6 +14,6 @@ inline bool contiguousTimelineClips(const SceneTimeline::MediaTrack& track,
         if (clip.id == previousId) previous = &clip;
         if (clip.id == nextId) next = &clip;
     }
-    return previous && next && previous->endMs() == next->startMs
-        && previous->sourceOutMs == next->sourceInMs;
+    return previous && next && previous->endSlot() == next->startSlot
+        && previous->sourceEndSlot() == next->sourceStartSlot;
 }

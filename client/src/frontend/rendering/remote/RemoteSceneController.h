@@ -198,7 +198,7 @@ private:
 	void disconnectFirstFrameObservers();
 	void updatePrepareProgress();
 	void advanceTimeline();
-	void evaluateTimelineAt(qint64 positionMs, bool playing);
+	void evaluateTimelineAt(qreal positionMs, bool playing);
 	void updateTimelineGeometry(const std::shared_ptr<RemoteMediaItem>& item,
 	                            const SceneTimeline::ElementState& state);
 	QString receivedFilePath(const QString& fileId) const;
@@ -260,8 +260,8 @@ private:
 	QTimer m_timelineTimer;
 	QElapsedTimer m_timelineClock;
 	qint64 m_timelineStartServerMs = -1;
-	qint64 m_timelineAnchorMs = 0;
-	qint64 m_timelinePositionMs = 0;
+	qreal m_timelineAnchorMs = 0;
+	qreal m_timelinePositionMs = 0;
 	bool m_timelineFinished = false;
 	bool m_batchTimelinePublishing = false;
 	QSet<int> m_dirtyTimelineScreens;

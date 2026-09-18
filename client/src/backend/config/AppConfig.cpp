@@ -24,7 +24,7 @@ struct SettingSpec {
     bool boolean;
 };
 
-constexpr std::array<SettingSpec, 82> kSpecs{{
+constexpr std::array<SettingSpec, 83> kSpecs{{
     {Key::ServerUrl, "MOUFFETTE_SERVER_URL", "server-url", "serverUrl", "ws://localhost:8080", false},
     {Key::RemoteSessionHiddenTimeoutMs, "MOUFFETTE_REMOTE_SESSION_HIDDEN_TIMEOUT_MS", "remote-session-hidden-timeout-ms", nullptr, "60000", false},
     {Key::ProjectMediaHiddenTimeoutMs, "MOUFFETTE_PROJECT_MEDIA_HIDDEN_TIMEOUT_MS", "project-media-hidden-timeout-ms", nullptr, "60000", false},
@@ -83,6 +83,7 @@ constexpr std::array<SettingSpec, 82> kSpecs{{
     {Key::UiInputWatchdogIntervalMs, "MOUFFETTE_UI_INPUT_WATCHDOG_INTERVAL_MS", "ui-input-watchdog-interval-ms", nullptr, "120", false},
     {Key::UiSnapFreezeCleanupDelayMs, "MOUFFETTE_UI_SNAP_FREEZE_CLEANUP_DELAY_MS", "ui-snap-freeze-cleanup-delay-ms", nullptr, "300", false},
     {Key::TimelineMaxDurationMs, "MOUFFETTE_TIMELINE_MAX_DURATION_MS", "timeline-max-duration-ms", nullptr, "180000", false},
+    {Key::TimelineSlotsPerSecond, "MOUFFETTE_TIMELINE_SLOTS_PER_SECOND", "timeline-slots-per-second", nullptr, "30", false},
     {Key::TimelineHeightPx, "MOUFFETTE_TIMELINE_HEIGHT_PX", "timeline-height-px", nullptr, "240", false},
     {Key::TimelineRulerHeightPx, "MOUFFETTE_TIMELINE_RULER_HEIGHT_PX", "timeline-ruler-height-px", nullptr, "28", false},
     {Key::TimelineClipTrackHeightPx, "MOUFFETTE_TIMELINE_CLIP_TRACK_HEIGHT_PX", "timeline-clip-track-height-px", nullptr, "64", false},
@@ -452,6 +453,7 @@ void AppConfig::resetToCompiledDefaults() {
     m_toastAnimationDurationMs = 300;
     m_mediaRamReservePercent = 0;
     m_timelineMaxDurationMs = 180000;
+    m_timelineSlotsPerSecond = 30;
     m_timelineHeightPx = 240;
     m_timelineRulerHeightPx = 28;
     m_timelineClipTrackHeightPx = 64;
@@ -669,6 +671,7 @@ bool AppConfig::load(const LoadOptions& options, QString* errorMessage) {
     if (!parseIntSetting(Key::CanvasTextInitialHeightPercent, 1, 100,
                          &candidate.m_canvasTextInitialHeightPercent)
         || !parseIntSetting(Key::TimelineMaxDurationMs, 1, 604800000, &candidate.m_timelineMaxDurationMs)
+        || !parseIntSetting(Key::TimelineSlotsPerSecond, 1, 240, &candidate.m_timelineSlotsPerSecond)
         || !parseIntSetting(Key::TimelineHeightPx, 120, 1200, &candidate.m_timelineHeightPx)
         || !parseIntSetting(Key::TimelineRulerHeightPx, 16, 160, &candidate.m_timelineRulerHeightPx)
         || !parseIntSetting(Key::TimelineClipTrackHeightPx, 24, 600, &candidate.m_timelineClipTrackHeightPx)
@@ -787,6 +790,9 @@ bool AppConfig::load(const LoadOptions& options, QString* errorMessage) {
         || !parseIntSetting(Key::ToastAnimationDurationMs, 0, 5000,
                             &candidate.m_toastAnimationDurationMs)) {
         return false;
+    }
+    if (qint64(candidate.m_timelineMaxDurationMs) * candidate.m_timelineSlotsPerSecond < 1000) {
+        return setError(errorMessage, QStringLiteral("Timeline maximum duration must contain at least one complete slot"));
     }
     if (candidate.m_sessionRetryMaxMs < candidate.m_sessionRetryBaseMs
         || candidate.m_uploadChannelRetryMaxMs < candidate.m_uploadChannelRetryBaseMs
