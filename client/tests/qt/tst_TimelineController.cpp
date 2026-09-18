@@ -12,6 +12,7 @@
 #include "backend/domain/scene/SceneTimeline.h"
 #include "backend/media/MediaResidencyManager.h"
 #include "frontend/qml/MediaSettingsViewModel.h"
+#include "frontend/qml/ClientWorkspaceViewModel.h"
 #include "frontend/qml/TimelineController.h"
 #include "frontend/rendering/canvas/QuickCanvasController.h"
 #include "frontend/rendering/canvas/QuickCanvasHost.h"
@@ -90,7 +91,7 @@ private slots:
             QCOMPARE(button->height(), play->height());
             QVERIFY(!button->property("iconSource").toUrl().isEmpty());
         }
-        QVERIFY(belongsTo(layout, edit));
+        QVERIFY(belongsTo(layout, editActions));
         QVERIFY(!play->property("iconOnly").toBool());
         QCOMPARE(play->property("text").toString(), QStringLiteral("Play"));
         QCOMPARE(time->height(), play->height());
@@ -118,9 +119,18 @@ private slots:
             QTRY_VERIFY(current->mapToScene({current->width(), 0}).x() <= playback->mapToScene({0, 0}).x());
             QTRY_VERIFY(playback->mapToScene({playback->width(), 0}).x() <= maximum->mapToScene({0, 0}).x());
             QTRY_COMPARE(maximum->mapToScene({maximum->width(), 0}).x(), qreal(width - 8));
-            QTRY_COMPARE(layout->mapToScene({layout->width(), 0}).x(), qreal(width - 8));
+            QTRY_COMPARE(layout->mapToItem(editActions, {layout->width(), 0}).x(),
+                editActions->property("contentWidth").toReal() - editActions->property("contentX").toReal() - 8);
+            QCOMPARE(editActions->mapToScene({0, 0}).x(), qreal(0));
+            QCOMPARE(editActions->width(), qreal(width));
+            QCOMPARE(edit->height(), play->height());
             QTRY_COMPARE(layout->mapToScene({0, 0}).y(), edit->y());
-            QTRY_VERIFY(editActions->mapToScene({editActions->width(), 0}).x() <= layout->mapToScene({0, 0}).x());
+            auto* authoring = f.item("timelinePlaceKeyframe")->parentItem();
+            const auto gap = layout->mapToScene({0, 0}).x() - authoring->mapToScene({authoring->width(), 0}).x();
+            if (editActions->property("contentWidth").toReal() > editActions->width())
+                QCOMPARE(gap, qreal(6));
+            else
+                QVERIFY(gap >= 6);
             QVERIFY(edit->y() >= playback->mapToScene({0, playback->height()}).y());
             const auto screenshotPrefix = qEnvironmentVariable("MOUFFETTE_TIMELINE_SCREENSHOT");
             if (!screenshotPrefix.isEmpty()) {
@@ -133,10 +143,22 @@ private slots:
         const auto zoomPosition = layout->mapToScene({0, 0});
         f.wheel(editActions->mapToScene({50, 12}).toPoint(), {0, -80}, {});
         QVERIFY(editActions->property("contentX").toReal() > 0);
-        QCOMPARE(layout->mapToScene({0, 0}), zoomPosition);
+        QCOMPARE(zoomPosition.x() - layout->mapToScene({0, 0}).x(), editActions->property("contentX").toReal());
         QCOMPARE(f.timeline.positionMs(), position);
+        f.wheel(editActions->mapToScene({50, 12}).toPoint(), {-10000, 0}, {});
+        QTRY_COMPARE(layout->mapToScene({layout->width(), 0}).x(), qreal(f.view.width() - 8));
+        const auto screenshotPrefix = qEnvironmentVariable("MOUFFETTE_TIMELINE_SCREENSHOT");
+        if (!screenshotPrefix.isEmpty()) {
+            QTest::qWait(100);
+            QVERIFY(f.view.grabWindow().save(screenshotPrefix + "420-scrolled.png"));
+        }
+        // Scrolling over the now-visible zoom group moves the same content.
+        const auto rightmostScroll = editActions->property("contentX").toReal();
+        f.wheel(layout->mapToScene({layout->width()/2, 12}).toPoint(), {80, 0}, {});
+        QCOMPARE(editActions->property("contentX").toReal(), rightmostScroll - 80);
         f.view.resize(1100, 240);
         QTRY_VERIFY(!play->property("iconOnly").toBool());
+        QTRY_COMPARE(editActions->property("contentX").toReal(), qreal(0));
         const auto playWidth = play->width();
         f.timeline.removeStop();
         f.timeline.togglePlayback();
@@ -149,6 +171,73 @@ private slots:
         QCOMPARE(play->property("text").toString(), QStringLiteral("Play"));
         QCOMPARE(play->width(), playWidth);
         QVERIFY(play->property("iconSource").toUrl().path().endsWith("play.svg"));
+    }
+
+    void fullPagePlayButtonAndSpaceFromCanvas_data()
+    {
+        QTest::addColumn<bool>("withMedia");
+        QTest::newRow("empty-project") << false;
+        QTest::newRow("with-media") << true;
+    }
+
+    void fullPagePlayButtonAndSpaceFromCanvas()
+    {
+        QFETCH(bool, withMedia);
+        std::unique_ptr<QuickCanvasHost> host(QuickCanvasHost::create());
+        QVERIFY(host);
+        host->setProjectEditingEnabled(true);
+        if (withMedia) host->document()->addText({}, "Playback test");
+        ClientWorkspaceViewModel session("playback-test", host.get(), [] {}, nullptr,
+            [] { return false; }, [] { return false; }, [] { return true; });
+        session.setLoading(false);
+        QVERIFY(host->testSceneActionEnabled());
+        QVERIFY(session.testSceneUnavailableReason().isEmpty());
+        auto* timeline = qobject_cast<TimelineController*>(session.timeline());
+        QVERIFY(timeline);
+        QQuickView view;
+        view.setResizeMode(QQuickView::SizeRootObjectToView);
+        view.resize(1100, 800);
+        view.setInitialProperties({{"controller", QVariantMap{
+            {"activeWorkspace", QVariant::fromValue<QObject*>(&session)}, {"remoteBusy", false}}}});
+        view.setSource(QUrl("qrc:/qt/qml/Mouffette/App/resources/qml/app/pages/CanvasPage.qml"));
+        QVERIFY2(view.status() == QQuickView::Ready, qPrintable(view.errors().isEmpty() ? QString() : view.errors().first().toString()));
+        view.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&view));
+        view.requestActivate();
+        QVERIFY(QTest::qWaitForWindowActive(&view));
+        auto* play = timelineItems(view.rootObject(), "timelinePlayPause").value(0);
+        auto* loader = timelineItems(view.rootObject(), "activeCanvasLoader").value(0);
+        QVERIFY(play && loader);
+        auto* canvas = qvariant_cast<QQuickItem*>(loader->property("item"));
+        QVERIFY(canvas);
+        QSignalSpy clicks(play, SIGNAL(clicked()));
+        const auto clickPlay = [&] {
+            QTest::mouseClick(&view, Qt::LeftButton, Qt::NoModifier,
+                play->mapToScene({play->width()/2, play->height()/2}).toPoint());
+        };
+        clickPlay();
+        QCOMPARE(clicks.count(), 1);
+        QTRY_VERIFY(timeline->playing());
+        QTRY_VERIFY(timeline->positionMs() > 0);
+        clickPlay();
+        QCOMPARE(clicks.count(), 2);
+        QTRY_VERIFY(!timeline->playing());
+        const auto pausedAt = timeline->positionMs();
+        QTest::qWait(80);
+        QCOMPARE(timeline->positionMs(), pausedAt);
+        auto* panel = timelineItems(view.rootObject(), "sceneTimeline").value(0);
+        QVERIFY(panel);
+        for (auto* focusTarget : {panel, canvas}) {
+            const auto position = timeline->positionMs();
+            focusTarget->forceActiveFocus();
+            QTRY_VERIFY(focusTarget->hasActiveFocus());
+            QTest::keyClick(&view, Qt::Key_Space);
+            QTRY_VERIFY(timeline->playing());
+            QTRY_VERIFY(timeline->positionMs() > position);
+            focusTarget->forceActiveFocus();
+            QTest::keyClick(&view, Qt::Key_Space);
+            QTRY_VERIFY(!timeline->playing());
+        }
     }
 
     void rulerDragScrubsAndBothWheelAxesScroll()
@@ -192,6 +281,9 @@ private slots:
         f.timeline.seek(10000);
         const qreal headX = 12 + f.timeline.positionMs() * f.scale() - f.scroll();
         const auto click = [&](const QString& name) {
+            // A scaled screen may constrain the window enough to overflow the shared row.
+            auto* editActions = f.item("timelineEditActions");
+            f.wheel(editActions->mapToScene({50, 12}).toPoint(), {-10000, 0}, {});
             auto* button = f.item(name);
             QTest::mouseClick(&f.view, Qt::LeftButton, Qt::NoModifier,
                 button->mapToScene({button->width()/2, button->height()/2}).toPoint());

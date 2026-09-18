@@ -54,6 +54,8 @@ cuts do not cause another seek. Both renderers use the same synchronization poli
 
 Play resumes at the head; at or past the effective end it restarts at zero. Pause
 returns to the beginning of the started slot, silently reseeks video and unlocks authoring.
+Local preview also runs on an empty project. Space toggles Play/Pause from the
+canvas or timeline, except while entering text.
 Manual placement chooses the nearest slot (ties go forward). An optional Stop marker defines the
 playback end; without it the project maximum is the end. Editing past Stop remains
 possible. At Stop, local preview holds the final evaluated state silently. Remote
@@ -65,9 +67,12 @@ The timeline stays below the canvas during preparation, preview and remote
 playback. Its transport row shows the current time and frame on the left, centered
 playback buttons, and the project maximum time and frame on the right. Both readouts
 use monospace digits padded to the project maximum, independently of the Stop marker.
-Zoom and fit stay anchored to the right of the editing row while editing actions
-scroll separately. The ruler, zoom, horizontal scroll and fit command navigate the
-project. Shift temporarily snaps against all keys and clip boundaries;
+Editing actions align left and zoom/fit align right within one scrollable row.
+The gap between them shrinks as the window narrows; once the buttons no longer fit,
+the entire row scrolls together. Its side padding belongs to the scrollable content;
+overflow adds neither a scrollbar nor extra height.
+The ruler, zoom, horizontal scroll and fit command navigate the project.
+Shift temporarily snaps against all keys and clip boundaries;
 releasing it immediately restores ordinary grid alignment. The ruler groups grid
 lines when zoomed out; it never changes the actual slot size. Left/right arrows
 move one slot when the timeline has focus; the transport displays the current slot.

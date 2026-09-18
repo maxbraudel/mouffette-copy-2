@@ -482,8 +482,8 @@ bool QuickCanvasHost::testSceneActionEnabled() const
 {
     if (m_sceneLaunching || m_sceneStopping || m_sceneLaunched) return false;
     if (m_testSceneLaunched) return true;
-    return m_projectEditingEnabled && !m_sceneContext
-        && !m_document->media().isEmpty() && mediaReadinessReason(false).isEmpty();
+    // The editor transport also runs on an empty timeline.
+    return m_projectEditingEnabled && !m_sceneContext && mediaReadinessReason(false).isEmpty();
 }
 
 QStringList QuickCanvasHost::residencyOwners() const

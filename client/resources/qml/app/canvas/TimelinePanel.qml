@@ -277,24 +277,24 @@ FocusScope {
         objectName: "timelineEditBar"
         anchors.left: parent.left; anchors.right: parent.right
         anchors.top: transportSeparator.bottom
-        anchors.leftMargin: 8; anchors.rightMargin: 8; anchors.topMargin: 8
-        height: Theme.controlHeight + (actionViewport.contentWidth > actionViewport.width ? 8 : 0)
+        anchors.topMargin: 8
+        height: Theme.controlHeight
         Flickable {
             id: actionViewport
             objectName: "timelineEditActions"
-            anchors.left: parent.left; anchors.right: layoutActions.left
-            anchors.rightMargin: 12
-            height: parent.height
+            readonly property int contentPadding: 8
+            anchors.fill: parent
             clip: true
-            contentWidth: actions.width; contentHeight: height
+            // The flexible gap collapses to normal button spacing before the whole row scrolls.
+            contentWidth: Math.max(width, contentPadding * 2 + actions.width + actions.spacing + layoutActions.width)
+            contentHeight: height
             boundsBehavior: Flickable.StopAtBounds
             interactive: false
-            ScrollBar.horizontal: ScrollBar { policy: ScrollBar.AsNeeded }
             Row {
                 id: actions
+                x: actionViewport.contentPadding
                 spacing: 6
                 TimelineButton {
-                    id: placeKeyframeButton
                     objectName: "timelinePlaceKeyframe"
                     text: root.timeline && root.timeline.hasKeyframeAtPosition ? "Update keyframe" : "Place keyframe"
                     textVariants: ["Update keyframe", "Place keyframe"]
@@ -366,6 +366,38 @@ FocusScope {
                     verticalAlignment: Text.AlignVCenter
                 }
             }
+            Row {
+                id: layoutActions
+                objectName: "timelineLayoutControls"
+                anchors.right: parent.right
+                anchors.rightMargin: actionViewport.contentPadding
+                height: Theme.controlHeight
+                spacing: transportViewport.gap
+                TimelineButton {
+                    id: zoomOutButton
+                    objectName: "timelineZoomOut"
+                    text: "Zoom out"
+                    iconSource: "qrc:/icons/icons/timeline/zoom-out.svg"
+                    enabled: !!root.timeline
+                    onClicked: root.zoom(2)
+                }
+                TimelineButton {
+                    id: zoomInButton
+                    objectName: "timelineZoomIn"
+                    text: "Zoom in"
+                    iconSource: "qrc:/icons/icons/timeline/zoom-in.svg"
+                    enabled: !!root.timeline
+                    onClicked: root.zoom(0.5)
+                }
+                TimelineButton {
+                    id: fitButton
+                    objectName: "timelineFitDuration"
+                    text: "Fit duration"
+                    iconSource: "qrc:/icons/icons/timeline/fit.svg"
+                    enabled: !!root.timeline
+                    onClicked: { root.viewDurationMs = root.maximumMs; trackViewport.contentX = 0 }
+                }
+            }
         }
         MouseArea {
             anchors.fill: actionViewport
@@ -380,43 +412,6 @@ FocusScope {
                 actionViewport.contentX = Math.max(0, Math.min(actionViewport.contentWidth - actionViewport.width,
                     actionViewport.contentX - delta))
                 wheel.accepted = true
-            }
-        }
-        Row {
-            id: layoutActions
-            objectName: "timelineLayoutControls"
-            anchors.right: parent.right
-            height: Theme.controlHeight
-            spacing: transportViewport.gap
-            readonly property bool compactButtons: editBar.width < textWidth + 12 + placeKeyframeButton.textWidth
-            readonly property real textWidth: zoomOutButton.textWidth + zoomInButton.textWidth
-                + fitButton.textWidth + spacing * 2
-            TimelineButton {
-                id: zoomOutButton
-                objectName: "timelineZoomOut"
-                text: "Zoom out"
-                iconSource: "qrc:/icons/icons/timeline/zoom-out.svg"
-                iconOnly: layoutActions.compactButtons
-                enabled: !!root.timeline
-                onClicked: root.zoom(2)
-            }
-            TimelineButton {
-                id: zoomInButton
-                objectName: "timelineZoomIn"
-                text: "Zoom in"
-                iconSource: "qrc:/icons/icons/timeline/zoom-in.svg"
-                iconOnly: layoutActions.compactButtons
-                enabled: !!root.timeline
-                onClicked: root.zoom(0.5)
-            }
-            TimelineButton {
-                id: fitButton
-                objectName: "timelineFitDuration"
-                text: "Fit duration"
-                iconSource: "qrc:/icons/icons/timeline/fit.svg"
-                iconOnly: layoutActions.compactButtons
-                enabled: !!root.timeline
-                onClicked: { root.viewDurationMs = root.maximumMs; trackViewport.contentX = 0 }
             }
         }
     }

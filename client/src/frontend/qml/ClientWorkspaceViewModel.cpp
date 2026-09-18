@@ -262,9 +262,7 @@ int ClientWorkspaceViewModel::testSceneActionTone() const
 QString ClientWorkspaceViewModel::testSceneUnavailableReason() const
 {
     if (!hasProject()) return QStringLiteral("Create a project first");
-    if (!m_canvas || m_canvas->enumerateMediaItems().isEmpty()) {
-        return QStringLiteral("Add media to the project first");
-    }
+    if (!m_canvas) return QStringLiteral("Canvas is unavailable");
     if (m_canvas->remoteSceneLaunched()) return QStringLiteral("Stop the remote scene first");
     if (const auto* host = qobject_cast<const QuickCanvasHost*>(m_canvas.data()))
         return host->mediaReadinessReason(false);
