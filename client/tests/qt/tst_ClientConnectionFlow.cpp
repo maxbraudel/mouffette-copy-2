@@ -501,7 +501,7 @@ private slots:
         QCOMPARE(connections->state(), ConnectionManager::State::Degraded);
         QCOMPARE(runtime.displayClients().size(), 1);
         QCOMPARE(runtime.displayClients().first().endpointId(), first.endpointId());
-        QCOMPARE(runtime.displayClients().first().availabilityBadgeText(), QStringLiteral("Degraded"));
+        QCOMPARE(runtime.displayClients().first().availabilityBadgeText(), QStringLiteral("Unreachable"));
         runtime.getWebSocketClient()->transportHealthChanged(false);
         QCOMPARE(connections->state(), ConnectionManager::State::Connected);
         QCOMPARE(runtime.displayClients().size(), 2);
@@ -646,8 +646,16 @@ private slots:
         QCOMPARE(server.openCommands.size(), count);
     }
 
-    void expiredSelectedProjectReopensEmptyOnlyWhenActivityReturns()
+    void expiredSelectedProjectRequiresExplicitReopen_data()
     {
+        QTest::addColumn<bool>("closeBeforePurge");
+        QTest::newRow("session-already-closed") << true;
+        QTest::newRow("close-still-pending") << false;
+    }
+
+    void expiredSelectedProjectRequiresExplicitReopen()
+    {
+        QFETCH(bool, closeBeforePurge);
         QTemporaryDir root;
         QVERIFY(root.isValid());
         RuntimeProfileContext context;
@@ -690,16 +698,53 @@ private slots:
         now = workspaces->remoteSessionCloseAtMs(target);
         workspaces->processDeadlines(now);
         QTRY_COMPARE(server.closeCommands.size(), 1);
-        QVERIFY(server.sendClosed(QStringLiteral("expired-project-session-1"), target));
+        if (closeBeforePurge) {
+            QVERIFY(server.sendClosed(QStringLiteral("expired-project-session-1"), target));
+            QTRY_COMPARE(runtime.remoteStatusText(), QStringLiteral("AVAILABLE"));
+        }
         QTRY_VERIFY(!runtime.isRemoteClientConnected());
+        QSignalSpy pages(&runtime, &ApplicationRuntime::applicationPageChanged);
+        connect(workspaces, &WorkspaceManager::workspaceDeleted, &runtime,
+                [&](const QString& endpoint) {
+            if (endpoint != target) return;
+            // The page must already be gone when its graph is detached.
+            QVERIFY(!runtime.getNavigationManager()->isOnScreenView());
+            QCOMPARE(pages.count(), 1);
+            QCOMPARE(pages.last().first().toInt(), 0);
+        });
         now = projects->projectDeleteAtMs(target);
         projects->processDeadlines(now);
         QVERIFY(!runtime.activeProjectExists());
-        QCOMPARE(runtime.activeWorkspaceEndpointId(), target);
-        QVERIFY(runtime.getNavigationManager()->isOnScreenView());
+        QVERIFY(runtime.activeWorkspaceEndpointId().isEmpty());
+        QVERIFY(!runtime.getNavigationManager()->isOnScreenView());
+        QVERIFY(!runtime.getActiveCanvas());
+        QVERIFY(!runtime.findWorkspace(target));
         QCOMPARE(server.openCommands.size(), 1);
         ++now;
         runtime.setPointerInsideControlWindow(true);
+        QVERIFY(server.sendClientList(client));
+        if (!closeBeforePurge) {
+            QVERIFY(server.sendClosed(QStringLiteral("expired-project-session-1"), target));
+        }
+        QTRY_COMPARE(runtime.displayClients().first().availabilityBadgeText(),
+                     QStringLiteral("Available"));
+        QCOMPARE(server.openCommands.size(), 1);
+
+        // Reconnection and rediscovery cannot restore a purged selection.
+        QSignalSpy disconnected(runtime.getWebSocketClient(), &WebSocketClient::disconnected);
+        server.connectionGeneration = 2;
+        server.closePeer();
+        QTRY_COMPARE(disconnected.count(), 1);
+        QTRY_COMPARE(ready.count(), 2);
+        QVERIFY(server.sendClientList(client));
+        QTRY_COMPARE(runtime.displayClients().size(), 1);
+        QCoreApplication::processEvents();
+        QCOMPARE(server.openCommands.size(), 1);
+        QCOMPARE(projects->projectCount(), 0);
+        QVERIFY(!runtime.getNavigationManager()->isOnScreenView());
+        QCOMPARE(pages.count(), 1);
+
+        runtime.activateClient(target);
         QTRY_COMPARE(server.openCommands.size(), 2);
         QVERIFY(!runtime.activeProjectExists()); // Fresh snapshot is required.
         QVERIFY(server.sendOpened(QStringLiteral("expired-project-session-2"),
@@ -714,6 +759,214 @@ private slots:
         runtime.getNavigationManager()->setActiveCanvas(nullptr);
         runtime.setActiveCanvas(nullptr);
         auto* workspace = runtime.findWorkspace(target);
+        QVERIFY(workspace);
+        delete workspace->canvas;
+        workspace->canvas = nullptr;
+    }
+
+    void purgingBackgroundProjectPreservesCurrentPage_data()
+    {
+        QTest::addColumn<int>("destination");
+        QTest::newRow("clients") << 0;
+        QTest::newRow("another-client") << 1;
+        QTest::newRow("history") << 2;
+    }
+
+    void purgingBackgroundProjectPreservesCurrentPage()
+    {
+        QFETCH(int, destination);
+        QTemporaryDir root;
+        RuntimeProfileContext context;
+        context.rootPath = root.path();
+        context.persistent = false;
+        RuntimeProfile::configure(context);
+        ApplicationRuntime runtime(context);
+        auto* projects = runtime.getProjectManager();
+        projects->stopAutomaticTimersForTesting();
+        runtime.getWorkspaceManager()->stopAutomaticTimersForTesting();
+        qint64 now = 1'000'000;
+        projects->setNowProviderForTesting([&] { return now; });
+        const auto first = onlineClient(fixtureEndpoint(QLatin1Char('J')), "Purged project");
+        const auto second = onlineClient(fixtureEndpoint(QLatin1Char('K')), "Other project");
+        for (const auto& client : {first, second}) {
+            QVERIFY(!projects->createProjectFromSnapshot(
+                ProjectTargetReference::fromClientInfo(client), client.getScreens(),
+                50, 1, now).isEmpty());
+        }
+        runtime.activateClient(first.endpointId());
+        QVERIFY(runtime.getActiveCanvas());
+        if (destination == 0) runtime.navigateToClients();
+        else if (destination == 2) runtime.navigateToHistory();
+        else runtime.activateClient(second.endpointId());
+        auto* const otherCanvas = destination == 1 ? runtime.getActiveCanvas() : nullptr;
+        QSignalSpy pages(&runtime, &ApplicationRuntime::applicationPageChanged);
+        QVERIFY(projects->setHidden(first.endpointId(), now));
+        now = projects->projectDeleteAtMs(first.endpointId());
+        projects->processDeadlines(now);
+        QVERIFY(!projects->hasProjectForTarget(first.endpointId()));
+        QVERIFY(projects->hasProjectForTarget(second.endpointId()));
+        QVERIFY(!runtime.findWorkspace(first.endpointId()));
+        QCOMPARE(pages.count(), 0);
+        if (destination == 1) {
+            QCOMPARE(runtime.activeWorkspaceEndpointId(), second.endpointId());
+            QCOMPARE(runtime.getActiveCanvas(), otherCanvas);
+            QVERIFY(runtime.getNavigationManager()->isOnScreenView());
+        } else {
+            QVERIFY(!runtime.getNavigationManager()->isOnScreenView());
+            QVERIFY(!runtime.getActiveCanvas());
+        }
+        runtime.handleApplicationAboutToQuit();
+        runtime.getNavigationManager()->setActiveCanvas(nullptr);
+        runtime.setActiveCanvas(nullptr);
+        if (auto* workspace = runtime.findWorkspace(second.endpointId())) {
+            delete workspace->canvas;
+            workspace->canvas = nullptr;
+        }
+    }
+
+    void purgingProjectCancelsAnUnacknowledgedOpen_data()
+    {
+        QTest::addColumn<bool>("background");
+        QTest::newRow("displayed") << false;
+        QTest::newRow("background") << true;
+    }
+
+    void purgingProjectCancelsAnUnacknowledgedOpen()
+    {
+        QFETCH(bool, background);
+        QTemporaryDir root;
+        RuntimeProfileContext context;
+        context.rootPath = root.path();
+        context.persistent = false;
+        RuntimeProfile::configure(context);
+        ApplicationRuntime runtime(context);
+        auto* projects = runtime.getProjectManager();
+        projects->stopAutomaticTimersForTesting();
+        runtime.getWorkspaceManager()->stopAutomaticTimersForTesting();
+        qint64 now = 1'000'000;
+        projects->setNowProviderForTesting([&] { return now; });
+        RemoteSessionTestServer server(runtime.getWebSocketClient()->endpointId());
+        QVERIFY(server.listen());
+        runtime.findChild<ConnectionManager*>()->connectToServer(server.url());
+        QTRY_COMPARE(runtime.localStatusText(), QStringLiteral("CONNECTED"));
+        const auto client = onlineClient(fixtureEndpoint(QLatin1Char('L')), "Pending open");
+        QVERIFY(server.sendClientList(client));
+        QTRY_COMPARE(runtime.displayClients().size(), 1);
+        QVERIFY(!projects->createProjectFromSnapshot(
+            ProjectTargetReference::fromClientInfo(client), client.getScreens(),
+            50, 1, now).isEmpty());
+        runtime.activateClient(client.endpointId());
+        QTRY_COMPARE(server.openCommands.size(), 1);
+        if (background) runtime.navigateToHistory();
+        QSignalSpy pages(&runtime, &ApplicationRuntime::applicationPageChanged);
+        QVERIFY(projects->setHidden(client.endpointId(), now));
+        now = projects->projectDeleteAtMs(client.endpointId());
+        projects->processDeadlines(now);
+        QCOMPARE(projects->projectCount(), 0);
+        QVERIFY(!runtime.getNavigationManager()->isOnScreenView());
+        QCOMPARE(pages.count(), background ? 0 : 1);
+
+        // The old OPEN can still reach the server after local cancellation.
+        QVERIFY(server.sendOpened("purged-pending-open", server.openCommands.first().value("requestId").toString(),
+                                  client.endpointId(), ScreenInfo(0, 1920, 1080, 0, 0, true), 50));
+        QTRY_COMPARE(server.closeCommands.size(), 1);
+        QCOMPARE(projects->projectCount(), 0);
+        QVERIFY(!runtime.findWorkspace(client.endpointId()));
+        QVERIFY(server.sendClosed("purged-pending-open", client.endpointId()));
+        QTRY_COMPARE(runtime.displayClients().first().availabilityBadgeText(), QStringLiteral("Available"));
+        runtime.setQmlWindowVisible(true);
+        runtime.setPointerInsideControlWindow(true);
+        QVERIFY(server.sendClientList(client));
+        QCoreApplication::processEvents();
+        QCOMPARE(server.openCommands.size(), 1);
+        QVERIFY(!runtime.getNavigationManager()->isOnScreenView());
+        QCOMPARE(projects->projectCount(), 0);
+        runtime.handleApplicationAboutToQuit();
+    }
+
+    void remoteBadgesUsePresenceIndependentlyOfSessionLifetime()
+    {
+        QTemporaryDir root;
+        RuntimeProfileContext context;
+        context.rootPath = root.path();
+        context.persistent = false;
+        RuntimeProfile::configure(context);
+        ApplicationRuntime runtime(context);
+        runtime.getProjectManager()->stopAutomaticTimersForTesting();
+        runtime.getWorkspaceManager()->stopAutomaticTimersForTesting();
+        RemoteSessionTestServer server(runtime.getWebSocketClient()->endpointId());
+        QVERIFY(server.listen());
+        auto* connection = runtime.findChild<ConnectionManager*>();
+        connection->connectToServer(server.url());
+        QTRY_COMPARE(runtime.localStatusText(), QStringLiteral("CONNECTED"));
+        ClientInfo client = onlineClient(fixtureEndpoint(QLatin1Char('M')), "Status target");
+        QVERIFY(server.sendClientList(client));
+        QTRY_COMPARE(runtime.displayClients().size(), 1);
+        const auto verifyBadge = [&](const QString& expected) {
+            QCOMPARE(runtime.remoteStatusText(), expected.toUpper());
+            QCOMPARE(runtime.displayClients().size(), 1);
+            QCOMPARE(runtime.displayClients().first().availabilityBadgeText(), expected);
+        };
+        runtime.activateClient(client.endpointId());
+        QTRY_COMPARE(server.openCommands.size(), 1);
+        verifyBadge("Connecting");
+        QVERIFY(server.sendOpened("status-session", server.openCommands.first().value("requestId").toString(),
+                                  client.endpointId(), ScreenInfo(0, 1920, 1080, 0, 0, true), 50));
+        QTRY_VERIFY(runtime.activeProjectExists());
+        verifyBadge("Connected");
+        QVERIFY(server.sendTerminating("status-session", client.endpointId()));
+        QTRY_COMPARE(runtime.remoteStatusText(), QStringLiteral("DISCONNECTING"));
+        verifyBadge("Disconnecting");
+        QVERIFY(!runtime.isRemoteOverlayActionsEnabled());
+        QVERIFY(server.sendClosed("status-session", client.endpointId()));
+        QTRY_COMPARE(runtime.remoteStatusText(), QStringLiteral("AVAILABLE"));
+        verifyBadge("Available");
+        QVERIFY(runtime.displayClients().first().isOnline());
+        QVERIFY(runtime.displayClients().first().canAcceptSession());
+        QCOMPARE(server.openCommands.size(), 1);
+
+        // Reproject without a new server presence message. Local health cannot
+        // rewrite peer presence, and without a session there is no recovery badge.
+        emit runtime.getWebSocketClient()->transportHealthChanged(true);
+        verifyBadge("Unreachable");
+        QVERIFY(runtime.displayClients().first().isOnline());
+        QVERIFY(runtime.displayClients().first().canAcceptSession());
+        emit runtime.getWebSocketClient()->transportHealthChanged(false);
+        verifyBadge("Available");
+
+        client.setCanAcceptSession(false);
+        client.setStatus("Degraded");
+        client.setAvailabilityStatus("Degraded");
+        QVERIFY(server.sendClientList(client));
+        QTRY_COMPARE(runtime.remoteStatusText(), QStringLiteral("DEGRADED"));
+        verifyBadge("Degraded");
+        QVERIFY(!runtime.displayClients().first().canAcceptSession());
+        client.setOnline(false);
+        client.setStatus("Disconnected");
+        client.setAvailabilityStatus("Disconnected");
+        QVERIFY(server.sendClientList(client));
+        QTRY_COMPARE(runtime.remoteStatusText(), QStringLiteral("DISCONNECTED"));
+        verifyBadge("Disconnected");
+
+        // Even a previously confirmed offline peer becomes unverified when
+        // we disable our own connection; only the local badge says Disconnected.
+        runtime.setConnectionEnabled(false);
+        verifyBadge("Unreachable");
+        QTRY_COMPARE(server.disableCommands.size(), 1);
+        QVERIFY(server.send(QJsonObject{
+            {"type", "endpoint_disable_started"},
+            {"requestId", server.disableCommands.last().value("requestId")},
+            {"connectionGeneration", static_cast<qint64>(server.connectionGeneration)}
+        }));
+        QTRY_COMPARE(runtime.localStatusText(), QStringLiteral("DISCONNECTED"));
+        verifyBadge("Unreachable");
+        QVERIFY(!runtime.isRemoteClientConnected());
+        QVERIFY(!runtime.isRemoteOverlayActionsEnabled());
+        QCOMPARE(server.openCommands.size(), 1);
+        auto* workspace = runtime.findWorkspace(client.endpointId());
+        runtime.handleApplicationAboutToQuit();
+        runtime.getNavigationManager()->setActiveCanvas(nullptr);
+        runtime.setActiveCanvas(nullptr);
         QVERIFY(workspace);
         delete workspace->canvas;
         workspace->canvas = nullptr;
@@ -1530,9 +1783,10 @@ private slots:
         QTRY_VERIFY_WITH_TIMEOUT(
             !runtime.getProjectManager()->hasProjectForTarget(targetEndpointId),
             1'000);
-        QVERIFY(runtime.getNavigationManager()->isOnScreenView());
-        QCOMPARE(runtime.activeWorkspaceEndpointId(), targetEndpointId);
+        QVERIFY(!runtime.getNavigationManager()->isOnScreenView());
+        QVERIFY(runtime.activeWorkspaceEndpointId().isEmpty());
         QVERIFY(!runtime.findWorkspace(targetEndpointId));
+        QVERIFY(!runtime.getActiveCanvas());
         QCOMPARE(closeCommands.size(), 1);
         QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
 

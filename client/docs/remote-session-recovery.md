@@ -50,7 +50,14 @@ internal phases. Retry action (idle, scheduled, running, suspended or blocked),
 cause and next attempt are separate diagnostics shown in tooltips. Available
 means an admissible peer without a usable session; desired work alone never
 becomes Connecting. A local server outage leaves remote presence unconfirmed,
-shown as Unreachable when no session is retained. A retained session is shown as
+shown as Unreachable when no session is retained. This also applies when our
+connection is explicitly disabled: only the local badge becomes Disconnected.
+The remote Disconnected badge requires a ready local server connection and
+confirmed remote absence or disablement. Session closure alone returns an
+admissible peer to Available, after any pending CLOSE has completed.
+The client list and selected header share one projection of authoritative
+presence, local connection health and session state; presentation never rewrites
+the server's presence or admission capability. A retained session is shown as
 Degraded throughout recovery, including TCP/authentication/RESUME attempts. Grace
 is its internal phase and never authorizes new commands. Legacy Reconnecting observations are normalized to Disconnected on
 input; neither the new server nor the new client emits that status.
@@ -164,10 +171,14 @@ updates do not replay all historical closes.
 
 ## Selection and activity
 
-Selection is retained in process memory independently of the Project, Canvas and
-session. Automatic project purge retains it; explicit navigation/deletion clears
-it. Returning activity, discovery, authentication and completion of cleanup
-reconcile selection. Only one OPEN per intended target is in flight; a lost
+Selection is retained in process memory across session interruption. Automatic
+project purge, explicit project deletion and navigation away clear it. Once a
+project deletion commits, its displayed Canvas page immediately returns to
+Clients, before the graph is detached and without waiting for remote cleanup.
+Deleting a background project never changes the current page. A failed durable
+deletion leaves the page, project and session intact.
+Returning activity, discovery, authentication and completion of cleanup
+reconcile existing selection. Only one OPEN per intended target is in flight; a lost
 reply is retried with the same request ID and backoff. Transient failures retry
 with delay; permanent failures stay visible until a relevant capability/runtime
 change or explicit selection permits reevaluation.
@@ -178,9 +189,14 @@ change or explicit selection permits reevaluation.
 - `MOUFFETTE_REMOTE_SESSION_HIDDEN_TIMEOUT_MS=120000`
 - `MOUFFETTE_PROJECT_HIDDEN_RETENTION_MS=240000`
 
-After purge, a provisional workspace waits for a valid authenticated snapshot
-before creating an empty Project. Offline targets stay selected and wait for
-presence. These rules govern outgoing activity only: incoming sessions do not
+After purge, a new explicit client click is required. Neither pointer return nor
+reconnection recreates the project. A pending OPEN is cancelled and any late
+reply is closed without recreating its workspace. Pending CLOSE obligations
+survive deletion; a new click waits for their completion, then a provisional
+workspace waits for a valid authenticated snapshot before creating an empty
+Project. Session-only inactivity expiry still allows automatic reopening when
+activity returns to an existing selected project. Selected offline projects
+wait for presence. These rules govern outgoing activity only: incoming sessions do not
 require a visible Canvas, pointer activity or another session to close. Multiple
 incoming sessions are allowed. The renderer's single simultaneous Live scene
 is an independent admission rule with an explicit conflict response.
@@ -242,7 +258,11 @@ Node and `npm ci` in `server` are required. It covers recovery after a 2-second
 socket interruption, terminal expiration after 4/6 seconds, peer ordering,
 lost replies/ACKs and duplicate OPEN. Real runtime/relay cases also verify
 Degraded in the list and Canvas header, unchanged project/Canvas during the
-period, Connected after recovery, and Disconnected after expiration.
+period, Connected after recovery, and Disconnected after expiration when the
+relay confirms the remote peer is offline. `ClientConnectionFlow` additionally
+covers immediate navigation on purge, cancellation of pending opens, late
+replies, explicit reopening, background deletion, and matching list/header
+badges for session-only closure, local outage, Disable and remote degradation.
 Injected-clock cases cover exact deadlines, sleep, repeated loss, one-sided
 return, a missing final state ACK, and recovery using an unchanged normal proof. The cache/upload and renderer
 suites check delayed resource release, cancelled writers, durable offsets and

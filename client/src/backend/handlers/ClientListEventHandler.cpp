@@ -1,6 +1,5 @@
 #include "ClientListEventHandler.h"
 #include "backend/runtime/ApplicationRuntime.h"
-#include "frontend/managers/ui/RemoteClientState.h"
 #include "backend/network/WebSocketClient.h"
 #include "backend/network/RemoteSessionCoordinator.h"
 #include "backend/domain/project/ProjectManager.h"
@@ -128,11 +127,7 @@ void ClientListEventHandler::onClientListReceived(const QList<ClientInfo>& clien
                 if (m_mainWindow->getUploadManager()) {
                     m_mainWindow->getUploadManager()->setTargetClientId(QString());
                 }
-                RemoteClientState state = RemoteClientState::disconnected();
-                state.clientInfo = activeWorkspace->lastClientInfo;
-                state.volumeVisible = false;
-                state.volumePercent = -1;
-                m_mainWindow->setRemoteClientState(state, /*propagateLoss*/ false);
+                m_mainWindow->refreshRemoteConnectionPresentation(false);
             }
         }
     }

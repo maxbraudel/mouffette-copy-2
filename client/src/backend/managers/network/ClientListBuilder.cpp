@@ -78,24 +78,20 @@ QList<ClientInfo> ClientListBuilder::buildDisplayClientList(
         }
     }
 
-    // Match the main merger when only retained workspace data is available.
-    if (auto* transport = mainWindow->getWebSocketClient()) {
-        for (ClientInfo& info : result) {
-            const auto binding = transport->remoteSessionCoordinator()->outgoingForPeer(info.endpointId());
-            const bool retained = (binding.phase == QLatin1String("Active")
-                || binding.phase == QLatin1String("Grace"))
-                && transport->sessionRecoveryRemainingMs(binding.remoteSessionId) > 0;
-            if (retained && !mainWindow->isUserDisconnected()
-                && (!localDiscoveryUsable || !transport->canIssueSessionCommands(binding.remoteSessionId))) {
-                info.setStatus(QStringLiteral("Degraded"));
-                info.setAvailabilityStatus(QStringLiteral("Degraded"));
-            } else if (!localDiscoveryUsable || !info.isOnline()) {
-                const QString status = mainWindow->isUserDisconnected() || !binding.remoteSessionId.isEmpty()
-                    || transport->isConnected() ? QStringLiteral("Disconnected") : QStringLiteral("Unreachable");
-                info.setStatus(status);
-                info.setAvailabilityStatus(status);
+    // Use the same network/session projection as the main merger and header.
+    for (ClientInfo& info : result) {
+        const ClientInfo* presence = nullptr;
+        for (const ClientInfo& discovered : connectedClients) {
+            if (discovered.endpointId() == info.endpointId()) {
+                presence = &discovered;
+                break;
             }
         }
+        const QString status = mainWindow->remoteConnectionStatus(
+            info.endpointId(), presence, localDiscoveryUsable);
+        info.setStatus(status);
+        info.setAvailabilityStatus(status);
     }
+
     return result;
 }

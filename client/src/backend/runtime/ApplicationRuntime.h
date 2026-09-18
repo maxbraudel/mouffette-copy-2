@@ -42,7 +42,6 @@ class UploadSignalConnector;
 class WebSocketClient;
 class WebSocketMessageHandler;
 struct ProjectMediaReference;
-struct RemoteClientState;
 
 // Business/runtime coordinator. It is deliberately a QObject and owns no visual Qt
 // object; the only Widgets dependency in the application is isolated inside
@@ -104,9 +103,10 @@ public:
 
     void resetAllWorkspaceUploadStates();
     void setLocalNetworkStatus(const QString& status);
-    void setRemoteConnectionStatus(const QString& status, bool propagateLoss = true);
-    void setRemoteClientState(const RemoteClientState& state,
-                              bool propagateLoss = true);
+    void refreshRemoteConnectionPresentation(bool propagateLoss = false);
+    QString remoteConnectionStatus(const QString& targetEndpointId,
+                                   const ClientInfo* presence,
+                                   bool localDiscoveryUsable) const;
     void refreshOverlayActionsState(bool remoteConnected,
                                     bool propagateLoss = true);
     void syncRegistration();
@@ -250,10 +250,8 @@ private:
     void finishTerminalIncomingCacheCleanupIfReady();
     void handleRemoteSessionClosed(const QJsonObject& envelope);
     void handleRemoteSessionError(const QJsonObject& envelope);
-    void updateRemoteClientAvailability(const QString& targetEndpointId,
-                                        const QString& status);
+    void cancelPendingRemoteSessionOpen(const QString& targetEndpointId);
     void clearRemoteSessionRuntimeState(const QString& targetEndpointId,
-                                        bool connectionLost,
                                         bool teardownPending = false);
     void clearDeletedProjectFromWorkspace(const QString& targetEndpointId);
     void destroyWorkspaceCanvasIfUnused(const QString& targetEndpointId);
