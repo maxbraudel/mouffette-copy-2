@@ -1,5 +1,6 @@
 #include <QApplication>
 #include <QClipboard>
+#include <QFontMetricsF>
 #include <QJsonDocument>
 #include <QMimeData>
 #include <QQuickItem>
@@ -283,6 +284,91 @@ private slots:
         QCOMPARE(f.host->serializeProjectState(), saved);
     }
 
+    void navigationPreservesSelection_data()
+    {
+        QTest::addColumn<bool>("multiple");
+        QTest::addColumn<bool>("keyframe");
+        QTest::newRow("single-clip") << false << false;
+        QTest::newRow("multiple-clips") << true << false;
+        QTest::newRow("keyframe") << false << true;
+    }
+
+    void navigationPreservesSelection()
+    {
+        QFETCH(bool, multiple); QFETCH(bool, keyframe);
+        TimelineFixture f; QVERIFY(f.initialize());
+        auto* doc = f.host->document();
+        auto* media = doc->addText({}, "Selected clip");
+        auto* other = doc->addText({}, "Other clip");
+        auto track = media->timelineTrack();
+        track.clip.startSlot = 60; track.clip.durationSlots = 60;
+        track.keyframes = {{"selected-key", 60, media->authorElementState()}};
+        media->setTimelineTrack(track);
+        doc->select(media->mediaId());
+        if (multiple) {
+            doc->select(other->mediaId(), true);
+            doc->setPrimarySelectedMedia(media->mediaId());
+        }
+        if (keyframe) f.timeline.selectKeyframe("selected-key");
+        f.timeline.seek(2500);
+        QVERIFY(media->clipActive());
+        const auto selected = doc->selectedMediaIds();
+        const auto selectedKey = f.timeline.selectedKeyframeId();
+        const auto saved = doc->serializeSceneState();
+        QSignalSpy selectionChanges(doc, &CanvasDocument::selectionChanged);
+        const auto unchanged = [&] {
+            return doc->selectedMediaIds() == selected && doc->primarySelectedMedia() == media
+                && f.timeline.selectedClipId() == track.clip.id && f.timeline.selectedKeyframeId() == selectedKey
+                && selectionChanges.isEmpty() && doc->serializeSceneState() == saved;
+        };
+        auto* tracks = f.item("timelineTracks");
+        const auto from = tracks->mapToScene({400, 10}).toPoint();
+        const auto to = tracks->mapToScene({550, 10}).toPoint();
+        QTest::mousePress(&f.view, Qt::LeftButton, Qt::NoModifier, from);
+        QVERIFY(unchanged());
+        QVERIFY(!media->clipActive());
+        QTest::mouseMove(&f.view, to, 20);
+        QTest::mouseRelease(&f.view, Qt::LeftButton, Qt::NoModifier, to);
+        QVERIFY(unchanged());
+        for (const auto* name : {"timelineGoToEnd", "timelineGoToStart"}) {
+            auto* button = f.item(name);
+            QTest::mouseClick(&f.view, Qt::LeftButton, Qt::NoModifier,
+                button->mapToScene({button->width()/2, button->height()/2}).toPoint());
+            QVERIFY(unchanged());
+            QVERIFY(!media->clipActive());
+        }
+        QCOMPARE(f.timeline.positionSlot(), 0);
+        f.view.requestActivate();
+        QVERIFY(QTest::qWaitForWindowActive(&f.view));
+        f.view.rootObject()->forceActiveFocus();
+        QTest::keyClick(&f.view, Qt::Key_Right);
+        QCOMPARE(f.timeline.positionSlot(), 1);
+        QVERIFY(unchanged());
+        QTest::keyClick(&f.view, Qt::Key_Left);
+        QCOMPARE(f.timeline.positionSlot(), 0);
+        QVERIFY(unchanged());
+        // Header clicks are informational, including the blank ruler cell.
+        auto* headers = f.item("timelineTrackHeaders");
+        for (qreal y : {10.0, f.timeline.rulerHeightPx() + 16.0,
+                        f.timeline.rulerHeightPx() + 32.0 + f.timeline.clipTrackHeightPx()/2.0}) {
+            const auto activeTrack = f.timeline.activeTrackIndex();
+            QTest::mouseClick(&f.view, Qt::LeftButton, Qt::NoModifier,
+                headers->mapToScene({headers->width()/2, y}).toPoint());
+            QVERIFY(unchanged());
+            QCOMPARE(f.timeline.activeTrackIndex(), activeTrack);
+            QCOMPARE(f.timeline.positionSlot(), 0);
+        }
+        // The empty portion of the selected clip's track still clears selection.
+        auto* clipViewport = f.item("timelineClipViewport");
+        QTest::mouseClick(&f.view, Qt::LeftButton, Qt::NoModifier,
+            clipViewport->mapToScene({550, f.timeline.clipTrackHeightPx()/2.0}).toPoint());
+        QVERIFY(doc->selectedMediaIds().isEmpty());
+        QVERIFY(f.timeline.selectedKeyframeId().isEmpty());
+        QCOMPARE(f.timeline.activeTrackIndex(), 0);
+        QCOMPARE(f.timeline.positionSlot(), 0);
+        QCOMPARE(selectionChanges.count(), 1);
+    }
+
     void trackBackgroundDoesNotSeek_data()
     {
         QTest::addColumn<QString>("trackName");
@@ -298,6 +384,11 @@ private slots:
         auto* track = f.item(trackName);
         auto* tracks = f.item("timelineTracks");
         QVERIFY(track && tracks);
+        auto* media = f.host->document()->addText({}, "Selected");
+        auto mediaTrack = media->timelineTrack();
+        mediaTrack.clip.durationSlots = 30;
+        media->setTimelineTrack(mediaTrack);
+        f.host->document()->select(media->mediaId());
         f.timeline.seek(1000);
         const auto position = f.timeline.positionMs();
         const auto saved = f.host->serializeProjectState();
@@ -306,6 +397,7 @@ private slots:
 
         QTest::mouseClick(&f.view, Qt::LeftButton, Qt::NoModifier, from);
         QCOMPARE(f.timeline.positionMs(), position);
+        QVERIFY(f.host->document()->selectedMediaIds().isEmpty());
         QTest::mousePress(&f.view, Qt::LeftButton, Qt::NoModifier, from);
         QTest::mouseMove(&f.view, to, 20);
         QCOMPARE(f.timeline.positionMs(), position);
@@ -488,7 +580,7 @@ private slots:
         doc->select(first->mediaId());
         auto* ruler = f.item("timelineTracks");
         QTest::mouseClick(&f.view, Qt::LeftButton, Qt::NoModifier, ruler->mapToScene({200, 10}).toPoint());
-        QVERIFY(doc->selectedMediaIds().isEmpty());
+        QCOMPARE(doc->primarySelectedMedia(), first);
         QVERIFY(selectionMatches());
         doc->select(first->mediaId());
         doc->clearSelection();
@@ -519,10 +611,10 @@ private slots:
         QTest::addColumn<int>("viewStartMs");
         QTest::addColumn<QString>("placement");
         QTest::newRow("long-clip-middle") << 0 << 90000 << 30000 << "center";
-        QTest::newRow("left-of-center") << 0 << 5000 << 0 << "right";
-        QTest::newRow("right-of-center") << 9000 << 14000 << 0 << "left";
-        QTest::newRow("left-edge-offscreen") << 0 << 34000 << 30000 << "right";
-        QTest::newRow("right-edge-offscreen") << 40000 << 60000 << 30000 << "left";
+        QTest::newRow("left-of-center") << 0 << 5000 << 0 << "center";
+        QTest::newRow("right-of-center") << 9000 << 14000 << 0 << "center";
+        QTest::newRow("left-edge-offscreen") << 0 << 34000 << 30000 << "center";
+        QTest::newRow("right-edge-offscreen") << 40000 << 60000 << 30000 << "center";
         QTest::newRow("short-clip") << 5000 << 5500 << 0 << "fill";
         QTest::newRow("long-title") << 0 << 90000 << 30000 << "fill";
         QTest::newRow("offscreen") << 0 << 1000 << 30000 << "hidden";
@@ -555,7 +647,7 @@ private slots:
         QCOMPARE(clip->y(), 5.0);
         QCOMPARE(clip->height(), trackHeight - 10);
         QCOMPARE(label->height(), clip->height());
-        QCOMPARE(f.item("timelineClipTrackLabel")->isVisible(), startMs > viewStartMs || endMs <= viewStartMs);
+        QVERIFY(f.item("timelineClipTrackLabel")->isVisible());
         QCOMPARE(title->property("text").toString(), media->displayName());
         QCOMPARE(duration->property("text").toString(), "  ·  " + QTime(0, 0).addMSecs(endMs - startMs).toString("mm:ss.zzz"));
         if (placement == "hidden") {
@@ -566,25 +658,29 @@ private slots:
         QTRY_VERIFY(label->width() > 0);
         QVERIFY(label->x() >= 8);
         QVERIFY(label->x() + label->width() <= clip->width() - 8 + 0.01);
-        QVERIFY(label->mapToScene({0, 0}).x() >= 8);
+        auto* viewport = f.item("timelineTracks");
+        const auto centeredInVisibleClip = [&] {
+            const qreal left = qMax(clip->mapToScene({0, 0}).x(), viewport->mapToScene({0, 0}).x());
+            const qreal right = qMin(clip->mapToScene({clip->width(), 0}).x(),
+                viewport->mapToScene({viewport->width(), 0}).x());
+            if (right - left <= 16) return label->width() == 0 && !label->isVisible();
+            return qAbs(label->mapToScene({label->width()/2, 0}).x() - (left + right)/2) < 0.01;
+        };
+        QVERIFY(label->mapToScene({0, 0}).x() >= viewport->x() + 8);
         QVERIFY(label->mapToScene({label->width(), 0}).x() <= f.view.width() - 8 + 0.01);
-        if (placement == "center") {
-            QTRY_VERIFY(qAbs(label->mapToScene({label->width()/2, 0}).x() - f.view.width()/2.0) < 0.01);
+        QTRY_VERIFY(centeredInVisibleClip());
+        if (QByteArray(QTest::currentDataTag()) == "long-clip-middle") {
             // Follow both horizontal scrolling and resizing/zooming without touching the clip.
             f.item("timelineTracks")->setProperty("contentX", 35000 * f.scale());
             f.view.resize(680, 240);
             QTRY_COMPARE(f.view.rootObject()->width(), 680.0);
             f.view.rootObject()->setProperty("viewDurationMs", 10000.0);
-            QTRY_VERIFY(qAbs(label->mapToScene({label->width()/2, 0}).x() - 340) < 0.01);
-        } else if (placement == "right") {
-            QTRY_VERIFY(qAbs(label->x() + label->width() - (clip->width() - 8)) < 0.01);
-        } else if (placement == "left") {
-            QCOMPARE(label->x(), 8.0);
+            QTRY_VERIFY(centeredInVisibleClip());
         } else if (longTitle) {
-            QTRY_COMPARE(label->width(), f.view.width() - 16.0);
+            QTRY_COMPARE(label->width(), viewport->width() - 16.0);
             QCOMPARE(duration->width(), duration->implicitWidth());
             QVERIFY(title->width() < title->implicitWidth());
-        } else {
+        } else if (placement == "fill") {
             QCOMPARE(label->width(), clip->width() - 16);
         }
         const auto screenshot = qEnvironmentVariable("MOUFFETTE_TIMELINE_SCREENSHOT");
@@ -597,7 +693,9 @@ private slots:
         clip->setProperty("previewEnd", qreal(startMs + 2000));
         clip->setProperty("dragging", true);
         QCOMPARE(duration->property("text").toString(), QString("  ·  00:02.000"));
+        QVERIFY(centeredInVisibleClip());
         clip->setProperty("dragging", false);
+        QVERIFY(centeredInVisibleClip());
         QCOMPARE(duration->property("text").toString(), "  ·  " + QTime(0, 0).addMSecs(endMs - startMs).toString("mm:ss.zzz"));
     }
 
@@ -667,6 +765,124 @@ private slots:
         QCOMPARE(f.scroll(), 80.0);
         const auto ids = f.host->document()->selectedMediaIds();
         QVERIFY(!ids.isEmpty());
+    }
+
+    void trackHeadersMeasureAllNamesAndFollowVerticalScroll()
+    {
+        TimelineFixture f; QVERIFY(f.initialize());
+        auto* headers = f.item("timelineTrackHeaders");
+        auto* keyHeader = f.item("timelineKeyframeHeader");
+        auto* tracks = f.item("timelineTracks");
+        auto* clips = f.item("timelineClipViewport");
+        QVERIFY(headers && keyHeader && tracks && clips);
+        auto* media = f.host->document()->addText({}, "Last occupied track");
+        const auto checkLayout = [&] {
+            const QFontMetricsF metrics(keyHeader->property("font").value<QFont>());
+            qreal widest = metrics.horizontalAdvance("Keyframes");
+            for (int i = 1; i <= f.timeline.trackCount(); ++i)
+                widest = qMax(widest, metrics.horizontalAdvance("Track " + QString::number(i)));
+            if (qAbs(headers->width() - (qCeil(widest) + 25)) > 1) return false;
+            if (headers->x() != 0 || tracks->x() != headers->width()) return false;
+            for (auto* header : timelineItems(f.view.rootObject(), "timelineClipTrackHeader")) {
+                if (!header->isVisible()) continue;
+                const int index = header->property("trackIndex").toInt();
+                auto* label = timelineItems(header, "timelineClipTrackLabel").value(0);
+                if (!label || label->width() + 0.01 < label->implicitWidth()
+                    || label->property("text").toString() != "Track " + QString::number(index + 1)) return false;
+                QQuickItem* row = nullptr;
+                for (auto* candidate : timelineItems(f.view.rootObject(), "timelineClipTrack"))
+                    if (candidate->property("trackIndex").toInt() == index) row = candidate;
+                if (!row || header->mapToScene({0, 0}).y() != row->mapToScene({0, 0}).y()) return false;
+            }
+            return keyHeader->width() >= keyHeader->implicitWidth();
+        };
+        const auto keyPosition = keyHeader->mapToScene({0, 0});
+        for (int count : {9, 10, 99, 100}) {
+            auto track = media->timelineTrack();
+            track.trackIndex = count - 2;
+            media->setTimelineTrack(track);
+            QCOMPARE(f.timeline.trackCount(), count);
+            QTRY_VERIFY(checkLayout());
+            const qreal width = headers->width();
+            tracks->setProperty("contentX", 1500.0);
+            QCOMPARE(headers->width(), width);
+            const qreal lastScroll = clips->property("contentHeight").toReal() - clips->height();
+            clips->setProperty("contentY", lastScroll);
+            QTRY_VERIFY(checkLayout());
+            QCOMPARE(keyHeader->mapToScene({0, 0}), keyPosition);
+            bool lastLabelVisible = false;
+            for (auto* label : timelineItems(f.view.rootObject(), "timelineClipTrackLabel"))
+                lastLabelVisible |= label->isVisible() && label->property("text").toString() == "Track " + QString::number(count);
+            QVERIFY(lastLabelVisible);
+            // Wheel events over the fixed labels scroll the same clip content.
+            const auto point = headers->mapToScene({headers->width()/2,
+                f.timeline.rulerHeightPx() + 32.0 + 20}).toPoint();
+            f.wheel(point, {0, 13}, {});
+            QCOMPARE(clips->property("contentY").toReal(), lastScroll - 13);
+            QCOMPARE(f.scroll(), 1500.0);
+            QTRY_VERIFY(checkLayout());
+            QCOMPARE(keyHeader->mapToScene({0, 0}), keyPosition);
+        }
+        const auto screenshot = qEnvironmentVariable("MOUFFETTE_TIMELINE_SCREENSHOT");
+        if (!screenshot.isEmpty()) {
+            QTest::qWait(100);
+            QVERIFY(f.view.grabWindow().save(screenshot + "track-headers.png"));
+        }
+        f.host->document()->removeMedia(media->mediaId());
+        QCOMPARE(f.timeline.trackCount(), 1);
+        QTRY_COMPARE(clips->property("contentY").toReal(), 0.0);
+        QTRY_VERIFY(checkLayout());
+    }
+
+    void activeTrackHasNoBackgroundTint()
+    {
+        TimelineFixture f; QVERIFY(f.initialize());
+        auto* tracks = f.item("timelineTracks");
+        auto* row = f.item("timelineClipTrack");
+        const QPoint point = row->mapToScene({tracks->width()*0.6, row->height()/2}).toPoint();
+        const auto colorAt = [&](const QImage& frame) {
+            return frame.pixelColor(qRound(point.x() * frame.width() / qreal(f.view.width())),
+                qRound(point.y() * frame.height() / qreal(f.view.height())));
+        };
+        // Adding an instance makes Track 2 active, leaving the first row empty at this time.
+        auto* media = f.host->document()->addText({}, "Clip");
+        auto track = media->timelineTrack(); track.trackIndex = 1;
+        media->setTimelineTrack(track);
+        f.timeline.setActiveTrackIndex(1);
+        QTest::qWait(30);
+        const QImage before = f.view.grabWindow(); QVERIFY(!before.isNull());
+        QTest::mouseClick(&f.view, Qt::LeftButton, Qt::NoModifier, point);
+        QCOMPARE(f.timeline.activeTrackIndex(), 0);
+        QTest::qWait(30);
+        const QImage after = f.view.grabWindow(); QVERIFY(!after.isNull());
+        QCOMPARE(colorAt(after), colorAt(before));
+    }
+
+    void clipDragScrollsAtTemporalViewportEdges()
+    {
+        TimelineFixture f; QVERIFY(f.initialize());
+        auto* media = f.host->document()->addText({}, "Drag");
+        auto* tracks = f.item("timelineTracks");
+        auto* clip = f.item("timelineClip");
+        auto* headers = f.item("timelineTrackHeaders");
+        tracks->setProperty("contentX", 400.0);
+        const auto saved = media->timelineTrack().toJson();
+        const auto from = tracks->mapToScene({100, f.timeline.rulerHeightPx() + 32.0 + 24}).toPoint();
+        const auto leftEdge = tracks->mapToScene({10, f.timeline.rulerHeightPx() + 32.0 + 24}).toPoint();
+        QVERIFY(leftEdge.x() > 22); // The panel edge is outside the temporal viewport.
+        QTest::mousePress(&f.view, Qt::LeftButton, Qt::NoModifier, from);
+        QVERIFY(clip->property("dragging").toBool());
+        QTest::mouseMove(&f.view, leftEdge, 20);
+        QTRY_VERIFY(f.scroll() < 400);
+        QCOMPARE(headers->x(), 0.0);
+        const qreal scrolled = f.scroll();
+        const auto rightEdge = tracks->mapToScene({tracks->width() - 10,
+            f.timeline.rulerHeightPx() + 32.0 + 24}).toPoint();
+        QTest::mouseMove(&f.view, rightEdge, 20);
+        QTRY_VERIFY(f.scroll() > scrolled);
+        QTest::mouseRelease(&f.view, Qt::LeftButton, Qt::NoModifier, rightEdge);
+        QVERIFY(!clip->property("dragging").toBool());
+        QCOMPARE(media->timelineTrack().toJson(), saved); // Full-scene clip cannot move in time.
     }
 
     void clipDragScrollsTracksInShortPanel()

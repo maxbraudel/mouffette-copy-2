@@ -20,6 +20,12 @@ FocusScope {
     readonly property real visibleEndX: trackViewport.contentX + trackViewport.width
     readonly property real clipHeight: timeline ? timeline.clipTrackHeightPx : 48
     readonly property real keyHeight: 32
+    readonly property var trackNames: {
+        var names = []
+        for (var i = 0; i < (timeline ? timeline.trackCount : 1); ++i)
+            names.push("Track " + (i + 1))
+        return names
+    }
     readonly property real slotMs: 1000 / (timeline ? timeline.slotsPerSecond : 30)
     readonly property int maximumFrame: Math.round(maximumMs / slotMs)
     readonly property int frameDigits: String(maximumFrame).length
@@ -71,8 +77,9 @@ FocusScope {
     }
     function autoScrollClip(drag) {
         var point = clipViewport.mapFromItem(root, drag.pointerPanelX, drag.pointerPanelY)
+        var viewportPoint = trackViewport.mapFromItem(root, drag.pointerPanelX, drag.pointerPanelY)
         var dy = point.y < 22 ? -8 : point.y > clipViewport.height - 22 ? 8 : 0
-        var dx = drag.pointerPanelX < 22 ? -8 : drag.pointerPanelX > root.width - 22 ? 8 : 0
+        var dx = viewportPoint.x < 22 ? -8 : viewportPoint.x > trackViewport.width - 22 ? 8 : 0
         if (dy !== 0) scrollTracks(dy)
         if (dx !== 0) scrollTo(trackViewport.contentX + dx)
         if (dx !== 0 || dy !== 0) drag.refreshFromPointer()
@@ -454,10 +461,76 @@ FocusScope {
         height: 1
         color: Theme.border
     }
+    StateTextMetrics {
+        id: trackNameMetrics
+        font: keyTrackName.font
+        text: keyTrackName.text
+        textVariants: root.trackNames
+    }
+    component TrackName: Text {
+        x: 12
+        width: Math.max(0, parent.width - 25)
+        font.pixelSize: 10
+        color: Theme.overlayText
+        textFormat: Text.PlainText
+        verticalAlignment: Text.AlignVCenter
+    }
+    Item {
+        id: trackHeaders
+        objectName: "timelineTrackHeaders"
+        anchors.left: parent.left
+        anchors.top: tracksSeparator.bottom; anchors.bottom: parent.bottom
+        width: trackNameMetrics.maximumWidth + 25
+        clip: true
+        Rectangle {
+            anchors.right: parent.right
+            width: 1; height: parent.height
+            color: Theme.overlayBorder
+        }
+        Rectangle { y: root.rulerHeight; width: parent.width; height: 1; color: Theme.overlayBorder }
+        TrackName {
+            id: keyTrackName
+            objectName: "timelineKeyframeHeader"
+            y: root.rulerHeight
+            height: root.keyHeight
+            text: "Keyframes"
+        }
+        Item {
+            id: clipHeaders
+            objectName: "timelineClipHeaders"
+            y: root.rulerHeight + root.keyHeight
+            width: parent.width; height: Math.max(0, parent.height - y)
+            clip: true
+            Repeater {
+                model: Math.ceil(clipHeaders.height / root.clipHeight) + 2
+                Item {
+                    required property int index
+                    readonly property int trackIndex: Math.floor(clipViewport.contentY / root.clipHeight) + index
+                    objectName: "timelineClipTrackHeader"
+                    y: trackIndex * root.clipHeight - clipViewport.contentY
+                    width: clipHeaders.width; height: root.clipHeight
+                    visible: trackIndex < root.trackNames.length
+                    Rectangle { width: parent.width; height: 1; color: Theme.overlayBorder }
+                    TrackName {
+                        objectName: "timelineClipTrackLabel"
+                        height: parent.height
+                        text: root.trackNames[parent.trackIndex] || ""
+                    }
+                }
+            }
+        }
+        MouseArea {
+            anchors.fill: parent
+            acceptedButtons: Qt.NoButton
+            cursorShape: undefined
+            scrollGestureEnabled: true
+            onWheel: wheel => root.handleWheel(wheel)
+        }
+    }
     Flickable {
         id: trackViewport
         objectName: "timelineTracks"
-        anchors.left: parent.left; anchors.right: parent.right
+        anchors.left: trackHeaders.right; anchors.right: parent.right
         anchors.top: tracksSeparator.bottom; anchors.bottom: parent.bottom
         clip: true
         contentWidth: Math.max(width, root.maximumMs * root.pixelsPerMs + 24)
@@ -483,7 +556,6 @@ FocusScope {
                 enabled: !!root.timeline && !root.timeline.remoteActive
                 onPressed: mouse => {
                     root.focusTrack()
-                    root.timeline.clearSelection()
                     root.timeline.seek(root.clampTime((mouse.x - 12) / root.pixelsPerMs))
                 }
                 onPositionChanged: mouse => { if (pressed) root.timeline.seek(root.clampTime((mouse.x - 12) / root.pixelsPerMs)) }
@@ -531,7 +603,6 @@ FocusScope {
                 objectName: "timelineKeyframeTrack"
                 y: root.rulerHeight
                 width: parent.width; height: root.keyHeight
-                Text { x: trackViewport.contentX + 6; y: 2; text: "KEYFRAMES"; font.pixelSize: 9; color: Theme.overlayDisabledText }
                 Repeater {
                     model: root.timeline ? root.timeline.otherKeyframes : []
                     KeyframeDiamond {
@@ -624,34 +695,7 @@ FocusScope {
                         y: trackIndex * root.clipHeight
                         width: clipViewport.width; height: root.clipHeight
                         visible: trackIndex < (root.timeline ? root.timeline.trackCount : 1)
-                        Rectangle {
-                            anchors.fill: parent
-                            color: root.timeline && root.timeline.activeTrackIndex === clipTrack.trackIndex
-                                ? Theme.overlaySelected : "transparent"
-                            opacity: 0.45
-                        }
                         Rectangle { width: parent.width; height: 1; color: Theme.overlayBorder }
-                        Text {
-                            objectName: "timelineClipTrackLabel"
-                            x: root.visibleStartX + 6
-                            anchors.verticalCenter: parent.verticalCenter
-                            text: "TRACK " + (clipTrack.trackIndex + 1)
-                            font.pixelSize: 9; color: Theme.overlayDisabledText
-                            // Show the background label only when it is fully readable.
-                            visible: {
-                                var clips = root.timeline ? root.timeline.clips : []
-                                for (var i = 0; i < clips.length; ++i) {
-                                    var row = clips[i]
-                                    var drag = root.activeDrag && root.activeDrag.isClipDrag
-                                        && root.activeDrag.modelData.id === row.id ? root.activeDrag : null
-                                    if ((drag ? drag.shownTrack : row.trackIndex) !== clipTrack.trackIndex) continue
-                                    var left = 12 + (drag ? drag.shownStart : row.startMs) * root.pixelsPerMs
-                                    var right = 12 + (drag ? drag.shownEnd : row.startMs + row.durationMs) * root.pixelsPerMs
-                                    if (left < x + implicitWidth && right > x) return false
-                                }
-                                return true
-                            }
-                        }
                         MouseArea {
                             anchors.fill: parent
                             enabled: root.editable

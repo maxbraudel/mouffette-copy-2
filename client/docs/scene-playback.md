@@ -105,15 +105,24 @@ not fit, the entire row scrolls together. Its side padding belongs to the scroll
 overflow adds neither a scrollbar nor extra height.
 The default panel height is 240 px. A fixed 32 px keyframe band remains above
 48 px clip tracks. The ruler and keys remain fixed vertically while the clips
-scroll. Clips fill their track with a 5 px top and bottom inset. The media name
-and duration follow the visible timeline center, staying inside the clip and
-clamping to the closest edge when it cannot reach the center. Long names elide
-before the duration. Clips support temporal and vertical dragging with edge
+scroll. A fixed column to the left of the time viewport displays Keyframes and
+Track 1, Track 2, etc. Its shared width measures every track name with the rendered
+font, plus 12 px padding on each side and a 1 px separator. Clip track names follow
+the clips' vertical scroll; the Keyframes header stays fixed. Header clicks are
+informational and wheel events navigate the same timeline. Track backgrounds do
+not highlight the active paste destination. Clips fill their track with a 5 px
+top and bottom inset. The media name and duration are centered in the intersection
+of their clip with the visible time viewport, including during drag and resize.
+Long names elide before the duration. Clips support temporal and vertical dragging with edge
 auto-scroll. Clip rows retain their identities when selection
 changes. The horizontal scrollbar overlays content without reserving a gutter.
 Vertical wheel motion over clips scrolls tracks; horizontal motion or Shift+wheel
 scrolls time. Ctrl/Cmd+wheel zooms.
 The ruler, zoom, horizontal scroll and fit command navigate the project.
+Ruler clicks/drags, Start/End and slot navigation preserve instance and keyframe
+selection, including when the selected instance is absent at the new playhead.
+Clicking empty track content clears selection; on a clip track it also chooses
+the paste destination. The header column does neither.
 Shift temporarily snaps against all keys and clip boundaries;
 releasing it immediately restores ordinary grid alignment. The ruler groups grid
 lines when zoomed out; it never changes the actual slot size. Left/right arrows

@@ -111,14 +111,13 @@ Rectangle {
     Item {
         id: clipLabel
         objectName: "timelineClipLabel"
-        // Aim for the viewport center, clamped to the visible part of this clip.
+        // Center the label within the intersection of this clip and the viewport.
         readonly property real leftBound: Math.max(8, panel.visibleStartX - clipItem.x + 8)
         readonly property real rightBound: Math.min(clipItem.width - 8, panel.visibleEndX - clipItem.x - 8)
         implicitWidth: clipTitle.implicitWidth + clipDuration.implicitWidth
         width: Math.min(implicitWidth, Math.max(0, rightBound - leftBound))
         height: parent.height
-        x: Math.max(leftBound, Math.min(rightBound - width,
-            (panel.visibleStartX + panel.visibleEndX) / 2 - clipItem.x - width / 2))
+        x: leftBound + Math.max(0, rightBound - leftBound - width) / 2
         visible: clipItem.interactive && width > 0
         Text {
             id: clipTitle
