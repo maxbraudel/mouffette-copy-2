@@ -149,8 +149,6 @@ signals:
     void textEditingRequested(const QString& mediaId);
     void selectedMediaChanged();
     void mediaVisibilityToggleRequested(const QString& mediaId, bool visible);
-    void mediaBringForwardRequested(const QString& mediaId);
-    void mediaBringBackwardRequested(const QString& mediaId);
     void mediaDeleteRequested(const QString& mediaId);
     void mediaMuteToggleRequested(const QString& mediaId);
     void mediaVolumeChangeRequested(const QString& mediaId, qreal value);
@@ -183,8 +181,6 @@ public slots:
                                        const QString& text);
     void handleTextCreateRequested(qreal viewX, qreal viewY);
     void handleOverlayVisibilityToggle(const QString& mediaId, bool visible);
-    void handleOverlayBringForward(const QString& mediaId);
-    void handleOverlayBringBackward(const QString& mediaId);
     void handleOverlayDelete(const QString& mediaId);
     void handleOverlayMuteToggle(const QString& mediaId);
     void handleOverlayVolumeChange(const QString& mediaId, qreal value);

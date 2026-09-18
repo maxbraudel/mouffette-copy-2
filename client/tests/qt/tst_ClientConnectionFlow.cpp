@@ -39,6 +39,8 @@
 #include "backend/network/RemoteSessionCoordinator.h"
 #include "backend/network/WebSocketClient.h"
 #include "backend/network/UploadManager.h"
+#include "backend/handlers/UploadEventHandler.h"
+#include "backend/files/FileManager.h"
 #include "backend/security/DeviceIdentityStore.h"
 #include "frontend/qml/ApplicationController.h"
 #include "frontend/qml/QmlRuntime.h"
@@ -173,7 +175,7 @@ public:
                 QJsonObject message)
     {
         if (!socket) return false;
-        message.insert(QStringLiteral("protocolVersion"), 10);
+        message.insert(QStringLiteral("protocolVersion"), 11);
         message.insert(QStringLiteral("serverBootId"), socketBootId);
         completeV7TestEnvelope(message);
         if (message.value(QStringLiteral("messageId")).toString().isEmpty()) {
@@ -326,6 +328,8 @@ public:
     QList<QJsonObject> teardownAcknowledgements;
     QList<QJsonObject> cursorSamples;
     QList<QJsonObject> disableCommands;
+    QList<QJsonObject> uploadStarts;
+    QList<QJsonObject> uploadAborts;
     bool replyRegistration = true;
     bool replyReconciliation = true;
     QJsonObject registrationReply;
@@ -383,6 +387,10 @@ private:
                     {"sessions", QJsonArray{}}, {"complete", true}, {"absentSessionIds", QJsonArray{}}
                 };
                 if (replyReconciliation) sendOn(socket, socketBootId, reconciliationReply);
+            } else if (type == QLatin1String("upload_start")) {
+                uploadStarts.append(message);
+            } else if (type == QLatin1String("upload_abort")) {
+                uploadAborts.append(message);
             } else if (type == QLatin1String("remote_session_open")) {
                 openCommands.append(message);
             } else if (type == QLatin1String("remote_session_close")) {
@@ -600,6 +608,107 @@ private slots:
         runtime.getUploadManager()->uploadRejected(QStringLiteral("readable-upload"),
             QStringLiteral("Not enough disk space"));
         QCOMPARE(toasts.last().first().toString(), QStringLiteral("Upload failed: Not enough disk space"));
+        runtime.handleApplicationAboutToQuit();
+    }
+
+    void deletingLastWorkspaceSourceCancelsOnlyItsUpload_data()
+    {
+        QTest::addColumn<bool>("preparing");
+        QTest::newRow("background-verification") << true;
+        QTest::newRow("awaiting-remote-ack") << false;
+    }
+
+    void deletingLastWorkspaceSourceCancelsOnlyItsUpload()
+    {
+        QFETCH(bool, preparing);
+        QTemporaryDir root;
+        QVERIFY(root.isValid());
+        const auto previous = RuntimeProfile::context();
+        const auto restoreProfile = qScopeGuard([previous] { RuntimeProfile::configure(previous); });
+        RuntimeProfileContext context;
+        context.rootPath = root.path();
+        context.persistent = false;
+        RuntimeProfile::configure(context);
+        ApplicationRuntime runtime(context);
+        runtime.setQmlWindowVisible(true);
+        runtime.setPointerInsideControlWindow(true);
+        RemoteSessionTestServer server(runtime.getWebSocketClient()->endpointId());
+        QVERIFY(server.listen());
+        runtime.findChild<ConnectionManager*>()->connectToServer(server.url());
+        QTRY_COMPARE_WITH_TIMEOUT(runtime.localStatusText(), QStringLiteral("CONNECTED"), 2000);
+        const QString targetA = fixtureEndpoint(QLatin1Char('A'));
+        const QString targetB = fixtureEndpoint(QLatin1Char('B'));
+        const QString sessionA = QStringLiteral("source-removal-session-a");
+        const QString sessionB = QStringLiteral("source-removal-session-b");
+        QVERIFY(server.send(QJsonObject{{"type", "client_list"}, {"clients", QJsonArray{
+            onlineClient(targetA, QStringLiteral("Source target A")).toJson(),
+            onlineClient(targetB, QStringLiteral("Source target B")).toJson()}}}));
+        QTRY_COMPARE(runtime.displayClients().size(), 2);
+        for (const auto& target : {targetA, targetB}) {
+            runtime.activateClient(target);
+            QTRY_VERIFY(!server.openCommands.isEmpty()
+                && server.openCommands.last().value("targetEndpointId").toString() == target);
+            QVERIFY(server.sendOpened(target == targetA ? sessionA : sessionB,
+                server.openCommands.last().value("requestId").toString(), target,
+                ScreenInfo(0, 1920, 1080, 0, 0, true), 50));
+            QTRY_VERIFY(runtime.getProjectManager()->hasProjectForTarget(target));
+        }
+        auto* workspaceA = runtime.findWorkspace(targetA);
+        auto* workspaceB = runtime.findWorkspace(targetB);
+        QVERIFY(workspaceA && workspaceB && workspaceA->canvas && workspaceB->canvas);
+        const QString sourcePath = root.filePath(QStringLiteral("shared-upload.png"));
+        QImage image(32, 32, QImage::Format_ARGB32_Premultiplied);
+        image.fill(Qt::darkYellow);
+        QVERIFY(image.save(sourcePath));
+        auto* mediaA = workspaceA->canvas->document()->addPreparedFile(sourcePath, {32, 32}, false, {});
+        auto* mediaB = workspaceB->canvas->document()->addPreparedFile(sourcePath, {32, 32}, false, {});
+        QVERIFY(mediaA && mediaB);
+        QTRY_VERIFY_WITH_TIMEOUT(mediaA->residencyReady() && mediaB->residencyReady(), 10000);
+        const QString fileId = mediaA->fileId();
+        QCOMPARE(mediaB->fileId(), fileId);
+        QCOMPARE(runtime.getFileManager()->getMediaIdsForFile(fileId).size(), 2);
+        runtime.getFileManager()->markFileUploadedToClient(fileId, targetB);
+        workspaceB->knownRemoteFileIds.insert(fileId);
+        UploadEventHandler handler(&runtime);
+        auto* uploads = runtime.getUploadManager();
+        QSignalSpy rejected(uploads, &UploadManager::uploadRejected);
+        QSignalSpy cancelled(uploads, &UploadManager::uploadCancelled);
+        handler.uploadWorkspace(targetA);
+        QVERIFY(workspaceA->knownRemoteFileIds.isEmpty()); // No target ACK has arrived.
+        QVERIFY(workspaceA->upload.fileIds.contains(fileId));
+        if (!preparing) {
+            QTRY_COMPARE_WITH_TIMEOUT(server.uploadStarts.size(), 1, 5000);
+            QCOMPARE(server.uploadStarts.first().value("remoteSessionId").toString(), sessionA);
+            QCOMPARE(uploads->activeOutgoingTransferCount(), 1);
+        }
+        QVERIFY(workspaceA->canvas->document()->removeMedia(mediaA->mediaId()));
+        // The global last-reference notifier cannot run: B still owns this source.
+        QCOMPARE(runtime.getFileManager()->getMediaIdsForFile(fileId), QList<QString>{mediaB->mediaId()});
+        if (preparing) {
+            // Commit reconciliation before dispatching the completed background
+            // verification callback, exercising the pre-upload removal path.
+            runtime.reconcileRemoteFilesForWorkspace(*workspaceA, {});
+            QCOMPARE(cancelled.count(), 1);
+            QCOMPARE(rejected.count(), 0);
+            QCoreApplication::processEvents();
+            QCOMPARE(server.uploadStarts.size(), 0);
+            QCOMPARE(server.uploadAborts.size(), 0);
+            QVERIFY(runtime.getWebSocketClient()->remoteSessionCoordinator()->outgoingForPeer(targetA).active);
+        } else {
+            // No explicit reconciliation: the committed document change timer
+            // must cancel the transfer on its own.
+            QTRY_COMPARE_WITH_TIMEOUT(rejected.count(), 1, 2000);
+            QTRY_COMPARE_WITH_TIMEOUT(uploads->activeOutgoingTransferCount(), 0, 2000);
+            QTRY_COMPARE_WITH_TIMEOUT(server.uploadAborts.size(), 1, 2000);
+            QCOMPARE(server.uploadAborts.first().value("remoteSessionId").toString(), sessionA);
+            QCOMPARE(server.uploadAborts.first().value("uploadId"), server.uploadStarts.first().value("uploadId"));
+        }
+        QVERIFY(runtime.getWebSocketClient()->remoteSessionCoordinator()->outgoingForPeer(targetB).active);
+        QCOMPARE(workspaceB->canvas->document()->media().size(), 1);
+        QVERIFY(mediaB->residencyReady());
+        QVERIFY(runtime.getFileManager()->isFileUploadedToClient(fileId, targetB));
+        QVERIFY(workspaceB->knownRemoteFileIds.contains(fileId));
+        QVERIFY(QFile::exists(sourcePath));
         runtime.handleApplicationAboutToQuit();
     }
 
@@ -1760,7 +1869,7 @@ private slots:
         QJsonObject authentication;
         auto sendServerMessage = [&](QJsonObject message) {
             QVERIFY2(peer, "The fake server has no authenticated peer");
-            message.insert(QStringLiteral("protocolVersion"), 10);
+            message.insert(QStringLiteral("protocolVersion"), 11);
             message.insert(QStringLiteral("serverBootId"), bootId);
             completeV7TestEnvelope(message);
             if (message.value(QStringLiteral("messageId")).toString().isEmpty()) {
@@ -4410,7 +4519,7 @@ private slots:
 
         auto sendServerMessage = [&](QJsonObject message) {
             QVERIFY2(peer, "The fake server has no authenticated peer");
-            message.insert(QStringLiteral("protocolVersion"), 10);
+            message.insert(QStringLiteral("protocolVersion"), 11);
             message.insert(QStringLiteral("serverBootId"), bootId);
             completeV7TestEnvelope(message);
             if (message.value(QStringLiteral("messageId")).toString().isEmpty()) {

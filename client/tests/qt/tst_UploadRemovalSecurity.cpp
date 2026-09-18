@@ -427,7 +427,7 @@ void UploadRemovalSecurityTest::idempotentRecoveryIsBoundToPersistentSender() {
 
         QJsonObject start;
         start["type"] = "upload_start";
-        start["protocolVersion"] = 10;
+        start["protocolVersion"] = 11;
         start["connectionGeneration"] = 11;
         start["generation"] = 1;
         start["ownerEndpointId"] = cacheOwner;
@@ -438,7 +438,7 @@ void UploadRemovalSecurityTest::idempotentRecoveryIsBoundToPersistentSender() {
 
         QJsonObject chunk;
         chunk["type"] = "upload_chunk";
-        chunk["protocolVersion"] = 10;
+        chunk["protocolVersion"] = 11;
         chunk["connectionGeneration"] = 11;
         chunk["generation"] = 1;
         chunk["ownerEndpointId"] = cacheOwner;
@@ -454,7 +454,7 @@ void UploadRemovalSecurityTest::idempotentRecoveryIsBoundToPersistentSender() {
 
         QJsonObject complete;
         complete["type"] = "upload_complete";
-        complete["protocolVersion"] = 10;
+        complete["protocolVersion"] = 11;
         complete["connectionGeneration"] = 11;
         complete["generation"] = 1;
         complete["ownerEndpointId"] = cacheOwner;
@@ -549,7 +549,7 @@ void UploadRemovalSecurityTest::freshUploadResetsStaleTransferScopedStaging()
     stale.close();
 
     uploads.handleIncomingMessage(QJsonObject{
-        {"type", "upload_start"}, {"protocolVersion", 10},
+        {"type", "upload_start"}, {"protocolVersion", 11},
         {"connectionGeneration", 5}, {"generation", 1},
         {"ownerEndpointId", senderId}, {"remoteSessionId", remoteSessionId},
         {"uploadId", uploadId},
@@ -574,7 +574,7 @@ void UploadRemovalSecurityTest::freshUploadResetsStaleTransferScopedStaging()
     QCOMPARE(QFileInfo(stagingPath).size(), qint64(0));
 
     uploads.handleIncomingMessage(QJsonObject{
-        {"type", "upload_abort"}, {"protocolVersion", 10},
+        {"type", "upload_abort"}, {"protocolVersion", 11},
         {"connectionGeneration", 5}, {"generation", 1},
         {"ownerEndpointId", senderId}, {"remoteSessionId", remoteSessionId},
         {"uploadId", uploadId},
@@ -650,7 +650,7 @@ void UploadRemovalSecurityTest::interruptedUploadRemovesOnlyPartialStagingAndCan
     auto startUpload = [&] {
         QJsonObject start;
         start["type"] = "upload_start";
-        start["protocolVersion"] = 10;
+        start["protocolVersion"] = 11;
         start["connectionGeneration"] = static_cast<double>(connectionGeneration);
         start["generation"] = static_cast<double>(generation);
         start["ownerEndpointId"] = senderId;
@@ -672,7 +672,7 @@ void UploadRemovalSecurityTest::interruptedUploadRemovesOnlyPartialStagingAndCan
 
     QJsonObject chunk;
     chunk["type"] = "upload_chunk";
-    chunk["protocolVersion"] = 10;
+    chunk["protocolVersion"] = 11;
     chunk["connectionGeneration"] = static_cast<double>(connectionGeneration);
     chunk["generation"] = static_cast<double>(generation);
     chunk["ownerEndpointId"] = senderId;
@@ -693,7 +693,7 @@ void UploadRemovalSecurityTest::interruptedUploadRemovesOnlyPartialStagingAndCan
     generation = 2;
     connectionGeneration = 8;
     QJsonObject resume{
-        {"type", "upload_resume"}, {"protocolVersion", 10},
+        {"type", "upload_resume"}, {"protocolVersion", 11},
         {"connectionGeneration", static_cast<double>(connectionGeneration)},
         {"generation", static_cast<double>(generation)},
         {"ownerEndpointId", senderId}, {"remoteSessionId", remoteSessionId},
@@ -708,7 +708,7 @@ void UploadRemovalSecurityTest::interruptedUploadRemovesOnlyPartialStagingAndCan
 
     QJsonObject abort;
     abort["type"] = "upload_abort";
-    abort["protocolVersion"] = 10;
+    abort["protocolVersion"] = 11;
     abort["connectionGeneration"] = static_cast<double>(connectionGeneration);
     abort["generation"] = static_cast<double>(generation);
     abort["ownerEndpointId"] = senderId;
@@ -753,14 +753,14 @@ void UploadRemovalSecurityTest::scopedUploadTeardownQuarantinesAndDropsMappings(
         {"mediaIds", QJsonArray{QStringLiteral("media_teardown")}},
     };
     QJsonObject start{
-        {"type", "upload_start"}, {"protocolVersion", 10},
+        {"type", "upload_start"}, {"protocolVersion", 11},
         {"connectionGeneration", 3}, {"generation", 1},
         {"ownerEndpointId", senderId}, {"remoteSessionId", remoteSessionId},
         {"uploadId", uploadId}, {"files", QJsonArray{manifest}},
     };
     uploads.handleIncomingMessage(start);
     QJsonObject chunk{
-        {"type", "upload_chunk"}, {"protocolVersion", 10},
+        {"type", "upload_chunk"}, {"protocolVersion", 11},
         {"connectionGeneration", 3}, {"generation", 1},
         {"ownerEndpointId", senderId}, {"remoteSessionId", remoteSessionId},
         {"uploadId", uploadId}, {"assetId", assetId}, {"offset", 0},
@@ -770,7 +770,7 @@ void UploadRemovalSecurityTest::scopedUploadTeardownQuarantinesAndDropsMappings(
     uploads.handleIncomingMessage(chunk);
     QTRY_VERIFY_WITH_TIMEOUT(uploads.incomingFileReadersSettled(), 5000);
     QJsonObject complete{
-        {"type", "upload_complete"}, {"protocolVersion", 10},
+        {"type", "upload_complete"}, {"protocolVersion", 11},
         {"connectionGeneration", 3}, {"generation", 1},
         {"ownerEndpointId", senderId}, {"remoteSessionId", remoteSessionId},
         {"uploadId", uploadId},
@@ -852,7 +852,7 @@ void UploadRemovalSecurityTest::completedUploadAckIsReplayableAndInventoryBound(
     auto boundMessage = [&](const QString& type, quint64 generation,
                             quint64 connectionGeneration) {
         return QJsonObject{
-            {"type", type}, {"protocolVersion", 10},
+            {"type", type}, {"protocolVersion", 11},
             {"connectionGeneration", static_cast<double>(connectionGeneration)},
             {"generation", static_cast<double>(generation)},
             {"ownerEndpointId", senderId}, {"remoteSessionId", remoteSessionId},
@@ -962,7 +962,7 @@ void UploadRemovalSecurityTest::receiverAcceptsRealWebpUpload()
     const QString uploadId = QStringLiteral("upload-real-webp");
     const QString assetId = QStringLiteral("asset-real-webp");
     const QJsonObject binding{
-        {"protocolVersion", 10}, {"connectionGeneration", 5}, {"generation", 1},
+        {"protocolVersion", 11}, {"connectionGeneration", 5}, {"generation", 1},
         {"ownerEndpointId", senderId}, {"remoteSessionId", remoteSessionId},
         {"uploadId", uploadId},
     };
@@ -1050,13 +1050,13 @@ void UploadRemovalSecurityTest::receiverReportsDecodeFailureSeparatelyFromUpload
         QStringLiteral("mp4"), &stagingError);
     QVERIFY2(!corruptValidated.isEmpty(), qPrintable(stagingError));
     uploads.handleIncomingMessage(QJsonObject{
-        {"type", "upload_start"}, {"protocolVersion", 10},
+        {"type", "upload_start"}, {"protocolVersion", 11},
         {"connectionGeneration", 7}, {"generation", 1},
         {"ownerEndpointId", senderId}, {"remoteSessionId", remoteSessionId},
         {"uploadId", uploadId}, {"files", QJsonArray{manifest}},
     });
     uploads.handleIncomingMessage(QJsonObject{
-        {"type", "upload_chunk"}, {"protocolVersion", 10},
+        {"type", "upload_chunk"}, {"protocolVersion", 11},
         {"connectionGeneration", 7}, {"generation", 1},
         {"ownerEndpointId", senderId}, {"remoteSessionId", remoteSessionId},
         {"uploadId", uploadId}, {"assetId", assetId}, {"offset", 0},
@@ -1064,7 +1064,7 @@ void UploadRemovalSecurityTest::receiverReportsDecodeFailureSeparatelyFromUpload
         {"data", QString::fromLatin1(bytes.toBase64())},
     });
     uploads.handleIncomingMessage(QJsonObject{
-        {"type", "upload_complete"}, {"protocolVersion", 10},
+        {"type", "upload_complete"}, {"protocolVersion", 11},
         {"connectionGeneration", 7}, {"generation", 1},
         {"ownerEndpointId", senderId}, {"remoteSessionId", remoteSessionId},
         {"uploadId", uploadId},
@@ -1116,7 +1116,7 @@ void UploadRemovalSecurityTest::terminalCleanupWaitsForBackgroundValidationReade
     const QString uploadId = QStringLiteral("upload-reader-barrier");
     const QString assetId = QStringLiteral("asset-reader-barrier");
     const RemoteCacheStore::Scope scope{senderId, remoteSessionId, 1};
-    const QJsonObject binding{{"protocolVersion", 10}, {"connectionGeneration", 7},
+    const QJsonObject binding{{"protocolVersion", 11}, {"connectionGeneration", 7},
         {"generation", 1}, {"ownerEndpointId", senderId},
         {"remoteSessionId", remoteSessionId}, {"uploadId", uploadId}};
     FileManager files;
@@ -1406,7 +1406,7 @@ void UploadRemovalSecurityTest::duplicateUploadClickIsIgnoredBeforeExplicitCance
         peer = server.nextPendingConnection();
         QVERIFY(peer);
         peer->sendTextMessage(QString::fromUtf8(v6Document(QJsonObject{
-            {"type", "auth_challenge"}, {"protocolVersion", 10},
+            {"type", "auth_challenge"}, {"protocolVersion", 11},
             {"serverBootId", bootId},
             {"messageId", QUuid::createUuid().toString(QUuid::WithoutBraces)},
             {"nonce", nonce}, {"issuedAt", 1},
@@ -1425,7 +1425,7 @@ void UploadRemovalSecurityTest::duplicateUploadClickIsIgnoredBeforeExplicitCance
                 {"removalAckTimeoutMs", 30000},
             };
             peer->sendTextMessage(QString::fromUtf8(v6Document(QJsonObject{
-                {"type", "welcome"}, {"protocolVersion", 10},
+                {"type", "welcome"}, {"protocolVersion", 11},
                 {"serverBootId", bootId},
                 {"messageId", QUuid::createUuid().toString(QUuid::WithoutBraces)},
                 {"connectionId", QUuid::createUuid().toString(QUuid::WithoutBraces)},
@@ -1455,7 +1455,7 @@ void UploadRemovalSecurityTest::duplicateUploadClickIsIgnoredBeforeExplicitCance
     const QString remoteSessionId =
         QStringLiteral("11111111-2222-4333-8444-555566667788");
     peer->sendTextMessage(QString::fromUtf8(v6Document(QJsonObject{
-        {"type", "remote_session_opened"}, {"protocolVersion", 10},
+        {"type", "remote_session_opened"}, {"protocolVersion", 11},
         {"serverBootId", bootId},
         {"messageId", QUuid::createUuid().toString(QUuid::WithoutBraces)},
         {"connectionGeneration", 1},
@@ -1521,7 +1521,7 @@ void UploadRemovalSecurityTest::uploadCompletionWaitsForDurableAck()
         peer = server.nextPendingConnection();
         QVERIFY(peer);
         peer->sendTextMessage(QString::fromUtf8(v6Document(QJsonObject{
-            {"type", "auth_challenge"}, {"protocolVersion", 10},
+            {"type", "auth_challenge"}, {"protocolVersion", 11},
             {"serverBootId", bootId},
             {"messageId", QUuid::createUuid().toString(QUuid::WithoutBraces)},
             {"nonce", nonce}, {"issuedAt", 1},
@@ -1544,7 +1544,7 @@ void UploadRemovalSecurityTest::uploadCompletionWaitsForDurableAck()
                 };
                 peer->sendTextMessage(QString::fromUtf8(
                     v6Document(QJsonObject{
-                        {"type", "welcome"}, {"protocolVersion", 10},
+                        {"type", "welcome"}, {"protocolVersion", 11},
                         {"serverBootId", bootId},
                         {"messageId", QUuid::createUuid().toString(QUuid::WithoutBraces)},
                         {"connectionId", QUuid::createUuid().toString(QUuid::WithoutBraces)},
@@ -1561,7 +1561,7 @@ void UploadRemovalSecurityTest::uploadCompletionWaitsForDurableAck()
             } else if (type == QLatin1String("heartbeat")) {
                 peer->sendTextMessage(QString::fromUtf8(
                     v6Document(QJsonObject{
-                        {"type", "heartbeat_ack"}, {"protocolVersion", 10},
+                        {"type", "heartbeat_ack"}, {"protocolVersion", 11},
                         {"serverBootId", bootId},
                         {"messageId", QUuid::createUuid().toString(QUuid::WithoutBraces)},
                         {"connectionGeneration", 1},
@@ -1593,7 +1593,7 @@ void UploadRemovalSecurityTest::uploadCompletionWaitsForDurableAck()
     const QString remoteSessionId =
         QStringLiteral("19191919-2222-4333-8444-555566667788");
     auto sendServerMessage = [&](QJsonObject message) {
-        message.insert("protocolVersion", 10);
+        message.insert("protocolVersion", 11);
         message.insert("serverBootId", bootId);
         message.insert("messageId",
                        QUuid::createUuid().toString(QUuid::WithoutBraces));
@@ -1657,6 +1657,11 @@ void UploadRemovalSecurityTest::uploadCompletionWaitsForDurableAck()
             return message.value("type").toString() == QLatin1String("upload_chunk");
         }), 1000);
 
+    QCOMPARE(uploads.sourceUploadStatus(targetEndpointId, fileId).state,
+             UploadManager::SourceUploadStatus::Uploading);
+    QVERIFY(uploads.sourceUploadStatus(targetEndpointId, fileId).progress < 100);
+    QCOMPARE(uploads.sourceUploadStatus(QStringLiteral("other-endpoint"), fileId).state,
+             UploadManager::SourceUploadStatus::NotUploaded);
     // The send queue is complete, but no target durability ACK exists yet.
     QTest::qWait(100);
     QVERIFY(std::none_of(
@@ -1685,6 +1690,9 @@ void UploadRemovalSecurityTest::uploadCompletionWaitsForDurableAck()
     QTRY_COMPARE_WITH_TIMEOUT(uploadFinished.count(), 1, 1000);
     QVERIFY(uploads.hasActiveUpload());
     QVERIFY(files.isFileUploadedToClient(fileId, targetEndpointId));
+    QCOMPARE(uploads.sourceUploadStatus(targetEndpointId, fileId).state,
+             UploadManager::SourceUploadStatus::Uploaded);
+    QCOMPARE(uploads.sourceUploadStatus(targetEndpointId, fileId).progress, 100);
 
     // The explicit Unload action must use the manager's authoritative v4
     // inventory even if the UI-side set is empty, then remain pending until
@@ -1696,6 +1704,8 @@ void UploadRemovalSecurityTest::uploadCompletionWaitsForDurableAck()
             return message.value("type").toString() == QLatin1String("upload_remove");
         }), 1000);
     QVERIFY(uploads.isRemoving());
+    QCOMPARE(uploads.sourceUploadStatus(targetEndpointId, fileId).state,
+             UploadManager::SourceUploadStatus::Uploaded); // Removal awaits its own ACK.
     const auto removalIt = std::find_if(
         clientMessages.crbegin(), clientMessages.crend(), [](const QJsonObject& message) {
             return message.value("type").toString() == QLatin1String("upload_remove");
@@ -1721,6 +1731,8 @@ void UploadRemovalSecurityTest::uploadCompletionWaitsForDurableAck()
     QVERIFY(!uploads.isRemoving());
     QVERIFY(!uploads.hasActiveUpload());
     QVERIFY(!files.isFileUploadedToClient(fileId, targetEndpointId));
+    QCOMPARE(uploads.sourceUploadStatus(targetEndpointId, fileId).state,
+             UploadManager::SourceUploadStatus::NotUploaded);
     socket.disconnect();
 }
 
@@ -1737,7 +1749,7 @@ void UploadRemovalSecurityTest::protocolRunsTwoOutgoingSessionsConcurrently() {
         peer = server.nextPendingConnection();
         QVERIFY(peer);
         peer->sendTextMessage(QString::fromUtf8(v6Document(QJsonObject{
-            {"type", "auth_challenge"}, {"protocolVersion", 10},
+            {"type", "auth_challenge"}, {"protocolVersion", 11},
             {"serverBootId", bootId},
             {"messageId", QUuid::createUuid().toString(QUuid::WithoutBraces)},
             {"nonce", nonce}, {"issuedAt", 1},
@@ -1758,7 +1770,7 @@ void UploadRemovalSecurityTest::protocolRunsTwoOutgoingSessionsConcurrently() {
                     {"removalAckTimeoutMs", 30000},
                 };
                 peer->sendTextMessage(QString::fromUtf8(v6Document(QJsonObject{
-                    {"type", "welcome"}, {"protocolVersion", 10},
+                    {"type", "welcome"}, {"protocolVersion", 11},
                     {"serverBootId", bootId},
                     {"messageId", QUuid::createUuid().toString(QUuid::WithoutBraces)},
                     {"connectionId", QUuid::createUuid().toString(QUuid::WithoutBraces)},
@@ -1774,7 +1786,7 @@ void UploadRemovalSecurityTest::protocolRunsTwoOutgoingSessionsConcurrently() {
                 }).toJson(QJsonDocument::Compact)));
             } else if (type == QLatin1String("heartbeat")) {
                 peer->sendTextMessage(QString::fromUtf8(v6Document(QJsonObject{
-                    {"type", "heartbeat_ack"}, {"protocolVersion", 10},
+                    {"type", "heartbeat_ack"}, {"protocolVersion", 11},
                     {"serverBootId", bootId},
                     {"messageId", QUuid::createUuid().toString(QUuid::WithoutBraces)},
                     {"connectionGeneration", 1},
@@ -1804,7 +1816,7 @@ void UploadRemovalSecurityTest::protocolRunsTwoOutgoingSessionsConcurrently() {
     const QString sessionB = QStringLiteral("bbbbbbbb-2222-4333-8444-555566667788");
     auto openSession = [&](const QString& sessionId, const QString& targetId) {
         peer->sendTextMessage(QString::fromUtf8(v6Document(QJsonObject{
-            {"type", "remote_session_opened"}, {"protocolVersion", 10},
+            {"type", "remote_session_opened"}, {"protocolVersion", 11},
             {"serverBootId", bootId},
             {"messageId", QUuid::createUuid().toString(QUuid::WithoutBraces)},
             {"connectionGeneration", 1},
@@ -1862,14 +1874,14 @@ void UploadRemovalSecurityTest::protocolRunsTwoOutgoingSessionsConcurrently() {
     for (const QJsonObject& start : std::as_const(uploadStarts)) {
         QVERIFY(!start.contains("targetClientId"));
         QVERIFY(!start.contains("canvasSessionId"));
-        QCOMPARE(start.value("protocolVersion").toInt(), 10);
+        QCOMPARE(start.value("protocolVersion").toInt(), 11);
         QCOMPARE(start.value("generation").toInt(), 1);
     }
 
     // Closing A is session-scoped. It must not route through the transport-loss
     // path, which would suspend the independent upload to B indefinitely.
     peer->sendTextMessage(QString::fromUtf8(v6Document(QJsonObject{
-        {"type", "remote_session_terminating"}, {"protocolVersion", 10},
+        {"type", "remote_session_terminating"}, {"protocolVersion", 11},
         {"serverBootId", bootId},
         {"messageId", QUuid::createUuid().toString(QUuid::WithoutBraces)},
         {"connectionGeneration", 1},
@@ -1902,7 +1914,7 @@ void UploadRemovalSecurityTest::protocolTargetedRemovalIsExactAndIdempotent() {
         peer = server.nextPendingConnection();
         QVERIFY(peer);
         peer->sendTextMessage(QString::fromUtf8(v6Document(QJsonObject{
-            {"type", "auth_challenge"}, {"protocolVersion", 10},
+            {"type", "auth_challenge"}, {"protocolVersion", 11},
             {"serverBootId", bootId},
             {"messageId", QUuid::createUuid().toString(QUuid::WithoutBraces)},
             {"nonce", nonce}, {"issuedAt", 1},
@@ -1924,7 +1936,7 @@ void UploadRemovalSecurityTest::protocolTargetedRemovalIsExactAndIdempotent() {
                     {"removalAckTimeoutMs", 30000},
                 };
                 peer->sendTextMessage(QString::fromUtf8(v6Document(QJsonObject{
-                    {"type", "welcome"}, {"protocolVersion", 10},
+                    {"type", "welcome"}, {"protocolVersion", 11},
                     {"serverBootId", bootId},
                     {"messageId", QUuid::createUuid().toString(QUuid::WithoutBraces)},
                     {"connectionId", QUuid::createUuid().toString(QUuid::WithoutBraces)},
@@ -1940,7 +1952,7 @@ void UploadRemovalSecurityTest::protocolTargetedRemovalIsExactAndIdempotent() {
                 }).toJson(QJsonDocument::Compact)));
             } else if (type == QLatin1String("heartbeat")) {
                 peer->sendTextMessage(QString::fromUtf8(v6Document(QJsonObject{
-                    {"type", "heartbeat_ack"}, {"protocolVersion", 10},
+                    {"type", "heartbeat_ack"}, {"protocolVersion", 11},
                     {"serverBootId", bootId},
                     {"messageId", QUuid::createUuid().toString(QUuid::WithoutBraces)},
                     {"connectionGeneration", 1},
@@ -1972,7 +1984,7 @@ void UploadRemovalSecurityTest::protocolTargetedRemovalIsExactAndIdempotent() {
     const QString remoteSessionId =
         QStringLiteral("dddddddd-2222-4333-8444-555566667788");
     peer->sendTextMessage(QString::fromUtf8(v6Document(QJsonObject{
-        {"type", "remote_session_opened"}, {"protocolVersion", 10},
+        {"type", "remote_session_opened"}, {"protocolVersion", 11},
         {"serverBootId", bootId},
         {"messageId", QUuid::createUuid().toString(QUuid::WithoutBraces)},
         {"connectionGeneration", 1},
@@ -2010,7 +2022,7 @@ void UploadRemovalSecurityTest::protocolTargetedRemovalIsExactAndIdempotent() {
 
     auto command = [&](const QString& removalId) {
         return QJsonObject{
-            {"type", "upload_remove"}, {"protocolVersion", 10},
+            {"type", "upload_remove"}, {"protocolVersion", 11},
             {"serverBootId", bootId},
             {"messageId", QUuid::createUuid().toString(QUuid::WithoutBraces)},
             {"connectionGeneration", 1},
@@ -2095,7 +2107,7 @@ void UploadRemovalSecurityTest::queuedWriterCancellationNeverAcknowledgesStaleBy
     const QString digest = QString::fromLatin1(
         QCryptographicHash::hash(bytes, QCryptographicHash::Sha256).toHex());
     QSignalSpy replies(&uploads, &UploadManager::uploadProtocolResponseReady);
-    QJsonObject message{{"type", "upload_start"}, {"protocolVersion", 10},
+    QJsonObject message{{"type", "upload_start"}, {"protocolVersion", 11},
         {"connectionGeneration", 1}, {"generation", 1}, {"ownerEndpointId", sender},
         {"remoteSessionId", session}, {"uploadId", "queued-writer"},
         {"files", QJsonArray{QJsonObject{{"assetId", "queued-asset"}, {"fileId", digest},

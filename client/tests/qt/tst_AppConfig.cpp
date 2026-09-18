@@ -70,7 +70,7 @@ void AppConfigTest::configuresTimeline() {
     QCOMPARE(config.timelineSnapDistancePx(), 0);
     QCOMPARE(config.timelineHeightPx(), 240);
     QCOMPARE(config.timelineRulerHeightPx(), 28);
-    QCOMPARE(config.timelineClipTrackHeightPx(), 64);
+    QCOMPARE(config.timelineClipTrackHeightPx(), 48);
     QCOMPARE(config.timelineKeyframeSizePx(), 10);
     QCOMPARE(config.timelineInitialViewDurationMs(), 15000);
     options.processEnvironment.insert(QStringLiteral("MOUFFETTE_TIMELINE_OTHER_KEYFRAME_OPACITY_PERCENT"), QStringLiteral("101"));
@@ -127,7 +127,8 @@ void AppConfigTest::loadsEmbeddedDefaults() {
     QVERIFY(config.provenance(AppConfig::Key::MediaRamReserveMinMiB)
                 .startsWith(QStringLiteral("embedded-env:")));
     QCOMPARE(config.remoteSessionHiddenTimeoutMs(), qint64(120000));
-    QCOMPARE(config.projectMediaHiddenTimeoutMs(), qint64(60000));
+    // The embedded .env also overrides the compiled hidden-media timeout.
+    QCOMPARE(config.projectMediaHiddenTimeoutMs(), qint64(180000));
     QCOMPARE(config.projectHiddenRetentionMs(), qint64(240000));
     QCOMPARE(config.incomingSessionOrphanTimeoutMs(), qint64(3000));
     QCOMPARE(config.connectionAttemptTimeoutMs(), 10000);

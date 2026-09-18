@@ -5,6 +5,7 @@
 #include <QFile>
 #include <QDebug>
 #include <QDir>
+#include <utility>
 
 QString FileManager::receivedScopeKey(const RemoteCacheStore::Scope& scope)
 {
@@ -57,6 +58,19 @@ void FileManager::associateMediaWithFile(const QString& mediaId, const QString& 
     
 }
 
+void FileManager::beginMediaAssociationTransaction()
+{
+    ++m_mediaAssociationTransactionDepth;
+}
+
+void FileManager::endMediaAssociationTransaction()
+{
+    Q_ASSERT(m_mediaAssociationTransactionDepth > 0);
+    if (m_mediaAssociationTransactionDepth <= 0 || --m_mediaAssociationTransactionDepth) return;
+    const QSet<QString> deferred = std::exchange(m_deferredUnusedFiles, {});
+    for (const QString& fileId : deferred) removeFileIfUnused(fileId);
+}
+
 void FileManager::removeMediaAssociation(const QString& mediaId)
 {
     if (!m_mediaIdToFileId.contains(mediaId)) {
@@ -103,6 +117,10 @@ bool FileManager::hasFileId(const QString& fileId) const
 
 void FileManager::removeFileIfUnused(const QString& fileId)
 {
+    if (m_mediaAssociationTransactionDepth > 0) {
+        m_deferredUnusedFiles.insert(fileId);
+        return;
+    }
     if (!m_fileIdToMediaIds.contains(fileId)) {
         return;
     }

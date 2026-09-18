@@ -857,6 +857,42 @@ bool UploadManager::remoteMediaReady(const QString& target, const QString& sha25
     return false;
 }
 
+UploadManager::SourceUploadStatus UploadManager::sourceUploadStatus(
+    const QString& targetEndpointId, const QString& fileId) const
+{
+    SourceUploadStatus result;
+    if (targetEndpointId.isEmpty() || fileId.isEmpty()) return result;
+    if (m_fileManager && m_fileManager->isFileUploadedToClient(fileId, targetEndpointId)) {
+        result.state = SourceUploadStatus::Uploaded;
+        result.progress = 100;
+        return result;
+    }
+    if (m_verifyingFileIdsByTarget.value(targetEndpointId).contains(fileId)) {
+        result.state = SourceUploadStatus::Uploading;
+        return result;
+    }
+    if (const auto* transfer = parallelForTarget(targetEndpointId)) {
+        for (const auto& asset : transfer->assets) {
+            if (!asset.localFileIds.contains(fileId)) continue;
+            const int remote = transfer->remoteFilePercents.value(fileId);
+            result.state = remote >= 100 ? SourceUploadStatus::Uploaded : SourceUploadStatus::Uploading;
+            result.progress = std::clamp(std::max(transfer->localFilePercents.value(fileId), remote),
+                                         0, remote >= 100 ? 100 : 99);
+            return result;
+        }
+    }
+    if (m_uploadTargetClientId == targetEndpointId && m_outgoingState != OutgoingState::Idle) {
+        for (const auto& asset : m_outgoingAssets) {
+            if (!asset.localFileIds.contains(fileId)) continue;
+            const int remote = m_remoteFilePercents.value(fileId);
+            result.state = remote >= 100 ? SourceUploadStatus::Uploaded : SourceUploadStatus::Uploading;
+            result.progress = std::clamp(m_effectiveFilePercents.value(fileId), 0, remote >= 100 ? 100 : 99);
+            return result;
+        }
+    }
+    return result;
+}
+
 void UploadManager::publishResidency(const QString& sessionId)
 {
     if (!m_ws || !m_ws->isConnected()) return;
@@ -986,6 +1022,7 @@ void UploadManager::forceResetForClient(const QString& clientId) {
     for (const QString& target : m_pendingUploadVerification.keys()) {
         if (!clientId.isEmpty() && clientId != target) continue;
         m_pendingUploadVerification.remove(target);
+        m_verifyingFileIdsByTarget.remove(target);
         if (const auto cancelled = m_uploadVerificationCancellation.take(target)) cancelled->store(true);
         emit uploadCancelled(m_verifyingUploadIds.take(target));
     }
@@ -1107,6 +1144,18 @@ bool UploadManager::requestAssetRemoval(const QString& targetEndpointId,
                                 {localFileId},
                                 QStringLiteral("The remote session is not active"));
         return false;
+    }
+
+    // Verification is part of the transfer lifecycle, even though no remote
+    // staging asset exists yet. Cancel only this endpoint's matching batch.
+    if (m_verifyingFileIdsByTarget.value(targetEndpointId).contains(localFileId)) {
+        m_pendingUploadVerification.remove(targetEndpointId);
+        m_verifyingFileIdsByTarget.remove(targetEndpointId);
+        if (const auto cancelled = m_uploadVerificationCancellation.take(targetEndpointId))
+            cancelled->store(true);
+        emit uploadCancelled(m_verifyingUploadIds.take(targetEndpointId));
+        emit uiStateChanged();
+        return true;
     }
 
     // An external source deletion wins over an in-flight transfer. Abort it
@@ -1490,6 +1539,7 @@ void UploadManager::failAssetRemoval(const QString& removalId,
 
 void UploadManager::requestCancel() {
     if (m_pendingUploadVerification.remove(m_targetClientId)) {
+        m_verifyingFileIdsByTarget.remove(m_targetClientId);
         if (const auto cancelled = m_uploadVerificationCancellation.take(m_targetClientId)) cancelled->store(true);
         emit uploadCancelled(m_verifyingUploadIds.take(m_targetClientId));
         emit uiStateChanged();
@@ -1545,6 +1595,9 @@ void UploadManager::startUpload(const QVector<UploadFileInfo>& files) {
     const QString target = m_targetClientId;
     const quint64 token = ++m_uploadVerificationGeneration;
     m_pendingUploadVerification.insert(target, token);
+    QSet<QString> sourceIds;
+    for (const auto& file : files) sourceIds.insert(file.fileId);
+    m_verifyingFileIdsByTarget.insert(target, sourceIds);
     const auto cancelled = std::make_shared<std::atomic_bool>(false);
     m_uploadVerificationCancellation.insert(target, cancelled);
     const QString verifiedUploadId = QUuid::createUuid().toString(QUuid::WithoutBraces);
@@ -1558,6 +1611,7 @@ void UploadManager::startUpload(const QVector<UploadFileInfo>& files) {
         m_pendingUploadVerification.remove(target);
         m_uploadVerificationCancellation.remove(target);
         m_verifyingUploadIds.remove(target);
+        m_verifyingFileIdsByTarget.remove(target);
         if (!error.isEmpty()) {
             emit uploadRejected(verifiedUploadId, error);
             emit uiStateChanged();
@@ -4210,6 +4264,7 @@ void UploadManager::onConnectionLost() {
     m_uploadVerificationCancellation.clear();
     m_pendingUploadVerification.clear();
     m_verifyingUploadIds.clear();
+    m_verifyingFileIdsByTarget.clear();
     for (const auto& uploadId : cancelledVerifications) emit uploadCancelled(uploadId);
     if (!cancelledVerifications.isEmpty()) emit uiStateChanged();
     // Transport loss is non-terminal until the strict RemoteSession lease

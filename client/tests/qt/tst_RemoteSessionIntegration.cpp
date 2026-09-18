@@ -65,7 +65,9 @@ QJsonObject liveTextScene()
     media[QStringLiteral("fileId")] = QString();
     media[QStringLiteral("fileName")] = QString();
     media[QStringLiteral("spans")] = QJsonArray{span};
-    media[QStringLiteral("timeline")] = SceneTimeline::MediaTrack{}.toJson();
+    SceneTimeline::MediaTrack track;
+    track.clip = {QStringLiteral("text-1-clip"), 0, std::nullopt, SceneTimeline::SceneSettings{}.maxSlot()};
+    media[QStringLiteral("timeline")] = track.toJson();
 
     QJsonObject scene;
     scene[QStringLiteral("renderSchemaVersion")] = SceneTimeline::RenderSchemaVersion;

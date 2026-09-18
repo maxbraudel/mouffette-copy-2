@@ -86,7 +86,7 @@ constexpr std::array<SettingSpec, 83> kSpecs{{
     {Key::TimelineSlotsPerSecond, "MOUFFETTE_TIMELINE_SLOTS_PER_SECOND", "timeline-slots-per-second", nullptr, "30", false},
     {Key::TimelineHeightPx, "MOUFFETTE_TIMELINE_HEIGHT_PX", "timeline-height-px", nullptr, "240", false},
     {Key::TimelineRulerHeightPx, "MOUFFETTE_TIMELINE_RULER_HEIGHT_PX", "timeline-ruler-height-px", nullptr, "28", false},
-    {Key::TimelineClipTrackHeightPx, "MOUFFETTE_TIMELINE_CLIP_TRACK_HEIGHT_PX", "timeline-clip-track-height-px", nullptr, "64", false},
+    {Key::TimelineClipTrackHeightPx, "MOUFFETTE_TIMELINE_CLIP_TRACK_HEIGHT_PX", "timeline-clip-track-height-px", nullptr, "48", false},
     {Key::TimelineKeyframeSizePx, "MOUFFETTE_TIMELINE_KEYFRAME_SIZE_PX", "timeline-keyframe-size-px", nullptr, "10", false},
     {Key::TimelineOtherKeyframeOpacityPercent, "MOUFFETTE_TIMELINE_OTHER_KEYFRAME_OPACITY_PERCENT", "timeline-other-keyframe-opacity-percent", nullptr, "30", false},
     {Key::TimelineSnapDistancePx, "MOUFFETTE_TIMELINE_SNAP_DISTANCE_PX", "timeline-snap-distance-px", nullptr, "10", false},
@@ -456,7 +456,7 @@ void AppConfig::resetToCompiledDefaults() {
     m_timelineSlotsPerSecond = 30;
     m_timelineHeightPx = 240;
     m_timelineRulerHeightPx = 28;
-    m_timelineClipTrackHeightPx = 64;
+    m_timelineClipTrackHeightPx = 48;
     m_timelineKeyframeSizePx = 10;
     m_timelineOtherKeyframeOpacityPercent = 30;
     m_timelineSnapDistancePx = 10;

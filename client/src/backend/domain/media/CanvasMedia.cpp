@@ -32,6 +32,7 @@ CanvasMedia::CanvasMedia(Type type, const QSize& baseSize, QObject* parent)
     : QObject(parent)
     , m_type(type)
     , m_mediaId(QUuid::createUuid().toString(QUuid::WithoutBraces))
+    , m_nativeSourceSize(baseSize.expandedTo(QSize(1, 1)))
     , m_baseSize(baseSize.expandedTo(QSize(1, 1)))
 {
     m_residencyOwnerId = QStringLiteral("canvas:") + QUuid::createUuid().toString(QUuid::WithoutBraces);
@@ -195,6 +196,7 @@ void CanvasMedia::refreshResidency()
     }
     const auto asset = manager.asset(m_residencyOwnerId);
     if (manager.ready(m_residencyOwnerId) && asset) {
+        m_nativeSourceSize = asset->displaySize;
         if (isVideo()) {
             // setAsset() can emit runtime signals before durationChanged().
             // Those signals publish the default clip, so its source bounds
@@ -257,13 +259,6 @@ void CanvasMedia::setPositionAndScale(const QPointF& position, qreal scale)
     // complete geometry, never an intermediate resize around the old origin.
     m_position = position;
     m_scale = scale;
-    notifyChanged();
-}
-
-void CanvasMedia::setZ(qreal z)
-{
-    if (!std::isfinite(z) || qFuzzyCompare(m_z, z)) return;
-    m_z = z;
     notifyChanged();
 }
 
@@ -695,7 +690,7 @@ QVariantMap CanvasMedia::toModelMap(qreal unit) const
         {QStringLiteral("width"), m_baseSize.width() * safeUnit},
         {QStringLiteral("height"), m_baseSize.height() * safeUnit},
         {QStringLiteral("scale"), m_scale},
-        {QStringLiteral("z"), m_z},
+        {QStringLiteral("z"), z()},
         {QStringLiteral("selected"), m_selected},
         {QStringLiteral("residencyReady"), residencyReady()},
         {QStringLiteral("residencyState"), residencyState()},
@@ -703,6 +698,9 @@ QVariantMap CanvasMedia::toModelMap(qreal unit) const
         {QStringLiteral("residencyError"), residencyError()},
         {QStringLiteral("residentFrameSource"), QVariant::fromValue<QObject*>(m_residentFrameSource)},
         {QStringLiteral("sourceSizeBytes"), m_sourceSizeBytes},
+        {QStringLiteral("fileId"), m_fileId},
+        {QStringLiteral("sourceWidth"), m_nativeSourceSize.width()},
+        {QStringLiteral("sourceHeight"), m_nativeSourceSize.height()},
         {QStringLiteral("sourcePath"), m_sourcePath},
         {QStringLiteral("sourceUrl"), m_sourcePath.isEmpty()
              ? QString() : QUrl::fromLocalFile(m_sourcePath).toString()},
@@ -762,7 +760,7 @@ SceneTimeline::ElementState CanvasMedia::captureElementFields() const
 {
     SceneTimeline::ElementState s;
     s.type = typeName(); s.position = m_position; s.baseSize = m_baseSize;
-    s.scale = m_scale; s.size = m_baseSize * m_scale; s.z = m_z;
+    s.scale = m_scale; s.size = m_baseSize * m_scale;
     s.visible = m_contentVisible; s.opacity = m_contentOpacity;
     s.opacityOverrideEnabled = m_settings.opacityOverrideEnabled;
     bool ok = false; s.rawOpacity = m_settings.opacityText.toDouble(&ok) / 100.0;
@@ -791,7 +789,7 @@ SceneTimeline::ElementState CanvasMedia::displayedElementState() const
 }
 void CanvasMedia::applyElementFields(const SceneTimeline::ElementState& s)
 {
-    m_position=s.position; m_scale=s.scale; m_baseSize=s.size/s.scale; m_z=s.z;
+    m_position=s.position; m_scale=s.scale; m_baseSize=s.size/s.scale;
     m_contentVisible=s.visible; m_contentOpacity=s.opacity;
     m_settings.opacityOverrideEnabled=s.opacityOverrideEnabled;
     m_settings.opacityText=QString::number(s.rawOpacity*100.0,'g',15);
@@ -851,14 +849,13 @@ void CanvasMedia::setClipActive(bool active)
 }
 void CanvasMedia::ensureDefaultClip(const SceneTimeline::SceneSettings& settings)
 {
-    if (m_timelineTrack.clipsInitialized) return;
+    if (!m_timelineTrack.clip.id.isEmpty()) return;
     const qint64 duration = isVideo() ? sourceDurationMs() : 0;
     if (isVideo() && duration <= 0) return;
     auto track=m_timelineTrack;
-    track.clipsInitialized=true;
-    track.clips.append({SceneTimeline::newId(),0,
+    track.clip = {SceneTimeline::newId(),0,
         isVideo() ? std::optional<qint64>(0) : std::nullopt,
-        isVideo() ? qMin(settings.maxSlot(),settings.sourceSlots(duration)) : settings.maxSlot()});
+        isVideo() ? qMin(settings.maxSlot(),settings.sourceSlots(duration)) : settings.maxSlot()};
     setTimelineTrack(track);
 }
 

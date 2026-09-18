@@ -41,6 +41,8 @@ public:
     QString mediaId() const { return m_mediaId; }
     QString residencyOwnerId() const { return m_residencyOwnerId; }
     void restoreMediaId(const QString& id);
+    qint64 sourceSizeBytes() const { return m_sourceSizeBytes; }
+    QSize nativeSourceSize() const { return m_nativeSourceSize; }
     QString fileId() const { return m_fileId; }
     void setFileId(const QString& id);
     QString sourcePath() const { return m_sourcePath; }
@@ -63,8 +65,7 @@ public:
     qreal scale() const { return m_scale; }
     void setScale(qreal scale);
     void setPositionAndScale(const QPointF& position, qreal scale);
-    qreal z() const { return m_z; }
-    void setZ(qreal z);
+    qreal z() const { return SceneTimeline::trackZ(m_timelineTrack.trackIndex); }
     QRectF sceneRect() const;
 
     bool selected() const { return m_selected; }
@@ -195,10 +196,10 @@ private:
     quint64 m_residencyGeneration = 0;
     QString m_residencyOwnerId;
     qint64 m_sourceSizeBytes = -1;
+    QSize m_nativeSourceSize;
     QSizeF m_baseSize;
     QPointF m_position;
     qreal m_scale = 1.0;
-    qreal m_z = 1.0;
     bool m_selected = false;
     bool m_clipActive = false;
     bool m_contentVisible = true;

@@ -7,38 +7,14 @@
 #include "frontend/qml/TimelineController.h"
 #include "frontend/ui/notifications/ToastNotificationSystem.h"
 #include "backend/network/UploadManager.h"
+#include "backend/domain/media/CanvasMedia.h"
+#include "backend/media/MediaResidencyManager.h"
 #include "shared/rendering/ICanvasHost.h"
 
 #include <QAbstractItemModel>
-#include <QSortFilterProxyModel>
+#include <QFileInfo>
+#include <algorithm>
 #include <QTimer>
-
-// Cache readiness belongs to this workspace's current remote endpoint. Keep it
-// out of the persisted document and update existing delegates when it changes.
-class WorkspaceMediaListModel final : public QSortFilterProxyModel
-{
-public:
-    WorkspaceMediaListModel(std::function<bool(const QString&)> cached, QObject* parent)
-        : QSortFilterProxyModel(parent), m_cached(std::move(cached)) {}
-
-    QVariant data(const QModelIndex& index, int role) const override
-    {
-        const QVariant value = QSortFilterProxyModel::data(index, role);
-        if (role != MediaListModel::ModelDataRole || !value.isValid()) return value;
-        auto row = value.toMap();
-        row.insert(QStringLiteral("remoteCached"), m_cached(row.value(QStringLiteral("mediaId")).toString()));
-        return row;
-    }
-
-    void refreshRemoteCache()
-    {
-        if (rowCount() > 0)
-            emit dataChanged(index(0, 0), index(rowCount() - 1, 0), {MediaListModel::ModelDataRole});
-    }
-
-private:
-    std::function<bool(const QString&)> m_cached;
-};
 
 ClientWorkspaceViewModel::ClientWorkspaceViewModel(QString workspaceEndpointId,
                                                ICanvasHost* canvas,
@@ -57,16 +33,13 @@ ClientWorkspaceViewModel::ClientWorkspaceViewModel(QString workspaceEndpointId,
     , m_hasProject(std::move(hasProject))
     , m_mediaSettings(new MediaSettingsViewModel(this))
     , m_timeline(new TimelineController(this))
-    , m_overlayMediaModel(new WorkspaceMediaListModel([this](const QString& mediaId) {
-        const auto* host = qobject_cast<QuickCanvasHost*>(m_canvas.data());
-        return host && host->remoteMediaCached(mediaId);
-    }, this))
+    , m_overlayMediaModel(new MediaListModel(this))
 {
-    m_overlayMediaModel->setSortRole(MediaListModel::ZRole);
-    m_overlayMediaModel->sort(0, Qt::DescendingOrder);
     connect(this, &ClientWorkspaceViewModel::actionStateChanged,
-            m_overlayMediaModel, &WorkspaceMediaListModel::refreshRemoteCache);
+            this, &ClientWorkspaceViewModel::refreshSources);
     if (m_uploadManager) {
+        connect(m_uploadManager, &UploadManager::fileUploadProgress, this,
+                [this](const QString&, int) { refreshSources(); });
         connect(m_uploadManager, &UploadManager::uiStateChanged, this, [this] {
             if (!uploadBelongsToSession() || !m_uploadManager->isBusy()
                 || uploadState() == UploadState::Preparing) {
@@ -93,7 +66,94 @@ QObject* ClientWorkspaceViewModel::mediaModel() const
 
 int ClientWorkspaceViewModel::mediaCount() const
 {
-    return typedMediaModel() ? typedMediaModel()->rowCount() : 0;
+    return m_overlayMediaModel->rowCount();
+}
+
+void ClientWorkspaceViewModel::scheduleSourceRefresh()
+{
+    if (m_sourceRefreshQueued) return;
+    m_sourceRefreshQueued = true;
+    QTimer::singleShot(0, this, [this] {
+        m_sourceRefreshQueued = false;
+        refreshSources();
+    });
+}
+
+void ClientWorkspaceViewModel::refreshSources()
+{
+    QHash<QString, QVariantMap> sources;
+    QHash<QString, QString> knownPathIds;
+    const auto media = m_canvas ? m_canvas->enumerateMediaItems() : QList<CanvasMedia*>();
+    const auto canonicalPath = [](const CanvasMedia* item) {
+        const QFileInfo info(item->sourcePath());
+        const QString canonical = info.canonicalFilePath();
+        return canonical.isEmpty() ? info.absoluteFilePath() : canonical;
+    };
+    for (const auto* item : media) {
+        if (item && !item->isText() && !item->fileId().isEmpty())
+            knownPathIds.insert(canonicalPath(item), item->fileId());
+    }
+    for (const auto* item : media) {
+        if (!item || item->isText() || item->sourcePath().isEmpty()) continue;
+        const QString path = canonicalPath(item);
+        const QString fileId = item->fileId().isEmpty() ? knownPathIds.value(path) : item->fileId();
+        const QString key = fileId.isEmpty() ? QStringLiteral("path:") + path : QStringLiteral("sha256:") + fileId;
+        QSize dimensions = item->nativeSourceSize();
+        const auto asset = MediaResidencyManager::instance().asset(item->residencyOwnerId());
+        if (asset) dimensions = asset->displaySize;
+        QVariantMap row{{QStringLiteral("rowKey"), key},
+                        {QStringLiteral("sourceId"), fileId},
+                        {QStringLiteral("sourcePath"), path},
+                        {QStringLiteral("displayName"), QFileInfo(path).fileName()},
+                        {QStringLiteral("mediaType"), item->typeName()},
+                        {QStringLiteral("width"), dimensions.width()},
+                        {QStringLiteral("height"), dimensions.height()},
+                        {QStringLiteral("sourceSizeBytes"), item->sourceSizeBytes()},
+                        {QStringLiteral("uploadState"), QStringLiteral("not_uploaded")},
+                        {QStringLiteral("uploadProgress"), 0},
+                        {QStringLiteral("remoteCached"), false}};
+        if (m_uploadManager) {
+            const auto status = m_uploadManager->sourceUploadStatus(m_workspaceEndpointId, fileId);
+            row[QStringLiteral("uploadState")] = status.state == UploadManager::SourceUploadStatus::Uploaded
+                ? QStringLiteral("uploaded") : status.state == UploadManager::SourceUploadStatus::Uploading
+                    ? QStringLiteral("uploading") : QStringLiteral("not_uploaded");
+            row[QStringLiteral("uploadProgress")] = status.progress;
+            row[QStringLiteral("remoteCached")] = m_uploadManager->remoteMediaReady(m_workspaceEndpointId, fileId);
+        } else {
+            // Standalone editor hosts have no transfer service. Preserve their
+            // local presentation state without coupling source identity to an occurrence.
+            row[QStringLiteral("uploadState")] = item->uploadState() == CanvasMedia::UploadState::Uploaded
+                ? QStringLiteral("uploaded") : item->uploadState() == CanvasMedia::UploadState::Uploading
+                    ? QStringLiteral("uploading") : QStringLiteral("not_uploaded");
+            row[QStringLiteral("uploadProgress")] = item->uploadProgress();
+        }
+        auto found = sources.find(key);
+        if (found == sources.end()) sources.insert(key, row);
+        else {
+            const auto oldState = found->value(QStringLiteral("uploadState")).toString();
+            const int progress = std::max(found->value(QStringLiteral("uploadProgress")).toInt(),
+                                          row.value(QStringLiteral("uploadProgress")).toInt());
+            if (path < found->value(QStringLiteral("sourcePath")).toString()) *found = row;
+            if (!m_uploadManager) {
+                if (oldState == QLatin1String("uploaded") || row.value(QStringLiteral("uploadState")).toString() == QLatin1String("uploaded"))
+                    (*found)[QStringLiteral("uploadState")] = QStringLiteral("uploaded");
+                else if (oldState == QLatin1String("uploading") || row.value(QStringLiteral("uploadState")).toString() == QLatin1String("uploading"))
+                    (*found)[QStringLiteral("uploadState")] = QStringLiteral("uploading");
+                (*found)[QStringLiteral("uploadProgress")] = progress;
+            }
+        }
+    }
+    QVariantList rows;
+    for (auto it = sources.cbegin(); it != sources.cend(); ++it) rows.append(it.value());
+    std::sort(rows.begin(), rows.end(), [](const QVariant& a, const QVariant& b) {
+        const auto left = a.toMap(), right = b.toMap();
+        const int names = QString::compare(left.value(QStringLiteral("displayName")).toString(),
+            right.value(QStringLiteral("displayName")).toString(), Qt::CaseInsensitive);
+        return names ? names < 0 : left.value(QStringLiteral("rowKey")).toString() < right.value(QStringLiteral("rowKey")).toString();
+    });
+    const int previousCount = mediaCount();
+    m_overlayMediaModel->updateFromList(rows);
+    if (previousCount != mediaCount()) emit mediaCountChanged();
 }
 
 QObject* ClientWorkspaceViewModel::mediaSettings() const
@@ -386,7 +446,6 @@ void ClientWorkspaceViewModel::setCanvas(ICanvasHost* canvas)
         disconnect(previous, nullptr, this, nullptr);
     }
     m_canvas = canvas;
-    m_overlayMediaModel->setSourceModel(typedMediaModel());
     if (m_canvas) {
         connect(m_canvas, &ICanvasHost::actionStateChanged,
                 this, &ClientWorkspaceViewModel::actionStateChanged,
@@ -402,12 +461,15 @@ void ClientWorkspaceViewModel::setCanvas(ICanvasHost* canvas)
                       this, &ClientWorkspaceViewModel::actionStateChanged, Qt::UniqueConnection);
     if (MediaListModel* model = typedMediaModel()) {
         connect(model, &QAbstractItemModel::rowsInserted,
-                this, &ClientWorkspaceViewModel::mediaCountChanged);
+                this, &ClientWorkspaceViewModel::refreshSources);
         connect(model, &QAbstractItemModel::rowsRemoved,
-                this, &ClientWorkspaceViewModel::mediaCountChanged);
+                this, &ClientWorkspaceViewModel::refreshSources);
         connect(model, &QAbstractItemModel::modelReset,
-                this, &ClientWorkspaceViewModel::mediaCountChanged);
+                this, &ClientWorkspaceViewModel::refreshSources);
+        connect(model, &QAbstractItemModel::dataChanged,
+                this, &ClientWorkspaceViewModel::scheduleSourceRefresh);
     }
+    refreshSources();
     setLoading(!canvas);
     emit mediaModelChanged();
     emit mediaCountChanged();

@@ -138,7 +138,25 @@ void ClientWorkspaceController::configureWorkspace(ClientWorkspace* workspace) {
                 m_runtime->persistProjectCanvas(targetEndpointId);
             }
         });
+        auto* sourceReconcileTimer = new QTimer(workspace->canvas);
+        sourceReconcileTimer->setSingleShot(true);
+        sourceReconcileTimer->setInterval(0);
+        connect(sourceReconcileTimer, &QTimer::timeout, m_runtime,
+                [this, targetEndpointId=workspace->targetEndpointId] {
+            auto* current = findWorkspace(targetEndpointId);
+            if (!current || !current->canvas) return;
+            QSet<QString> sources;
+            for (const auto* media : current->canvas->enumerateMediaItems()) {
+                if (!media || media->isText()) continue;
+                // Keep existing remote sources while an import is acquiring its identity.
+                if (media->fileId().isEmpty()) return;
+                sources.insert(media->fileId());
+            }
+            m_runtime->reconcileRemoteFilesForWorkspace(*current, sources);
+        });
         if (workspace->canvas->document()) {
+            connect(workspace->canvas->document(), &CanvasDocument::documentChanged,
+                    sourceReconcileTimer, qOverload<>(&QTimer::start));
             connect(workspace->canvas->document(), &CanvasDocument::editsLockedChanged,
                     m_runtime, [this, targetEndpointId=workspace->targetEndpointId] {
                 m_runtime->reconcileProjectMediaResidency(targetEndpointId);
@@ -248,7 +266,7 @@ void ClientWorkspaceController::updateUploadButtonForWorkspace(
 void ClientWorkspaceController::clearUploadTracking(ClientWorkspace* workspace) {
     if (!workspace) return;
     
-    workspace->upload.itemsByFileId.clear();
+    workspace->upload.fileIds.clear();
     workspace->upload.currentUploadFileOrder.clear();
     workspace->upload.serverCompletedFileIds.clear();
     workspace->upload.perFileProgress.clear();

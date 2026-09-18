@@ -40,7 +40,8 @@ public:
         QSet<QString> knownRemoteFileIds;
 
         struct UploadTracking {
-            QHash<QString, QList<CanvasMedia*>> itemsByFileId;
+            // Track sources, never occurrence pointers: timeline edits can replace instances mid-transfer.
+            QSet<QString> fileIds;
             QStringList currentUploadFileOrder;
             QSet<QString> serverCompletedFileIds;
             QHash<QString, int> perFileProgress;

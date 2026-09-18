@@ -11,6 +11,8 @@
 #include <QFileInfo>
 #include <QFutureWatcher>
 #include <QJsonArray>
+#include <QJsonDocument>
+#include <QSignalBlocker>
 #include <QPointer>
 #include <QThreadPool>
 #include <QUuid>
@@ -21,6 +23,7 @@
 #include <cmath>
 #include <limits>
 #include <utility>
+#include <vector>
 
 namespace {
 
@@ -87,8 +90,15 @@ CanvasDocument::~CanvasDocument()
 void CanvasDocument::cancelPendingImportTasks()
 {
     ++m_importGeneration;
-    for (const PendingImport& pending : std::as_const(m_pendingImports))
+    for (auto& pending : m_pendingImports) {
         if (pending.cancelled) pending.cancelled->store(true);
+        if (pending.candidate) {
+            auto* candidate = pending.candidate.data();
+            pending.candidate.clear();
+            candidate->retireResidency();
+            candidate->deleteLater();
+        }
+    }
     m_activeImports.clear();
 }
 
@@ -103,7 +113,7 @@ void CanvasDocument::setClientWorkspaceId(const QString& id)
 QString CanvasDocument::queueFileImport(const QString& sourcePath,
                                        const QPointF& center)
 {
-    if (m_editsLocked || !std::isfinite(center.x()) || !std::isfinite(center.y())) return {};
+    if (m_editsLocked || m_media.size() + m_pendingImports.size() >= SceneTimeline::MaximumMediaCount || !std::isfinite(center.x()) || !std::isfinite(center.y())) return {};
     const QFileInfo info(sourcePath);
     const QString signature = sourceSignature(sourcePath);
     if (signature.isEmpty()) return {};
@@ -125,6 +135,7 @@ void CanvasDocument::startPendingImport(const QString& mediaId)
     if (m_editsLocked || m_mediaResidencySuspended || !m_pendingImports.contains(mediaId)
         || m_activeImports.contains(mediaId)) return;
     auto& stored = m_pendingImports[mediaId];
+    if (stored.candidate) { finishPendingImport(mediaId); return; }
     stored.cancelled = std::make_shared<std::atomic_bool>(false);
     const PendingImport pending = stored;
     const quint64 generation = m_importGeneration;
@@ -158,15 +169,12 @@ void CanvasDocument::startPendingImport(const QString& mediaId)
         media->setSourcePath(pending.sourcePath);
         media->setPosition(pending.center - QPointF(probe.displaySize.width() / 2.0,
                                                     probe.displaySize.height() / 2.0));
-        media->setZ(nextZ());
         if (probe.video) media->initializeVideoRuntime();
-        // Keep the pending gate until adoption so no observer can launch an
-        // incomplete scene between removing the intent and creating its node.
-        adoptMedia(media);
-        select(media->mediaId());
-        m_pendingImports.remove(pending.mediaId);
-        emit pendingImportsChanged();
-        emit documentChanged();
+        media->setParent(this);
+        m_pendingImports[pending.mediaId].candidate = media;
+        connect(media, &CanvasMedia::runtimeStateChanged, this, [this, id=pending.mediaId] { finishPendingImport(id); });
+        connect(media, &CanvasMedia::residencyChanged, this, [this, id=pending.mediaId] { finishPendingImport(id); });
+        finishPendingImport(pending.mediaId);
     });
     watcher->setFuture(QtConcurrent::run(importMetadataPool(), [pending] {
         MediaDecoder::Geometry probe;
@@ -178,6 +186,38 @@ void CanvasDocument::startPendingImport(const QString& mediaId)
         return MediaDecoder::inspectGeometry(pending.sourcePath,
             [cancelled = pending.cancelled] { return cancelled->load(); });
     }));
+}
+
+void CanvasDocument::finishPendingImport(const QString& mediaId)
+{
+    auto found = m_pendingImports.find(mediaId);
+    if (found == m_pendingImports.end() || !found->candidate || m_editsLocked || m_mediaResidencySuspended) return;
+    auto* media = found->candidate.data();
+    const bool unknownDuration = media->isVideo() && media->sourceDurationMs() <= 0;
+    const bool sourceChanged = sourceSignature(found->sourcePath) != found->sourceSignature;
+    if (!sourceChanged && unknownDuration && !media->residencyReady() && media->residencyState() != "error") return;
+    if (sourceChanged || unknownDuration || media->sourceDurationMs() > SceneTimeline::MaximumSupportedDurationMs
+        || m_media.size() >= SceneTimeline::MaximumMediaCount) {
+        const QString path = found->sourcePath;
+        m_pendingImports.erase(found);
+        media->retireResidency(); media->deleteLater();
+        emit pendingImportsChanged(); emit documentChanged();
+        emit mediaImportFailed(mediaId, path, sourceChanged
+            ? QStringLiteral("The source file changed or disappeared during import.")
+            : QStringLiteral("The video duration is unavailable or the scene instance limit was reached."));
+        return;
+    }
+    media->ensureDefaultClip(m_timelineSettings);
+    auto track = media->timelineTrack();
+    track.trackIndex = firstFreeTimelineTrack(track.clip);
+    media->setTimelineTrack(track);
+    // Keep the durable gate through adoption; its candidate is cleared first
+    // so synchronous player notifications cannot adopt it a second time.
+    found->candidate.clear();
+    adoptMedia(media);
+    select(mediaId);
+    m_pendingImports.remove(mediaId);
+    emit pendingImportsChanged(); emit documentChanged();
 }
 
 CanvasMedia* CanvasDocument::mediaById(const QString& mediaId) const
@@ -195,21 +235,25 @@ void CanvasDocument::adoptMedia(CanvasMedia* media)
     media->setResidencySuspended(m_mediaResidencySuspended);
     m_media.append(media);
     connect(media, &CanvasMedia::changed, this, [this, media]() {
+        if (!m_media.contains(media)) return;
         media->setClipActive(SceneTimeline::activeClip(media->timelineTrack(), m_timelineSettings.slotAt(m_timelinePositionMs)) != nullptr);
+        if (m_publishingTimelineEdit) return;
         emit mediaChanged(media->mediaId());
         emit documentChanged();
     });
     connect(media, &CanvasMedia::presentationChanged, this, [this, media]() {
-        if (!m_evaluatingTimeline) emit mediaChanged(media->mediaId());
+        if (m_media.contains(media) && !m_evaluatingTimeline && !m_publishingTimelineEdit) emit mediaChanged(media->mediaId());
     });
     connect(media, &CanvasMedia::residencyChanged, this, [this, media]() {
+        if (!m_media.contains(media)) return;
         media->ensureDefaultClip(m_timelineSettings);
-        emit mediaChanged(media->mediaId());
+        if (!m_publishingTimelineEdit) emit mediaChanged(media->mediaId());
     });
     connect(media, &CanvasMedia::runtimeStateChanged, this, [this, media]() {
         media->ensureDefaultClip(m_timelineSettings);
     });
     connect(media, &CanvasMedia::identityReady, this, [this, media](const QString& fileId) {
+        if (!m_media.contains(media)) return;
         if (m_fileManager) {
             m_fileManager->registerVerifiedLocalFile(fileId, media->sourcePath());
             m_fileManager->associateMediaWithFile(media->mediaId(), fileId);
@@ -219,6 +263,7 @@ void CanvasDocument::adoptMedia(CanvasMedia* media)
         emit documentChanged();
     });
     connect(media, &CanvasMedia::sourceInvalidated, this, [this, media](const QString& reason) {
+        if (!m_media.contains(media)) return;
         const QString id = media->mediaId();
         emit mediaSourceInvalidated(id, reason);
         QMetaObject::invokeMethod(this, [this, id] { removeMedia(id); }, Qt::QueuedConnection);
@@ -231,15 +276,17 @@ void CanvasDocument::adoptMedia(CanvasMedia* media)
     }
     media->ensureDefaultClip(m_timelineSettings);
     media->setClipActive(SceneTimeline::activeClip(media->timelineTrack(), m_timelineSettings.slotAt(m_timelinePositionMs)) != nullptr);
-    emit mediaAdded(media);
-    emit documentChanged();
+    if (!m_publishingTimelineEdit) {
+        emit mediaAdded(media);
+        emit documentChanged();
+    }
 }
 
 CanvasMedia* CanvasDocument::addText(const QPointF& position,
                                      const QString& text,
                                      qreal initialSceneHeight)
 {
-    if (m_editsLocked || !std::isfinite(initialSceneHeight)
+    if (m_editsLocked || m_media.size() + m_pendingImports.size() >= SceneTimeline::MaximumMediaCount || !std::isfinite(initialSceneHeight)
         || initialSceneHeight < 0.0) return nullptr;
     auto* media = new CanvasMedia(CanvasMedia::Type::Text, QSize(400, 200));
     media->setText(text.isEmpty() ? QStringLiteral("Text") : text);
@@ -255,7 +302,10 @@ CanvasMedia* CanvasDocument::addText(const QPointF& position,
     }
     media->setPosition(position - QPointF(media->sceneRect().width() * 0.5,
                                           media->sceneRect().height() * 0.5));
-    media->setZ(nextZ());
+    media->ensureDefaultClip(m_timelineSettings);
+    auto track = media->timelineTrack();
+    track.trackIndex = firstFreeTimelineTrack(track.clip);
+    media->setTimelineTrack(track);
     adoptMedia(media);
     select(media->mediaId());
     return media;
@@ -265,7 +315,13 @@ CanvasMedia* CanvasDocument::addPreparedFile(
     const QString& sourcePath, const QSize& nativeSize, bool video,
     const QPointF& position, qint64 sourceDurationMs)
 {
-    if (m_editsLocked || sourcePath.isEmpty()) return nullptr;
+    if (m_editsLocked || m_media.size() + m_pendingImports.size() >= SceneTimeline::MaximumMediaCount || sourcePath.isEmpty()) return nullptr;
+    if (video && sourceDurationMs <= 0) {
+        const auto metadata = MediaDecoder::inspectGeometry(sourcePath);
+        sourceDurationMs = (metadata.durationUs + 999) / 1000;
+        if (!metadata.accepted() || sourceDurationMs <= 0) return nullptr;
+    }
+    if (video && sourceDurationMs > SceneTimeline::MaximumSupportedDurationMs) return nullptr;
     auto* media = new CanvasMedia(video ? CanvasMedia::Type::Video
                                         : CanvasMedia::Type::Image,
                                   nativeSize.expandedTo(QSize(1, 1)));
@@ -273,8 +329,11 @@ CanvasMedia* CanvasDocument::addPreparedFile(
     media->restoreSourceDurationMs(sourceDurationMs);
     media->setSourcePath(sourcePath);
     media->setPosition(position);
-    media->setZ(nextZ());
     if (video) media->initializeVideoRuntime();
+    media->ensureDefaultClip(m_timelineSettings);
+    auto track = media->timelineTrack();
+    track.trackIndex = firstFreeTimelineTrack(track.clip);
+    media->setTimelineTrack(track);
     adoptMedia(media);
     select(media->mediaId());
     return media;
@@ -285,7 +344,9 @@ bool CanvasDocument::removeMedia(const QString& mediaId)
     if (m_editsLocked) return false;
     if (auto found = m_pendingImports.find(mediaId); found != m_pendingImports.end()) {
         if (found->cancelled) found->cancelled->store(true);
+        auto candidate = found->candidate;
         m_pendingImports.erase(found);
+        if (candidate) { candidate->retireResidency(); candidate->deleteLater(); }
         m_activeImports.remove(mediaId);
         emit pendingImportsChanged();
         emit documentChanged();
@@ -339,36 +400,6 @@ void CanvasDocument::clear()
     if (hadPendingImports) emit pendingImportsChanged();
     emit selectionChanged();
     emit documentChanged();
-}
-
-void CanvasDocument::moveForward(const QString& mediaId)
-{
-    if (m_editsLocked) return;
-    CanvasMedia* target = mediaById(mediaId);
-    if (!target) return;
-    qreal nearest = std::numeric_limits<qreal>::max();
-    for (CanvasMedia* item : m_media) {
-        if (item != target && item->z() > target->z()) {
-            nearest = std::min(nearest, item->z());
-        }
-    }
-    target->setZ(nearest == std::numeric_limits<qreal>::max()
-                     ? nextZ() : nearest + 0.5);
-}
-
-void CanvasDocument::moveBackward(const QString& mediaId)
-{
-    if (m_editsLocked) return;
-    CanvasMedia* target = mediaById(mediaId);
-    if (!target) return;
-    qreal nearest = -std::numeric_limits<qreal>::max();
-    for (CanvasMedia* item : m_media) {
-        if (item != target && item->z() < target->z()) {
-            nearest = std::max(nearest, item->z());
-        }
-    }
-    target->setZ(nearest == -std::numeric_limits<qreal>::max()
-                     ? 1.0 : std::max<qreal>(1.0, nearest - 0.5));
 }
 
 QStringList CanvasDocument::selectedMediaIds() const
@@ -431,9 +462,9 @@ bool CanvasDocument::setTimelineSettings(const SceneTimeline::SceneSettings& set
     for (CanvasMedia* item:m_media) {
         const auto& t=item->timelineTrack();
         if (validated.slotsPerSecond != m_timelineSettings.slotsPerSecond
-            && (!t.keyframes.isEmpty() || t.clipsInitialized)) return false;
+            && (!t.keyframes.isEmpty() || !t.clip.id.isEmpty())) return false;
         for(const auto& k:t.keyframes) if(k.slot>validated.maxSlot()) return false;
-        for(const auto& c:t.clips) if(c.endSlot()>validated.maxSlot()) return false;
+        if(t.clip.endSlot()>validated.maxSlot()) return false;
     }
     m_timelineSettings=validated;
     m_timelinePositionMs=qMin(m_timelinePositionMs,validated.timeMs(validated.maxSlot()));
@@ -458,7 +489,7 @@ void CanvasDocument::evaluateTimeline()
         else media->setEvaluatedElementState(SceneTimeline::evaluate(media->authorElementState(),media->timelineTrack(),m_timelineSettings.slotAt(m_timelinePositionMs)));
     }
     m_evaluatingTimeline = false;
-    emit timelineEvaluated();
+    if (!m_publishingTimelineEdit) emit timelineEvaluated();
 }
 
 void CanvasDocument::setScreens(const QList<ScreenInfo>& screens)
@@ -609,7 +640,13 @@ QJsonObject CanvasDocument::serializeSceneState() const
     root.insert(QStringLiteral("screens"), screens);
     QJsonArray serializedMedia;
     QList<CanvasMedia*> ordered=m_media;
-    std::sort(ordered.begin(),ordered.end(),[](CanvasMedia* a,CanvasMedia* b){return a->authorElementState().z<b->authorElementState().z;});
+    std::sort(ordered.begin(),ordered.end(),[](CanvasMedia* a,CanvasMedia* b){
+        if (a->timelineTrack().trackIndex != b->timelineTrack().trackIndex)
+            return a->timelineTrack().trackIndex > b->timelineTrack().trackIndex;
+        if (a->timelineTrack().clip.startSlot != b->timelineTrack().clip.startSlot)
+            return a->timelineTrack().clip.startSlot < b->timelineTrack().clip.startSlot;
+        return a->mediaId() < b->mediaId();
+    });
     for(CanvasMedia* media:ordered) {
         const auto author=media->authorElementState();
         QJsonObject item=author.toJson();
@@ -723,7 +760,8 @@ bool CanvasDocument::restoreProjectState(
         // A synchronous snapshot during adoption can contain both forms of
         // the same import. The concrete media is already authoritative.
         if (mediaById(pending.mediaId) || m_pendingImports.contains(pending.mediaId)) continue;
-        if (pending.mediaId.isEmpty() || !std::isfinite(pending.center.x())
+        if (m_media.size() + m_pendingImports.size() >= SceneTimeline::MaximumMediaCount
+            || pending.mediaId.isEmpty() || !std::isfinite(pending.center.x())
             || !std::isfinite(pending.center.y()) || pending.sourceSignature.isEmpty()
             || !QFileInfo(pending.sourcePath).isAbsolute()
             || sourceSignature(pending.sourcePath) != pending.sourceSignature) {
@@ -746,77 +784,389 @@ QStringList CanvasDocument::pasteMediaState(
     const QJsonObject& state, const QHash<QString, QString>& sourcePaths,
     QStringList* skippedMediaIds)
 {
-    if (m_editsLocked || state.value(QStringLiteral("renderSchemaVersion")).toInt(-1) != SceneTimeline::RenderSchemaVersion)
-        return {};
-    SceneTimeline::SceneSettings sourceSettings;
-    if (!SceneTimeline::SceneSettings::fromJson(state.value(QStringLiteral("timeline")).toObject(), &sourceSettings)
-        || sourceSettings.slotsPerSecond != m_timelineSettings.slotsPerSecond) {
-        if (skippedMediaIds) for (const auto& item : state.value(QStringLiteral("media")).toArray())
-            skippedMediaIds->append(item.toObject().value(QStringLiteral("mediaId")).toString());
-        return {};
+    if (m_editsLocked || state.value("renderSchemaVersion").toInt(-1) != SceneTimeline::RenderSchemaVersion) return {};
+    const auto copiedItems = state.value("media").toArray();
+    const auto reject = [&]() {
+        if (skippedMediaIds) for (const auto& value : copiedItems)
+            skippedMediaIds->append(value.toObject().value("mediaId").toString());
+        return QStringList{};
+    };
+    SceneTimeline::SceneSettings settings;
+    if (copiedItems.isEmpty() || !SceneTimeline::SceneSettings::fromJson(state.value("timeline").toObject(), &settings)
+        || settings.slotsPerSecond != m_timelineSettings.slotsPerSecond) return reject();
+    int firstCopiedTrack = SceneTimeline::MaximumTrackIndex;
+    for (const auto& value : copiedItems) {
+        SceneTimeline::MediaTrack track;
+        if (!SceneTimeline::MediaTrack::fromJson(value.toObject().value("timeline").toObject(), &track, m_timelineSettings.maxSlot())) return reject();
+        firstCopiedTrack = qMin(firstCopiedTrack, track.trackIndex);
     }
-    QHash<QString,QString> insertedIds;
-    const QStringList inserted = insertProjectMedia(state, sourcePaths, skippedMediaIds, true, &insertedIds);
-    if (!inserted.isEmpty()) {
-        clearSelection();
-        for (const QString& id : inserted) select(id, true);
-        const QString copiedPrimary=insertedIds.value(state.value(QStringLiteral("primaryMediaId")).toString());
-        setPrimarySelectedMedia(copiedPrimary.isEmpty()?inserted.first():copiedPrimary);
+    const int offset = timelineTrackCount() - 1 - firstCopiedTrack;
+    QJsonArray items;
+    for (auto* media : m_media) items.append(timelineMediaSnapshot(media->mediaId()));
+    QHash<QString, QString> paths, newIds;
+    QStringList inserted;
+    for (const auto& value : copiedItems) {
+        auto item = value.toObject();
+        const QString oldId = item.value("mediaId").toString();
+        SceneTimeline::MediaTrack track;
+        SceneTimeline::MediaTrack::fromJson(item.value("timeline").toObject(), &track, m_timelineSettings.maxSlot());
+        const QString newId = SceneTimeline::newId();
+        item.insert("mediaId", newId);
+        track.trackIndex += offset;
+        track.clip.id = SceneTimeline::newId();
+        for (auto& key : track.keyframes) key.id = SceneTimeline::newId();
+        item.insert("timeline", track.toJson());
+        items.append(item); inserted.append(newId); newIds.insert(oldId, newId);
+        paths.insert(newId, sourcePaths.value(oldId));
     }
+    const QString primary = newIds.value(state.value("primaryMediaId").toString(), inserted.first());
+    if (!applyMediaPlan(items, paths, primary, true, nullptr, inserted)) return reject();
     return inserted;
 }
 
 QStringList CanvasDocument::insertProjectMedia(
-    const QJsonObject& state, const QHash<QString, QString>& sourcePathByMediaId,
+    const QJsonObject& state, const QHash<QString, QString>& sourcePaths,
     QStringList* skippedMediaIds, bool freshIds, QHash<QString,QString>* insertedIds)
 {
-    QStringList inserted;
-    for(const QJsonValue& value:state.value(QStringLiteral("media")).toArray()) {
-        const auto source=value.toObject();
-        const QString id=source.value(QStringLiteral("mediaId")).toString();
-        const auto skip=[&]{if(skippedMediaIds && !id.isEmpty() && !skippedMediaIds->contains(id)) skippedMediaIds->append(id);};
+    Q_UNUSED(freshIds);
+    QJsonArray items;
+    QStringList accepted;
+    for (const auto& value : state.value("media").toArray()) {
+        const auto item = value.toObject();
+        const QString id = item.value("mediaId").toString();
         SceneTimeline::ElementState element; SceneTimeline::MediaTrack track;
-        if(id.isEmpty() || (!freshIds && mediaById(id))
-            || !SceneTimeline::ElementState::fromMediaJson(source,&element)
-            || !SceneTimeline::MediaTrack::fromJson(source.value(QStringLiteral("timeline")).toObject(),&track,m_timelineSettings.maxSlot())) {skip();continue;}
-        bool compatible=true;
-        for(const auto& key:track.keyframes) if(key.state.type!=element.type) compatible=false;
-        const bool text=element.type==QLatin1String("text"),video=element.type==QLatin1String("video");
-        qint64 sourceDuration=0;
-        if(video) {
-            const auto value=source.value(QStringLiteral("durationMs"));
-            const double duration=value.toDouble(-1);
-            if(!value.isDouble() || !std::isfinite(duration) || duration<0
-                || duration>SceneTimeline::MaximumSupportedDurationMs || std::floor(duration)!=duration) compatible=false;
-            else sourceDuration=static_cast<qint64>(duration);
+        const double duration = item.value("durationMs").toDouble(-1);
+        const bool video = item.value("type").toString() == "video";
+        if (id.isEmpty() || mediaById(id) || accepted.contains(id)
+            || !SceneTimeline::ElementState::fromMediaJson(item, &element)
+            || !SceneTimeline::MediaTrack::fromJson(item.value("timeline").toObject(), &track, m_timelineSettings.maxSlot())
+            || (video && (!std::isfinite(duration) || duration <= 0 || duration > SceneTimeline::MaximumSupportedDurationMs || std::floor(duration) != duration))
+            || !SceneTimeline::validateMediaTrack(track, element.type, video ? qint64(duration) : 0)
+            || (element.type != "text" && !QFileInfo(sourcePaths.value(id)).isFile())) {
+            if (skippedMediaIds) skippedMediaIds->append(id);
+            continue;
         }
-        if(!compatible || !SceneTimeline::validateMediaTrack(track, element.type, sourceDuration)){skip();continue;}
-        const QString path=sourcePathByMediaId.value(id);
-        if(!text && (path.isEmpty() || !QFileInfo::exists(path))){skip();continue;}
-        auto* media=new CanvasMedia(text?CanvasMedia::Type::Text:(video?CanvasMedia::Type::Video:CanvasMedia::Type::Image),element.baseSize.toSize());
-        if(!freshIds) media->restoreMediaId(id);
-        else {
-            for(auto& key:track.keyframes) key.id=SceneTimeline::newId();
-            for(auto& clip:track.clips) clip.id=SceneTimeline::newId();
-        }
-        media->setElementState(element); media->setTimelineTrack(track);
-        if(video) media->restoreSourceDurationMs(sourceDuration);
-        if(!text) {
-            media->setResidencySuspended(m_mediaResidencySuspended);
-            media->setSourcePath(path,source.value(QStringLiteral("fileId")).toString());
-            if(video) media->initializeVideoRuntime();
-        }
-        media->setUploadNotUploaded(); adoptMedia(media); inserted.append(media->mediaId());
-        if(insertedIds) insertedIds->insert(id,media->mediaId());
+        items.append(item); accepted.append(id);
     }
-    evaluateTimeline(); return inserted;
+    if (items.isEmpty()) return {};
+    if (!applyMediaPlan(items, sourcePaths, {}, false, nullptr)) {
+        if (skippedMediaIds) skippedMediaIds->append(accepted);
+        return {};
+    }
+    if (insertedIds) for (const auto& id : accepted) insertedIds->insert(id, id);
+    return accepted;
 }
 
-qreal CanvasDocument::nextZ() const
+namespace {
+bool timelineFailure(QString* error, const QString& message)
 {
-    qreal z = 1.0;
-    for (CanvasMedia* media : m_media) {
-        if (media) z = std::max(z, media->z() + 1.0);
+    if (error) *error = message;
+    return false;
+}
+QJsonObject withTimeline(QJsonObject item, const SceneTimeline::MediaTrack& track)
+{
+    item.insert(QStringLiteral("timeline"), track.toJson());
+    return item;
+}
+QJsonObject freshTimelineInstance(QJsonObject item, SceneTimeline::MediaTrack track)
+{
+    item.insert(QStringLiteral("mediaId"), SceneTimeline::newId());
+    track.clip.id = SceneTimeline::newId();
+    for (auto& key : track.keyframes) key.id = SceneTimeline::newId();
+    return withTimeline(item, track);
+}
+}
+
+CanvasMedia* CanvasDocument::mediaForTimelineClip(const QString& clipId) const
+{
+    if (clipId.isEmpty()) return nullptr;
+    for (auto* media : m_media)
+        if (media->timelineTrack().clip.id == clipId) return media;
+    return nullptr;
+}
+
+int CanvasDocument::timelineTrackCount() const
+{
+    int last = -1;
+    for (auto* media : m_media) last = qMax(last, media->timelineTrack().trackIndex);
+    return last + 2;
+}
+
+int CanvasDocument::firstFreeTimelineTrack(const SceneTimeline::Clip& clip) const
+{
+    for (int index = 0; index <= SceneTimeline::MaximumTrackIndex; ++index) {
+        bool free = true;
+        for (auto* media : m_media) {
+            const auto& track = media->timelineTrack();
+            if (track.trackIndex == index && track.clip.startSlot < clip.endSlot()
+                && clip.startSlot < track.clip.endSlot()) { free = false; break; }
+        }
+        if (free) return index;
     }
-    return z;
+    return -1;
+}
+
+QJsonObject CanvasDocument::timelineMediaSnapshot(const QString& mediaId) const
+{
+    auto* media = mediaById(mediaId);
+    if (!media) return {};
+    auto item = media->authorElementState().toJson();
+    item.insert(QStringLiteral("mediaId"), media->mediaId());
+    item.insert(QStringLiteral("fileId"), media->fileId());
+    item.insert(QStringLiteral("fileName"), QFileInfo(media->sourcePath()).fileName());
+    item.insert(QStringLiteral("timeline"), media->timelineTrack().toJson());
+    if (media->isVideo()) item.insert(QStringLiteral("durationMs"), double(media->sourceDurationMs()));
+    QJsonArray spans;
+    const auto author = media->authorElementState();
+    for (auto it = m_screenRects.cbegin(); it != m_screenRects.cend(); ++it) {
+        const auto span = spanForIntersection(it.key(), it.value(), {author.position, author.size});
+        if (!span.isEmpty()) spans.append(span);
+    }
+    item.insert(QStringLiteral("spans"), spans);
+    return item;
+}
+
+CanvasMedia* CanvasDocument::createMediaFromSnapshot(const QJsonObject& item, const QString& path) const
+{
+    SceneTimeline::ElementState state;
+    SceneTimeline::MediaTrack track;
+    if (!SceneTimeline::ElementState::fromMediaJson(item, &state)
+        || !SceneTimeline::MediaTrack::fromJson(item.value("timeline").toObject(), &track, m_timelineSettings.maxSlot())) return nullptr;
+    QSize nativeSize = state.baseSize.toSize();
+    if (state.type != "text") {
+        const QString canonicalPath = QFileInfo(path).canonicalFilePath();
+        for (auto* existing : m_media) {
+            if (!existing->isText() && existing->nativeSourceSize().isValid()
+                && QFileInfo(existing->sourcePath()).canonicalFilePath() == canonicalPath) {
+                nativeSize = existing->nativeSourceSize();
+                break;
+            }
+        }
+    }
+    auto* media = new CanvasMedia(state.type == "text" ? CanvasMedia::Type::Text
+        : state.type == "video" ? CanvasMedia::Type::Video : CanvasMedia::Type::Image, nativeSize);
+    media->restoreMediaId(item.value("mediaId").toString());
+    media->setElementState(state);
+    media->setTimelineTrack(track);
+    media->setResidencySuspended(m_mediaResidencySuspended);
+    if (media->isVideo()) media->restoreSourceDurationMs(qint64(item.value("durationMs").toDouble()));
+    if (!media->isText()) media->setSourcePath(path, item.value("fileId").toString());
+    if (media->isVideo()) media->initializeVideoRuntime();
+    return media;
+}
+
+bool CanvasDocument::applyMediaPlan(const QJsonArray& items,
+    const QHash<QString, QString>& paths, const QString& primaryId, bool selectOnly, QString* error,
+    const QStringList& selectedIds)
+{
+    if (m_editsLocked || m_publishingTimelineEdit) return timelineFailure(error, "Timeline editing is locked.");
+    if (items.size() + m_pendingImports.size() > SceneTimeline::MaximumMediaCount)
+        return timelineFailure(error, "A scene cannot contain more than 512 instances.");
+    auto scene = serializeSceneState();
+    scene.insert("media", items);
+    if (QJsonDocument(scene).toJson(QJsonDocument::Compact).size() > 8 * 1024 * 1024)
+        return timelineFailure(error, "This operation would exceed the scene size limit (8 MiB).");
+
+    QSet<QString> mediaIds, identities;
+    QHash<QString, SceneTimeline::MediaTrack> tracks;
+    for (const auto& value : items) {
+        const auto item = value.toObject();
+        const auto id = item.value("mediaId").toString();
+        SceneTimeline::ElementState state;
+        SceneTimeline::MediaTrack track;
+        if (id.isEmpty() || id.size() > 128 || identities.contains(id)
+            || !SceneTimeline::ElementState::fromMediaJson(item, &state, error)
+            || !SceneTimeline::MediaTrack::fromJson(item.value("timeline").toObject(), &track, m_timelineSettings.maxSlot(), error))
+            return timelineFailure(error, "Invalid timeline instance.");
+        const double duration = item.value("durationMs").toDouble(-1);
+        if (state.type == "video" && (!std::isfinite(duration) || duration <= 0
+            || duration > SceneTimeline::MaximumSupportedDurationMs || std::floor(duration) != duration))
+            return timelineFailure(error, "Invalid video duration.");
+        if (!SceneTimeline::validateMediaTrack(track, state.type, state.type == "video" ? qint64(duration) : 0, error)) return false;
+        identities.insert(id);
+        if (identities.contains(track.clip.id)) return timelineFailure(error, "Duplicate clip identity.");
+        identities.insert(track.clip.id);
+        for (const auto& key : track.keyframes) {
+            if (identities.contains(key.id)) return timelineFailure(error, "Duplicate keyframe identity.");
+            identities.insert(key.id);
+        }
+        for (auto it = tracks.cbegin(); it != tracks.cend(); ++it) {
+            const auto& other = it.value();
+            if (other.trackIndex == track.trackIndex && other.clip.startSlot < track.clip.endSlot()
+                && track.clip.startSlot < other.clip.endSlot()) return timelineFailure(error, "Overlapping clips on one track.");
+        }
+        if (!mediaById(id) && state.type != "text" && !QFileInfo(paths.value(id)).isFile())
+            return timelineFailure(error, "The source file is unavailable.");
+        const QString fileId = item.value("fileId").toString();
+        if (!mediaById(id) && state.type != "text" && m_fileManager && m_fileManager->hasFileId(fileId)) {
+            const QString canonical = QFileInfo(paths.value(id)).canonicalFilePath();
+            bool knownPath = false;
+            for (const QString& known : m_fileManager->getRecordedFilePathsForId(fileId))
+                if (QFileInfo(known).canonicalFilePath() == canonical) { knownPath = true; break; }
+            if (!knownPath) return timelineFailure(error, "The copied source identity does not match a verified source path.");
+        }
+        mediaIds.insert(id); tracks.insert(id, track);
+    }
+
+    QList<CanvasMedia*> created;
+    for (const auto& value : items) {
+        const auto item = value.toObject();
+        if (mediaById(item.value("mediaId").toString())) continue;
+        auto* media = createMediaFromSnapshot(item, paths.value(item.value("mediaId").toString()));
+        if (!media) { qDeleteAll(created); return timelineFailure(error, "Could not create timeline instance."); }
+        created.append(media);
+    }
+    const auto oldSelected = selectedMediaIds();
+    const auto oldPrimary = m_primarySelectedMediaId;
+    QList<CanvasMedia*> removed;
+    m_publishingTimelineEdit = true;
+    std::vector<std::unique_ptr<QSignalBlocker>> mediaSignals;
+    for (auto* media : m_media) mediaSignals.emplace_back(std::make_unique<QSignalBlocker>(media));
+    for (auto* media : created) mediaSignals.emplace_back(std::make_unique<QSignalBlocker>(media));
+    if (m_fileManager) m_fileManager->beginMediaAssociationTransaction();
+    // Install replacement references before releasing the previous last owner.
+    for (auto* media : created) {
+        if (m_fileManager && !media->isText() && !media->fileId().isEmpty() && m_fileManager->hasFileId(media->fileId()))
+            m_fileManager->associateMediaWithFile(media->mediaId(), media->fileId());
+        adoptMedia(media);
+    }
+    for (auto* media : std::as_const(m_media)) {
+        if (!mediaIds.contains(media->mediaId())) { removed.append(media); continue; }
+        media->setTimelineTrack(tracks.value(media->mediaId()));
+    }
+    for (auto* media : removed) {
+        m_media.removeAll(media);
+        m_selectionActivationOrder.removeAll(media->mediaId());
+    }
+    if (selectOnly) m_selectionActivationOrder = selectedIds;
+    for (auto* media : std::as_const(m_media)) {
+        const bool selected = selectOnly ? media->mediaId() == primaryId || selectedIds.contains(media->mediaId()) : media->selected() || media->mediaId() == primaryId;
+        media->setSelected(selected);
+    }
+    m_primarySelectedMediaId = mediaIds.contains(primaryId) ? primaryId
+        : m_selectionActivationOrder.isEmpty() ? QString() : m_selectionActivationOrder.last();
+    if (!m_primarySelectedMediaId.isEmpty()) {
+        m_selectionActivationOrder.removeAll(m_primarySelectedMediaId);
+        m_selectionActivationOrder.append(m_primarySelectedMediaId);
+    }
+    evaluateTimeline();
+    // Direct media observers, as well as document projections, only see the
+    // completed graph. Replay property notifications before document publication.
+    mediaSignals.clear();
+    for (auto* media : m_media) if (!created.contains(media)) emit media->changed();
+    // Lifecycle observers can now inspect only the completed authoring graph.
+    for (auto* media : removed) {
+        emit mediaAboutToBeRemoved(media);
+        if (m_fileManager && !media->isText()) m_fileManager->removeMediaAssociation(media->mediaId());
+    }
+    if (m_fileManager) m_fileManager->endMediaAssociationTransaction();
+    m_publishingTimelineEdit = false;
+    for (auto* media : created) emit mediaAdded(media);
+    for (auto* media : removed) {
+        emit mediaRemoved(media->mediaId());
+        // New owners queued their acquires during preparation. Let those run
+        // before retiring the previous last lease of a shared decoded source.
+        QMetaObject::invokeMethod(media, [media] {
+            media->retireResidency();
+            media->deleteLater();
+        }, Qt::QueuedConnection);
+    }
+    for (auto* media : m_media) if (!created.contains(media)) emit mediaChanged(media->mediaId());
+    emit timelineEvaluated();
+    if (oldPrimary != m_primarySelectedMediaId) emit primarySelectedMediaChanged();
+    if (oldPrimary != m_primarySelectedMediaId || oldSelected != selectedMediaIds()) emit selectionChanged();
+    emit documentChanged();
+    return true;
+}
+
+bool CanvasDocument::applyTimelinePlacement(const QJsonObject& incoming, const QString& sourcePath,
+                                          bool freshInstance, QString* error)
+{
+    SceneTimeline::MediaTrack placed;
+    if (!SceneTimeline::MediaTrack::fromJson(incoming.value("timeline").toObject(), &placed, m_timelineSettings.maxSlot(), error)) return false;
+    const QString incomingId = incoming.value("mediaId").toString();
+    if (!freshInstance && !m_editsLocked && !m_publishingTimelineEdit && incoming == timelineMediaSnapshot(incomingId)) return true;
+    QJsonArray result;
+    QHash<QString, QString> paths;
+    paths.insert(incomingId, sourcePath);
+    for (auto* media : m_media) {
+        if (media->mediaId() == incomingId) continue;
+        const auto original = timelineMediaSnapshot(media->mediaId());
+        const auto& old = media->timelineTrack();
+        const auto& cut = placed.clip;
+        if (old.trackIndex != placed.trackIndex || old.clip.endSlot() <= cut.startSlot || old.clip.startSlot >= cut.endSlot()) {
+            result.append(original); continue;
+        }
+        const bool left = old.clip.startSlot < cut.startSlot;
+        const bool right = old.clip.endSlot() > cut.endSlot();
+        if (left) {
+            auto fragment = old; fragment.clip.durationSlots = cut.startSlot - old.clip.startSlot;
+            result.append(withTimeline(original, fragment));
+        }
+        if (right) {
+            auto fragment = old;
+            fragment.clip.startSlot = cut.endSlot();
+            fragment.clip.durationSlots = old.clip.endSlot() - cut.endSlot();
+            if (fragment.clip.sourceStartSlot) *fragment.clip.sourceStartSlot += cut.endSlot() - old.clip.startSlot;
+            auto item = left ? freshTimelineInstance(original, fragment) : withTimeline(original, fragment);
+            paths.insert(item.value("mediaId").toString(), media->sourcePath());
+            result.append(item);
+        }
+    }
+    result.append(incoming);
+    return applyMediaPlan(result, paths, incomingId, freshInstance, error);
+}
+
+bool CanvasDocument::moveTimelineClip(const QString& clipId, qint64 startSlot, int trackIndex, QString* error)
+{
+    auto* media = mediaForTimelineClip(clipId);
+    if (!media) return timelineFailure(error, "Unknown clip.");
+    auto track = media->timelineTrack();
+    track.clip.startSlot = qBound<qint64>(0, startSlot, m_timelineSettings.maxSlot() - track.clip.durationSlots);
+    track.trackIndex = trackIndex;
+    return applyTimelinePlacement(withTimeline(timelineMediaSnapshot(media->mediaId()), track), media->sourcePath(), false, error);
+}
+
+bool CanvasDocument::trimTimelineClip(const QString& clipId, qint64 startSlot, qint64 endSlot, QString* error)
+{
+    auto* media = mediaForTimelineClip(clipId);
+    if (!media) return timelineFailure(error, "Unknown clip.");
+    auto track = media->timelineTrack();
+    startSlot = qBound<qint64>(0, startSlot, m_timelineSettings.maxSlot() - 1);
+    endSlot = qBound(startSlot + 1, endSlot, m_timelineSettings.maxSlot());
+    if (track.clip.sourceStartSlot) *track.clip.sourceStartSlot += startSlot - track.clip.startSlot;
+    track.clip.startSlot = startSlot; track.clip.durationSlots = endSlot - startSlot;
+    return applyTimelinePlacement(withTimeline(timelineMediaSnapshot(media->mediaId()), track), media->sourcePath(), false, error);
+}
+
+bool CanvasDocument::splitTimelineClip(const QString& clipId, qint64 slot, QString* error)
+{
+    auto* media = mediaForTimelineClip(clipId);
+    if (!media) return timelineFailure(error, "Unknown clip.");
+    const auto old = media->timelineTrack();
+    if (slot <= old.clip.startSlot || slot >= old.clip.endSlot()) return timelineFailure(error, "The cut must be inside the clip.");
+    auto left = old, right = old;
+    left.clip.durationSlots = slot - old.clip.startSlot;
+    right.clip.startSlot = slot; right.clip.durationSlots = old.clip.endSlot() - slot;
+    if (right.clip.sourceStartSlot) *right.clip.sourceStartSlot += left.clip.durationSlots;
+    const auto snapshot = timelineMediaSnapshot(media->mediaId());
+    const auto clone = freshTimelineInstance(snapshot, right);
+    QJsonArray items;
+    for (auto* item : m_media) items.append(item == media ? withTimeline(snapshot, left) : timelineMediaSnapshot(item->mediaId()));
+    items.append(clone);
+    return applyMediaPlan(items, {{clone.value("mediaId").toString(), media->sourcePath()}}, media->mediaId(), false, error);
+}
+
+QString CanvasDocument::pasteTimelineClip(const QJsonObject& snapshot, const QHash<QString, QString>& paths,
+                                         qint64 startSlot, int trackIndex, QString* error)
+{
+    SceneTimeline::MediaTrack track;
+    if (startSlot < 0 || startSlot >= m_timelineSettings.maxSlot()
+        || !SceneTimeline::MediaTrack::fromJson(snapshot.value("timeline").toObject(), &track, m_timelineSettings.maxSlot(), error)) return {};
+    track.clip.startSlot = startSlot;
+    track.clip.durationSlots = qMin(track.clip.durationSlots, m_timelineSettings.maxSlot() - startSlot);
+    track.trackIndex = trackIndex;
+    const auto item = freshTimelineInstance(snapshot, track);
+    if (!applyTimelinePlacement(item, paths.value(snapshot.value("mediaId").toString()), true, error)) return {};
+    return item.value("mediaId").toString();
 }

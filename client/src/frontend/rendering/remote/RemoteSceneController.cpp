@@ -835,7 +835,7 @@ void RemoteSceneController::onRemoteSceneStart(const QString& senderClientId, co
         || !scene.value(QStringLiteral("screens")).isArray()
         || !scene.value(QStringLiteral("media")).isArray()
         || sceneInstanceId.isEmpty()) {
-        rejectStart(QStringLiteral("Scene does not conform to render schema 5"));
+        rejectStart(QStringLiteral("Scene does not conform to render schema 6"));
         return;
     }
 
@@ -984,6 +984,8 @@ void RemoteSceneController::onRemoteSceneStart(const QString& senderClientId, co
         return;
     }
     QSet<QString> declaredMediaIds;
+    QSet<QString> declaredTimelineIds;
+    QHash<int, QList<SceneTimeline::Clip>> clipsByTrack;
     for (const auto& mediaValue : media) {
         const QJsonObject object = mediaValue.toObject();
         const QString id = object.value(QStringLiteral("mediaId")).toString();
@@ -1021,7 +1023,36 @@ void RemoteSceneController::onRemoteSceneStart(const QString& senderClientId, co
             failWithMessage(QStringLiteral("Invalid timeline asset identity"));
             return;
         }
+        if (declaredTimelineIds.contains(id)) {
+            failWithMessage(QStringLiteral("Media and timeline identifiers must be distinct"));
+            return;
+        }
+        declaredTimelineIds.insert(id);
+        if (declaredTimelineIds.contains(track.clip.id)) {
+            failWithMessage(QStringLiteral("Duplicate timeline clip identifier"));
+            return;
+        }
+        declaredTimelineIds.insert(track.clip.id);
+        for (const auto& key : track.keyframes) {
+            if (declaredTimelineIds.contains(key.id)) {
+                failWithMessage(QStringLiteral("Duplicate timeline keyframe identifier"));
+                return;
+            }
+            declaredTimelineIds.insert(key.id);
+        }
+        clipsByTrack[track.trackIndex].append(track.clip);
         declaredMediaIds.insert(id);
+    }
+    for (auto& clips : clipsByTrack) {
+        std::sort(clips.begin(), clips.end(), [](const auto& a, const auto& b) {
+            return a.startSlot < b.startSlot;
+        });
+        for (qsizetype index = 1; index < clips.size(); ++index) {
+            if (clips[index - 1].endSlot() > clips[index].startSlot) {
+                failWithMessage(QStringLiteral("Overlapping clips on the same timeline track"));
+                return;
+            }
+        }
     }
 
     QStringList missingFileNames;
@@ -2267,7 +2298,7 @@ void RemoteSceneController::scheduleMedia(const std::shared_ptr<RemoteMediaItem>
     item->audio = new QAudioOutput(this);
     item->audio->setMuted(true);
     item->player->setAudioOutput(item->audio);
-    item->timelineRequestedSourceMs = SceneTimeline::evaluateVideo(item->timeline, 0, duration, m_timelineSettings).sourceTimeMs;
+    item->timelineRequestedSourceMs = timelineVideoPreparationSourceMs(item->timeline, 0, duration, m_timelineSettings);
     const quint64 epoch = item->sceneEpoch;
     std::weak_ptr<RemoteMediaItem> weak = item;
     connect(item->player, &ResidentVideoPlayer::errorOccurred, this,
@@ -2303,7 +2334,7 @@ void RemoteSceneController::updateTimelineGeometry(
 {
     item->baseWidth = std::max(1, qRound(state.baseSize.width()));
     item->baseHeight = std::max(1, qRound(state.baseSize.height()));
-    item->z = state.z;
+    item->z = SceneTimeline::trackZ(item->timeline.trackIndex);
     item->contentVisible = state.visible;
     item->contentOpacity = state.opacity;
     item->clipActive = SceneTimeline::activeClip(item->timeline, m_timelineSettings.slotAt(m_timelinePositionMs)) != nullptr;
@@ -2402,24 +2433,30 @@ void RemoteSceneController::evaluateTimelineAt(qreal positionMs, bool playing)
         if (!video.clipActive) {
             item->player->pause();
             item->audio->setMuted(true);
+            if (m_timelinePositionMs < m_timelineSettings.timeMs(item->timeline.clip.startSlot)) {
+                item->timelineRequestedSourceMs = timelineVideoPreparationSourceMs(
+                    item->timeline, m_timelinePositionMs, item->player->duration(), m_timelineSettings);
+                if (item->player->position() != item->timelineRequestedSourceMs)
+                    item->player->prepare(item->timelineRequestedSourceMs);
+            }
             item->timelineClipId.clear();
             item->timelineVideoPlaying = false;
             continue;
         }
         const bool shouldPlay = playing && video.playing;
-        const bool changedClip = item->timelineClipId != video.clipId;
-        const bool discontinuity = changedClip
-            && !contiguousTimelineClips(item->timeline, item->timelineClipId, video.clipId);
+        const bool discontinuity = item->timelineClipId != video.clipId;
         const bool transition = shouldPlay != item->timelineVideoPlaying;
         item->timelineVideoPlaying = shouldPlay;
         if (!shouldPlay) item->player->pause();
         const qint64 error = qAbs(item->player->position() - video.sourceTimeMs);
+        const bool preparedForEntry = item->player->preparedAt(video.sourceTimeMs)
+            && error <= AppConfig::instance().sceneVideoSyncPositionToleranceMs();
         const bool drift = shouldPlay && error > AppConfig::instance().sceneVideoSyncPositionToleranceMs()
             && clock >= item->timelineSeekGuardUntilMs;
         const bool heldFrameMissing = !shouldPlay && error > 0
             && !item->player->preparedAt(video.sourceTimeMs)
             && clock >= item->timelineSeekGuardUntilMs;
-        if (discontinuity || transition || drift || heldFrameMissing) {
+        if (((discontinuity || transition) && !preparedForEntry) || drift || heldFrameMissing) {
             item->player->setPosition(video.sourceTimeMs);
             item->timelineSeekGuardUntilMs = clock + AppConfig::instance().sceneAuthoritativeSeekGuardMs();
         }

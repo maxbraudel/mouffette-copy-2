@@ -1,6 +1,6 @@
 import QtQuick
 // Top overlay panel attached above a selected media item.
-//   Row 1: show/hide | bring-forward | bring-backward | delete
+//   Row 1: show/hide | delete
 //   Row 2: media name pill (full width, adaptive with ellipsis)
 // Container width is driven by the buttons row.
 Item {
@@ -13,8 +13,6 @@ Item {
     property bool actionsAvailable: true
 
     signal visibilityToggleRequested(string mediaId, bool visible)
-    signal bringForwardRequested(string mediaId)
-    signal bringBackwardRequested(string mediaId)
     signal deleteRequested(string mediaId)
     signal overlayHoveredChanged(bool hovered)
 
@@ -70,18 +68,6 @@ Item {
             implicitWidth: root.btnSize
             implicitHeight: root.btnSize
             onClicked: root.visibilityToggleRequested(root.mediaId, !root.contentVisible)
-        }
-        OverlayButton {
-            iconSource: "qrc:/icons/icons/arrow-up.svg"
-            implicitWidth: root.btnSize
-            implicitHeight: root.btnSize
-            onClicked: root.bringForwardRequested(root.mediaId)
-        }
-        OverlayButton {
-            iconSource: "qrc:/icons/icons/arrow-down.svg"
-            implicitWidth: root.btnSize
-            implicitHeight: root.btnSize
-            onClicked: root.bringBackwardRequested(root.mediaId)
         }
         OverlayButton {
             iconSource: "qrc:/icons/icons/delete.svg"

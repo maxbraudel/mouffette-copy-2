@@ -26,7 +26,7 @@
 #include <utility>
 
 namespace {
-constexpr auto kCanvasClipboardMime = "application/x-mouffette-media-v3";
+constexpr auto kCanvasClipboardMime = "application/x-mouffette-media-v4";
 constexpr qreal kSnapDistancePx = 10.0;
 constexpr qreal kCornerSnapDistancePx = 20.0;
 constexpr qreal kSnapReleaseFactor = 1.4;
@@ -1622,26 +1622,6 @@ void QuickCanvasController::handleOverlayVisibilityToggle(const QString& id, boo
         media->setContentVisible(visible);
     }
     emit mediaVisibilityToggleRequested(id, visible);
-}
-
-void QuickCanvasController::handleOverlayBringForward(const QString& id)
-{
-    if (!editingEnabled()) return;
-    if (m_document && id == primarySelectedMediaId()) {
-        if (auto* media = m_document->mediaById(id)) media->beginElementEdit();
-        m_document->moveForward(id);
-    }
-    emit mediaBringForwardRequested(id);
-}
-
-void QuickCanvasController::handleOverlayBringBackward(const QString& id)
-{
-    if (!editingEnabled()) return;
-    if (m_document && id == primarySelectedMediaId()) {
-        if (auto* media = m_document->mediaById(id)) media->beginElementEdit();
-        m_document->moveBackward(id);
-    }
-    emit mediaBringBackwardRequested(id);
 }
 
 void QuickCanvasController::copySelectedMedia()

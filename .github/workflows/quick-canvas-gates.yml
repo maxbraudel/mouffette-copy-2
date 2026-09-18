@@ -40,4 +40,4 @@ jobs:
           node tests/baseline/run_phase2_interaction_parity.js
           node tests/baseline/run_phase2_interaction_ownership.js
           node tests/baseline/run_phase8_randomized_input_sequences.js
-          node tests/baseline/run_render_schema_v2.js
+          node tests/baseline/run_render_schema_v6.js

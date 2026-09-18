@@ -1,11 +1,12 @@
 'use strict';
 
-// Canonical render schema 5. Keep numeric bounds in sync with SceneTimeline.cpp.
+// Canonical render schema 6. Keep numeric bounds in sync with SceneTimeline.cpp.
 const MAXIMUM_SOURCE_OFFSET_SLOTS = 2 ** 52;
 const MAXIMUM_DURATION_MS = 604_800_000;
+const MAXIMUM_TRACK_INDEX = 9999;
 const COMMON_ELEMENT_KEYS = Object.freeze([
     'type', 'x', 'y', 'width', 'height', 'baseWidth', 'baseHeight', 'scale',
-    'visible', 'z', 'contentOpacity', 'opacityOverrideEnabled', 'rawOpacity',
+    'visible', 'contentOpacity', 'opacityOverrideEnabled', 'rawOpacity',
 ]);
 const TEXT_ELEMENT_KEYS = Object.freeze([
     'text', 'fontFamily', 'fontPixelSize', 'fontWeight', 'fontItalic', 'fontUnderline',
@@ -35,7 +36,7 @@ function isCanonicalElement(value, extraKeys = []) {
         || !finite(value.x, -1e9, 1e9) || !finite(value.y, -1e9, 1e9)
         || !finite(value.width, 0.0001, 1e9) || !finite(value.height, 0.0001, 1e9)
         || !finite(value.baseWidth, 0.0001, 1e9) || !finite(value.baseHeight, 0.0001, 1e9)
-        || !finite(value.scale, 0.0001, 1e9) || !finite(value.z, -1e9, 1e9)
+        || !finite(value.scale, 0.0001, 1e9)
         || !boolean(value.visible) || !finite(value.contentOpacity, 0, 1)
         || !boolean(value.opacityOverrideEnabled) || !finite(value.rawOpacity, 0, 1)) return false;
     if (value.type === 'video') return boolean(value.muted) && finite(value.volume, 0, 1);
@@ -63,11 +64,9 @@ function isCanonicalTimelineSettings(value) {
 }
 function isCanonicalMediaTrack(value, type, settings, sourceDuration = 0) {
     if (!isCanonicalTimelineSettings(settings) || !['image', 'video', 'text'].includes(type)
-        || !onlyKeys(value, ['keyframes', 'clips', 'clipsInitialized'])
+        || !onlyKeys(value, ['keyframes', 'clip', 'trackIndex'])
         || !Array.isArray(value.keyframes) || value.keyframes.length > 10_000
-        || !Array.isArray(value.clips) || value.clips.length > 10_000
-        || !boolean(value.clipsInitialized)
-        || (!value.clipsInitialized && value.clips.length > 0)
+        || !integer(value.trackIndex, 0, MAXIMUM_TRACK_INDEX)
         || (type === 'video' && !integer(sourceDuration, 0, MAXIMUM_DURATION_MS))) return false;
     const maximum = maximumSlot(settings);
     const ids = new Set(); const times = new Set();
@@ -77,25 +76,41 @@ function isCanonicalMediaTrack(value, type, settings, sourceDuration = 0) {
             || !isCanonicalElement(key.state) || key.state.type !== type) return false;
         ids.add(key.id); times.add(key.slot);
     }
-    for (const clip of value.clips) {
-        if (!onlyKeys(clip, ['id', 'startSlot', 'sourceStartSlot', 'durationSlots'])
-            || !identifier(clip.id) || ids.has(clip.id) || !integer(clip.startSlot, 0, maximum)
-            || !integer(clip.durationSlots, 1, maximum)
-            || (type === 'video'
-                ? sourceDuration <= 0 || !integer(clip.sourceStartSlot, -MAXIMUM_SOURCE_OFFSET_SLOTS,
-                    MAXIMUM_SOURCE_OFFSET_SLOTS - clip.durationSlots)
-                : clip.sourceStartSlot !== null)
-            || clip.startSlot + clip.durationSlots > maximum) return false;
-        ids.add(clip.id);
+    const clip = value.clip;
+    return onlyKeys(clip, ['id', 'startSlot', 'sourceStartSlot', 'durationSlots'])
+        && identifier(clip.id) && !ids.has(clip.id) && integer(clip.startSlot, 0, maximum)
+        && integer(clip.durationSlots, 1, maximum)
+        && (type === 'video'
+            ? sourceDuration > 0 && integer(clip.sourceStartSlot, -MAXIMUM_SOURCE_OFFSET_SLOTS,
+                MAXIMUM_SOURCE_OFFSET_SLOTS - clip.durationSlots)
+            : clip.sourceStartSlot === null)
+        && clip.startSlot + clip.durationSlots <= maximum;
+}
+// Per-instance validation cannot detect collisions between separate instances.
+function isCanonicalSceneTracks(media) {
+    const clipsByTrack = new Map();
+    const timelineIds = new Set();
+    for (const item of media) {
+        const { trackIndex, clip } = item.timeline;
+        for (const id of [item.mediaId, clip.id, ...item.timeline.keyframes.map(key => key.id)]) {
+            if (timelineIds.has(id)) return false;
+            timelineIds.add(id);
+        }
+        const clips = clipsByTrack.get(trackIndex) || [];
+        clips.push(clip);
+        clipsByTrack.set(trackIndex, clips);
     }
-    const clips = [...value.clips].sort((a, b) => a.startSlot - b.startSlot);
-    return clips.every((clip, i) => i === 0
-        || clips[i - 1].startSlot + clips[i - 1].durationSlots <= clip.startSlot);
+    for (const clips of clipsByTrack.values()) {
+        clips.sort((a, b) => a.startSlot - b.startSlot);
+        if (clips.some((clip, index) => index > 0
+            && clips[index - 1].startSlot + clips[index - 1].durationSlots > clip.startSlot)) return false;
+    }
+    return true;
 }
 function isCanonicalTimelineSnapshot(snapshot, settings) {
     return isCanonicalTimelineSettings(settings) && onlyKeys(snapshot, ['timelinePositionMs'])
         && finite(snapshot.timelinePositionMs, 0,
             (settings.stopSlot < 0 ? maximumSlot(settings) : settings.stopSlot) * 1000 / settings.slotsPerSecond);
 }
-module.exports = { MAXIMUM_DURATION_MS, isCanonicalElement,
-    isCanonicalTimelineSettings, isCanonicalMediaTrack, isCanonicalTimelineSnapshot };
+module.exports = { MAXIMUM_DURATION_MS, MAXIMUM_TRACK_INDEX, isCanonicalElement,
+    isCanonicalTimelineSettings, isCanonicalMediaTrack, isCanonicalSceneTracks, isCanonicalTimelineSnapshot };

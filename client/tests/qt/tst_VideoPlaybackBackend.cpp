@@ -62,7 +62,7 @@ private slots:
         video->setVolume(0.27);
         video->setPositionMs(1234);
         SceneTimeline::MediaTrack track;
-        QVERIFY(SceneTimeline::insertClip(track,{"clip",30,30,42},5400));
+        track.clip={"clip",30,30,42};
         video->setTimelineTrack(track);
         if (!whileLoading)
             QTRY_VERIFY(player->asset() && video->hasRenderedFrame());
@@ -95,8 +95,8 @@ private slots:
         QVERIFY(!video->isPlaying());
         QVERIFY(video->muted());
         QCOMPARE(video->volume(), 0.27);
-        QCOMPARE(video->timelineTrack().clips.first().sourceStartSlot.value(),30);
-        QCOMPARE(video->timelineTrack().clips.first().sourceEndSlot(),72);
+        QCOMPARE(video->timelineTrack().clip.sourceStartSlot.value(),30);
+        QCOMPARE(video->timelineTrack().clip.sourceEndSlot(),72);
     }
 
     void restoredVideoHasNoPersistedTransportCursor()
@@ -216,8 +216,7 @@ private slots:
         auto* video=host->document()->addPreparedFile(videoFixture(),QSize(160,90),true,{});
         QTRY_VERIFY_WITH_TIMEOUT(video->residencyReady() && video->player()->duration()>3000,5000);
         SceneTimeline::MediaTrack track;
-        QVERIFY(SceneTimeline::insertClip(track,{"first",12,3,18},5400));
-        QVERIFY(SceneTimeline::insertClip(track,{"second",42,60,15},5400));
+        track.clip={"second",42,60,15};
         video->setTimelineTrack(track);
         const auto saved=host->serializeProjectState();
         QSignalSpy writes(host->document(),&CanvasDocument::documentChanged);
@@ -239,7 +238,7 @@ private slots:
         auto* video=host->document()->addPreparedFile(videoFixture(),QSize(160,90),true,{});
         QTRY_VERIFY_WITH_TIMEOUT(video->residencyReady() && video->player()->duration()>3000,5000);
         video->setMuted(true);
-        SceneTimeline::MediaTrack track;SceneTimeline::insertClip(track,{"clip",11,15,15},5400);
+        SceneTimeline::MediaTrack track;track.clip={"clip",11,15,15};
         video->setTimelineTrack(track);
         auto settings=host->document()->timelineSettings();settings.stopSlot=36;QVERIFY(host->document()->setTimelineSettings(settings));
         host->timelineSeek(0);QVERIFY(!video->clipActive());

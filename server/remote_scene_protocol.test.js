@@ -44,7 +44,7 @@ function messages(ws, type) {
 
 function envelope(session, extra = {}) {
     return {
-        protocolVersion: 10,
+        protocolVersion: 11,
         serverBootId: session.serverBootId,
         messageId: crypto.randomUUID(),
         remoteSessionId: session.remoteSessionId,
@@ -59,16 +59,17 @@ const asset = Object.freeze({
     mediaIds: ['media-1'], sha256: 'a'.repeat(64), size: 128,
 });
 const scene = Object.freeze({
-    renderSchemaVersion: 5,
+    renderSchemaVersion: 6,
             timeline: { maxDurationMs: 180000, stopSlot: -1, slotsPerSecond: 30 },
     screens: [{ id: 1, x: 0, y: 0, width: 1920, height: 1080, primary: true }],
     media: [{
         mediaId: 'media-1', assetId: 'asset-1', fileId: 'a'.repeat(64),
         fileName: 'asset.png', type: 'image',
         x: 0, y: 0, width: 1920, height: 1080,
-        baseWidth: 1920, baseHeight: 1080, visible: true, z: 1,
+        baseWidth: 1920, baseHeight: 1080, visible: true,
         scale: 1, contentOpacity: 1, opacityOverrideEnabled: false, rawOpacity: 1,
-        timeline: { keyframes: [], clips: [], clipsInitialized: false },
+        timeline: { keyframes: [], trackIndex: 0,
+            clip: { id: 'clip-media-1', startSlot: 0, sourceStartSlot: null, durationSlots: 5400 } },
         spans: [{
             screenId: 1, normX: 0, normY: 0, normW: 1, normH: 1,
             spanDestNormX: 0, spanDestNormY: 0,
@@ -707,7 +708,7 @@ for (const invalidCase of [
     assert.equal(messages(owner, 'stopped').at(-1).success, true);
 
     server.handleMessage('owner-connection', {
-        protocolVersion: 10, serverBootId: server.serverBootId,
+        protocolVersion: 11, serverBootId: server.serverBootId,
         messageId: crypto.randomUUID(),
         type: 'remote_scene_start',
     });
@@ -788,16 +789,22 @@ for (const invalidCase of [
 
 // Timeline clips and keyframes are validated before creating a remote graph.
 const clip = { id: 'clip-1', startSlot: 120, sourceStartSlot: 30, durationSlots: 60 };
-for (const [overrides, accepted] of [
+for (const [overrides, accepted, secondTrack] of [
     [{}, true],
-    [{ timeline: { clipsInitialized: true, keyframes: [], clips: [] } }, true],
-    [{ timeline: { clipsInitialized: false, keyframes: [], clips: [clip] } }, false],
-    [{ timeline: { clipsInitialized: true, keyframes: [], clips: [{ ...clip, durationSlots: 121 }] } }, true],
-    [{ timeline: { clipsInitialized: true, keyframes: [], clips: [{ ...clip, startSlot: 5370 }] } }, false],
-    [{ timeline: { clipsInitialized: true, keyframes: [], clips: [{ ...clip, durationSlots: 0 }] } }, false],
-    [{ timeline: { clipsInitialized: true, keyframes: [], clips: [{ ...clip, startSlot: 0.5 }] } }, false],
-    [{ timeline: { clipsInitialized: true, keyframes: [], clips: [clip, { ...clip, id: 'clip-2', startSlot: 135 }] } }, false],
-    [{ timeline: { clipsInitialized: true, keyframes: [], clips: [clip, { ...clip, id: 'clip-2', startSlot: 180 }] } }, true],
+    [{}, false, { trackIndex: 0, keyframes: [], clip: { ...clip, id: 'clip-2', startSlot: 130 } }],
+    [{}, true, { trackIndex: 0, keyframes: [], clip: { ...clip, id: 'clip-2', startSlot: 180 } }],
+    [{}, true, { trackIndex: 2, keyframes: [], clip: { ...clip, id: 'clip-2' } }],
+    [{}, false, { trackIndex: 2, keyframes: [], clip }],
+    [{}, false, { trackIndex: 2, keyframes: [], clip: { ...clip, id: 'media-1' } }],
+    [{ timeline: { trackIndex: 0, keyframes: [], clip: null } }, false],
+    [{ timeline: { trackIndex: 0, keyframes: [], clip: { ...clip, durationSlots: 121 } } }, true],
+    [{ timeline: { trackIndex: 0, keyframes: [], clip: { ...clip, startSlot: 5370 } } }, false],
+    [{ timeline: { trackIndex: 0, keyframes: [], clip: { ...clip, durationSlots: 0 } } }, false],
+    [{ timeline: { trackIndex: 0, keyframes: [], clip: { ...clip, startSlot: 0.5 } } }, false],
+    [{ timeline: { trackIndex: -1, keyframes: [], clip } }, false],
+    [{ timeline: { trackIndex: 9999, keyframes: [], clip } }, true],
+    [{ timeline: { clipsInitialized: true, keyframes: [], clips: [clip] } }, false],
+    [{ z: 1 }, false],
     [{ autoPlay: true }, false], [{ startPositionMs: 1000 }, false],
     [{ endPositionMs: 1800 }, false], [{ fadeInSeconds: 1 }, false],
     [{ durationMs: -1 }, false], [{ durationMs: 604_800_001 }, false],
@@ -811,14 +818,16 @@ for (const [overrides, accepted] of [
         ownerConnectionGeneration: 1, targetConnectionGeneration: 1,
     }).session;
     session.serverBootId = server.serverBootId;
-    const videoAsset = { ...asset, extension: 'mp4' };
+    const videoAsset = { ...asset, extension: 'mp4',
+        mediaIds: secondTrack ? ['media-1', 'media-2'] : ['media-1'] };
     const video = {
         ...scene.media[0], type: 'video', fileName: 'clip.mp4',
         muted: true, volume: 1, durationMs: 5000,
-        timeline: { clipsInitialized: true, keyframes: [], clips: [clip] },
+        timeline: { trackIndex: 0, keyframes: [], clip },
         ...overrides,
     };
-    const rangedScene = { ...scene, media: [video] };
+    const rangedScene = { ...scene, media: secondTrack
+        ? [video, { ...video, mediaId: 'media-2', timeline: secondTrack }] : [video] };
     session.mediaResidency = { generation: session.generation, sequence: 1,
         assets: [{ assetId: asset.assetId, sha256: asset.sha256, state: 'ready', progress: 1, error: '' }] };
     server.sessionAssets.set(session.remoteSessionId, new Map([[
@@ -841,7 +850,7 @@ for (const [overrides, accepted] of [
     }
 }
 
-console.log('scene protocol v10 tests passed');
+console.log('scene protocol v11 tests passed');
 
 // Residency is a separate, authenticated barrier; upload completion never implies it.
 {

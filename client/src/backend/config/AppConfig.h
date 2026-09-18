@@ -314,7 +314,7 @@ private:
     int m_timelineSlotsPerSecond = 30;
     int m_timelineHeightPx = 240;
     int m_timelineRulerHeightPx = 28;
-    int m_timelineClipTrackHeightPx = 64;
+    int m_timelineClipTrackHeightPx = 48;
     int m_timelineKeyframeSizePx = 10;
     int m_timelineOtherKeyframeOpacityPercent = 30;
     int m_timelineSnapDistancePx = 10;

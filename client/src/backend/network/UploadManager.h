@@ -114,6 +114,12 @@ public:
     void setTargetClientId(const QString& id);
     QString targetClientId() const { return m_targetClientId; }
     bool remoteMediaReady(const QString& targetEndpointId, const QString& sha256) const;
+    struct SourceUploadStatus {
+        enum State { NotUploaded, Uploading, Uploaded } state = NotUploaded;
+        int progress = 0;
+    };
+    SourceUploadStatus sourceUploadStatus(const QString& targetEndpointId,
+                                          const QString& fileId) const;
     static QString residencyOwnerId(const QString& sessionId, quint64 generation,
                                    const QString& sha256);
 
@@ -334,6 +340,7 @@ private:
     QHash<QString, quint64> m_pendingUploadVerification;
     QHash<QString, std::shared_ptr<std::atomic_bool>> m_uploadVerificationCancellation;
     QHash<QString, QString> m_verifyingUploadIds;
+    QHash<QString, QSet<QString>> m_verifyingFileIdsByTarget;
     quint64 m_uploadVerificationGeneration = 0;
     ParallelOutgoingTransfer* parallelForUpload(const QString& uploadId) const;
     ParallelOutgoingTransfer* parallelForSession(const QString& remoteSessionId) const;

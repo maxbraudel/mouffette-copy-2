@@ -10,7 +10,6 @@ class MediaListModel;
 class MediaSettingsViewModel;
 class TimelineController;
 class UploadManager;
-class WorkspaceMediaListModel;
 
 class ClientWorkspaceViewModel : public QObject
 {
@@ -153,6 +152,8 @@ signals:
 
 private:
     MediaListModel* typedMediaModel() const;
+    void refreshSources();
+    void scheduleSourceRefresh();
     bool remoteCommandsEnabled() const;
     void dispatchAction(std::function<void()> action);
     bool uploadBelongsToSession() const;
@@ -171,7 +172,8 @@ private:
     bool m_settingsVisible = false;
     MediaSettingsViewModel* m_mediaSettings = nullptr;
     TimelineController* m_timeline = nullptr;
-    WorkspaceMediaListModel* m_overlayMediaModel = nullptr;
+    MediaListModel* m_overlayMediaModel = nullptr;
+    bool m_sourceRefreshQueued = false;
     int m_uploadPercent = 0;
     int m_uploadFilesCompleted = 0;
     int m_uploadFilesTotal = 0;

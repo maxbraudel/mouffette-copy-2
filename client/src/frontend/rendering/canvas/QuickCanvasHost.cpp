@@ -511,7 +511,8 @@ bool QuickCanvasHost::remoteMediaCached(const QString& mediaId) const
 {
     const auto* media = m_document->mediaById(mediaId);
     return media && !media->isText() && m_uploadManager
-        && media->uploadState() == CanvasMedia::UploadState::Uploaded
+        && m_uploadManager->sourceUploadStatus(m_targetClientId, media->fileId()).state
+            == UploadManager::SourceUploadStatus::Uploaded
         && m_uploadManager->remoteMediaReady(m_targetClientId, media->fileId());
 }
 
@@ -670,8 +671,8 @@ void QuickCanvasHost::prepareSceneVideos(std::function<void()> ready)
                 return;
             }
             if (media->isVideo() && (!media->player()
-                || !media->player()->preparedAt(SceneTimeline::evaluateVideo(
-                    media->timelineTrack(), timelinePositionMs(), media->player()->duration(), m_document->timelineSettings()).sourceTimeMs))) return;
+                || !media->player()->preparedAt(timelineVideoPreparationSourceMs(
+                    media->timelineTrack(), timelinePositionMs(), media->player()->duration(), m_document->timelineSettings())))) return;
         }
         m_videoPreparation = nullptr;
         context->deleteLater();
@@ -700,8 +701,8 @@ void QuickCanvasHost::prepareSceneVideos(std::function<void()> ready)
             // Replace any preview seek queued while this player's source was
             // loading. Its LoadedMedia handler must not restore the draft
             // cursor over the scene's prepared start frame.
-            const qint64 sourceTime = SceneTimeline::evaluateVideo(
-                media->timelineTrack(), timelinePositionMs(), media->player()->duration(), m_document->timelineSettings()).sourceTimeMs;
+            const qint64 sourceTime = timelineVideoPreparationSourceMs(
+                media->timelineTrack(), timelinePositionMs(), media->player()->duration(), m_document->timelineSettings());
             media->setPositionMs(sourceTime);
             media->player()->prepare(sourceTime);
         }
@@ -935,24 +936,31 @@ void QuickCanvasHost::applyTimeline(qreal positionMs, bool playing, bool forceSe
         if (!sample.clipActive) {
             player->pause();
             if (auto* audio = player->audioOutput()) audio->setMuted(true);
+            if (time < m_document->timelineSettings().timeMs(media->timelineTrack().clip.startSlot)) {
+                const qint64 sourceTime = timelineVideoPreparationSourceMs(
+                    media->timelineTrack(), time, player->duration(), m_document->timelineSettings());
+                if (player->position() != sourceTime || (forceSeek && !player->preparedAt(sourceTime)))
+                    player->prepare(sourceTime);
+            }
             m_timelineClipIds.remove(media->mediaId());
             m_timelineVideoPlaying.insert(media->mediaId(), false);
             continue;
         }
         const bool shouldPlay = playing && sample.playing;
         const QString previousClip = m_timelineClipIds.value(media->mediaId());
-        const bool changedClip = previousClip != sample.clipId;
-        const bool discontinuity = changedClip
-            && !contiguousTimelineClips(media->timelineTrack(), previousClip, sample.clipId);
+        const bool discontinuity = previousClip != sample.clipId;
         const bool transition = shouldPlay != m_timelineVideoPlaying.value(media->mediaId(), false);
         if (!shouldPlay) player->pause();
         const qint64 error = qAbs(player->position() - sample.sourceTimeMs);
+        const bool preparedForEntry = player->preparedAt(sample.sourceTimeMs)
+            && error <= AppConfig::instance().sceneVideoSyncPositionToleranceMs();
         const bool drift = shouldPlay && error > AppConfig::instance().sceneVideoSyncPositionToleranceMs()
             && clock >= m_timelineSeekGuards.value(media->mediaId(), 0);
         const bool heldFrameMissing = !shouldPlay && error > 0
             && !player->preparedAt(sample.sourceTimeMs)
             && clock >= m_timelineSeekGuards.value(media->mediaId(), 0);
-        if (forceSeek || discontinuity || transition || drift || heldFrameMissing) {
+        if ((forceSeek && !playing) || ((forceSeek || discontinuity || transition) && !preparedForEntry)
+            || drift || heldFrameMissing) {
             player->setPosition(sample.sourceTimeMs);
             m_timelineSeekGuards.insert(media->mediaId(), clock + AppConfig::instance().sceneAuthoritativeSeekGuardMs());
         }

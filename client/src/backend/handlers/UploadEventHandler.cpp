@@ -91,7 +91,7 @@ void UploadEventHandler::uploadWorkspace(const QString& workspaceEndpointId, boo
     qDebug() << "  - activeTargetClientId:" << uploadManager->activeUploadTargetClientId();
     qDebug() << "hasRemoteFiles:" << hasRemoteFiles;
 
-    upload.itemsByFileId.clear();
+    upload.fileIds.clear();
     upload.currentUploadFileOrder.clear();
     upload.serverCompletedFileIds.clear();
     upload.perFileProgress.clear();
@@ -144,7 +144,7 @@ void UploadEventHandler::uploadWorkspace(const QString& workspaceEndpointId, boo
         }
 
         if (!alreadyOnTarget) {
-            upload.itemsByFileId[fileId].append(media);
+            upload.fileIds.insert(fileId);
         }
     }
 
@@ -249,9 +249,8 @@ void UploadEventHandler::updateIndividualProgressFromServer(int globalPercent, i
 
     for (const QString& fileId : session->upload.currentUploadFileOrder) {
         if (session->upload.serverCompletedFileIds.contains(fileId)) continue;
-        const QList<CanvasMedia*> items = session->upload.itemsByFileId.value(fileId);
-        for (CanvasMedia* item : items) {
-            if (item) item->setUploadUploaded();
+        for (CanvasMedia* item : session->canvas->enumerateMediaItems()) {
+            if (item && item->fileId() == fileId) item->setUploadUploaded();
         }
         session->upload.serverCompletedFileIds.insert(fileId);
         have++;

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QObject>
+#include <QAbstractItemModel>
 #include "backend/domain/scene/SceneTimeline.h"
 #include <QPointer>
 #include <QVariantList>
@@ -9,6 +10,7 @@
 class CanvasDocument;
 class CanvasMedia;
 class QuickCanvasHost;
+class TimelineClipModel;
 namespace SceneTimeline { struct MediaTrack; }
 
 // Authoring commands and immutable QML projections. The host owns transport;
@@ -32,11 +34,12 @@ class TimelineController final : public QObject
     Q_PROPERTY(QVariantList keyframes READ keyframes NOTIFY tracksChanged)
     Q_PROPERTY(QVariantList otherKeyframes READ otherKeyframes NOTIFY tracksChanged)
     Q_PROPERTY(QVariantList clips READ clips NOTIFY tracksChanged)
-    Q_PROPERTY(QVariantList otherClips READ otherClips NOTIFY tracksChanged)
+    Q_PROPERTY(QAbstractItemModel* clipModel READ clipModel CONSTANT)
+    Q_PROPERTY(int trackCount READ trackCount NOTIFY changed)
+    Q_PROPERTY(int activeTrackIndex READ activeTrackIndex NOTIFY changed)
     Q_PROPERTY(QString selectedKeyframeId READ selectedKeyframeId NOTIFY changed)
     Q_PROPERTY(QString selectedClipId READ selectedClipId NOTIFY changed)
     Q_PROPERTY(bool canCapture READ canCapture NOTIFY transportChanged)
-    Q_PROPERTY(bool canInsertClip READ canInsertClip NOTIFY transportChanged)
     Q_PROPERTY(bool canSplit READ canSplit NOTIFY transportChanged)
     Q_PROPERTY(bool canPaste READ canPaste NOTIFY transportChanged)
     Q_PROPERTY(bool hasKeyframeAtPosition READ hasKeyframeAtPosition NOTIFY transportChanged)
@@ -70,12 +73,13 @@ public:
     QVariantList keyframes() const;
     QVariantList otherKeyframes() const;
     QVariantList clips() const;
-    QVariantList otherClips() const;
+    QAbstractItemModel* clipModel() const;
+    int trackCount() const;
+    int activeTrackIndex() const;
     QString selectedKeyframeId() const { return m_keyframeId; }
     QString selectedClipId() const { return m_clipId; }
     bool canCapture() const;
     bool canSplit() const;
-    bool canInsertClip() const;
     bool canPaste() const;
     bool hasKeyframeAtPosition() const;
     QString errorText() const { return m_error; }
@@ -95,10 +99,10 @@ public:
     Q_INVOKABLE void selectKeyframe(const QString& id);
     Q_INVOKABLE void moveKeyframe(const QString& id, qreal timeMs);
     Q_INVOKABLE void selectClip(const QString& id);
-    Q_INVOKABLE void moveClip(const QString& id, qreal startMs);
+    Q_INVOKABLE void setActiveTrackIndex(int index);
+    Q_INVOKABLE void moveClip(const QString& id, qreal startMs, int trackIndex = -1);
     Q_INVOKABLE void trimClip(const QString& id, qreal startMs, qreal endMs);
     Q_INVOKABLE void splitClip();
-    Q_INVOKABLE void insertClip();
     Q_INVOKABLE void deleteSelected();
     Q_INVOKABLE void copySelected();
     Q_INVOKABLE void paste();
@@ -131,5 +135,6 @@ private:
     QVariantList m_publishedKeys;
     QVariantList m_publishedOtherKeys;
     QVariantList m_publishedClips;
-    QVariantList m_publishedOtherClips;
+    TimelineClipModel* m_clipModel = nullptr;
+    int m_activeTrackIndex = -1;
 };

@@ -1,6 +1,6 @@
 # Mouffette Server
 
-Node.js WebSocket coordinator for Mouffette protocol v10.
+Node.js WebSocket coordinator for Mouffette protocol v11.
 
 ## Run and test
 
@@ -16,7 +16,7 @@ override it. Invalid critical values fail startup.
 ## Protocol envelope
 
 The server sends `auth_challenge` first. The client signs
-`mouffette-v10\n<serverBootId>\n<nonce>\n<runtimeId>\n<instanceId>\n<instanceOrdinal>` with its
+`mouffette-v11\n<serverBootId>\n<nonce>\n<runtimeId>\n<instanceId>\n<instanceOrdinal>` with its
 Ed25519 installation key and returns the SPKI public key and signature as
 base64url. The SHA-256 of the SPKI key is the stable `installationId`; the
 server domain-separates and hashes `installationId + instanceId` to derive and
@@ -46,7 +46,7 @@ Every subsequent message uses:
 ```json
 {
   "type": "message_type",
-  "protocolVersion": 10,
+  "protocolVersion": 11,
   "serverBootId": "uuid-from-welcome",
   "messageId": "unique-uuid",
   "connectionGeneration": 1
@@ -64,7 +64,7 @@ An owner opens `remote_session_open` with `targetEndpointId` and a stable
 same endpoint. An existing scene, another controller, or local UI activity does
 not make the endpoint unavailable for another session.
 
-The v10 welcome uses timing policy version 4:
+The v11 welcome uses timing policy version 4:
 
 - `heartbeatIntervalMs`: 750 ms. Two missed intervals detect silent loss;
   `transportSuspectAfterMs` and `leaseTimeoutMs` both equal 1,500 ms (derived).
@@ -145,7 +145,7 @@ a bounded 4,096-entry presence cache. Pair cleanup and scene ownership remain
 private and do not label an endpoint Busy. Offline entries retain the entire
 authenticated identity tuple; `lastSeenAt` uses epoch milliseconds.
 
-Protocol v10 is a coordinated client/server cut-over. Older versions receive an
+Protocol v11 is a coordinated client/server cut-over. Older versions receive an
 explicit protocol-version rejection; the server does not silently translate
 lease or cleanup semantics. Run `npm test` before deploying both artifacts.
 
@@ -214,12 +214,11 @@ The grid uses integer indices for keys (`slot`), clips (`startSlot`,
 `sourceStartSlot`, `durationSlots`) and Stop. Cadence is an integer from 1 to 240
 and is persisted per project. Video source coverage rounds up; its final partial
 slot holds the last frame silently. Snapshots retain continuous milliseconds.
-Projects v6 migrate to v7, adding full-scene clips to images/text and preserving video clips.
-Projects v1–5 reset to v7 without resetting other profile components.
+Projects v1–7 reset to v8 without resetting other profile components or source files.
 
-Render schema 5 stores a scene `timeline` (`maxDurationMs`, `slotsPerSecond`, `stopSlot`) and,
+Render schema 6 stores a scene `timeline` (`maxDurationMs`, `slotsPerSecond`, `stopSlot`) and,
 for each media, a complete intrinsic element state plus a `timeline` containing
-full-state `keyframes`, non-overlapping presence `clips`, and `clipsInitialized`.
+full-state `keyframes`, one presence `clip`, and `trackIndex`.
 Slot indices are integers; source duration and the configured maximum use milliseconds.
 The maximum supported duration is seven days.
 Each project normally uses the client's configured three-minute maximum.
@@ -231,7 +230,7 @@ hold the first/last image silently. The actual `durationMs` bounds moving playba
 not clip length. The receiver validates actual loaded media before preparation. Initially offscreen media still
 participate in preparation because their keyframes can move them onto a screen.
 
-Schemas 2–4 and automatic display/play/mute delays, fades, repeat and source-range
+Schemas 2–5 and automatic display/play/mute delays, fades, repeat and source-range
 markers are rejected. State snapshots now contain only
 `{ "timelinePositionMs": <finite milliseconds> }`, sampled at the enclosing
 `sampledServerMonotonicMs`. The receiver advances its immutable timeline from
@@ -254,7 +253,7 @@ States are `analysing`, `queued`, `decoding`, `ready`, `waiting_for_memory`,
 both endpoints must acknowledge the `media_memory_ready` checklist stage. A new
 report that invalidates a preparing or running scene stops that scene. Transfers
 and memory reports remain independent so completion does not wait for RAM space.
-Clients using a protocol version other than 10 are rejected; deploy the client
+Clients using a protocol version other than 11 are rejected; deploy the client
 and server version together.
 
 Targets publish full `remote_session_snapshot` updates on change and refresh
@@ -291,3 +290,9 @@ configured history limits and empty live registries after every cleanup. Its
 separate cache exercise uses real files across 128 cleanup cycles, four restarts
 and injected deletion failures, then verifies empty work/data directories and
 at most eight durable proofs for its eight reused cache scopes.
+
+### Timeline render schema 6
+
+Protocol 11 scenes use render schema 6. Each media instance has `timeline: {trackIndex, clip, keyframes}` with exactly one clip and absolute keyframe slots. Track indices are integers from 0 through 9999; gaps are retained. Clips on the same track must not overlap (touching endpoints are allowed), and all instance/clip/keyframe identifiers are distinct across the scene (source identifiers remain shared). Different tracks may overlap in time. Track 0 renders above later tracks; `z` is no longer an element or keyframe field. Scene limits remain 512 instances and 4096 spans.
+
+Deploy server and clients together. Protocol 10 clients fail the existing compatibility check; previous saved project schemas reset to schema 8 independently of network negotiation.

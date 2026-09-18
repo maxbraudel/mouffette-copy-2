@@ -2,18 +2,12 @@
 
 #include "backend/domain/scene/SceneTimeline.h"
 
-// Splitting an uninterrupted source range must not flush the decoder/audio
-// queue when the playhead crosses the new editing boundary.
-inline bool contiguousTimelineClips(const SceneTimeline::MediaTrack& track,
-                                   const QString& previousId, const QString& nextId)
+// Each instance owns its decoder. Prepare a future clip at its source in-point
+// so its first visible frame is already decoded before the timeline reaches it.
+inline qint64 timelineVideoPreparationSourceMs(const SceneTimeline::MediaTrack& track,
+                                               qreal positionMs, qint64 durationMs,
+                                               const SceneTimeline::SceneSettings& settings)
 {
-    if (previousId.isEmpty() || nextId.isEmpty()) return false;
-    const SceneTimeline::Clip* previous = nullptr;
-    const SceneTimeline::Clip* next = nullptr;
-    for (const auto& clip : track.clips) {
-        if (clip.id == previousId) previous = &clip;
-        if (clip.id == nextId) next = &clip;
-    }
-    return previous && next && previous->sourceStartSlot && next->sourceStartSlot && previous->endSlot() == next->startSlot
-        && previous->sourceEndSlot() == *next->sourceStartSlot;
+    const qreal firstMs = settings.timeMs(track.clip.startSlot);
+    return SceneTimeline::evaluateVideo(track, qMax(positionMs, firstMs), durationMs, settings).sourceTimeMs;
 }

@@ -1221,7 +1221,7 @@ if(APPLE OR WIN32)
                 seekBeforeFirstPlay seekAfterPauseAndSourceReload)
             set_tests_properties(VideoPlaybackDarwinSeek PROPERTIES
                 RUN_SERIAL TRUE
-                ENVIRONMENT "QT_MEDIA_BACKEND=darwin;QT_QUICK_CONTROLS_STYLE=Basic")
+                ENVIRONMENT "QT_MEDIA_BACKEND=darwin;QT_QPA_PLATFORM=cocoa;QT_QUICK_CONTROLS_STYLE=Basic")
         endif()
         get_property(_tests DIRECTORY PROPERTY TESTS)
         set_property(TEST ${_tests} APPEND PROPERTY ENVIRONMENT_MODIFICATION

@@ -23,8 +23,6 @@ Rectangle {
 
     // Overlay action signals (forwarded to C++)
     signal overlayVisibilityToggleRequested(string mediaId, bool visible)
-    signal overlayBringForwardRequested(string mediaId)
-    signal overlayBringBackwardRequested(string mediaId)
     signal overlayDeleteRequested(string mediaId)
     signal overlayMuteToggleRequested(string mediaId)
     signal overlayVolumeChangeRequested(string mediaId, real value)
@@ -351,8 +349,6 @@ Rectangle {
     onTextLiveUpdateRequested: (mediaId, text) => canvasController?.handleTextLiveUpdateRequested(mediaId, text)
     onTextCreateRequested: (x, y) => canvasController?.handleTextCreateRequested(x, y)
     onOverlayVisibilityToggleRequested: (mediaId, visible) => canvasController?.handleOverlayVisibilityToggle(mediaId, visible)
-    onOverlayBringForwardRequested: mediaId => canvasController?.handleOverlayBringForward(mediaId)
-    onOverlayBringBackwardRequested: mediaId => canvasController?.handleOverlayBringBackward(mediaId)
     onOverlayDeleteRequested: mediaId => canvasController?.handleOverlayDelete(mediaId)
     onOverlayMuteToggleRequested: mediaId => canvasController?.handleOverlayMuteToggle(mediaId)
     onOverlayVolumeChangeRequested: (mediaId, value) => canvasController?.handleOverlayVolumeChange(mediaId, value)
@@ -1812,8 +1808,6 @@ Rectangle {
                         y: overlayDelegate.screenTop      - panelHeight - 8
 
                         onVisibilityToggleRequested: function(m, v) { root.overlayVisibilityToggleRequested(m, v) }
-                        onBringForwardRequested:     function(m)    { root.overlayBringForwardRequested(m) }
-                        onBringBackwardRequested:    function(m)    { root.overlayBringBackwardRequested(m) }
                         onDeleteRequested:           function(m)    { root.overlayDeleteRequested(m) }
                         onOverlayHoveredChanged:     function(h)    { /* input handled by overlay's own MouseArea */ }
                     }

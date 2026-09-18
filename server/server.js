@@ -4,7 +4,7 @@ const crypto = require('node:crypto');
 const { loadServerConfig } = require('./config');
 const { monotonicNow } = require('./suspend_inclusive_clock');
 const { PROTOCOL_VERSION, createChallenge, verifyAuthResponse } = require('./device_auth');
-const { MAXIMUM_DURATION_MS, isCanonicalElement, isCanonicalTimelineSettings, isCanonicalMediaTrack, isCanonicalTimelineSnapshot } = require('./scene_timeline_validation');
+const { MAXIMUM_DURATION_MS, isCanonicalElement, isCanonicalTimelineSettings, isCanonicalMediaTrack, isCanonicalSceneTracks, isCanonicalTimelineSnapshot } = require('./scene_timeline_validation');
 const { RemoteSessionRegistry, TERMINAL_PHASES } = require('./remote_session_registry');
 const { ProtocolMetrics } = require('./protocol_metrics');
 const { isAllowedMediaExtension } = require('./media_format_contract');
@@ -166,7 +166,7 @@ function isCanonicalSceneMedia(item, screenIds, settings) {
 function isCanonicalScene(scene, maximumScreens, maximumMedia) {
     if (!isPlainObject(scene)
         || !hasOnlyKeys(scene, ['renderSchemaVersion', 'timeline', 'screens', 'media'])
-        || scene.renderSchemaVersion !== 5
+        || scene.renderSchemaVersion !== 6
         || !isCanonicalTimelineSettings(scene.timeline)
         || !Array.isArray(scene.screens) || scene.screens.length < 1
         || scene.screens.length > maximumScreens
@@ -185,11 +185,11 @@ function isCanonicalScene(scene, maximumScreens, maximumMedia) {
         spanCount += item.spans.length;
         if (spanCount > 4096) return false;
     }
-    return true;
+    return isCanonicalSceneTracks(scene.media);
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// MOUFFETTE SERVER - PROTOCOL V10 IDENTITY BOUNDARY
+// MOUFFETTE SERVER - PROTOCOL V11 IDENTITY BOUNDARY
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 //
 // Protocol v8 authenticates one installation key, derives one addressable
@@ -1363,21 +1363,21 @@ class MouffetteServer {
             return;
         }
         if (!this.isValidOpaqueId(message.type)) {
-            this.sendError(clientId, 'Invalid protocol v10 message type',
+            this.sendError(clientId, 'Invalid protocol v11 message type',
                 'invalid_message_type');
             return;
         }
         if (REMOVED_MESSAGE_TYPES.has(message.type)
             || (typeof message.type === 'string' && message.type.startsWith('remote_scene_'))) {
             this.sendError(clientId,
-                `Obsolete message type is not supported by protocol v10: ${message.type}`,
+                `Obsolete message type is not supported by protocol v11: ${message.type}`,
                 'removed_message_type');
             return;
         }
         const removedField = findRemovedWireField(message);
         if (removedField) {
             this.sendError(clientId,
-                `Obsolete field is not supported by protocol v10: ${removedField}`,
+                `Obsolete field is not supported by protocol v11: ${removedField}`,
                 'removed_protocol_field');
             return;
         }
@@ -1557,7 +1557,7 @@ class MouffetteServer {
                 this.handleRemoteSessionTeardownAck(clientId, message);
                 break;
             default:
-                this.sendError(clientId, 'Unknown protocol v10 message type', 'unknown_message_type');
+                this.sendError(clientId, 'Unknown protocol v11 message type', 'unknown_message_type');
         }
     }
 

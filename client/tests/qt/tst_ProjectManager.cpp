@@ -282,7 +282,7 @@ private slots:
         source.sourceIdentity = QStringLiteral("size:mtime");
         source.mediaType = QStringLiteral("image");
         source.pendingImport = true;
-        QJsonObject canvas{{QStringLiteral("renderSchemaVersion"), 5},
+        QJsonObject canvas{{QStringLiteral("renderSchemaVersion"), 6},
             {QStringLiteral("media"), QJsonArray{QJsonObject{
                 {QStringLiteral("mediaId"), source.mediaId}, {QStringLiteral("type"), source.mediaType},
                 {QStringLiteral("fileId"), QString()}, {QStringLiteral("baseWidth"), 640},

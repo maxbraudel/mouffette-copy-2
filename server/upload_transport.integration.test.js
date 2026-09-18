@@ -48,7 +48,7 @@ function trackedSocket(url) {
 }
 
 function assertEnvelope(message, context) {
-    assert.equal(message.protocolVersion, 10);
+    assert.equal(message.protocolVersion, 11);
     assert.equal(message.serverBootId, context.serverBootId);
     assert.equal(message.connectionGeneration, context.connectionGeneration);
     assert.match(message.messageId,
@@ -77,7 +77,7 @@ async function connectDevice(url, machineName) {
     const endpointId = endpointIdForInstallation(installationId, instanceId);
     peer.ws.send(JSON.stringify({
         type: 'auth_response',
-        protocolVersion: 10,
+        protocolVersion: 11,
         serverBootId: challenge.serverBootId,
         messageId: crypto.randomUUID(),
         runtimeId,
@@ -98,7 +98,7 @@ async function connectDevice(url, machineName) {
     };
     peer.send = (type, body = {}) => peer.ws.send(JSON.stringify({
         type,
-        protocolVersion: 10,
+        protocolVersion: 11,
         serverBootId: peer.context.serverBootId,
         connectionGeneration: peer.context.connectionGeneration,
         messageId: crypto.randomUUID(),
@@ -178,7 +178,7 @@ async function connectDevice(url, machineName) {
             mediaIds: ['media-integration-1'],
         };
         const uploadEnvelope = body => ({
-            protocolVersion: 10,
+            protocolVersion: 11,
             serverBootId: owner.context.serverBootId,
             messageId: crypto.randomUUID(),
             connectionGeneration: owner.context.connectionGeneration,
@@ -301,7 +301,7 @@ async function connectDevice(url, machineName) {
             mediaIds: asset.mediaIds, sha256, size: asset.size,
         }];
         const scene = {
-            renderSchemaVersion: 5,
+            renderSchemaVersion: 6,
             timeline: { maxDurationMs: 180000, stopSlot: -1, slotsPerSecond: 30 },
             screens: [{ id: 1, x: 0, y: 0, width: 1920, height: 1080,
                 primary: true }],
@@ -309,9 +309,10 @@ async function connectDevice(url, machineName) {
                 mediaId: asset.mediaIds[0], assetId: asset.assetId,
                 fileId: sha256, fileName: asset.name, type: 'image',
                 x: 0, y: 0, width: 1920, height: 1080,
-                baseWidth: 1920, baseHeight: 1080, visible: true, z: 1,
+                baseWidth: 1920, baseHeight: 1080, visible: true,
                 scale: 1, contentOpacity: 1, opacityOverrideEnabled: false, rawOpacity: 1,
-                timeline: { keyframes: [], clips: [], clipsInitialized: false },
+                timeline: { keyframes: [], trackIndex: 0,
+            clip: { id: 'clip-media-1', startSlot: 0, sourceStartSlot: null, durationSlots: 5400 } },
                 spans: [{
                     screenId: 1, normX: 0, normY: 0, normW: 1, normH: 1,
                     spanDestNormX: 0, spanDestNormY: 0,
@@ -378,7 +379,7 @@ async function connectDevice(url, machineName) {
             const output = peer.ws === owner.ws ? owner : target;
             // A representative post-auth message proves centralized envelopes.
             const clientList = await output.next(message => message.type === 'client_list');
-            assert.equal(clientList.protocolVersion, 10);
+            assert.equal(clientList.protocolVersion, 11);
             assert.equal(clientList.serverBootId, server.serverBootId);
             assert.equal(clientList.connectionGeneration,
                 output.context.connectionGeneration);
@@ -392,7 +393,7 @@ async function connectDevice(url, machineName) {
         await new Promise(resolve => server.wss.close(resolve));
     }
 })().then(() => {
-    console.log('upload transport v10 integration tests passed');
+    console.log('upload transport v11 integration tests passed');
 }).catch(error => {
     console.error(error);
     process.exitCode = 1;

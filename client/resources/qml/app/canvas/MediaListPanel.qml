@@ -12,7 +12,6 @@ Rectangle {
     readonly property var mediaModel: session ? session.mediaModel : null
     readonly property int mediaCount: session ? session.mediaCount : 0
     readonly property int actionAreaHeight: (Theme.overlayButtonHeight + 1) * 2
-    readonly property bool sceneLocked: session && session.remoteSceneActionTone !== OverlayActionButton.Normal
     property real mediaNaturalWidth: 0
     property real maximumHeight: parent ? Math.max(0, parent.height - 32) : implicitHeight
 
@@ -85,11 +84,10 @@ Rectangle {
                     onItemAdded: Qt.callLater(root.measureMediaWidth)
                     onItemRemoved: Qt.callLater(root.measureMediaWidth)
 
-                    delegate: ItemDelegate {
+                    delegate: Control {
                         id: row
                         objectName: "mediaRow_" + index
                         required property int index
-                        required property string mediaId
                         required property string displayName
                         required property string mediaType
                         required property string uploadState
@@ -100,7 +98,6 @@ Rectangle {
                         readonly property bool showProgress: uploadState === "uploading" || awaitingRemoteCache
                         readonly property string statusText: uploadedAndCached ? "Uploaded and Cached"
                             : uploadState === "uploaded" ? "Uploaded" : "Not uploaded"
-                        readonly property bool selected: !!modelData.selected
                         readonly property string dimensions: Math.round(modelData.width || 0)
                             + " x " + Math.round(modelData.height || 0) + " px"
                         readonly property string detailsText: dimensions
@@ -114,18 +111,14 @@ Rectangle {
                         rightPadding: 20
                         topPadding: 8 + (index > 0 ? 1 : 0)
                         bottomPadding: 8
-                        hoverEnabled: true
+                        hoverEnabled: false
+                        focusPolicy: Qt.NoFocus
                         onImplicitWidthChanged: Qt.callLater(root.measureMediaWidth)
-                        onClicked: {
-                            if (!root.sceneLocked) root.session.selectMedia(mediaId, false)
-                        }
                         Accessible.name: displayName
                         Accessible.description: (textMedia ? "" : (uploadState === "uploading" ? "Uploading"
                             : awaitingRemoteCache ? "Uploaded, preparing remote cache" : statusText) + ", ") + detailsText
                         background: Rectangle {
-                            color: root.sceneLocked ? Theme.overlayDisabledBackground
-                                 : row.selected ? Theme.overlaySelected
-                                 : row.hovered ? Theme.overlayHover : "transparent"
+                            color: "transparent"
                         }
                         Rectangle {
                             width: parent.width
@@ -267,7 +260,7 @@ Rectangle {
                 text: root.session ? root.session.uploadActionText : "Upload"
                 textVariants: ["Upload", "Unload", "Preparing…", "Uploading…",
                                "Finalizing…", "Cancelling…", "Removing…"]
-                // At most one uploaded file per media occurrence. Reserve all
+                // Reserve upload counters from the number of unique sources. Keep all
                 // counter digits before upload starts, in its progress font.
                 monospaceTextVariants: {
                     var digits = "9".repeat(String(Math.max(1, root.mediaCount)).length)

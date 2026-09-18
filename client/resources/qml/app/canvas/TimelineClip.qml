@@ -10,7 +10,15 @@ Rectangle {
     required property real trackHeight
     property bool interactive: true
     objectName: interactive ? "timelineClip" : "otherMediaClip"
+    readonly property bool isClipDrag: true
     property bool dragging: false
+    property int initialTrack: 0
+    property int previewTrack: 0
+    property real pressContentX: 0
+    property real pressContentY: 0
+    property real pointerPanelX: 0
+    property real pointerPanelY: 0
+    readonly property int shownTrack: dragging ? previewTrack : modelData.trackIndex
     property int editEdge: 0
     property real previewStart: 0
     property real previewEnd: 0
@@ -34,35 +42,46 @@ Rectangle {
                 panel.snapTime(rawMs, modelData.id, 0)))
         }
     }
+    function refreshFromPointer() {
+        var point = timeContent.mapFromItem(panel, pointerPanelX, pointerPanelY)
+        rawMs = (editEdge > 0 ? initialEnd : initialStart) + (point.x - pressContentX) / panel.pixelsPerMs
+        previewTrack = editEdge === 0 ? Math.max(0, Math.min(panel.timeline.trackCount - 1,
+            initialTrack + Math.round((point.y - pressContentY) / trackHeight))) : initialTrack
+        refreshPreview()
+    }
     function beginEdit(edge, mouse, area) {
         panel.focusTrack(); panel.shiftHeld = !!(mouse.modifiers & Qt.ShiftModifier)
         panel.timeline.selectClip(modelData.id)
+        initialTrack = modelData.trackIndex; previewTrack = initialTrack
         initialStart = modelData.startMs; initialEnd = modelData.startMs + modelData.durationMs
         previewStart = initialStart; previewEnd = initialEnd
         editEdge = edge; rawMs = edge > 0 ? initialEnd : initialStart
-        area.pressX = area.mapToItem(timeContent, mouse.x, mouse.y).x
+        var point = area.mapToItem(timeContent, mouse.x, mouse.y)
+        pressContentX = point.x; pressContentY = point.y
+        var panelPoint = area.mapToItem(panel, mouse.x, mouse.y)
+        pointerPanelX = panelPoint.x; pointerPanelY = panelPoint.y
         dragging = true; panel.activeDrag = clipItem
     }
     function updateEdit(mouse, area) {
         panel.shiftHeld = !!(mouse.modifiers & Qt.ShiftModifier)
-        rawMs = (editEdge > 0 ? initialEnd : initialStart)
-            + (area.mapToItem(timeContent, mouse.x, mouse.y).x - area.pressX) / panel.pixelsPerMs
-        refreshPreview()
+        var point = area.mapToItem(panel, mouse.x, mouse.y)
+        pointerPanelX = point.x; pointerPanelY = point.y
+        refreshFromPointer()
     }
     function finishEdit() {
-        var id = modelData.id; var start = panel.clampTime(previewStart); var end = panel.clampTime(previewEnd); var edge = editEdge
+        var id = modelData.id; var start = panel.clampTime(previewStart); var end = panel.clampTime(previewEnd); var edge = editEdge; var track = previewTrack
         dragging = false; panel.endDrag()
-        if (start === initialStart && end === initialEnd) return
-        if (edge === 0) panel.timeline.moveClip(id, start)
+        if (start === initialStart && end === initialEnd && track === initialTrack) return
+        if (edge === 0) panel.timeline.moveClip(id, start, track)
         else panel.timeline.trimClip(id, start, end)
     }
     x: 12 + shownStart * panel.pixelsPerMs
-    y: 17
+    y: shownTrack * trackHeight + 17
     z: dragging ? 3 : interactive && panel.timeline && panel.timeline.selectedClipId === modelData.id ? 2 : 1
     width: Math.max(2, (shownEnd - shownStart) * panel.pixelsPerMs)
     height: Math.max(12, trackHeight - 22)
     radius: 3
-    color: interactive && panel.timeline && panel.timeline.selectedClipId === modelData.id
+    color: interactive && modelData.selected
         ? Theme.controlSelectionBackground : interactive ? Theme.overlayHover : Theme.overlayPressed
     border.width: 1
     border.color: interactive ? Theme.overlayText : Theme.overlayBorder
@@ -91,7 +110,7 @@ Rectangle {
     Text {
         anchors.fill: parent; anchors.margins: 8
         visible: clipItem.interactive
-        text: panel.formatTime(clipItem.shownStart) + " → " + panel.formatTime(clipItem.shownEnd)
+        text: modelData.mediaName + "  ·  " + panel.formatTime(clipItem.shownStart) + " → " + panel.formatTime(clipItem.shownEnd)
         font.pixelSize: 10; color: Theme.overlayText; verticalAlignment: Text.AlignVCenter; elide: Text.ElideRight
     }
     component HoldRegion: Rectangle {

@@ -39,6 +39,10 @@ public:
     // Associate a media ID with a file ID
     void associateMediaWithFile(const QString& mediaId, const QString& fileId);
     
+    // Defer last-reference cleanup until a complete document edit is committed.
+    void beginMediaAssociationTransaction();
+    void endMediaAssociationTransaction();
+
     // Remove media association (when media is deleted)
     void removeMediaAssociation(const QString& mediaId);
     
@@ -131,6 +135,9 @@ private:
     RemoteFileTracker* m_tracker;
     FileMemoryCache* m_cache;
     
+    int m_mediaAssociationTransactionDepth = 0;
+    QSet<QString> m_deferredUnusedFiles;
+
     // Media associations (not moved to services - app-specific logic)
     QHash<QString, QList<QString>> m_fileIdToMediaIds; // fileId -> [mediaId1, mediaId2, ...]
     QHash<QString, QString> m_mediaIdToFileId;     // mediaId -> fileId

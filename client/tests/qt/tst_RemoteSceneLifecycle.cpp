@@ -2,6 +2,7 @@
 #include "backend/media/MediaResidencyManager.h"
 #include "backend/media/ResidentVideoPlayer.h"
 #include <QApplication>
+#include <QAudioOutput>
 #include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -425,14 +426,14 @@ private slots:
         host->setScreens({ScreenInfo(0, 1920, 1080, 0, 0, true)});
         host->setProjectEditingEnabled(true);
         host->setOverlayActionsEnabled(true);
-        ClientWorkspaceViewModel workspace(QStringLiteral("persistent-workspace"), host.get(),
+        ClientWorkspaceViewModel workspace(targetId, host.get(),
             [] {}, &uploads, [] { return true; }, [] { return false; }, [] { return true; });
         auto* listModel = qobject_cast<QAbstractItemModel*>(workspace.mediaModel());
         QVERIFY(listModel);
-        const auto rowCached = [listModel](const QString& mediaId) {
+        const auto rowCached = [listModel](const QString& sourceId) {
             for (int row = 0; row < listModel->rowCount(); ++row) {
                 const auto value = listModel->data(listModel->index(row, 0), MediaListModel::ModelDataRole).toMap();
-                if (value.value(QStringLiteral("mediaId")).toString() == mediaId)
+                if (value.value(QStringLiteral("sourceId")).toString() == sourceId)
                     return value.value(QStringLiteral("remoteCached")).toBool();
             }
             return false;
@@ -452,7 +453,7 @@ private slots:
             if (uploaded) {
                 files.markFileUploadedToClient(media->fileId(), targetId);
                 media->setUploadUploaded();
-                QVERIFY(!rowCached(media->mediaId())); // Upload alone is not a cache acknowledgement.
+                QVERIFY(!rowCached(media->fileId())); // Upload alone is not a cache acknowledgement.
                 if (memoryReady) {
                     const auto report = [&](const QString& state, int sequence) {
                         send(serverPeer, {{"type", "media_residency"},
@@ -465,19 +466,32 @@ private slots:
                     QSignalSpy rowChanges(listModel, &QAbstractItemModel::dataChanged);
                     report(QStringLiteral("ready"), 1);
                     QTRY_VERIFY_WITH_TIMEOUT(uploads.remoteMediaReady(targetId, media->fileId()), 2000);
-                    QTRY_VERIFY(rowCached(media->mediaId()));
+                    QTRY_VERIFY(rowCached(media->fileId()));
+                    QCOMPARE(listModel->rowCount(),1); // Text never enters the source catalogue.
                     QVERIFY(!rowChanges.isEmpty());
                     rowChanges.clear();
                     report(QStringLiteral("waiting_for_memory"), 2);
-                    QTRY_VERIFY(!rowCached(media->mediaId()));
+                    QTRY_VERIFY(!rowCached(media->fileId()));
                     QVERIFY(!rowChanges.isEmpty());
                     report(QStringLiteral("ready"), 3);
-                    QTRY_VERIFY(rowCached(media->mediaId()));
-                    // A workspace ID and its current transport endpoint are different identities.
+                    QTRY_VERIFY(rowCached(media->fileId()));
+                    // Source readiness belongs to a target endpoint. The same
+                    // source in another workspace has no remote cache evidence.
+                    ClientWorkspaceViewModel otherWorkspace(QStringLiteral("another-peer"), host.get(),
+                        [] {}, &uploads, [] { return true; }, [] { return false; }, [] { return true; });
+                    auto* otherList = qobject_cast<QAbstractItemModel*>(otherWorkspace.mediaModel());
+                    QVERIFY(otherList);
+                    QCOMPARE(otherList->rowCount(),1);
+                    const auto otherRow = otherList->data(otherList->index(0,0), MediaListModel::ModelDataRole).toMap();
+                    QCOMPARE(otherRow.value("sourceId").toString(),media->fileId());
+                    QCOMPARE(otherRow.value("uploadState").toString(),QStringLiteral("not_uploaded"));
+                    QVERIFY(!otherRow.value("remoteCached").toBool());
                     host->setRemoteSceneTarget(QStringLiteral("another-peer"), {});
-                    QVERIFY(!rowCached(media->mediaId()));
+                    QVERIFY(!host->remoteMediaCached(media->mediaId()));
+                    QVERIFY(rowCached(media->fileId())); // Its owning workspace is unchanged.
                     host->setRemoteSceneTarget(targetId, QStringLiteral("Client B"));
-                    QVERIFY(rowCached(media->mediaId()));
+                    QVERIFY(host->remoteMediaCached(media->mediaId()));
+                    QVERIFY(rowCached(media->fileId()));
                 }
             }
             if (missingSource) {
@@ -1078,9 +1092,10 @@ private slots:
                 entry.insert(QStringLiteral("assetId"), entry.value(QStringLiteral("fileId")));
             if (entry.value(QStringLiteral("type")) == QLatin1String("video")) {
                 SceneTimeline::MediaTrack track;
-                QVERIFY(SceneTimeline::insertClip(track,{SceneTimeline::newId(),0,SceneTimeline::SceneSettings{}.nearestSlot(startMs),
+                QVERIFY(SceneTimeline::MediaTrack::fromJson(entry.value("timeline").toObject(), &track, 5400));
+                track.clip = {SceneTimeline::newId(),0,SceneTimeline::SceneSettings{}.nearestSlot(startMs),
                     SceneTimeline::SceneSettings{}.sourceSlots(entry.value(QStringLiteral("durationMs")).toInteger())
-                        -SceneTimeline::SceneSettings{}.nearestSlot(startMs)},5400));
+                        -SceneTimeline::SceneSettings{}.nearestSlot(startMs)};
                 entry.insert(QStringLiteral("timeline"),track.toJson());
                 QCOMPARE(entry.value(QStringLiteral("spans")).toArray().isEmpty(), offscreen);
             }
@@ -1257,7 +1272,7 @@ private slots:
         QVERIFY(host);host->setProjectEditingEnabled(true);
         auto* media=host->document()->addText({40,60},"Scene title");
         auto a=media->authorElementState(),b=a;a.opacity=0;b.opacity=1;
-        SceneTimeline::MediaTrack track;
+        SceneTimeline::MediaTrack track = media->timelineTrack();
         SceneTimeline::upsertKeyframe(track,{"a",0,SceneTimeline::materialize(a)},180000);
         SceneTimeline::upsertKeyframe(track,{"b",30,SceneTimeline::materialize(b)},180000);
         media->setTimelineTrack(track);const auto saved=host->serializeProjectState();
@@ -1267,6 +1282,36 @@ private slots:
         const auto position=host->timelinePositionMs();const auto displayed=media->displayedElementState().toJson();
         QTest::qWait(80);QCOMPARE(host->timelinePositionMs(),position);QCOMPARE(media->displayedElementState().toJson(),displayed);
         QCOMPARE(host->serializeProjectState(),saved);
+    }
+
+    void futureClipPreparesItsSourceFrameBeforeLocalPlayback()
+    {
+        std::unique_ptr<QuickCanvasHost> host(QuickCanvasHost::create());
+        QVERIFY(host);
+        host->setProjectEditingEnabled(true);
+        auto* media = host->document()->addPreparedFile(QString::fromUtf8(TEST_VIDEO_FILE),
+                                                       QSize(160,90), true, {});
+        QVERIFY(media);
+        QTRY_VERIFY_WITH_TIMEOUT(media->residencyReady(),5000);
+        auto track = media->timelineTrack();
+        track.clip.startSlot = 30;
+        track.clip.sourceStartSlot = 60;
+        track.clip.durationSlots = 30;
+        media->setTimelineTrack(track);
+        host->timelineSeek(0);
+        QTRY_VERIFY_WITH_TIMEOUT(media->player()->preparedAt(2000),5000);
+        QVERIFY(!media->clipActive());
+        const auto frame = media->player()->preparedFrame(2000);
+        QVERIFY(frame.isValid());
+        QVERIFY(frame.startTime()/1000 <= 2000);
+        QVERIFY(frame.endTime() > 2000000);
+        host->timelinePlay();
+        QTRY_VERIFY_WITH_TIMEOUT(host->timelinePlaying(),5000);
+        QVERIFY(media->player()->preparedAt(2000));
+        QCOMPARE(media->player()->position(),2000);
+        QVERIFY(!media->player()->isPlaying());
+        QVERIFY(media->player()->audioOutput()->isMuted());
+        host->timelinePause();
     }
 
     void testSceneAppliesDisplayAndHideFades_data()
@@ -1324,7 +1369,7 @@ private slots:
         QVERIFY(host);host->setProjectEditingEnabled(true);
         auto* media=host->document()->addText({},"Restart");
         auto a=media->authorElementState(),b=a;a.position={0,0};b.position={100,0};
-        SceneTimeline::MediaTrack track;
+        SceneTimeline::MediaTrack track = media->timelineTrack();
         SceneTimeline::upsertKeyframe(track,{"a",0,a},180000);SceneTimeline::upsertKeyframe(track,{"b",30,b},180000);
         media->setTimelineTrack(track);
         for(int run=0;run<3;++run) {
@@ -1341,7 +1386,7 @@ private slots:
     {
         CanvasDocument document;auto* media=document.addText({},"Persistent");
         auto a=media->authorElementState(),b=a;b.position={700,100};b.uppercase=true;
-        SceneTimeline::MediaTrack track;
+        SceneTimeline::MediaTrack track = media->timelineTrack();
         SceneTimeline::upsertKeyframe(track,{"a",3,a},180000);SceneTimeline::upsertKeyframe(track,{"b",33,b},180000);
         media->setTimelineTrack(track);const auto saved=document.serializeProjectState();
         QSignalSpy writes(&document,&CanvasDocument::documentChanged);
@@ -1349,7 +1394,7 @@ private slots:
         media->beginElementEdit();media->setUppercase(true);QVERIFY(media->hasElementDraft());
         QCOMPARE(document.serializeProjectState(),saved);QCOMPARE(writes.count(),0);
         document.setTimelinePosition(600);QVERIFY(!media->hasElementDraft());QVERIFY(!media->uppercase());
-        QCOMPARE(document.serializeSceneState().value("renderSchemaVersion").toInt(),5);
+        QCOMPARE(document.serializeSceneState().value("renderSchemaVersion").toInt(),6);
         const auto serialized=document.serializeSceneState().value("media").toArray()[0].toObject();
         QVERIFY(!serialized.contains("autoDisplay"));QVERIFY(!serialized.contains("projectMediaSettings"));
     }

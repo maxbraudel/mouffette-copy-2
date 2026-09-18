@@ -70,9 +70,9 @@ QJsonObject textScene()
     media.insert("fileId", "");
     media.insert("fileName", "");
     SceneTimeline::MediaTrack track;
-    SceneTimeline::insertClip(track,{"full",0,std::nullopt,5400},5400);
+    track.clip = {"full",0,std::nullopt,5400};
     media.insert("timeline", track.toJson());
-    return {{"renderSchemaVersion", 5}, {"sceneInstanceId", "lifecycle-test-run"},
+    return {{"renderSchemaVersion", 6}, {"sceneInstanceId", "lifecycle-test-run"},
         {"timeline", SceneTimeline::SceneSettings{}.toJson()},
         {"screens", QJsonArray{QJsonObject{{"id",0},{"x",0},{"y",0},{"width",1920},{"height",1080},{"primary",true}}}},
         {"media", QJsonArray{media}}};
@@ -99,11 +99,10 @@ QJsonObject videoScene(const QString& fileId)
     media.insert("assetId", fileId);
     media.insert("fileName", "video-1080p.mp4");
     SceneTimeline::MediaTrack track;
-    track.clipsInitialized = true;
     const auto asset = MediaResidencyManager::instance().asset(UploadManager::residencyOwnerId({},0,fileId));
     const qint64 duration = asset ? (asset->durationUs + 999) / 1000 : 4000;
     media.insert("durationMs", duration);
-    track.clips.append({"clip-1",0,0,std::min(SceneTimeline::SceneSettings{}.sourceSlots(duration),qint64(5400))});
+    track.clip = {"clip-1",0,0,std::min(SceneTimeline::SceneSettings{}.sourceSlots(duration),qint64(5400))};
     media.insert("timeline", track.toJson());
     scene.insert("sceneInstanceId", "video-lifecycle-test-run");
     scene.insert("media", QJsonArray{media});
@@ -148,6 +147,75 @@ private slots:
             Q_ARG(QString, QStringLiteral("schema-test-owner")),
             Q_ARG(QJsonObject, incomplete)));
         QVERIFY(!findRemoteWindow());
+    }
+
+    void trackOrderingIsIndependentOfPayloadOrder()
+    {
+        RemoteSceneController controller(nullptr, nullptr);
+        auto scene = textScene();
+        auto behind = scene["media"].toArray().first().toObject();
+        auto behindTrack = behind["timeline"].toObject();
+        behindTrack["trackIndex"] = SceneTimeline::MaximumTrackIndex;
+        behind["timeline"] = behindTrack;
+        auto front = behind;
+        front["mediaId"] = "text-front";
+        auto frontTrack = behindTrack;
+        frontTrack["trackIndex"] = 0;
+        auto frontClip = frontTrack["clip"].toObject();
+        frontClip["id"] = "front-clip";
+        frontTrack["clip"] = frontClip;
+        front["timeline"] = frontTrack;
+        scene["media"] = QJsonArray{behind, front};
+        controller.onRemoteSceneStart("track-order-owner", scene);
+        QTRY_VERIFY(controller.m_sceneActivationRequested);
+        QCOMPARE(controller.m_mediaItems.size(), 2);
+        const auto backItem = controller.m_mediaItems.first();
+        const auto frontItem = controller.m_mediaItems.last();
+        QVERIFY(frontItem->z > backItem->z);
+        QVERIFY(backItem->z > 0);
+        controller.evaluateTimelineAt(1000, false);
+        QCOMPARE(frontItem->z, SceneTimeline::trackZ(0));
+        QCOMPARE(backItem->z, SceneTimeline::trackZ(SceneTimeline::MaximumTrackIndex));
+    }
+
+    void invalidTrackScenesAreRejectedBeforeRendererCreation()
+    {
+        for (const QString& invalid : {QStringLiteral("overlap"), QStringLiteral("duplicate-clip"), QStringLiteral("duplicate-key"),
+                QStringLiteral("media-clip"), QStringLiteral("media-key"), QStringLiteral("own-media-clip"),
+                QStringLiteral("track-index"), QStringLiteral("authored-z"), QStringLiteral("old-schema")}) {
+            RemoteSceneController controller(nullptr, nullptr);
+            auto scene = textScene();
+            auto media = scene["media"].toArray().first().toObject();
+            auto second = media;
+            second["mediaId"] = "text-2";
+            auto track = second["timeline"].toObject();
+            auto clip = track["clip"].toObject();
+            clip["id"] = invalid == "duplicate-clip" ? "full" : "second-clip";
+            if (invalid == "media-clip") clip["id"] = "text-1";
+            if (invalid == "own-media-clip") clip["id"] = "text-2";
+            track["clip"] = clip;
+            track["trackIndex"] = invalid == "overlap" ? 0 : 1;
+            if (invalid == "duplicate-key" || invalid == "media-key") {
+                SceneTimeline::ElementState state;
+                QVERIFY(SceneTimeline::ElementState::fromMediaJson(media, &state));
+                const QJsonArray keys{QJsonObject{{"id",invalid == "media-key" ? "text-1" : "shared-key"},
+                                                {"slot",0},{"state",state.toJson()}}};
+                track["keyframes"] = keys;
+                if (invalid == "duplicate-key") {
+                    auto firstTrack = media["timeline"].toObject();
+                    firstTrack["keyframes"] = keys;
+                    media["timeline"] = firstTrack;
+                }
+            }
+            if (invalid == "track-index") track["trackIndex"] = SceneTimeline::MaximumTrackIndex + 1;
+            if (invalid == "authored-z") second["z"] = 100;
+            if (invalid == "old-schema") scene["renderSchemaVersion"] = 5;
+            second["timeline"] = track;
+            scene["media"] = QJsonArray{media, second};
+            controller.onRemoteSceneStart("invalid-track-owner", scene);
+            QVERIFY2(controller.m_mediaItems.isEmpty(), qPrintable(invalid));
+            QVERIFY2(!findRemoteWindow(), qPrintable(invalid));
+        }
     }
 
     void screenHotplugPreservesRunAndMatchesIdentity()
@@ -307,8 +375,7 @@ private slots:
             scene["sceneInstanceId"] = QStringLiteral("delayed-video-run-%1").arg(++attempt);
             auto media = scene["media"].toArray().first().toObject();
             SceneTimeline::MediaTrack track;
-            track.clipsInitialized = true;
-            track.clips = {{"selected-range",attempt == 4 ? 0 : 150,targetSlot,grid.sourceSlots(tail+1)-targetSlot}};
+            track.clip = {"selected-range",attempt == 4 ? 0 : 150,targetSlot,grid.sourceSlots(tail+1)-targetSlot};
             media["timeline"] = track.toJson();
             scene["media"] = QJsonArray{media};
             controller.onRemoteSceneStart(QStringLiteral("delayed-video-owner"), scene);
@@ -316,7 +383,7 @@ private slots:
             const auto item = controller.m_mediaItems.first();
             QVERIFY(item->primedFirstFrame);
             QVERIFY(!item->lastFrameImage.isNull());
-            const qint64 preparedTarget=attempt == 4 ? target : 0;
+            const qint64 preparedTarget=target;
             QCOMPARE(item->player->position(), preparedTarget);
             QCOMPARE(item->timelineRequestedSourceMs, preparedTarget);
             controller.activateScene();
@@ -406,7 +473,7 @@ private slots:
         second.opacity = 1;
         second.uppercase = true;
         SceneTimeline::MediaTrack track;
-        SceneTimeline::insertClip(track,{"full",0,std::nullopt,5400},5400);
+        track.clip = {"full",0,std::nullopt,5400};
         track.keyframes = {{"start",0,first},{"end",30,second}};
         media["timeline"] = track.toJson();
         scene["media"] = QJsonArray{media};
@@ -444,7 +511,7 @@ private slots:
         auto second = first;
         second.position = QPointF(100,0);
         SceneTimeline::MediaTrack track;
-        SceneTimeline::insertClip(track,{"full",0,std::nullopt,5400},5400);
+        track.clip = {"full",0,std::nullopt,5400};
         track.keyframes = {{"out",0,first},{"in",30,second}};
         media["timeline"] = track.toJson();
         scene["media"] = QJsonArray{media};
@@ -470,22 +537,29 @@ private slots:
         RemoteSceneController controller(nullptr,nullptr);
         auto scene=textScene(); auto media=scene["media"].toArray().first().toObject();
         SceneTimeline::MediaTrack track;
-        QVERIFY(SceneTimeline::insertClip(track,{"first",30,std::nullopt,30},5400));
-        QVERIFY(SceneTimeline::insertClip(track,{"second",90,std::nullopt,30},5400));
-        media["timeline"]=track.toJson(); scene["media"]=QJsonArray{media};
+        track.clip = {"first",30,std::nullopt,30};
+        media["timeline"]=track.toJson();
+        auto second=media; second["mediaId"]="text-2";
+        track.clip = {"second",90,std::nullopt,30};
+        second["timeline"]=track.toJson(); scene["media"]=QJsonArray{media,second};
         controller.onRemoteSceneStart("presence-owner",scene);
         QTRY_VERIFY(controller.m_sceneActivationRequested);
-        const auto item=controller.m_mediaItems.first();
+        QCOMPARE(controller.m_mediaItems.size(),2);
         for (qreal time : {0.0,999.99,2000.0,2999.99,4000.0}) {
             controller.evaluateTimelineAt(time,false);
-            QVERIFY(!item->clipActive); QVERIFY(!item->renderVisible); QVERIFY(item->contentVisible);
+            for (const auto& item : controller.m_mediaItems) {
+                QVERIFY(!item->clipActive); QVERIFY(!item->renderVisible); QVERIFY(item->contentVisible);
+            }
         }
         for (qreal time : {1000.0,1999.99,3000.0,3999.99}) {
             controller.evaluateTimelineAt(time,false);
-            QVERIFY(item->clipActive); QVERIFY(item->renderVisible);
+            QCOMPARE(controller.m_mediaItems[0]->renderVisible,time<2000);
+            QCOMPARE(controller.m_mediaItems[1]->renderVisible,time>=3000);
         }
-        item->timeline.clips.clear(); controller.evaluateTimelineAt(1000,false);
-        QVERIFY(!item->renderVisible); QVERIFY(item->baseState.visible);
+        controller.m_mediaItems[0]->timeline.clip.startSlot=150;
+        controller.evaluateTimelineAt(1000,false);
+        QVERIFY(!controller.m_mediaItems[0]->renderVisible);
+        QVERIFY(controller.m_mediaItems[0]->baseState.visible);
     }
 
     void videoClipsDriveSourceCursorAndGateAudio()
@@ -504,14 +578,22 @@ private slots:
         auto media = scene["media"].toArray().first().toObject();
         media["muted"] = false;
         SceneTimeline::MediaTrack track;
-        track.clipsInitialized = true;
-        track.clips = {{"a",9,30,12},{"b",30,60,12}};
+        track.clip = {"a",9,30,12};
         media["timeline"] = track.toJson();
-        scene["media"] = QJsonArray{media};
+        auto secondMedia = media; secondMedia["mediaId"] = "video-2";
+        track.clip = {"b",30,60,12};
+        secondMedia["timeline"] = track.toJson();
+        scene["media"] = QJsonArray{media,secondMedia};
         controller.onRemoteSceneStart("clip-owner",scene);
         QTRY_VERIFY_WITH_TIMEOUT(controller.m_sceneActivationRequested,5000);
+        QCOMPARE(controller.m_mediaItems.size(),2);
         const auto item = controller.m_mediaItems.first();
-        QCOMPARE(item->player->position(),0);
+        const auto secondItem = controller.m_mediaItems.last();
+        QVERIFY(item->player != secondItem->player);
+        QCOMPARE(item->player->position(),1000);
+        QVERIFY(item->player->preparedAt(1000));
+        QCOMPARE(secondItem->player->position(),2000);
+        QVERIFY(secondItem->player->preparedAt(2000));
         QVERIFY(!item->renderVisible);
         QVERIFY(item->audio->isMuted());
         controller.evaluateTimelineAt(400,true);
@@ -528,30 +610,45 @@ private slots:
         controller.evaluateTimelineAt(700,true);
         QCOMPARE(heldCursorChanges.count(),0);
         controller.evaluateTimelineAt(1050,false);
-        QCOMPARE(item->timelineRequestedSourceMs,2050);
-        QVERIFY(item->audio->isMuted());
+        QCOMPARE(secondItem->timelineRequestedSourceMs,2050);
+        QVERIFY(secondItem->audio->isMuted());
+        QVERIFY(!item->renderVisible);
         controller.evaluateTimelineAt(1050,true);
-        QVERIFY(!item->audio->isMuted());
+        QVERIFY(!secondItem->audio->isMuted());
+        QVERIFY(item->audio->isMuted());
         controller.evaluateTimelineAt(1500,true);
         QCOMPARE(item->timelineRequestedSourceMs,0);
         QVERIFY(!item->renderVisible);
         QVERIFY(item->audio->isMuted());
         QVERIFY(!item->player->isPlaying());
-        // A pure editing split is continuous in source time: crossing it must
-        // not flush the decoder and introduce an audio gap.
-        item->timeline.clips = {{"a",9,30,6},{"a-right",15,36,6}};
+        // A split owns two independent instances: crossing the boundary
+        // stops the left player's audio and starts the right at its own cursor.
+        item->timeline.clip = {"a",9,30,6};
+        secondItem->timeline.clip = {"a-right",15,36,6};
         controller.evaluateTimelineAt(499,false);
+        QTRY_VERIFY_WITH_TIMEOUT(secondItem->player->preparedAt(1200),5000);
+        const auto rightFrame = secondItem->player->preparedFrame(1200);
+        QVERIFY(rightFrame.isValid());
+        QVERIFY(rightFrame.startTime()/1000 <= 1200);
+        QVERIFY(rightFrame.endTime() > 1201000);
         controller.evaluateTimelineAt(499,true);
-        QSignalSpy cursorChanges(item->player, &ResidentVideoPlayer::positionChanged);
+        QVERIFY(item->player->isPlaying());
+        QVERIFY(!secondItem->player->isPlaying());
+        QSignalSpy rightCursorChanges(secondItem->player, &ResidentVideoPlayer::positionChanged);
         controller.evaluateTimelineAt(501,true);
-        QCOMPARE(cursorChanges.count(),0);
-        QCOMPARE(item->timelineRequestedSourceMs,1201);
+        QVERIFY(!item->player->isPlaying());
+        QVERIFY(item->audio->isMuted());
+        QVERIFY(secondItem->player->isPlaying());
+        QCOMPARE(secondItem->timelineRequestedSourceMs,1201);
+        QCOMPARE(rightCursorChanges.count(),0);
+        QCOMPARE(secondItem->player->preparedFrame(1201).startTime(),rightFrame.startTime());
+        secondItem->timeline.clip = {"later",5300,0,10};
         // The real source's fractional final slot is occupied but silent.
         const SceneTimeline::SceneSettings grid;
         const auto duration=item->player->duration();
         const auto occupied=grid.sourceSlots(duration);
         QVERIFY(grid.timeMs(occupied)>duration);
-        item->timeline.clips={{"padded",0,0,occupied}};
+        item->timeline.clip={"padded",0,0,occupied};
         controller.evaluateTimelineAt(duration+1,true);
         QCOMPARE(item->timelineRequestedSourceMs,duration-1);
         QVERIFY(!item->player->isPlaying()); QVERIFY(item->audio->isMuted());
@@ -559,7 +656,7 @@ private slots:
         QVERIFY(item->player->videoSink()->videoFrame().isValid());
         // Both explicit holds remain visible and silent, even when a fragment
         // contains no moving source frames.
-        item->timeline.clips={{"extended",0,-30,occupied+60}};
+        item->timeline.clip={"extended",0,-30,occupied+60};
         controller.evaluateTimelineAt(500,true);
         QVERIFY(item->renderVisible); QVERIFY(item->clipActive);
         QCOMPARE(item->timelineRequestedSourceMs,0); QVERIFY(item->audio->isMuted());
@@ -568,7 +665,7 @@ private slots:
         controller.evaluateTimelineAt(1000+duration+100,true);
         QVERIFY(item->renderVisible); QCOMPARE(item->timelineRequestedSourceMs,duration-1);
         QVERIFY(item->audio->isMuted()); QVERIFY(!item->player->isPlaying());
-        item->timeline.clips.clear();
+        item->timeline.clip.startSlot=5300; item->timeline.clip.durationSlots=10;
         controller.evaluateTimelineAt(300,false);
         QCOMPARE(item->timelineRequestedSourceMs,0);
         QVERIFY(item->audio->isMuted());

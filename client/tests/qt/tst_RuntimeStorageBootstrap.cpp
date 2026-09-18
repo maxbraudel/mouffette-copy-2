@@ -128,7 +128,7 @@ class RuntimeStorageBootstrapTest final : public QObject {
 private slots:
     void freshProfileAndLegacyManifestAreSilent();
     void realProcessRestartsPreserveData();
-    void projectClipMigrationPreservesProjectsAndOtherComponents();
+    void projectTimelineResetPreservesOtherComponents();
     void unversionedSettingsMigration_data();
     void unversionedSettingsMigration();
     void componentMismatch_data();
@@ -156,49 +156,32 @@ private slots:
     void inaccessibleLegacyIdentityIsNotReplaced();
 };
 
-void RuntimeStorageBootstrapTest::projectClipMigrationPreservesProjectsAndOtherComponents()
+void RuntimeStorageBootstrapTest::projectTimelineResetPreservesOtherComponents()
 {
-    QTemporaryDir directory; QVERIFY(directory.isValid());
-    const auto context=temporaryContext(directory.path());
-    QVERIFY(!launchWorker(directory.path(),"seed","1.0").isEmpty());
-    const QString path=componentPath(context,"projects");
-    auto document=QJsonDocument::fromJson(readBytes(path)).object();
-    auto projects=document["projects"].toArray();
-    auto project=projects.first().toObject();
-    const QJsonObject emptyTrack{{"clipsInitialized",false},{"keyframes",QJsonArray{}},{"clips",QJsonArray{}}};
-    const QJsonObject videoTrack{{"clipsInitialized",true},{"keyframes",QJsonArray{}},
-        {"clips",QJsonArray{QJsonObject{{"id","existing-clip"},{"startSlot",30},{"sourceStartSlot",15},{"durationSlots",60}}}}};
-    const QJsonObject deletedTrack{{"clipsInitialized",true},{"keyframes",QJsonArray{}},{"clips",QJsonArray{}}};
-    QJsonArray media;
-    for (const auto& type : {"image","text"}) media.append(QJsonObject{{"type",type},{"mediaId",type},{"timeline",emptyTrack}});
-    media.append(QJsonObject{{"type","video"},{"mediaId","video"},{"timeline",videoTrack}});
-    media.append(QJsonObject{{"type","video"},{"mediaId","empty-video"},{"timeline",deletedTrack}});
-    project["canvasState"]=QJsonObject{{"renderSchemaVersion",4},
-        {"timeline",QJsonObject{{"maxDurationMs",180000},{"slotsPerSecond",30},{"stopSlot",60}}},{"media",media}};
-    projects[0]=project;document["projects"]=projects;document["schemaVersion"]=6;
-    QVERIFY(writeJson(context.rootPath,path,document).succeeded());
-    const auto before=snapshots(context);
-    const auto result=RuntimeStorageBootstrap(context).run(); QVERIFY2(result.succeeded(),"Migration failed");
-    QCOMPARE(reportFor(result,"projects").action,Action::Migrated);
-    const auto migrated=QJsonDocument::fromJson(readBytes(path)).object();
-    QCOMPARE(migrated["schemaVersion"].toInt(),7);
-    const auto restored=migrated["projects"].toArray().first().toObject();
-    QCOMPARE(restored["projectId"],project["projectId"]);
-    const auto scene=restored["canvasState"].toObject(); QCOMPARE(scene["renderSchemaVersion"].toInt(),5);
-    const auto elements=scene["media"].toArray();
-    for (int i=0;i<2;++i) {
-        const auto track=elements[i].toObject()["timeline"].toObject();
-        QVERIFY(track["clipsInitialized"].toBool());
-        const auto clip=track["clips"].toArray().first().toObject();
-        QCOMPARE(clip["startSlot"].toInt(),0); QCOMPARE(clip["durationSlots"].toInt(),5400);
-        QVERIFY(clip["sourceStartSlot"].isNull()); QVERIFY(!clip["id"].toString().isEmpty());
+    for (const int oldVersion : {6, 7}) {
+        QTemporaryDir directory; QVERIFY(directory.isValid());
+        const auto context = temporaryContext(directory.path());
+        QVERIFY(!launchWorker(directory.path(), "seed", "1.0").isEmpty());
+        const QString path = componentPath(context, "projects");
+        auto document = QJsonDocument::fromJson(readBytes(path)).object();
+        QVERIFY(!document["projects"].toArray().isEmpty());
+        document["schemaVersion"] = oldVersion;
+        QVERIFY(writeJson(context.rootPath, path, document).succeeded());
+        const auto before = snapshots(context);
+        const auto result = RuntimeStorageBootstrap(context).run();
+        QVERIFY(result.succeeded());
+        QCOMPARE(reportFor(result, "projects").action, Action::Reset);
+        const auto reset = QJsonDocument::fromJson(readBytes(path)).object();
+        QCOMPARE(reset["schemaVersion"].toInt(), 8);
+        QVERIFY(reset["projects"].toArray().isEmpty());
+        const auto after = snapshots(context);
+        for (const auto& name : {"settings", "history", "identity", "key"})
+            QCOMPARE(after[name], before[name]);
+        const auto restarted = RuntimeStorageBootstrap(context).run();
+        QVERIFY(restarted.succeeded());
+        QCOMPARE(reportFor(restarted, "projects").action, Action::Preserved);
+        QCOMPARE(readBytes(path), after["projects"]);
     }
-    QCOMPARE(elements[2].toObject()["timeline"].toObject(),videoTrack);
-    QCOMPARE(elements[3].toObject()["timeline"].toObject(),deletedTrack);
-    const auto after=snapshots(context);
-    for (const auto& name : {"settings","history","identity","key"}) QCOMPARE(after[name],before[name]);
-    QVERIFY(!launchWorker(directory.path(),"read","2.0").isEmpty());
-    QCOMPARE(readBytes(path),after["projects"]); // Restart does not generate new clip IDs.
 }
 
 void RuntimeStorageBootstrapTest::freshProfileAndLegacyManifestAreSilent()

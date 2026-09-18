@@ -5,6 +5,8 @@
 
 #include <QHash>
 #include <QJsonObject>
+#include <QJsonArray>
+#include <QPointer>
 #include <QObject>
 #include <QPointF>
 #include <QRectF>
@@ -52,8 +54,14 @@ public:
     bool hasPendingImports() const { return !m_pendingImports.isEmpty(); }
     bool removeMedia(const QString& mediaId);
     void clear();
-    void moveForward(const QString& mediaId);
-    void moveBackward(const QString& mediaId);
+    CanvasMedia* mediaForTimelineClip(const QString& clipId) const;
+    int timelineTrackCount() const;
+    QJsonObject timelineMediaSnapshot(const QString& mediaId) const;
+    bool moveTimelineClip(const QString& clipId, qint64 startSlot, int trackIndex, QString* error = nullptr);
+    bool trimTimelineClip(const QString& clipId, qint64 startSlot, qint64 endSlot, QString* error = nullptr);
+    bool splitTimelineClip(const QString& clipId, qint64 slot, QString* error = nullptr);
+    QString pasteTimelineClip(const QJsonObject& snapshot, const QHash<QString, QString>& sourcePaths,
+                             qint64 startSlot, int trackIndex, QString* error = nullptr);
 
     QStringList selectedMediaIds() const;
     CanvasMedia* selectedMedia() const;
@@ -143,9 +151,16 @@ private:
         QString sourceSignature;
         QPointF center;
         std::shared_ptr<std::atomic_bool> cancelled;
+        QPointer<CanvasMedia> candidate;
     };
     void startPendingImport(const QString& mediaId);
     void cancelPendingImportTasks();
+    void finishPendingImport(const QString& mediaId);
+    int firstFreeTimelineTrack(const SceneTimeline::Clip& clip) const;
+    bool applyTimelinePlacement(const QJsonObject& snapshot, const QString& sourcePath, bool freshInstance, QString* error);
+    bool applyMediaPlan(const QJsonArray& items, const QHash<QString, QString>& sourcePaths,
+                        const QString& primaryId, bool selectOnly, QString* error, const QStringList& selectedIds = {});
+    CanvasMedia* createMediaFromSnapshot(const QJsonObject& snapshot, const QString& sourcePath) const;
     void adoptMedia(CanvasMedia* media);
     QStringList insertProjectMedia(const QJsonObject& state,
                                   const QHash<QString, QString>& sourcePaths,
@@ -153,7 +168,7 @@ private:
                                   QHash<QString, QString>* insertedIds = nullptr);
     void rebuildScreenRects();
     void setRemoteCursor(bool visible, const QPointF& scenePosition);
-    qreal nextZ() const;
+    bool m_publishingTimelineEdit = false;
 
     quint64 m_importGeneration = 0;
     QHash<QString, PendingImport> m_pendingImports;

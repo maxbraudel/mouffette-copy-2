@@ -10,7 +10,10 @@
 
 // Authoring data and the deterministic, clock-independent scene evaluator.
 namespace SceneTimeline {
-inline constexpr int RenderSchemaVersion = 5;
+inline constexpr int RenderSchemaVersion = 6;
+inline constexpr int MaximumMediaCount = 512;
+inline constexpr int MaximumTrackIndex = 9999;
+inline qreal trackZ(int index) { return 1.0 / (1.0 + index); }
 inline constexpr qint64 MaximumSupportedDurationMs = 604800000;
 // Exactly representable in JSON, including arithmetic with a scene duration.
 inline constexpr qint64 MaximumSourceOffsetSlots = qint64(1) << 52;
@@ -21,7 +24,6 @@ struct ElementState {
     QSizeF size = QSizeF(1, 1); // final scene dimensions, interpolated linearly
     QSizeF baseSize = QSizeF(1, 1);
     qreal scale = 1.0;
-    qreal z = 1.0;
     bool visible = true;
     qreal opacity = 1.0;
     bool muted = false;
@@ -77,8 +79,8 @@ struct Clip {
 };
 struct MediaTrack {
     QList<Keyframe> keyframes;
-    QList<Clip> clips;
-    bool clipsInitialized = false;
+    Clip clip;
+    int trackIndex = 0;
     QJsonObject toJson() const;
     static bool fromJson(const QJsonObject&, MediaTrack*, qint64 maxSlot,
                          QString* error = nullptr);
@@ -116,12 +118,4 @@ QString newId();
 bool upsertKeyframe(MediaTrack&, Keyframe, qint64 maxSlot);
 bool removeKeyframe(MediaTrack&, const QString& id);
 bool moveKeyframe(MediaTrack&, const QString& id, qint64 slot, qint64 maxSlot);
-// Insertion/movement/extension overwrite only their occupied interval, keeping
-// source-correct fragments on either side. Operations are atomic.
-bool insertClip(MediaTrack&, Clip, qint64 maxSlot);
-bool removeClip(MediaTrack&, const QString& id);
-bool moveClip(MediaTrack&, const QString& id, qint64 startSlot, qint64 maxSlot);
-bool splitClip(MediaTrack&, const QString& id, qint64 slot);
-bool trimClip(MediaTrack&, const QString& id, qint64 startSlot, qint64 endSlot,
-              qint64 maxSlot);
 }

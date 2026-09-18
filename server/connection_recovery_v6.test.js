@@ -30,7 +30,7 @@ function fixture() {
         return client;
     };
     const send = (id, type, fields = {}) => server.handleMessage(id, {
-        type, protocolVersion: 10, serverBootId: server.serverBootId,
+        type, protocolVersion: 11, serverBootId: server.serverBootId,
         messageId: crypto.randomUUID(), connectionGeneration: server.clients.get(id).connectionGeneration,
         ...fields,
     });
@@ -309,4 +309,4 @@ const ofType = (client, type) => client.ws.messages.filter(message => message.ty
     assert.equal(registry.tick().length, 1);
 }
 
-console.log('connection recovery v7 tests passed');
+console.log('connection recovery v11 tests passed');

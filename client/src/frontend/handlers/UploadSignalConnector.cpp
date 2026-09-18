@@ -13,6 +13,16 @@
 #include <algorithm>
 
 namespace {
+QList<CanvasMedia*> currentMediaForSource(ApplicationRuntime::ClientWorkspace* session,
+                                         const QString& fileId)
+{
+    QList<CanvasMedia*> matches;
+    if (!session || !session->canvas) return matches;
+    for (auto* media : session->canvas->enumerateMediaItems())
+        if (media && media->fileId() == fileId) matches.append(media);
+    return matches;
+}
+
 QString uploadFailureDetail(const QString& reason)
 {
     const QString detail = reason.trimmed();
@@ -74,7 +84,7 @@ void UploadSignalConnector::connectAllSignals(
         if (ApplicationRuntime::ClientWorkspace* session = mainWindow->workspaceForActiveUpload()) {
             if (!session->canvas) return;
             session->upload.perFileProgress[fileId] = 0;
-            const QList<CanvasMedia*> items = session->upload.itemsByFileId.value(fileId);
+            const QList<CanvasMedia*> items = currentMediaForSource(session, fileId);
             for (CanvasMedia* item : items) {
                 if (item && item->uploadState() != CanvasMedia::UploadState::Uploaded) {
                     item->setUploadUploading(0);
@@ -89,7 +99,7 @@ void UploadSignalConnector::connectAllSignals(
             if (!session->canvas) return;
             if (percent >= 100) {
                 session->upload.perFileProgress[fileId] = 100;
-                const QList<CanvasMedia*> items = session->upload.itemsByFileId.value(fileId);
+                const QList<CanvasMedia*> items = currentMediaForSource(session, fileId);
                 for (CanvasMedia* item : items) {
                     if (item) item->setUploadUploaded();
                 }
@@ -100,7 +110,7 @@ void UploadSignalConnector::connectAllSignals(
             int previous = session->upload.perFileProgress.value(fileId, -1);
             if (previous >= 100 || clamped <= previous) return;
             session->upload.perFileProgress[fileId] = clamped;
-            const QList<CanvasMedia*> items = session->upload.itemsByFileId.value(fileId);
+            const QList<CanvasMedia*> items = currentMediaForSource(session, fileId);
             for (CanvasMedia* item : items) {
                 if (item && item->uploadState() != CanvasMedia::UploadState::Uploaded) {
                     item->setUploadUploading(clamped);
@@ -120,7 +130,7 @@ void UploadSignalConnector::connectAllSignals(
                 uploadId, NotificationSeverity::Success,
                 QStringLiteral("Upload completed successfully to %1").arg(label));
             session->upload.remoteFilesPresent = true;
-            session->knownRemoteFileIds.unite(session->expectedProjectFileIds);
+            session->knownRemoteFileIds.unite(session->upload.fileIds);
             mainWindow->clearUploadTracking(*session);
         } else {
             publishTerminalUploadNotification(
@@ -132,9 +142,8 @@ void UploadSignalConnector::connectAllSignals(
     connect(uploadManager, &UploadManager::uploadCancelled, mainWindow,
             [mainWindow](const QString& uploadId) {
         if (ApplicationRuntime::ClientWorkspace* session = mainWindow->workspaceForUploadId(uploadId)) {
-            for (auto it = session->upload.itemsByFileId.constBegin();
-                 it != session->upload.itemsByFileId.constEnd(); ++it) {
-                for (CanvasMedia* item : it.value()) {
+            for (const QString& fileId : session->upload.fileIds) {
+                for (CanvasMedia* item : currentMediaForSource(session, fileId)) {
                     if (item) item->setUploadNotUploaded();
                 }
             }
@@ -152,9 +161,8 @@ void UploadSignalConnector::connectAllSignals(
             [mainWindow](const QString& uploadId, const QString& reason) {
         ApplicationRuntime::ClientWorkspace* session = mainWindow->workspaceForUploadId(uploadId);
         if (session) {
-            for (auto it = session->upload.itemsByFileId.constBegin();
-                 it != session->upload.itemsByFileId.constEnd(); ++it) {
-                for (CanvasMedia* item : it.value()) {
+            for (const QString& fileId : session->upload.fileIds) {
+                for (CanvasMedia* item : currentMediaForSource(session, fileId)) {
                     if (item) item->setUploadNotUploaded();
                 }
             }
@@ -175,7 +183,7 @@ void UploadSignalConnector::connectAllSignals(
             if (!session->canvas) return;
             for (const QString& fileId : fileIds) {
                 if (session->upload.serverCompletedFileIds.contains(fileId)) continue;
-                const QList<CanvasMedia*> items = session->upload.itemsByFileId.value(fileId);
+                const QList<CanvasMedia*> items = currentMediaForSource(session, fileId);
                 for (CanvasMedia* item : items) {
                     if (item) item->setUploadUploaded();
                 }

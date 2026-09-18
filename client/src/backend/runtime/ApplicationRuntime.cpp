@@ -1097,11 +1097,15 @@ bool ApplicationRuntime::getAutoUploadImportedMedia() const {
 void ApplicationRuntime::reconcileRemoteFilesForWorkspace(
     ClientWorkspace& workspace,
     const QSet<QString>& currentFileIds) {
-    workspace.expectedProjectFileIds = currentFileIds;
-    m_fileManager->replaceProjectFileSet(workspace.projectId, currentFileIds);
+    if (workspace.expectedProjectFileIds != currentFileIds) {
+        workspace.expectedProjectFileIds = currentFileIds;
+        m_fileManager->replaceProjectFileSet(workspace.projectId, currentFileIds);
+    }
 
     if (!workspace.targetEndpointId.isEmpty()) {
-        const QSet<QString> toRemove = workspace.knownRemoteFileIds - currentFileIds;
+        QSet<QString> targetSources = workspace.knownRemoteFileIds;
+        targetSources.unite(workspace.upload.fileIds);
+        const QSet<QString> toRemove = targetSources - currentFileIds;
         for (const QString& fileId : toRemove) {
             if (m_uploadManager) {
                 m_uploadManager->requestAssetRemoval(

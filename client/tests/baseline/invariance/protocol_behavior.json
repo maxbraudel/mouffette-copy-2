@@ -11,8 +11,7 @@
     {
       "file": "src/backend/handlers/ScreenEventHandler.cpp",
       "mustContain": [
-        "registerClient\\(",
-        "volumePercent"
+        "registerClient\\("
       ]
     },
     {
@@ -20,7 +19,8 @@
       "mustContain": [
         "sendScenePrepare\\(",
         "sendSceneStateSnapshot\\(",
-        "sendSceneStop\\("
+        "sendSceneStop\\(",
+        "message\\[\"volumePercent\"\\] ="
       ]
     }
   ]

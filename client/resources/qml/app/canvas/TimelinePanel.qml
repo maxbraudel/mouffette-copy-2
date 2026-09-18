@@ -18,8 +18,8 @@ FocusScope {
     readonly property real rulerHeight: timeline ? timeline.rulerHeightPx : 28
     readonly property real visibleStartX: trackViewport.contentX
     readonly property real visibleEndX: trackViewport.contentX + trackViewport.width
-    readonly property real clipHeight: timeline ? timeline.clipTrackHeightPx : 64
-    readonly property real keyHeight: Math.max(30, trackViewport.height - rulerHeight - clipHeight)
+    readonly property real clipHeight: timeline ? timeline.clipTrackHeightPx : 48
+    readonly property real keyHeight: 32
     readonly property real slotMs: 1000 / (timeline ? timeline.slotsPerSecond : 30)
     readonly property int maximumFrame: Math.round(maximumMs / slotMs)
     readonly property int frameDigits: String(maximumFrame).length
@@ -65,6 +65,18 @@ FocusScope {
         return clampTime(result.timeMs)
     }
     function endDrag() { activeDrag = null; snapGuideMs = -1; snapGuideLabel = "" }
+    function scrollTracks(delta) {
+        clipViewport.contentY = Math.max(0, Math.min(Math.max(0, clipViewport.contentHeight - clipViewport.height),
+            clipViewport.contentY + delta))
+    }
+    function autoScrollClip(drag) {
+        var point = clipViewport.mapFromItem(root, drag.pointerPanelX, drag.pointerPanelY)
+        var dy = point.y < 22 ? -8 : point.y > clipViewport.height - 22 ? 8 : 0
+        var dx = drag.pointerPanelX < 22 ? -8 : drag.pointerPanelX > root.width - 22 ? 8 : 0
+        if (dy !== 0) scrollTracks(dy)
+        if (dx !== 0) scrollTo(trackViewport.contentX + dx)
+        if (dx !== 0 || dy !== 0) drag.refreshFromPointer()
+    }
     function scrollTo(x) {
         trackViewport.contentX = Math.max(0, Math.min(trackViewport.contentWidth - trackViewport.width, x))
     }
@@ -89,8 +101,14 @@ FocusScope {
                 || (wheel.device && wheel.device.type === PointerDevice.TouchPad)
             if (delta !== 0)
                 zoom(trackpad ? Math.exp(-delta * 0.003) : Math.pow(1.0015, -delta * 5))
+        } else if (wheel.y >= root.rulerHeight + root.keyHeight) {
+            if ((wheel.modifiers & Qt.ShiftModifier) !== 0)
+                scrollTo(trackViewport.contentX - (dx || dy) * (precise ? 1 : 3))
+            else {
+                if (dx !== 0) scrollTo(trackViewport.contentX - dx * (precise ? 1 : 3))
+                if (dy !== 0) scrollTracks(-dy * (precise ? 1 : 3))
+            }
         } else {
-            // Either swipe axis scrolls time; the dominant axis avoids doubling diagonals.
             scrollTo(trackViewport.contentX - (Math.abs(dx) > Math.abs(dy) ? dx : dy) * (precise ? 1 : 3))
         }
         wheel.accepted = true
@@ -106,6 +124,7 @@ FocusScope {
     onTimelineChanged: {
         viewDurationMs = timeline ? Math.min(maximumMs, timeline.initialViewDurationMs) : 15000
         trackViewport.contentX = 0
+        clipViewport.contentY = 0
         endDrag()
     }
     Keys.onPressed: event => { if (event.key === Qt.Key_Shift) { shiftHeld = true; event.accepted = true } }
@@ -277,7 +296,7 @@ FocusScope {
                 destructive: true
                 visible: !!root.timeline && root.timeline.remoteActive
                 enabled: !!root.session
-                Accessible.description: root.session ? root.session.remoteSceneUnavailableReason : ""
+                Accessible.description: root.session ? (root.session.remoteSceneUnavailableReason || "") : ""
                 onClicked: root.session.toggleRemoteScene()
             }
         }
@@ -331,14 +350,7 @@ FocusScope {
                     enabled: root.editable && root.timeline.canSplit
                     onClicked: { root.focusTrack(); root.timeline.splitClip() }
                 }
-                TimelineEditButton {
-                    objectName: "timelineInsertClip"
-                    text: "Insert clip"
-                    iconSource: "qrc:/icons/icons/timeline/insert.svg"
-                    visible: !!root.timeline && root.timeline.primaryMediaId !== ""
-                    enabled: root.editable && root.timeline.canInsertClip
-                    onClicked: { root.focusTrack(); root.timeline.insertClip() }
-                }
+
                 TimelineEditButton {
                     objectName: "timelineCopy"
                     text: "Copy"
@@ -583,29 +595,63 @@ FocusScope {
                     }
                 }
             }
-            Item {
-                id: clipTrack
-                objectName: "timelineClipTrack"
+            Flickable {
+                id: clipViewport
+                objectName: "timelineClipViewport"
                 y: keyTrack.y + keyTrack.height
-                width: parent.width; height: root.clipHeight
-                Rectangle { width: parent.width; height: 1; color: Theme.overlayBorder }
-                Text { x: trackViewport.contentX + 6; y: 2; text: "CLIPS"; font.pixelSize: 9; color: Theme.overlayDisabledText }
+                width: parent.width; height: Math.max(0, parent.height - y)
+                contentWidth: width
+                contentHeight: Math.max(height, (root.timeline ? root.timeline.trackCount : 1) * root.clipHeight)
+                interactive: false
+                clip: true
+                boundsBehavior: Flickable.StopAtBounds
+                onContentHeightChanged: root.scrollTracks(0)
+                onHeightChanged: root.scrollTracks(0)
+                ScrollBar.vertical: ScrollBar {
+                    x: root.visibleStartX + trackViewport.width - width
+                    anchors.right: undefined
+                    z: 10
+                    policy: ScrollBar.AsNeeded
+                    background: null
+                }
                 Repeater {
-                    model: root.timeline ? root.timeline.otherClips : []
-                    TimelineClip {
-                        panel: root
-                        timeContent: timelineContent
-                        trackHeight: clipTrack.height
-                        interactive: false
-                        opacity: Math.min(1, (root.timeline ? root.timeline.otherKeyframeOpacity : 0.3) + 0.25)
+                    model: Math.ceil(clipViewport.height / root.clipHeight) + 2
+                    Item {
+                        id: clipTrack
+                        required property int index
+                        readonly property int trackIndex: Math.floor(clipViewport.contentY / root.clipHeight) + index
+                        objectName: "timelineClipTrack"
+                        y: trackIndex * root.clipHeight
+                        width: clipViewport.width; height: root.clipHeight
+                        visible: trackIndex < (root.timeline ? root.timeline.trackCount : 1)
+                        Rectangle {
+                            anchors.fill: parent
+                            color: root.timeline && root.timeline.activeTrackIndex === clipTrack.trackIndex
+                                ? Theme.overlaySelected : "transparent"
+                            opacity: 0.45
+                        }
+                        Rectangle { width: parent.width; height: 1; color: Theme.overlayBorder }
+                        Text {
+                            x: root.visibleStartX + 6; y: 2
+                            text: "TRACK " + (clipTrack.trackIndex + 1)
+                            font.pixelSize: 9; color: Theme.overlayDisabledText
+                        }
+                        MouseArea {
+                            anchors.fill: parent
+                            enabled: root.editable
+                            onPressed: {
+                                root.focusTrack()
+                                root.timeline.setActiveTrackIndex(clipTrack.trackIndex)
+                            }
+                        }
                     }
                 }
                 Repeater {
-                    model: root.timeline ? root.timeline.clips : []
+                    model: root.timeline ? root.timeline.clipModel : null
                     TimelineClip {
                         panel: root
-                        timeContent: timelineContent
-                        trackHeight: clipTrack.height
+                        timeContent: clipViewport.contentItem
+                        trackHeight: root.clipHeight
                     }
                 }
             }
@@ -683,6 +729,12 @@ FocusScope {
                 Text { x: 4; y: root.rulerHeight + 2; text: root.snapGuideLabel; color: Theme.accent; font.pixelSize: 11 }
             }
         }
+    }
+    Timer {
+        interval: 16
+        repeat: true
+        running: !!root.activeDrag && !!root.activeDrag.isClipDrag
+        onTriggered: root.autoScrollClip(root.activeDrag)
     }
     MouseArea {
         id: trackInput
