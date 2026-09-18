@@ -60,6 +60,62 @@ class TimelineControllerTest final : public QObject
 {
     Q_OBJECT
 private slots:
+    void toolbarKeepsPlaybackCenteredAndEditingSeparate()
+    {
+        TimelineFixture f;
+        QVERIFY(f.initialize());
+        auto* media = f.host->document()->addText({}, "Media name must stay off the toolbar");
+        f.host->document()->select(media->mediaId());
+        f.timeline.placeStop();
+        auto* playback = f.item("timelinePlaybackControls");
+        auto* layout = f.item("timelineLayoutControls");
+        auto* edit = f.item("timelineEditBar");
+        auto* play = f.item("timelinePlayPause");
+        auto* time = f.item("timelineTimeField");
+        QVERIFY(playback && layout && edit && play && time);
+        const auto belongsTo = [](QQuickItem* child, QQuickItem* ancestor) {
+            for (auto* item = child; item; item = item->parentItem())
+                if (item == ancestor) return true;
+            return false;
+        };
+        for (const auto* name : {"timelinePlaceKeyframe", "timelineCopy", "timelinePaste",
+                                 "timelineDelete", "timelinePlaceStop", "timelineRemoveStop"}) {
+            auto* button = f.item(name);
+            QVERIFY(button);
+            QVERIFY(belongsTo(button, edit));
+            QCOMPARE(button->height(), play->height());
+            QVERIFY(!button->property("iconSource").toUrl().isEmpty());
+        }
+        QVERIFY(play->property("iconOnly").toBool());
+        QCOMPARE(time->height(), play->height());
+        for (int width : {1100, 680, 420}) {
+            f.view.resize(width, 240);
+            QTRY_COMPARE(f.view.rootObject()->width(), qreal(width));
+            QTRY_VERIFY(qAbs(playback->mapToScene({playback->width()/2, 0}).x() - width/2.0) < 0.01);
+            QTRY_VERIFY(time->mapToScene({time->width(), 0}).x() <= playback->mapToScene({0, 0}).x());
+            QTRY_VERIFY(playback->mapToScene({playback->width(), 0}).x() <= layout->mapToScene({0, 0}).x());
+            QTRY_VERIFY(layout->mapToScene({layout->width(), 0}).x() <= width);
+            QVERIFY(edit->y() >= playback->mapToScene({0, playback->height()}).y());
+            const auto screenshotPrefix = qEnvironmentVariable("MOUFFETTE_TIMELINE_SCREENSHOT");
+            if (!screenshotPrefix.isEmpty()) {
+                QTest::qWait(100);
+                QVERIFY(f.view.grabWindow().save(screenshotPrefix + QString::number(width) + ".png"));
+            }
+        }
+        QVERIFY(edit->property("contentWidth").toReal() > edit->width());
+        const auto position = f.timeline.positionMs();
+        f.wheel(edit->mapToScene({50, 12}).toPoint(), {0, -80}, {});
+        QVERIFY(edit->property("contentX").toReal() > 0);
+        QCOMPARE(f.timeline.positionMs(), position);
+        f.timeline.removeStop();
+        f.timeline.togglePlayback();
+        QTRY_VERIFY(play->property("checked").toBool());
+        QVERIFY(play->property("iconSource").toUrl().path().endsWith("pause.svg"));
+        f.timeline.togglePlayback();
+        QTRY_VERIFY(!play->property("checked").toBool());
+        QVERIFY(play->property("iconSource").toUrl().path().endsWith("play.svg"));
+    }
+
     void rulerDragScrubsAndBothWheelAxesScroll()
     {
         TimelineFixture f;
