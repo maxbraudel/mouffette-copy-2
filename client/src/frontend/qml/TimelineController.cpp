@@ -197,6 +197,7 @@ QVariantList TimelineController::clips() const
 }
 QAbstractItemModel* TimelineController::clipModel() const { return m_clipModel; }
 int TimelineController::trackCount() const { return m_document ? m_document->timelineTrackCount() : 1; }
+int TimelineController::firstTrackIndex() const { return m_document ? m_document->timelineTrackAtRow(0) : 0; }
 int TimelineController::activeTrackIndex() const
 { return m_activeTrackIndex < 0 ? 0 : qMin(m_activeTrackIndex, trackCount() - 1); }
 void TimelineController::setActiveTrackIndex(int index)
@@ -239,11 +240,11 @@ int TimelineController::initialViewDurationMs() const { return AppConfig::instan
 void TimelineController::refresh()
 {
     const bool primaryChanged = m_primaryId != primaryMediaId();
-    int previousRow = -1;
+    std::optional<int> previousTrack;
     for (const auto& value : m_publishedClips) {
         const auto row = value.toMap();
         if (row.value("mediaId").toString() == primaryMediaId()) {
-            previousRow = row.value("displayTrackIndex").toInt(); break;
+            previousTrack = row.value("trackIndex").toInt(); break;
         }
     }
     if (primaryChanged) {
@@ -268,7 +269,10 @@ void TimelineController::refresh()
     }
     emit changed();
     emit transportChanged();
-    if (primary() && previousRow != m_activeTrackIndex) emit revealTrack(activeTrackIndex());
+    // Inserting or selecting a clip never moves the viewport under the pointer.
+    // Only an actual track change can reveal an existing clip.
+    if (primary() && previousTrack && *previousTrack != primary()->timelineTrack().trackIndex)
+        emit revealTrack(activeTrackIndex());
 }
 void TimelineController::error(const QString& text) { m_error = text; emit changed(); }
 bool TimelineController::commitTrack(CanvasMedia* media, const SceneTimeline::MediaTrack& track)

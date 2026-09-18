@@ -1921,7 +1921,7 @@ private slots:
         QCOMPARE(right->timelineTrack().clip.startSlot, 120);
     }
 
-    void timelineRowsPreserveGapsAndPrependAtomically()
+    void timelineCoordinatesStayStableAcrossInsertionAndRoundTrip()
     {
         CanvasDocument doc;
         QCOMPARE(doc.timelineTrackCount(), 1);
@@ -1933,9 +1933,11 @@ private slots:
         bool validPublication = true;
         connect(&doc, &CanvasDocument::documentChanged, &doc, [&] {
             validPublication &= doc.timelineRow(doc.firstTimelineTrack()) == 1;
-            for (auto* media : doc.media()) validPublication &= media->timelineTrack().trackIndex >= 0;
+            for (auto* media : doc.media()) validPublication &= media->timelineTrack().trackIndex >= SceneTimeline::MinimumTrackIndex;
         });
         auto* next = doc.addText({}, "Above"); QVERIFY(next);
+        QCOMPARE(first->timelineTrack().trackIndex, 0);
+        QCOMPARE(next->timelineTrack().trackIndex, -1);
         QCOMPARE(doc.timelineTrackCount(), 4);
         QCOMPARE(doc.timelineRow(next->timelineTrack().trackIndex), 1);
         QCOMPARE(doc.timelineRow(first->timelineTrack().trackIndex), 2);
@@ -1943,16 +1945,17 @@ private slots:
         QCOMPARE(first->mediaId(), firstId); QCOMPARE(first->timelineTrack().clip.id, clipId);
         QCOMPARE(first->timelineTrack().keyframes.first().slot, 15);
         QVERIFY(doc.moveTimelineClip(clipId, 90, 4));
-        QCOMPARE(doc.timelineTrackCount(), 7); // Three interior empty tracks plus both insertion rows.
+        QCOMPARE(doc.timelineTrackCount(), 8); // Stable coordinates retain interior gaps and insertion rows.
         QVERIFY(doc.moveTimelineClip(clipId, 90, doc.timelineTrackAtRow(0)));
         QCOMPARE(doc.timelineRow(first->timelineTrack().trackIndex), 1);
         QCOMPARE(doc.timelineRow(next->timelineTrack().trackIndex), 2);
-        QCOMPARE(doc.timelineTrackCount(), 4);
+        QCOMPARE(doc.timelineTrackCount(), 5);
+        QCOMPARE(next->timelineTrack().trackIndex, -1);
         QVERIFY(first->z() > next->z()); QVERIFY(validPublication);
         const auto saved = doc.serializeProjectState();
         CanvasDocument restored; QVERIFY(restored.restoreProjectState(saved, {}));
         QCOMPARE(restored.serializeProjectState(), saved);
-        QVERIFY(doc.removeMedia(firstId)); QCOMPARE(doc.timelineTrackCount(), 3);
+        QVERIFY(doc.removeMedia(firstId)); QCOMPARE(doc.timelineTrackCount(), 4);
         QVERIFY(doc.removeMedia(next->mediaId())); QCOMPARE(doc.timelineTrackCount(), 1);
     }
 
@@ -1966,7 +1969,9 @@ private slots:
         const auto ids = doc.pasteMediaState(copied, {});
         QCOMPARE(ids.size(), 2);
         auto* copyFirst = doc.mediaById(ids[0]); auto* copySecond = doc.mediaById(ids[1]);
-        QCOMPARE(copyFirst->timelineTrack().trackIndex - copySecond->timelineTrack().trackIndex, 3);
+        QCOMPARE(copyFirst->timelineTrack().trackIndex - copySecond->timelineTrack().trackIndex, 4);
+        QCOMPARE(first->timelineTrack().trackIndex, 3);
+        QCOMPARE(second->timelineTrack().trackIndex, -1);
         QVERIFY(copyFirst->z() > second->z()); QVERIFY(copySecond->z() > copyFirst->z());
         QVERIFY(second->z() > first->z());
         const auto snapshot = doc.timelineMediaSnapshot(copyFirst->mediaId());
@@ -1986,11 +1991,15 @@ private slots:
         CanvasDocument restored; QVERIFY(restored.restoreProjectState(saved, {}));
         QCOMPARE(restored.serializeProjectState(), saved);
         QCOMPARE(restored.timelineTrackCount(), SceneTimeline::MaximumTrackIndex + 3);
+        QVERIFY(doc.addText({}, "Above without shifting the bottom"));
+        QCOMPARE(bottom->timelineTrack().trackIndex, SceneTimeline::MaximumTrackIndex);
+        QVERIFY(doc.moveTimelineClip(top->timelineTrack().clip.id, 0, SceneTimeline::MinimumTrackIndex));
+        const auto atLimits = doc.serializeProjectState();
         QSignalSpy writes(&doc, &CanvasDocument::documentChanged);
-        QVERIFY(!doc.addText({}, "Cannot shift past the maximum"));
-        QVERIFY(!doc.moveTimelineClip(top->timelineTrack().clip.id, 0, -1));
+        QVERIFY(!doc.addText({}, "Cannot insert beyond the top limit"));
+        QVERIFY(!doc.moveTimelineClip(top->timelineTrack().clip.id, 0, SceneTimeline::MinimumTrackIndex - 1));
         QVERIFY(!doc.moveTimelineClip(top->timelineTrack().clip.id, 0, SceneTimeline::MaximumTrackIndex + 1));
-        QCOMPARE(doc.serializeProjectState(), saved); QCOMPARE(writes.count(), 0);
+        QCOMPARE(doc.serializeProjectState(), atLimits); QCOMPARE(writes.count(), 0);
     }
 
     void timelineOverwriteCreatesIndependentInstancesAndKeepsAbsoluteKeys()
@@ -2035,7 +2044,7 @@ private slots:
                  SceneTimeline::evaluate(a, track, 90).toJson());
         QCOMPARE(document.timelineTrackCount(), 3);
         QVERIFY(document.moveTimelineClip(incoming->timelineTrack().clip.id, 200, 3));
-        QCOMPARE(document.timelineTrackCount(), 5); // Interior empty tracks are retained.
+        QCOMPARE(document.timelineTrackCount(), 6); // Interior empty tracks are retained.
         QVERIFY(document.removeMedia(incoming->mediaId()));
         QCOMPARE(document.timelineTrackCount(), 3);
         QVERIFY(document.moveTimelineClip(right->timelineTrack().clip.id, 200, 2));

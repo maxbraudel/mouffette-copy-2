@@ -53,7 +53,14 @@ private slots:
         QVERIFY(!track.toJson().contains("clips")); QVERIFY(!track.toJson().contains("clipsInitialized"));
         auto invalid=track.toJson(); invalid["clips"]=QJsonArray{};
         QVERIFY(!MediaTrack::fromJson(invalid,&restored,5000));
-        invalid=track.toJson(); invalid["trackIndex"]=-1;
+        for (int index : {MinimumTrackIndex, -1, 0, MaximumTrackIndex}) {
+            track.trackIndex = index;
+            QVERIFY(MediaTrack::fromJson(track.toJson(), &restored, 5000));
+            QCOMPARE(restored.toJson(), track.toJson());
+            QVERIFY(std::isfinite(trackZ(index))); QVERIFY(trackZ(index) > 0);
+        }
+        QVERIFY(trackZ(-2) > trackZ(-1)); QVERIFY(trackZ(-1) > trackZ(0));
+        invalid=track.toJson(); invalid["trackIndex"]=MinimumTrackIndex-1;
         QVERIFY(!MediaTrack::fromJson(invalid,&restored,5000));
         invalid["trackIndex"]=MaximumTrackIndex+1;
         QVERIFY(!MediaTrack::fromJson(invalid,&restored,5000));

@@ -35,14 +35,15 @@ Every image, text and video instance owns exactly one presence `clip`, an intege
 The first track renders in front; `z` is derived at presentation time and is not
 an authoring or keyframe property. Empty intermediate tracks are retained. The
 editor derives one empty insertion row above the first occupied track and one
-below the last, or presents one empty row for an empty project. Displayed rows
-are numbered Track 1, Track 2, etc. independently of saved indices:
-`displayTrackIndex = trackIndex - firstOccupiedIndex + 1`. Leading/trailing unused
-indices are hidden, while interior gaps remain. Dropping into an insertion row
-creates a track at that end, then regenerates the empty row on release. Prepending
-shifts saved indices only when necessary; saved identities and relative Z order
-are preserved. Existing schema-6 projects require no migration. A shift beyond
-the maximum track index rejects the whole edit.
+below the last, or presents Track 0 for an empty project. Track 0 remains the
+fixed origin: positive labels extend upwards, negative labels downwards. Saved
+`trackIndex` coordinates grow downwards, so the displayed number is `-trackIndex`.
+The visible range includes zero, interior gaps and the two insertion rows, bounded
+by stored indices -9999 and 9999. Adding or pasting above existing clips never
+renumbers them. Existing schema-6 projects keep their indices and layer order
+without migration. Both clients and the relay must support signed indices for
+remote scenes containing tracks above zero; older validators reject those scenes.
+Edits beyond either track limit are rejected atomically.
 
 A new image, text or video starts at the playhead's current slot. Pending imports
 retain the slot captured when the file was added, including across project reloads.
@@ -130,10 +131,14 @@ The gap between them shrinks as the window narrows. If the full labels no longer
 fit, all buttons in the row switch to icons with tooltips. If the icons still do
 not fit, the entire row scrolls together. Its side padding belongs to the scrollable content;
 overflow adds neither a scrollbar nor extra height.
-The default panel height is 240 px. A fixed 32 px keyframe band remains above
+The canvas and timeline each occupy half of the available page height. The
+Timeline toggle beside Settings hides everything below the transport row and
+returns that space to the canvas; timing readouts and Start/Play/End remain visible.
+Reopening preserves horizontal zoom and scroll, and the vertical center.
+A fixed 32 px keyframe band remains above
 48 px clip tracks. The ruler and keys remain fixed vertically while the clips
 scroll. A fixed column to the left of the time viewport displays Keyframes and
-Track 1, Track 2, etc. Its shared width measures every track name with the rendered
+Track 0 with positive and negative neighbours. Its shared width measures every track name with the rendered
 font, plus 12 px padding on each side and a 1 px separator. Clip track names follow
 the clips' vertical scroll; the Keyframes header stays fixed. Header clicks are
 informational and wheel events navigate the same timeline. Track backgrounds do
@@ -142,9 +147,12 @@ top and bottom inset. Only the media name is shown, centered in the intersection
 of its clip with the visible time viewport, including during drag and resize.
 Long names elide to the available width. Resize zones remain on the edges with a
 horizontal resize cursor but no visible handle bars. Clips support temporal and
-vertical dragging with edge auto-scroll. After insertion or renumbering, the
-selected clip remains visible and the active paste row follows its identity. Clip rows retain their identities when selection
-changes. The horizontal scrollbar overlays content without reserving a gutter.
+vertical dragging with edge auto-scroll. The clip viewport initially centers
+Track 0. Track coordinates and the viewport center stay fixed when the range grows
+at either end; resizing preserves the center and removal clamps to the remaining
+range. Selecting a partly visible clip never scrolls it under the pointer. The
+active paste row follows the selected clip's identity. Clip delegates retain
+their identities when selection changes. The horizontal scrollbar overlays content without reserving a gutter.
 Vertical wheel motion over clips scrolls tracks; horizontal motion or Shift+wheel
 scrolls time. Ctrl/Cmd+wheel zooms.
 The ruler, zoom, horizontal scroll and fit command navigate the project.

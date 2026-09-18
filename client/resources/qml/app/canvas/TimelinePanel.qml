@@ -9,6 +9,8 @@ FocusScope {
     id: root
     objectName: "sceneTimeline"
     required property var session
+    property bool expanded: true
+    readonly property real transportHeight: Theme.controlHeight + 16
     property real bottomCornerRadius: 0
     readonly property var timeline: session ? session.timeline : null
     readonly property bool editable: !!timeline && timeline.editable
@@ -20,10 +22,12 @@ FocusScope {
     readonly property real visibleEndX: trackViewport.contentX + trackViewport.width
     readonly property real clipHeight: timeline ? timeline.clipTrackHeightPx : 48
     readonly property real keyHeight: 32
+    readonly property int firstTrackIndex: timeline ? timeline.firstTrackIndex : 0
+    readonly property int lastTrackIndex: firstTrackIndex + (timeline ? timeline.trackCount : 1) - 1
     readonly property var trackNames: {
         var names = []
         for (var i = 0; i < (timeline ? timeline.trackCount : 1); ++i)
-            names.push("Track " + (i + 1))
+            names.push("Track " + -(firstTrackIndex + i))
         return names
     }
     readonly property real slotMs: 1000 / (timeline ? timeline.slotsPerSecond : 30)
@@ -80,7 +84,8 @@ FocusScope {
     }
     function endDrag() { activeDrag = null; snapGuideMs = -1; snapGuideLabel = "" }
     function scrollTracks(delta) {
-        clipViewport.contentY = Math.max(0, Math.min(Math.max(0, clipViewport.contentHeight - clipViewport.height),
+        clipViewport.contentY = Math.max(-clipViewport.topMargin,
+            Math.min(clipViewport.contentHeight + clipViewport.bottomMargin - clipViewport.height,
             clipViewport.contentY + delta))
     }
     function autoScrollClip(drag) {
@@ -137,10 +142,18 @@ FocusScope {
     }
     onShiftHeldChanged: if (activeDrag) activeDrag.refreshPreview()
     onControlHeldChanged: if (activeDrag && activeDrag.isClipDrag) activeDrag.refreshPreview()
+    onExpandedChanged: {
+        if (!expanded && activeDrag) {
+            activeDrag.dragging = false
+            endDrag()
+        }
+    }
+    onFirstTrackIndexChanged: Qt.callLater(scrollTracks, 0)
+    onLastTrackIndexChanged: Qt.callLater(scrollTracks, 0)
     onTimelineChanged: {
         viewDurationMs = timeline ? Math.min(maximumMs, timeline.initialViewDurationMs) : 15000
         trackViewport.contentX = 0
-        clipViewport.contentY = 0
+        clipViewport.contentY = (root.clipHeight - clipViewport.height) / 2
         endDrag(); shiftHeld = false; controlHeld = false
     }
     Keys.onPressed: event => {
@@ -165,11 +178,11 @@ FocusScope {
         function onTransportChanged() { root.followHead() }
         function onRevealTrack(row) {
             if (root.activeDrag || !root.timeline || root.timeline.activeTrackIndex !== row) return
-            var top = row * root.clipHeight
+            var top = (root.firstTrackIndex + row) * root.clipHeight
             var bottom = top + root.clipHeight
             if (top < clipViewport.contentY) clipViewport.contentY = top
             else if (bottom > clipViewport.contentY + clipViewport.height)
-                clipViewport.contentY = Math.max(0, bottom - clipViewport.height)
+                clipViewport.contentY = bottom - clipViewport.height
         }
     }
     Rectangle {
@@ -340,527 +353,558 @@ FocusScope {
             }
         }
     }
-    Rectangle {
-        id: transportSeparator
-        anchors.left: parent.left; anchors.right: parent.right
-        anchors.top: transportViewport.bottom; anchors.topMargin: 8
-        height: 1
-        color: Theme.border
-    }
     Item {
-        id: editBar
-        objectName: "timelineEditBar"
-        // Measure labels independently of the current mode so resizing cannot oscillate.
-        readonly property bool compactButtons: width < actionViewport.contentPadding * 2
-            + root.buttonRowTextWidth(actions) + actions.spacing + root.buttonRowTextWidth(layoutActions)
+        id: editorBody
+        objectName: "timelineEditorBody"
         anchors.left: parent.left; anchors.right: parent.right
-        anchors.top: transportSeparator.bottom
-        anchors.topMargin: 8
-        height: Theme.controlHeight
-        Flickable {
-            id: actionViewport
-            objectName: "timelineEditActions"
-            readonly property int contentPadding: 8
-            anchors.fill: parent
-            clip: true
-            // Compact buttons share one scrollable row if their icons still do not fit.
-            contentWidth: Math.max(width, contentPadding * 2 + actions.width + actions.spacing + layoutActions.width)
-            contentHeight: height
-            boundsBehavior: Flickable.StopAtBounds
-            interactive: false
-            Row {
-                id: actions
-                x: actionViewport.contentPadding
-                spacing: 6
-                TimelineEditButton {
-                    objectName: "timelinePlaceKeyframe"
-                    text: root.timeline && root.timeline.hasKeyframeAtPosition ? "Update keyframe" : "Place keyframe"
-                    textVariants: ["Update keyframe", "Place keyframe"]
-                    iconSource: root.timeline && root.timeline.hasKeyframeAtPosition
-                        ? "qrc:/icons/icons/timeline/keyframe-update.svg" : "qrc:/icons/icons/timeline/keyframe-add.svg"
-                    enabled: root.editable && root.timeline.canCapture
-                    onClicked: { root.focusTrack(); root.timeline.placeKeyframe() }
-                }
-                TimelineEditButton {
-                    objectName: "timelineSplitClip"
-                    text: "Split clip"
-                    iconSource: "qrc:/icons/icons/timeline/split.svg"
-                    visible: !!root.timeline && root.timeline.primaryMediaId !== ""
-                    enabled: root.editable && root.timeline.canSplit
-                    onClicked: { root.focusTrack(); root.timeline.splitClip() }
-                }
-
-                TimelineEditButton {
-                    objectName: "timelineCopy"
-                    text: "Copy"
-                    iconSource: "qrc:/icons/icons/timeline/copy.svg"
-                    enabled: root.editable && (root.timeline.selectedKeyframeId !== "" || root.timeline.selectedClipId !== "")
-                    onClicked: { root.focusTrack(); root.timeline.copySelected() }
-                }
-                TimelineEditButton {
-                    objectName: "timelinePaste"
-                    text: "Paste"
-                    iconSource: "qrc:/icons/icons/timeline/paste.svg"
-                    enabled: root.editable && root.timeline.canPaste
-                    onClicked: { root.focusTrack(); root.timeline.paste() }
-                }
-                TimelineEditButton {
-                    objectName: "timelineDelete"
-                    text: "Delete"
-                    iconSource: "qrc:/icons/icons/delete.svg"
-                    destructive: true
-                    enabled: root.editable && (root.timeline.selectedKeyframeId !== "" || root.timeline.selectedClipId !== "")
-                    onClicked: { root.focusTrack(); root.timeline.deleteSelected() }
-                }
-                TimelineEditButton {
-                    objectName: "timelinePlaceStop"
-                    text: root.timeline && root.timeline.stopTimeMs >= 0 ? "Move Stop here" : "Place Stop"
-                    textVariants: ["Move Stop here", "Place Stop"]
-                    iconSource: "qrc:/icons/icons/timeline/stop-add.svg"
-                    enabled: root.editable
-                    onClicked: { root.focusTrack(); root.timeline.placeStop() }
-                }
-                TimelineEditButton {
-                    objectName: "timelineRemoveStop"
-                    text: "Remove Stop"
-                    iconSource: "qrc:/icons/icons/timeline/stop-remove.svg"
-                    destructive: true
-                    visible: !!root.timeline && root.timeline.stopTimeMs >= 0
-                    enabled: root.editable
-                    onClicked: { root.focusTrack(); root.timeline.removeStop() }
-                }
-                Text {
-                    height: Theme.controlHeight
-                    visible: !!root.timeline && root.timeline.hasDraft
-                    text: "Unsaved draft · place a keyframe to keep changes"
-                    color: Theme.warningText; font.pixelSize: Theme.controlFontSize
-                    verticalAlignment: Text.AlignVCenter
-                }
-            }
-            Row {
-                id: layoutActions
-                objectName: "timelineLayoutControls"
-                anchors.right: parent.right
-                anchors.rightMargin: actionViewport.contentPadding
-                height: Theme.controlHeight
-                spacing: transportViewport.gap
-                TimelineEditButton {
-                    id: zoomOutButton
-                    objectName: "timelineZoomOut"
-                    text: "Zoom out"
-                    iconSource: "qrc:/icons/icons/timeline/zoom-out.svg"
-                    enabled: !!root.timeline
-                    onClicked: root.zoom(2)
-                }
-                TimelineEditButton {
-                    id: zoomInButton
-                    objectName: "timelineZoomIn"
-                    text: "Zoom in"
-                    iconSource: "qrc:/icons/icons/timeline/zoom-in.svg"
-                    enabled: !!root.timeline
-                    onClicked: root.zoom(0.5)
-                }
-                TimelineEditButton {
-                    id: fitButton
-                    objectName: "timelineFitDuration"
-                    text: "Fit duration"
-                    iconSource: "qrc:/icons/icons/timeline/fit.svg"
-                    enabled: !!root.timeline
-                    onClicked: { root.viewDurationMs = root.maximumMs; trackViewport.contentX = 0 }
-                }
-            }
-        }
-        MouseArea {
-            anchors.fill: actionViewport
-            acceptedButtons: Qt.NoButton
-            cursorShape: undefined
-            scrollGestureEnabled: true
-            onWheel: wheel => {
-                var precise = wheel.pixelDelta.x !== 0 || wheel.pixelDelta.y !== 0
-                var dx = precise ? wheel.pixelDelta.x : wheel.angleDelta.x / 8
-                var dy = precise ? wheel.pixelDelta.y : wheel.angleDelta.y / 8
-                var delta = (Math.abs(dx) > Math.abs(dy) ? dx : dy) * (precise ? 1 : 3)
-                actionViewport.contentX = Math.max(0, Math.min(actionViewport.contentWidth - actionViewport.width,
-                    actionViewport.contentX - delta))
-                wheel.accepted = true
-            }
-        }
-    }
-    Rectangle {
-        id: tracksSeparator
-        anchors.left: parent.left; anchors.right: parent.right
-        anchors.top: editBar.bottom; anchors.topMargin: 8
-        height: 1
-        color: Theme.border
-    }
-    StateTextMetrics {
-        id: trackNameMetrics
-        font: keyTrackName.font
-        text: keyTrackName.text
-        textVariants: root.trackNames
-    }
-    component TrackName: Text {
-        x: 12
-        width: Math.max(0, parent.width - 25)
-        font.pixelSize: 10
-        color: Theme.overlayText
-        textFormat: Text.PlainText
-        verticalAlignment: Text.AlignVCenter
-    }
-    Rectangle {
-        id: keyframeSeparator
-        objectName: "timelineKeyframeSeparator"
-        anchors.left: parent.left; anchors.right: parent.right
-        anchors.top: tracksSeparator.bottom
-        anchors.topMargin: root.rulerHeight + root.keyHeight
-        height: 1
-        z: 1
-        color: Theme.overlayBorder
-    }
-    Item {
-        id: trackHeaders
-        objectName: "timelineTrackHeaders"
-        anchors.left: parent.left
-        anchors.top: tracksSeparator.bottom; anchors.bottom: parent.bottom
-        width: trackNameMetrics.maximumWidth + 25
+        y: root.transportHeight
+        height: Math.max(0, root.height - y)
+        visible: root.expanded
         clip: true
         Rectangle {
-            anchors.right: parent.right
-            width: 1; height: parent.height
-            color: Theme.overlayBorder
-        }
-        Rectangle { y: root.rulerHeight; width: parent.width; height: 1; color: Theme.overlayBorder }
-        TrackName {
-            id: keyTrackName
-            objectName: "timelineKeyframeHeader"
-            y: root.rulerHeight
-            height: root.keyHeight
-            text: "Keyframes"
+            id: transportSeparator
+            anchors.left: parent.left; anchors.right: parent.right
+            anchors.top: parent.top
+            height: 1
+            color: Theme.border
         }
         Item {
-            id: clipHeaders
-            objectName: "timelineClipHeaders"
-            y: root.rulerHeight + root.keyHeight + keyframeSeparator.height
-            width: parent.width; height: Math.max(0, parent.height - y)
-            clip: true
-            Repeater {
-                model: Math.ceil(clipHeaders.height / root.clipHeight) + 2
-                Item {
-                    required property int index
-                    readonly property int trackIndex: Math.floor(clipViewport.contentY / root.clipHeight) + index
-                    objectName: "timelineClipTrackHeader"
-                    y: trackIndex * root.clipHeight - clipViewport.contentY
-                    width: clipHeaders.width; height: root.clipHeight
-                    visible: trackIndex < root.trackNames.length
-                    Rectangle { visible: parent.trackIndex > 0; width: parent.width; height: 1; color: Theme.overlayBorder }
-                    TrackName {
-                        objectName: "timelineClipTrackLabel"
-                        height: parent.height
-                        text: root.trackNames[parent.trackIndex] || ""
+            id: editBar
+            objectName: "timelineEditBar"
+            // Measure labels independently of the current mode so resizing cannot oscillate.
+            readonly property bool compactButtons: width < actionViewport.contentPadding * 2
+                + root.buttonRowTextWidth(actions) + actions.spacing + root.buttonRowTextWidth(layoutActions)
+            anchors.left: parent.left; anchors.right: parent.right
+            anchors.top: transportSeparator.bottom
+            anchors.topMargin: 8
+            height: Theme.controlHeight
+            Flickable {
+                id: actionViewport
+                objectName: "timelineEditActions"
+                readonly property int contentPadding: 8
+                anchors.fill: parent
+                clip: true
+                // Compact buttons share one scrollable row if their icons still do not fit.
+                contentWidth: Math.max(width, contentPadding * 2 + actions.width + actions.spacing + layoutActions.width)
+                contentHeight: height
+                boundsBehavior: Flickable.StopAtBounds
+                interactive: false
+                Row {
+                    id: actions
+                    x: actionViewport.contentPadding
+                    spacing: 6
+                    TimelineEditButton {
+                        objectName: "timelinePlaceKeyframe"
+                        text: root.timeline && root.timeline.hasKeyframeAtPosition ? "Update keyframe" : "Place keyframe"
+                        textVariants: ["Update keyframe", "Place keyframe"]
+                        iconSource: root.timeline && root.timeline.hasKeyframeAtPosition
+                            ? "qrc:/icons/icons/timeline/keyframe-update.svg" : "qrc:/icons/icons/timeline/keyframe-add.svg"
+                        enabled: root.editable && root.timeline.canCapture
+                        onClicked: { root.focusTrack(); root.timeline.placeKeyframe() }
+                    }
+                    TimelineEditButton {
+                        objectName: "timelineSplitClip"
+                        text: "Split clip"
+                        iconSource: "qrc:/icons/icons/timeline/split.svg"
+                        visible: !!root.timeline && root.timeline.primaryMediaId !== ""
+                        enabled: root.editable && root.timeline.canSplit
+                        onClicked: { root.focusTrack(); root.timeline.splitClip() }
+                    }
+
+                    TimelineEditButton {
+                        objectName: "timelineCopy"
+                        text: "Copy"
+                        iconSource: "qrc:/icons/icons/timeline/copy.svg"
+                        enabled: root.editable && (root.timeline.selectedKeyframeId !== "" || root.timeline.selectedClipId !== "")
+                        onClicked: { root.focusTrack(); root.timeline.copySelected() }
+                    }
+                    TimelineEditButton {
+                        objectName: "timelinePaste"
+                        text: "Paste"
+                        iconSource: "qrc:/icons/icons/timeline/paste.svg"
+                        enabled: root.editable && root.timeline.canPaste
+                        onClicked: { root.focusTrack(); root.timeline.paste() }
+                    }
+                    TimelineEditButton {
+                        objectName: "timelineDelete"
+                        text: "Delete"
+                        iconSource: "qrc:/icons/icons/delete.svg"
+                        destructive: true
+                        enabled: root.editable && (root.timeline.selectedKeyframeId !== "" || root.timeline.selectedClipId !== "")
+                        onClicked: { root.focusTrack(); root.timeline.deleteSelected() }
+                    }
+                    TimelineEditButton {
+                        objectName: "timelinePlaceStop"
+                        text: root.timeline && root.timeline.stopTimeMs >= 0 ? "Move Stop here" : "Place Stop"
+                        textVariants: ["Move Stop here", "Place Stop"]
+                        iconSource: "qrc:/icons/icons/timeline/stop-add.svg"
+                        enabled: root.editable
+                        onClicked: { root.focusTrack(); root.timeline.placeStop() }
+                    }
+                    TimelineEditButton {
+                        objectName: "timelineRemoveStop"
+                        text: "Remove Stop"
+                        iconSource: "qrc:/icons/icons/timeline/stop-remove.svg"
+                        destructive: true
+                        visible: !!root.timeline && root.timeline.stopTimeMs >= 0
+                        enabled: root.editable
+                        onClicked: { root.focusTrack(); root.timeline.removeStop() }
+                    }
+                    Text {
+                        height: Theme.controlHeight
+                        visible: !!root.timeline && root.timeline.hasDraft
+                        text: "Unsaved draft · place a keyframe to keep changes"
+                        color: Theme.warningText; font.pixelSize: Theme.controlFontSize
+                        verticalAlignment: Text.AlignVCenter
+                    }
+                }
+                Row {
+                    id: layoutActions
+                    objectName: "timelineLayoutControls"
+                    anchors.right: parent.right
+                    anchors.rightMargin: actionViewport.contentPadding
+                    height: Theme.controlHeight
+                    spacing: transportViewport.gap
+                    TimelineEditButton {
+                        id: zoomOutButton
+                        objectName: "timelineZoomOut"
+                        text: "Zoom out"
+                        iconSource: "qrc:/icons/icons/timeline/zoom-out.svg"
+                        enabled: !!root.timeline
+                        onClicked: root.zoom(2)
+                    }
+                    TimelineEditButton {
+                        id: zoomInButton
+                        objectName: "timelineZoomIn"
+                        text: "Zoom in"
+                        iconSource: "qrc:/icons/icons/timeline/zoom-in.svg"
+                        enabled: !!root.timeline
+                        onClicked: root.zoom(0.5)
+                    }
+                    TimelineEditButton {
+                        id: fitButton
+                        objectName: "timelineFitDuration"
+                        text: "Fit duration"
+                        iconSource: "qrc:/icons/icons/timeline/fit.svg"
+                        enabled: !!root.timeline
+                        onClicked: { root.viewDurationMs = root.maximumMs; trackViewport.contentX = 0 }
                     }
                 }
             }
+            MouseArea {
+                anchors.fill: actionViewport
+                acceptedButtons: Qt.NoButton
+                cursorShape: undefined
+                scrollGestureEnabled: true
+                onWheel: wheel => {
+                    var precise = wheel.pixelDelta.x !== 0 || wheel.pixelDelta.y !== 0
+                    var dx = precise ? wheel.pixelDelta.x : wheel.angleDelta.x / 8
+                    var dy = precise ? wheel.pixelDelta.y : wheel.angleDelta.y / 8
+                    var delta = (Math.abs(dx) > Math.abs(dy) ? dx : dy) * (precise ? 1 : 3)
+                    actionViewport.contentX = Math.max(0, Math.min(actionViewport.contentWidth - actionViewport.width,
+                        actionViewport.contentX - delta))
+                    wheel.accepted = true
+                }
+            }
+        }
+        Rectangle {
+            id: tracksSeparator
+            anchors.left: parent.left; anchors.right: parent.right
+            anchors.top: editBar.bottom; anchors.topMargin: 8
+            height: 1
+            color: Theme.border
+        }
+        StateTextMetrics {
+            id: trackNameMetrics
+            font: keyTrackName.font
+            text: keyTrackName.text
+            textVariants: root.trackNames
+        }
+        component TrackName: Text {
+            x: 12
+            width: Math.max(0, parent.width - 25)
+            font.pixelSize: 10
+            color: Theme.overlayText
+            textFormat: Text.PlainText
+            verticalAlignment: Text.AlignVCenter
+        }
+        Rectangle {
+            id: keyframeSeparator
+            objectName: "timelineKeyframeSeparator"
+            anchors.left: parent.left; anchors.right: parent.right
+            anchors.top: tracksSeparator.bottom
+            anchors.topMargin: root.rulerHeight + root.keyHeight
+            height: 1
+            z: 1
+            color: Theme.overlayBorder
+        }
+        Item {
+            id: trackHeaders
+            objectName: "timelineTrackHeaders"
+            anchors.left: parent.left
+            anchors.top: tracksSeparator.bottom; anchors.bottom: parent.bottom
+            width: trackNameMetrics.maximumWidth + 25
+            clip: true
+            Rectangle {
+                anchors.right: parent.right
+                width: 1; height: parent.height
+                color: Theme.overlayBorder
+            }
+            Rectangle { y: root.rulerHeight; width: parent.width; height: 1; color: Theme.overlayBorder }
+            TrackName {
+                id: keyTrackName
+                objectName: "timelineKeyframeHeader"
+                y: root.rulerHeight
+                height: root.keyHeight
+                text: "Keyframes"
+            }
+            Item {
+                id: clipHeaders
+                objectName: "timelineClipHeaders"
+                y: root.rulerHeight + root.keyHeight + keyframeSeparator.height
+                width: parent.width; height: Math.max(0, parent.height - y)
+                clip: true
+                Repeater {
+                    model: Math.ceil(clipHeaders.height / root.clipHeight) + 2
+                    Item {
+                        required property int index
+                        readonly property int trackIndex: Math.floor(clipViewport.contentY / root.clipHeight) + index
+                        objectName: "timelineClipTrackHeader"
+                        y: trackIndex * root.clipHeight - clipViewport.contentY
+                        width: clipHeaders.width; height: root.clipHeight
+                        visible: trackIndex >= root.firstTrackIndex && trackIndex <= root.lastTrackIndex
+                        Rectangle { width: parent.width; height: 1; color: Theme.overlayBorder }
+                        TrackName {
+                            objectName: "timelineClipTrackLabel"
+                            height: parent.height
+                            text: "Track " + -parent.trackIndex
+                        }
+                    }
+                }
+            }
+            MouseArea {
+                anchors.fill: parent
+                acceptedButtons: Qt.NoButton
+                cursorShape: undefined
+                scrollGestureEnabled: true
+                onWheel: wheel => root.handleWheel(wheel)
+            }
+        }
+        Flickable {
+            id: trackViewport
+            objectName: "timelineTracks"
+            anchors.left: trackHeaders.right; anchors.right: parent.right
+            anchors.top: tracksSeparator.bottom; anchors.bottom: parent.bottom
+            clip: true
+            contentWidth: Math.max(width, root.maximumMs * root.pixelsPerMs + 24)
+            contentHeight: height
+            boundsBehavior: Flickable.StopAtBounds
+            interactive: false
+            ScrollBar.horizontal: ScrollBar {
+                policy: ScrollBar.AlwaysOn
+                z: 1
+                background: null
+            }
+            Item {
+                id: timelineContent
+                width: trackViewport.contentWidth; height: trackViewport.height
+                Rectangle { width: parent.width; height: root.rulerHeight; color: Theme.overlaySelected }
+                Rectangle { y: root.rulerHeight; width: parent.width; height: 1; color: Theme.overlayBorder }
+                MouseArea {
+                    id: scrubber
+                    width: parent.width
+                    height: root.rulerHeight
+                    acceptedButtons: Qt.LeftButton
+                    preventStealing: true
+                    enabled: !!root.timeline && !root.timeline.remoteActive
+                    onPressed: mouse => {
+                        root.focusTrack()
+                        root.timeline.seek(root.clampTime((mouse.x - 12) / root.pixelsPerMs))
+                    }
+                    onPositionChanged: mouse => { if (pressed) root.timeline.seek(root.clampTime((mouse.x - 12) / root.pixelsPerMs)) }
+                }
+                MouseArea {
+                    y: root.rulerHeight
+                    width: parent.width
+                    height: parent.height - y
+                    acceptedButtons: Qt.LeftButton
+                    preventStealing: true
+                    enabled: !!root.timeline && !root.timeline.remoteActive
+                    onPressed: {
+                        root.focusTrack()
+                        root.timeline.clearSelection()
+                    }
+                }
+                Repeater {
+                    model: Math.ceil(Math.max(0, trackViewport.width) / (root.gridStep * root.pixelsPerMs)) + 2
+                    Rectangle {
+                        required property int index
+                        readonly property real timeMs: (Math.floor(Math.max(0, trackViewport.contentX - 12) / root.pixelsPerMs / root.gridStep) + index) * root.gridStep
+                        objectName: "timelineGridLine"
+                        x: 12 + timeMs * root.pixelsPerMs
+                        y: root.rulerHeight
+                        visible: timeMs <= root.maximumMs
+                        width: 1; height: timelineContent.height - y
+                        color: Theme.overlayBorder; opacity: 0.45
+                    }
+                }
+                Repeater {
+                    model: Math.ceil(Math.max(0, trackViewport.width) / (root.tickStep * root.pixelsPerMs)) + 2
+                    Item {
+                        required property int index
+                        readonly property real timeMs: (Math.floor(Math.max(0, trackViewport.contentX - 12) / root.pixelsPerMs / root.tickStep) + index) * root.tickStep
+                        x: 12 + timeMs * root.pixelsPerMs
+                        visible: timeMs <= root.maximumMs
+                        height: timelineContent.height
+                        Rectangle { y: root.rulerHeight - 7; width: 1; height: 7; color: Theme.overlayDisabledText }
+                        Rectangle { y: root.rulerHeight; width: 1; height: parent.height - root.rulerHeight; color: Theme.overlayBorder; opacity: 0.35 }
+                        Text { x: 4; y: 3; text: root.formatTime(parent.timeMs); font.pixelSize: 10; color: Theme.overlayText }
+                    }
+                }
+                Item {
+                    id: keyTrack
+                    objectName: "timelineKeyframeTrack"
+                    y: root.rulerHeight
+                    width: parent.width; height: root.keyHeight
+                    Repeater {
+                        model: root.timeline ? root.timeline.otherKeyframes : []
+                        KeyframeDiamond {
+                            required property var modelData
+                            objectName: "otherMediaKeyframe"
+                            x: 12 + modelData.timeMs * root.pixelsPerMs - width / 2
+                            y: (keyTrack.height - height) / 2
+                            opacity: root.timeline ? root.timeline.otherKeyframeOpacity : 0.3
+                        }
+                    }
+                    Repeater {
+                        model: root.timeline ? root.timeline.keyframes : []
+                        Item {
+                            id: keyItem
+                            required property var modelData
+                            objectName: "timelineKeyframe"
+                            property bool dragging: false
+                            property real previewMs: 0
+                            property real rawMs: 0
+                            readonly property real shownMs: dragging ? previewMs : modelData.timeMs
+                            function refreshPreview() { previewMs = root.snapTime(rawMs, modelData.id, 0) }
+                            x: 12 + shownMs * root.pixelsPerMs - width / 2
+                            y: (keyTrack.height - height) / 2
+                            z: dragging ? 2 : 1
+                            width: 24; height: 24
+                            KeyframeDiamond {
+                                objectName: "timelineKeyframeDiamond"
+                                anchors.centerIn: parent
+                                color: root.timeline && root.timeline.selectedKeyframeId === keyItem.modelData.id ? Theme.accent : Theme.overlayText
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                enabled: root.editable
+                                cursorShape: Qt.SizeHorCursor
+                                property real pressX: 0
+                                property real initialMs: 0
+                                onPressed: mouse => {
+                                    root.focusTrack(); root.shiftHeld = !!(mouse.modifiers & Qt.ShiftModifier)
+                                    root.timeline.selectKeyframe(keyItem.modelData.id)
+                                    initialMs = keyItem.modelData.timeMs
+                                    pressX = mapToItem(timelineContent, mouse.x, mouse.y).x
+                                    keyItem.rawMs = initialMs; keyItem.previewMs = initialMs
+                                    keyItem.dragging = true; root.activeDrag = keyItem
+                                }
+                                onPositionChanged: mouse => {
+                                    if (!pressed) return
+                                    root.shiftHeld = !!(mouse.modifiers & Qt.ShiftModifier)
+                                    keyItem.rawMs = initialMs + (mapToItem(timelineContent, mouse.x, mouse.y).x - pressX) / root.pixelsPerMs
+                                    keyItem.refreshPreview()
+                                }
+                                onReleased: {
+                                    var id = keyItem.modelData.id; var ms = keyItem.previewMs
+                                    keyItem.dragging = false; root.endDrag()
+                                    if (ms !== initialMs) root.timeline.moveKeyframe(id, ms)
+                                }
+                                onCanceled: { keyItem.dragging = false; root.endDrag() }
+                            }
+                            ToolTip.visible: keyHover.hovered
+                            ToolTip.text: root.formatTime(shownMs)
+                            HoverHandler { id: keyHover }
+                        }
+                    }
+                }
+                Item {
+                    id: clipViewport
+                    objectName: "timelineClipViewport"
+                    y: keyTrack.y + keyTrack.height + keyframeSeparator.height
+                    width: parent.width; height: Math.max(0, parent.height - y)
+                    // A track's Y coordinate never depends on the first occupied row.
+                    // Margins expand the scroll range around the fixed track-zero origin.
+                    readonly property real centerPadding: Math.max(0, (height - root.clipHeight) / 2)
+                    readonly property real topMargin: -root.firstTrackIndex * root.clipHeight + centerPadding
+                    readonly property real bottomMargin: centerPadding
+                    readonly property real contentHeight: (root.lastTrackIndex + 1) * root.clipHeight
+                    property real previousHeight: 0
+                    clip: true
+                    property real contentY: 0
+                    readonly property alias contentItem: clipContent
+                    onHeightChanged: {
+                        contentY -= (height - previousHeight) / 2
+                        previousHeight = height
+                    }
+                    Component.onCompleted: contentY = (root.clipHeight - height) / 2
+                    ScrollBar {
+                        objectName: "timelineVerticalScrollBar"
+                        orientation: Qt.Vertical
+                        height: parent.height
+                        readonly property real extent: clipViewport.topMargin + clipViewport.contentHeight + clipViewport.bottomMargin
+                        size: Math.min(1, height / Math.max(1, extent))
+                        position: (clipViewport.contentY + clipViewport.topMargin) / Math.max(1, extent)
+                        onPositionChanged: if (pressed) clipViewport.contentY = position * extent - clipViewport.topMargin
+                        active: hovered || pressed
+                        x: root.visibleStartX + trackViewport.width - width
+                        anchors.right: undefined
+                        z: 10
+                        policy: ScrollBar.AsNeeded
+                        background: null
+                    }
+                    Item {
+                        id: clipContent
+                        y: -clipViewport.contentY
+                        width: clipViewport.width
+                        height: clipViewport.contentHeight
+                        Repeater {
+                            model: Math.ceil(clipViewport.height / root.clipHeight) + 2
+                            Item {
+                                id: clipTrack
+                                required property int index
+                                readonly property int trackIndex: Math.floor(clipViewport.contentY / root.clipHeight) + index
+                                objectName: "timelineClipTrack"
+                                y: trackIndex * root.clipHeight
+                                width: clipViewport.width; height: root.clipHeight
+                                visible: trackIndex >= root.firstTrackIndex && trackIndex <= root.lastTrackIndex
+                                Rectangle { width: parent.width; height: 1; color: Theme.overlayBorder }
+                                MouseArea {
+                                    anchors.fill: parent
+                                    enabled: root.editable
+                                    onPressed: {
+                                        root.focusTrack()
+                                        root.timeline.setActiveTrackIndex(clipTrack.trackIndex - root.firstTrackIndex)
+                                    }
+                                }
+                            }
+                        }
+                        Repeater {
+                            model: root.timeline ? root.timeline.clipModel : null
+                            TimelineClip {
+                                panel: root
+                                timeContent: clipViewport.contentItem
+                                trackHeight: root.clipHeight
+                            }
+                        }
+                    }
+                }
+                Rectangle {
+                    x: 12 + (root.timeline ? root.timeline.effectiveEndMs : root.maximumMs) * root.pixelsPerMs
+                    y: root.rulerHeight
+                    width: Math.max(0, timelineContent.width - x); height: timelineContent.height - y
+                    color: "#44000000"
+                }
+                Rectangle {
+                    objectName: "timelinePlayhead"
+                    x: 12 + (root.timeline ? root.timeline.positionMs : 0) * root.pixelsPerMs
+                    width: 1; height: timelineContent.height
+                    color: Theme.accent
+                    Shape {
+                        id: playheadCap
+                        objectName: "timelinePlayheadCap"
+                        x: (parent.width - width) / 2
+                        anchors.top: parent.top
+                        width: 12; height: 14
+                        preferredRendererType: Shape.CurveRenderer
+                        antialiasing: true
+                        ShapePath {
+                            strokeWidth: -1
+                            fillColor: Theme.accent
+                            startX: 0; startY: 0
+                            PathLine { x: playheadCap.width; y: 0 }
+                            PathLine { x: playheadCap.width; y: playheadCap.height - 5 }
+                            PathLine { x: playheadCap.width / 2; y: playheadCap.height }
+                            PathLine { x: 0; y: playheadCap.height - 5 }
+                            PathLine { x: 0; y: 0 }
+                        }
+                    }
+                }
+                Item {
+                    id: stopMarker
+                    objectName: "timelineStopMarker"
+                    visible: !!root.timeline && root.timeline.stopTimeMs >= 0
+                    property bool dragging: false
+                    property real previewMs: 0
+                    property real rawMs: 0
+                    function refreshPreview() { previewMs = root.snapTime(rawMs, "", 0) }
+                    x: 12 + (dragging ? previewMs : root.timeline ? root.timeline.stopTimeMs : 0) * root.pixelsPerMs - 8
+                    width: 16; height: timelineContent.height
+                    Rectangle { x: 7.5; width: 1; height: parent.height; color: "#ee7979" }
+                    Rectangle { width: 14; height: Math.max(16, root.rulerHeight - 4); color: "#b74646"; radius: 2 }
+                    Text { y: 2; anchors.horizontalCenter: parent.horizontalCenter; text: "S"; color: "white"; font.pixelSize: 11 }
+                    MouseArea {
+                        width: parent.width; height: root.rulerHeight
+                        enabled: root.editable
+                        cursorShape: Qt.SizeHorCursor
+                        onPressed: mouse => {
+                            root.focusTrack(); root.shiftHeld = !!(mouse.modifiers & Qt.ShiftModifier)
+                            stopMarker.previewMs = root.timeline.stopTimeMs; stopMarker.rawMs = stopMarker.previewMs
+                            stopMarker.dragging = true; root.activeDrag = stopMarker
+                        }
+                        onPositionChanged: mouse => {
+                            if (!pressed) return
+                            root.shiftHeld = !!(mouse.modifiers & Qt.ShiftModifier)
+                            stopMarker.rawMs = (mapToItem(timelineContent, mouse.x, mouse.y).x - 12) / root.pixelsPerMs
+                            stopMarker.refreshPreview()
+                        }
+                        onReleased: {
+                            var ms = stopMarker.previewMs
+                            stopMarker.dragging = false; root.endDrag(); root.timeline.setStopTime(ms)
+                        }
+                        onCanceled: { stopMarker.dragging = false; root.endDrag() }
+                    }
+                }
+                Rectangle {
+                    visible: root.snapGuideMs >= 0
+                    x: 12 + root.snapGuideMs * root.pixelsPerMs
+                    width: 1; height: timelineContent.height
+                    color: Theme.accent
+                    Text { x: 4; y: root.rulerHeight + 2; text: root.snapGuideLabel; color: Theme.accent; font.pixelSize: 11 }
+                }
+            }
+        }
+        Timer {
+            interval: 16
+            repeat: true
+            running: !!root.activeDrag && !!root.activeDrag.isClipDrag
+            onTriggered: root.autoScrollClip(root.activeDrag)
         }
         MouseArea {
-            anchors.fill: parent
+            id: trackInput
+            anchors.fill: trackViewport
             acceptedButtons: Qt.NoButton
             cursorShape: undefined
+            hoverEnabled: true
             scrollGestureEnabled: true
             onWheel: wheel => root.handleWheel(wheel)
         }
     }
-    Flickable {
-        id: trackViewport
-        objectName: "timelineTracks"
-        anchors.left: trackHeaders.right; anchors.right: parent.right
-        anchors.top: tracksSeparator.bottom; anchors.bottom: parent.bottom
-        clip: true
-        contentWidth: Math.max(width, root.maximumMs * root.pixelsPerMs + 24)
-        contentHeight: height
-        boundsBehavior: Flickable.StopAtBounds
-        interactive: false
-        ScrollBar.horizontal: ScrollBar {
-            policy: ScrollBar.AlwaysOn
-            z: 1
-            background: null
-        }
-        Item {
-            id: timelineContent
-            width: trackViewport.contentWidth; height: trackViewport.height
-            Rectangle { width: parent.width; height: root.rulerHeight; color: Theme.overlaySelected }
-            Rectangle { y: root.rulerHeight; width: parent.width; height: 1; color: Theme.overlayBorder }
-            MouseArea {
-                id: scrubber
-                width: parent.width
-                height: root.rulerHeight
-                acceptedButtons: Qt.LeftButton
-                preventStealing: true
-                enabled: !!root.timeline && !root.timeline.remoteActive
-                onPressed: mouse => {
-                    root.focusTrack()
-                    root.timeline.seek(root.clampTime((mouse.x - 12) / root.pixelsPerMs))
-                }
-                onPositionChanged: mouse => { if (pressed) root.timeline.seek(root.clampTime((mouse.x - 12) / root.pixelsPerMs)) }
-            }
-            MouseArea {
-                y: root.rulerHeight
-                width: parent.width
-                height: parent.height - y
-                acceptedButtons: Qt.LeftButton
-                preventStealing: true
-                enabled: !!root.timeline && !root.timeline.remoteActive
-                onPressed: {
-                    root.focusTrack()
-                    root.timeline.clearSelection()
-                }
-            }
-            Repeater {
-                model: Math.ceil(trackViewport.width / (root.gridStep * root.pixelsPerMs)) + 2
-                Rectangle {
-                    required property int index
-                    readonly property real timeMs: (Math.floor(Math.max(0, trackViewport.contentX - 12) / root.pixelsPerMs / root.gridStep) + index) * root.gridStep
-                    objectName: "timelineGridLine"
-                    x: 12 + timeMs * root.pixelsPerMs
-                    y: root.rulerHeight
-                    visible: timeMs <= root.maximumMs
-                    width: 1; height: timelineContent.height - y
-                    color: Theme.overlayBorder; opacity: 0.45
-                }
-            }
-            Repeater {
-                model: Math.ceil(trackViewport.width / (root.tickStep * root.pixelsPerMs)) + 2
-                Item {
-                    required property int index
-                    readonly property real timeMs: (Math.floor(Math.max(0, trackViewport.contentX - 12) / root.pixelsPerMs / root.tickStep) + index) * root.tickStep
-                    x: 12 + timeMs * root.pixelsPerMs
-                    visible: timeMs <= root.maximumMs
-                    height: timelineContent.height
-                    Rectangle { y: root.rulerHeight - 7; width: 1; height: 7; color: Theme.overlayDisabledText }
-                    Rectangle { y: root.rulerHeight; width: 1; height: parent.height - root.rulerHeight; color: Theme.overlayBorder; opacity: 0.35 }
-                    Text { x: 4; y: 3; text: root.formatTime(parent.timeMs); font.pixelSize: 10; color: Theme.overlayText }
-                }
-            }
-            Item {
-                id: keyTrack
-                objectName: "timelineKeyframeTrack"
-                y: root.rulerHeight
-                width: parent.width; height: root.keyHeight
-                Repeater {
-                    model: root.timeline ? root.timeline.otherKeyframes : []
-                    KeyframeDiamond {
-                        required property var modelData
-                        objectName: "otherMediaKeyframe"
-                        x: 12 + modelData.timeMs * root.pixelsPerMs - width / 2
-                        y: (keyTrack.height - height) / 2
-                        opacity: root.timeline ? root.timeline.otherKeyframeOpacity : 0.3
-                    }
-                }
-                Repeater {
-                    model: root.timeline ? root.timeline.keyframes : []
-                    Item {
-                        id: keyItem
-                        required property var modelData
-                        objectName: "timelineKeyframe"
-                        property bool dragging: false
-                        property real previewMs: 0
-                        property real rawMs: 0
-                        readonly property real shownMs: dragging ? previewMs : modelData.timeMs
-                        function refreshPreview() { previewMs = root.snapTime(rawMs, modelData.id, 0) }
-                        x: 12 + shownMs * root.pixelsPerMs - width / 2
-                        y: (keyTrack.height - height) / 2
-                        z: dragging ? 2 : 1
-                        width: 24; height: 24
-                        KeyframeDiamond {
-                            objectName: "timelineKeyframeDiamond"
-                            anchors.centerIn: parent
-                            color: root.timeline && root.timeline.selectedKeyframeId === keyItem.modelData.id ? Theme.accent : Theme.overlayText
-                        }
-                        MouseArea {
-                            anchors.fill: parent
-                            enabled: root.editable
-                            cursorShape: Qt.SizeHorCursor
-                            property real pressX: 0
-                            property real initialMs: 0
-                            onPressed: mouse => {
-                                root.focusTrack(); root.shiftHeld = !!(mouse.modifiers & Qt.ShiftModifier)
-                                root.timeline.selectKeyframe(keyItem.modelData.id)
-                                initialMs = keyItem.modelData.timeMs
-                                pressX = mapToItem(timelineContent, mouse.x, mouse.y).x
-                                keyItem.rawMs = initialMs; keyItem.previewMs = initialMs
-                                keyItem.dragging = true; root.activeDrag = keyItem
-                            }
-                            onPositionChanged: mouse => {
-                                if (!pressed) return
-                                root.shiftHeld = !!(mouse.modifiers & Qt.ShiftModifier)
-                                keyItem.rawMs = initialMs + (mapToItem(timelineContent, mouse.x, mouse.y).x - pressX) / root.pixelsPerMs
-                                keyItem.refreshPreview()
-                            }
-                            onReleased: {
-                                var id = keyItem.modelData.id; var ms = keyItem.previewMs
-                                keyItem.dragging = false; root.endDrag()
-                                if (ms !== initialMs) root.timeline.moveKeyframe(id, ms)
-                            }
-                            onCanceled: { keyItem.dragging = false; root.endDrag() }
-                        }
-                        ToolTip.visible: keyHover.hovered
-                        ToolTip.text: root.formatTime(shownMs)
-                        HoverHandler { id: keyHover }
-                    }
-                }
-            }
-            Flickable {
-                id: clipViewport
-                objectName: "timelineClipViewport"
-                y: keyTrack.y + keyTrack.height + keyframeSeparator.height
-                width: parent.width; height: Math.max(0, parent.height - y)
-                contentWidth: width
-                contentHeight: Math.max(height, (root.timeline ? root.timeline.trackCount : 1) * root.clipHeight)
-                interactive: false
-                clip: true
-                boundsBehavior: Flickable.StopAtBounds
-                onContentHeightChanged: root.scrollTracks(0)
-                onHeightChanged: root.scrollTracks(0)
-                ScrollBar.vertical: ScrollBar {
-                    x: root.visibleStartX + trackViewport.width - width
-                    anchors.right: undefined
-                    z: 10
-                    policy: ScrollBar.AsNeeded
-                    background: null
-                }
-                Repeater {
-                    model: Math.ceil(clipViewport.height / root.clipHeight) + 2
-                    Item {
-                        id: clipTrack
-                        required property int index
-                        readonly property int trackIndex: Math.floor(clipViewport.contentY / root.clipHeight) + index
-                        objectName: "timelineClipTrack"
-                        y: trackIndex * root.clipHeight
-                        width: clipViewport.width; height: root.clipHeight
-                        visible: trackIndex < (root.timeline ? root.timeline.trackCount : 1)
-                        Rectangle { visible: clipTrack.trackIndex > 0; width: parent.width; height: 1; color: Theme.overlayBorder }
-                        MouseArea {
-                            anchors.fill: parent
-                            enabled: root.editable
-                            onPressed: {
-                                root.focusTrack()
-                                root.timeline.setActiveTrackIndex(clipTrack.trackIndex)
-                            }
-                        }
-                    }
-                }
-                Repeater {
-                    model: root.timeline ? root.timeline.clipModel : null
-                    TimelineClip {
-                        panel: root
-                        timeContent: clipViewport.contentItem
-                        trackHeight: root.clipHeight
-                    }
-                }
-            }
-            Rectangle {
-                x: 12 + (root.timeline ? root.timeline.effectiveEndMs : root.maximumMs) * root.pixelsPerMs
-                y: root.rulerHeight
-                width: Math.max(0, timelineContent.width - x); height: timelineContent.height - y
-                color: "#44000000"
-            }
-            Rectangle {
-                objectName: "timelinePlayhead"
-                x: 12 + (root.timeline ? root.timeline.positionMs : 0) * root.pixelsPerMs
-                width: 1; height: timelineContent.height
-                color: Theme.accent
-                Shape {
-                    id: playheadCap
-                    objectName: "timelinePlayheadCap"
-                    x: (parent.width - width) / 2
-                    anchors.top: parent.top
-                    width: 12; height: 14
-                    preferredRendererType: Shape.CurveRenderer
-                    antialiasing: true
-                    ShapePath {
-                        strokeWidth: -1
-                        fillColor: Theme.accent
-                        startX: 0; startY: 0
-                        PathLine { x: playheadCap.width; y: 0 }
-                        PathLine { x: playheadCap.width; y: playheadCap.height - 5 }
-                        PathLine { x: playheadCap.width / 2; y: playheadCap.height }
-                        PathLine { x: 0; y: playheadCap.height - 5 }
-                        PathLine { x: 0; y: 0 }
-                    }
-                }
-            }
-            Item {
-                id: stopMarker
-                objectName: "timelineStopMarker"
-                visible: !!root.timeline && root.timeline.stopTimeMs >= 0
-                property bool dragging: false
-                property real previewMs: 0
-                property real rawMs: 0
-                function refreshPreview() { previewMs = root.snapTime(rawMs, "", 0) }
-                x: 12 + (dragging ? previewMs : root.timeline ? root.timeline.stopTimeMs : 0) * root.pixelsPerMs - 8
-                width: 16; height: timelineContent.height
-                Rectangle { x: 7.5; width: 1; height: parent.height; color: "#ee7979" }
-                Rectangle { width: 14; height: Math.max(16, root.rulerHeight - 4); color: "#b74646"; radius: 2 }
-                Text { y: 2; anchors.horizontalCenter: parent.horizontalCenter; text: "S"; color: "white"; font.pixelSize: 11 }
-                MouseArea {
-                    width: parent.width; height: root.rulerHeight
-                    enabled: root.editable
-                    cursorShape: Qt.SizeHorCursor
-                    onPressed: mouse => {
-                        root.focusTrack(); root.shiftHeld = !!(mouse.modifiers & Qt.ShiftModifier)
-                        stopMarker.previewMs = root.timeline.stopTimeMs; stopMarker.rawMs = stopMarker.previewMs
-                        stopMarker.dragging = true; root.activeDrag = stopMarker
-                    }
-                    onPositionChanged: mouse => {
-                        if (!pressed) return
-                        root.shiftHeld = !!(mouse.modifiers & Qt.ShiftModifier)
-                        stopMarker.rawMs = (mapToItem(timelineContent, mouse.x, mouse.y).x - 12) / root.pixelsPerMs
-                        stopMarker.refreshPreview()
-                    }
-                    onReleased: {
-                        var ms = stopMarker.previewMs
-                        stopMarker.dragging = false; root.endDrag(); root.timeline.setStopTime(ms)
-                    }
-                    onCanceled: { stopMarker.dragging = false; root.endDrag() }
-                }
-            }
-            Rectangle {
-                visible: root.snapGuideMs >= 0
-                x: 12 + root.snapGuideMs * root.pixelsPerMs
-                width: 1; height: timelineContent.height
-                color: Theme.accent
-                Text { x: 4; y: root.rulerHeight + 2; text: root.snapGuideLabel; color: Theme.accent; font.pixelSize: 11 }
-            }
-        }
-    }
-    Timer {
-        interval: 16
-        repeat: true
-        running: !!root.activeDrag && !!root.activeDrag.isClipDrag
-        onTriggered: root.autoScrollClip(root.activeDrag)
-    }
-    MouseArea {
-        id: trackInput
-        anchors.fill: trackViewport
-        acceptedButtons: Qt.NoButton
-        cursorShape: undefined
-        hoverEnabled: true
-        scrollGestureEnabled: true
-        onWheel: wheel => root.handleWheel(wheel)
-    }
     Text {
         anchors.right: parent.right; anchors.bottom: parent.bottom; anchors.margins: 4
         text: root.timeline ? root.timeline.errorText : ""
-        visible: text.length > 0
+        visible: root.expanded && text.length > 0
         color: "#ee7979"; font.pixelSize: 11
         width: Math.min(implicitWidth, root.width - 12); elide: Text.ElideRight
     }
     component TimelineShortcut: Shortcut {
-        enabled: root.activeFocus && !root.textInputFocused && root.editable
+        enabled: root.expanded && root.activeFocus && !root.textInputFocused && root.editable
         context: Qt.WindowShortcut
         autoRepeat: false
     }
     component TimelineZoomShortcut: Shortcut {
-        enabled: !!root.timeline && !root.textInputFocused && (root.activeFocus || trackInput.containsMouse)
+        enabled: root.expanded && !!root.timeline && !root.textInputFocused && (root.activeFocus || trackInput.containsMouse)
         context: Qt.WindowShortcut
         autoRepeat: true
     }

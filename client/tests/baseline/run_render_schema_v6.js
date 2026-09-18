@@ -33,8 +33,8 @@ function main() {
   assert(!timeline.includes('"z"'), 'authoring or keyframes still serialize independent z');
   assert(timeline.includes('onlyKeys(o,{"keyframes","clip","trackIndex"})'),
     'timeline must accept exactly keyframes, one clip, and a track index');
-  assert(timeline.includes('integer(o,"trackIndex",0,MaximumTrackIndex,&index)'),
-    'track index is not validated as a bounded nonnegative integer');
+  assert(timeline.includes('integer(o,"trackIndex",MinimumTrackIndex,MaximumTrackIndex,&index)'),
+    'track index is not validated as a bounded signed integer');
   assert(timeline.includes('!o.value("clip").isObject()'), 'timeline must reject missing or non-object clips');
   assert(!timeline.includes('"clips"'), 'obsolete multiple clips per instance remain');
   assert(canvasMedia.includes('SceneTimeline::trackZ(m_timelineTrack.trackIndex)'),

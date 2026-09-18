@@ -66,7 +66,7 @@ function isCanonicalMediaTrack(value, type, settings, sourceDuration = 0) {
     if (!isCanonicalTimelineSettings(settings) || !['image', 'video', 'text'].includes(type)
         || !onlyKeys(value, ['keyframes', 'clip', 'trackIndex'])
         || !Array.isArray(value.keyframes) || value.keyframes.length > 10_000
-        || !integer(value.trackIndex, 0, MAXIMUM_TRACK_INDEX)
+        || !integer(value.trackIndex, -MAXIMUM_TRACK_INDEX, MAXIMUM_TRACK_INDEX)
         || (type === 'video' && !integer(sourceDuration, 0, MAXIMUM_DURATION_MS))) return false;
     const maximum = maximumSlot(settings);
     const ids = new Set(); const times = new Set();

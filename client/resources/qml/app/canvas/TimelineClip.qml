@@ -114,7 +114,7 @@ Rectangle {
         else panel.timeline.trimClip(id, start, end, overwrite)
     }
     x: 12 + shownStart * panel.pixelsPerMs
-    y: shownTrack * trackHeight + 5
+    y: (shownTrack + panel.firstTrackIndex) * trackHeight + 5
     z: dragging ? 3 : selected ? 2 : 1
     width: Math.max(2, (shownEnd - shownStart) * panel.pixelsPerMs)
     height: Math.max(0, trackHeight - 10)

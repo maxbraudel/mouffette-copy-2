@@ -804,7 +804,7 @@ QStringList CanvasDocument::pasteMediaState(
     SceneTimeline::SceneSettings settings;
     if (copiedItems.isEmpty() || !SceneTimeline::SceneSettings::fromJson(state.value("timeline").toObject(), &settings)
         || settings.slotsPerSecond != m_timelineSettings.slotsPerSecond) return reject();
-    int firstCopiedTrack = SceneTimeline::MaximumTrackIndex, lastCopiedTrack = 0;
+    int firstCopiedTrack = SceneTimeline::MaximumTrackIndex, lastCopiedTrack = SceneTimeline::MinimumTrackIndex;
     for (const auto& value : copiedItems) {
         SceneTimeline::MediaTrack track;
         if (!SceneTimeline::MediaTrack::fromJson(value.toObject().value("timeline").toObject(), &track, m_timelineSettings.maxSlot())) return reject();
@@ -812,15 +812,9 @@ QStringList CanvasDocument::pasteMediaState(
         lastCopiedTrack = qMax(lastCopiedTrack, track.trackIndex);
     }
     const int span = lastCopiedTrack - firstCopiedTrack + 1;
-    const int shift = m_media.isEmpty() ? 0 : qMax(0, span - firstTimelineTrack());
-    const int offset = (m_media.isEmpty() ? 0 : firstTimelineTrack() + shift - span) - firstCopiedTrack;
+    const int offset = (m_media.isEmpty() ? 0 : qMin(0, firstTimelineTrack()) - span) - firstCopiedTrack;
     QJsonArray items;
-    for (auto* media : m_media) {
-        auto item = timelineMediaSnapshot(media->mediaId());
-        auto timeline = item.value("timeline").toObject();
-        timeline.insert("trackIndex", media->timelineTrack().trackIndex + shift);
-        item.insert("timeline", timeline); items.append(item);
-    }
+    for (auto* media : m_media) items.append(timelineMediaSnapshot(media->mediaId()));
     QHash<QString, QString> paths, newIds;
     QStringList inserted;
     for (const auto& value : copiedItems) {
@@ -915,25 +909,24 @@ int CanvasDocument::timelineTrackCount() const
     if (m_media.isEmpty()) return 1;
     int last = 0;
     for (auto* media : m_media) last = qMax(last, media->timelineTrack().trackIndex);
-    return last - firstTimelineTrack() + 3;
+    const int firstRowTrack = qMax(SceneTimeline::MinimumTrackIndex, qMin(0, firstTimelineTrack() - 1));
+    const int lastRowTrack = qMin(SceneTimeline::MaximumTrackIndex, last + 1);
+    return lastRowTrack - firstRowTrack + 1;
 }
 
 int CanvasDocument::timelineRow(int trackIndex) const
-{ return m_media.isEmpty() ? 0 : trackIndex - firstTimelineTrack() + 1; }
+{ return trackIndex - timelineTrackAtRow(0); }
 
 int CanvasDocument::timelineTrackAtRow(int row) const
-{ return m_media.isEmpty() ? 0 : firstTimelineTrack() + row - 1; }
+{ return m_media.isEmpty() ? 0 : qMax(SceneTimeline::MinimumTrackIndex, qMin(0, firstTimelineTrack() - 1)) + row; }
 
 bool CanvasDocument::timelinePlacementFree(const QString& clipId, const ClipPlacement& placement) const
 {
     if (placement.startSlot < 0 || placement.endSlot > m_timelineSettings.maxSlot()
-        || placement.endSlot <= placement.startSlot || placement.trackIndex < -1
+        || placement.endSlot <= placement.startSlot || placement.trackIndex < SceneTimeline::MinimumTrackIndex
         || placement.trackIndex > SceneTimeline::MaximumTrackIndex) return false;
     for (auto* media : m_media) {
         const auto& track = media->timelineTrack();
-        // A virtual top insertion must fit after all stored indices shift by one.
-        if (placement.trackIndex == -1 && track.trackIndex == SceneTimeline::MaximumTrackIndex
-            && track.clip.id != clipId) return false;
         if (track.clip.id != clipId && track.trackIndex == placement.trackIndex
             && track.clip.startSlot < placement.endSlot && placement.startSlot < track.clip.endSlot()) return false;
     }
@@ -986,16 +979,10 @@ CanvasDocument::ClipPlacement CanvasDocument::previewTimelineClip(const QString&
 
 bool CanvasDocument::insertMediaAbove(CanvasMedia* media, QString* error)
 {
-    const int first = firstTimelineTrack();
-    const int shift = !m_media.isEmpty() && first == 0 ? 1 : 0;
     QJsonArray items;
-    for (auto* existing : m_media) {
-        auto track = existing->timelineTrack();
-        track.trackIndex += shift;
-        items.append(withTimeline(timelineMediaSnapshot(existing), track));
-    }
+    for (auto* existing : m_media) items.append(timelineMediaSnapshot(existing));
     auto track = media->timelineTrack();
-    track.trackIndex = m_media.isEmpty() ? 0 : first - 1 + shift;
+    track.trackIndex = m_media.isEmpty() ? 0 : qMin(0, firstTimelineTrack()) - 1;
     items.append(withTimeline(timelineMediaSnapshot(media), track));
     return applyMediaPlan(items, {{media->mediaId(), media->sourcePath()}}, media->mediaId(), true,
                           error, {}, media);
@@ -1186,11 +1173,8 @@ bool CanvasDocument::applyTimelinePlacement(const QJsonObject& incoming, const Q
                                           bool freshInstance, QString* error, PlacementMode mode)
 {
     SceneTimeline::MediaTrack placed;
-    auto timeline = incoming.value("timeline").toObject();
-    const bool prepend = timeline.value("trackIndex").toInt(-2) == -1;
-    if (prepend) timeline.insert("trackIndex", 0); // Virtual row, never persisted as a negative index.
+    const auto timeline = incoming.value("timeline").toObject();
     if (!SceneTimeline::MediaTrack::fromJson(timeline, &placed, m_timelineSettings.maxSlot(), error)) return false;
-    if (prepend) placed.trackIndex = -1;
     const QString incomingId = incoming.value("mediaId").toString();
     if (!freshInstance && !m_editsLocked && !m_publishingTimelineEdit && incoming == timelineMediaSnapshot(incomingId)) return true;
     QJsonArray result;
@@ -1222,14 +1206,6 @@ bool CanvasDocument::applyTimelinePlacement(const QJsonObject& incoming, const Q
         }
     }
     result.append(incoming);
-    if (prepend) {
-        for (qsizetype i = 0; i < result.size(); ++i) {
-            auto item = result[i].toObject();
-            auto track = item.value("timeline").toObject();
-            track.insert("trackIndex", track.value("trackIndex").toInt() + 1);
-            item.insert("timeline", track); result[i] = item;
-        }
-    }
     return applyMediaPlan(result, paths, incomingId, freshInstance, error);
 }
 

@@ -143,7 +143,7 @@ bool MediaTrack::fromJson(const QJsonObject& o, MediaTrack* out, qint64 maximum,
     qint64 index = 0;
     if (!out || !onlyKeys(o,{"keyframes","clip","trackIndex"}) || maximum < 1
         || maximum > MaximumSupportedDurationMs * 240 / 1000 || !o.value("keyframes").isArray()
-        || !o.value("clip").isObject() || !integer(o,"trackIndex",0,MaximumTrackIndex,&index))
+        || !o.value("clip").isObject() || !integer(o,"trackIndex",MinimumTrackIndex,MaximumTrackIndex,&index))
         return fail(error,"Invalid media timeline");
     MediaTrack t; t.trackIndex = int(index); QSet<QString> ids; QSet<qint64> times;
     const auto keys = o.value("keyframes").toArray();

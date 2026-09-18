@@ -4,6 +4,8 @@ import "../.." as CanvasControls
 Row {
     id: root
     required property var session
+    property bool timelineExpanded: true
+    signal toggleTimeline()
     spacing: 8
 
     CanvasControls.OverlayButton {
@@ -16,6 +18,15 @@ Row {
         enabled: root.session && root.session.mediaEditingEnabled
         unavailableReason: root.session ? root.session.mediaEditingUnavailableReason : "Canvas is unavailable"
         onClicked: root.session.settingsVisible = !root.session.settingsVisible
+    }
+    CanvasControls.OverlayButton {
+        objectName: "canvasTimelineButton"
+        iconSource: "qrc:/icons/icons/timeline/panel.svg"
+        accessibleName: "Timeline"
+        isToggle: true
+        toggled: root.timelineExpanded
+        visible: root.session && root.session.hasProject
+        onClicked: root.toggleTimeline()
     }
     Row {
         visible: root.session && root.session.hasProject

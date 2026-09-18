@@ -22,6 +22,7 @@
     <file>icons/pause.svg</file>
     <file>icons/stop.svg</file>
     <file>icons/timeline/start.svg</file>
+    <file>icons/timeline/panel.svg</file>
     <file>icons/timeline/end.svg</file>
     <file>icons/timeline/zoom-in.svg</file>
     <file>icons/timeline/zoom-out.svg</file>

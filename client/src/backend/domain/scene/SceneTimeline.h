@@ -13,7 +13,10 @@ namespace SceneTimeline {
 inline constexpr int RenderSchemaVersion = 6;
 inline constexpr int MaximumMediaCount = 512;
 inline constexpr int MaximumTrackIndex = 9999;
-inline qreal trackZ(int index) { return 1.0 / (1.0 + index); }
+inline constexpr int MinimumTrackIndex = -MaximumTrackIndex;
+// Stored coordinates grow downwards; the UI labels them with the opposite sign.
+// Preserve existing layer order and allow new tracks above zero without renumbering.
+inline qreal trackZ(int index) { return index < 0 ? 1.0 - index : 1.0 / (1.0 + index); }
 inline constexpr qint64 MaximumSupportedDurationMs = 604800000;
 // Exactly representable in JSON, including arithmetic with a scene duration.
 inline constexpr qint64 MaximumSourceOffsetSlots = qint64(1) << 52;

@@ -36,6 +36,7 @@ class TimelineController final : public QObject
     Q_PROPERTY(QVariantList clips READ clips NOTIFY tracksChanged)
     Q_PROPERTY(QAbstractItemModel* clipModel READ clipModel CONSTANT)
     Q_PROPERTY(int trackCount READ trackCount NOTIFY changed)
+    Q_PROPERTY(int firstTrackIndex READ firstTrackIndex NOTIFY changed)
     Q_PROPERTY(int activeTrackIndex READ activeTrackIndex NOTIFY changed)
     Q_PROPERTY(QString selectedKeyframeId READ selectedKeyframeId NOTIFY changed)
     Q_PROPERTY(QString selectedClipId READ selectedClipId NOTIFY changed)
@@ -75,6 +76,7 @@ public:
     QVariantList clips() const;
     QAbstractItemModel* clipModel() const;
     int trackCount() const;
+    int firstTrackIndex() const;
     int activeTrackIndex() const;
     QString selectedKeyframeId() const { return m_keyframeId; }
     QString selectedClipId() const;

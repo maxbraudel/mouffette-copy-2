@@ -90,9 +90,9 @@ assert.equal(isCanonicalMediaTrack(videoTrack, 'video', oneSecond, 0), false);
 
 // Layer order is derived from the track, never authored or keyframed.
 assert.equal(isCanonicalElement({ ...image, z: 1 }), false);
-for (const trackIndex of [0, 2, MAXIMUM_TRACK_INDEX])
+for (const trackIndex of [-MAXIMUM_TRACK_INDEX, -2, -1, 0, 2, MAXIMUM_TRACK_INDEX])
     assert.equal(isCanonicalMediaTrack({ ...track, trackIndex }, 'image', oneSecond), true);
-for (const trackIndex of [-1, 0.5, '0', MAXIMUM_TRACK_INDEX + 1, NaN])
+for (const trackIndex of [-MAXIMUM_TRACK_INDEX - 1, 0.5, '0', MAXIMUM_TRACK_INDEX + 1, NaN])
     assert.equal(isCanonicalMediaTrack({ ...track, trackIndex }, 'image', oneSecond), false);
 for (const clip of [null, [], {}, { ...track.clip, durationSlots: 0 }])
     assert.equal(isCanonicalMediaTrack({ ...track, clip }, 'image', oneSecond), false);

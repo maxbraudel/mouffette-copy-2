@@ -9,6 +9,7 @@ AppPanel {
     id: root
     required property var controller
     readonly property var session: controller.activeWorkspace
+    property bool timelineExpanded: true
     color: Theme.canvasBackground
 
     Loader {
@@ -56,6 +57,8 @@ AppPanel {
         active: !!root.session && root.session.mediaEditingEnabled
         sourceComponent: CanvasToolbar {
             session: root.session
+            timelineExpanded: root.timelineExpanded
+            onToggleTimeline: root.timelineExpanded = !root.timelineExpanded
         }
     }
 
@@ -106,7 +109,9 @@ AppPanel {
         anchors.right: parent.right
         anchors.bottom: parent.bottom
         anchors.margins: root.border.width
-        height: visible ? Math.min(implicitHeight, Math.max(120, Math.floor(root.height * 0.55))) : 0
+        height: visible ? (expanded ? Math.max(0, (root.height - root.border.width * 2 - canvasTimelineSeparator.height) / 2)
+                                   : transportHeight) : 0
+        expanded: root.timelineExpanded
         bottomCornerRadius: Math.max(0, root.radius - root.border.width)
         visible: !!root.session && root.session.hasProject
         session: root.session
