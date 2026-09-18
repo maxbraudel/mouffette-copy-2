@@ -19,6 +19,9 @@ FocusScope {
     readonly property real clipHeight: timeline ? timeline.clipTrackHeightPx : 64
     readonly property real keyHeight: Math.max(30, trackViewport.height - rulerHeight - clipHeight - 16)
     readonly property real slotMs: 1000 / (timeline ? timeline.slotsPerSecond : 30)
+    readonly property int maximumFrame: Math.round(maximumMs / slotMs)
+    readonly property int frameDigits: String(maximumFrame).length
+    readonly property int minuteDigits: Math.max(2, String(Math.floor(Math.round(maximumMs) / 60000)).length)
     // Visual grouping only: authoring always retains the project slot size.
     readonly property int gridStride: Math.max(1, Math.ceil(8 / (slotMs * pixelsPerMs)))
     readonly property real gridStep: gridStride * slotMs
@@ -39,16 +42,14 @@ FocusScope {
 
     function formatTime(ms) {
         ms = Math.max(0, Math.round(ms))
-        return String(Math.floor(ms / 60000)).padStart(2, "0") + ":"
+        return String(Math.floor(ms / 60000)).padStart(minuteDigits, "0") + ":"
              + String(Math.floor(ms / 1000) % 60).padStart(2, "0") + "."
              + String(ms % 1000).padStart(3, "0")
     }
-    function parseTime(text) {
-        var parts = text.trim().split(":")
-        if (parts.length > 2 || !/^\d+(?::\d{1,2})?(?:\.\d{1,3})?$/.test(text.trim())) return NaN
-        return Math.round((parts.length === 2 ? Number(parts[0]) * 60 + Number(parts[1]) : Number(parts[0])) * 1000)
+    function formatFrame(frame) {
+        return "#" + String(Math.max(0, Math.round(frame))).padStart(frameDigits, "0")
     }
-    function focusTrack() { timeField.focus = false; root.forceActiveFocus() }
+    function focusTrack() { root.forceActiveFocus() }
     function clampTime(ms) { return timeline ? timeline.gridTime(ms) : 0 }
     function snapTime(ms, excludeId, duration) {
         snapGuideMs = -1
@@ -128,6 +129,56 @@ FocusScope {
         color: Theme.overlayText
         border.color: Theme.overlayBackground
     }
+    TextMetrics {
+        id: readoutMetrics
+        font.family: Theme.monospaceFontFamily
+        font.pixelSize: Theme.controlFontSize
+        text: root.formatTime(root.maximumMs) + root.formatFrame(root.maximumFrame)
+    }
+    component TimelineReadout: Item {
+        id: readout
+        required property real timeMs
+        required property int frame
+        required property string description
+        property alias timeObjectName: timeLabel.objectName
+        property alias frameObjectName: frameLabel.objectName
+        readonly property int gap: 6
+        readonly property real labelSize: Math.min(Theme.controlFontSize,
+            Theme.controlFontSize * Math.max(1, width - gap * 2 - 1) / Math.max(1, readoutMetrics.width))
+        implicitWidth: readoutMetrics.width + gap * 2 + 1
+        implicitHeight: Theme.controlHeight
+        width: implicitWidth; height: implicitHeight
+        Accessible.role: Accessible.StaticText
+        Accessible.name: description + ": " + timeLabel.text + ", " + frameLabel.text
+
+        Row {
+            anchors.verticalCenter: parent.verticalCenter
+            spacing: readout.gap
+            Text {
+                id: timeLabel
+                height: readout.height
+                text: root.formatTime(readout.timeMs)
+                color: Theme.mutedText
+                font.family: Theme.monospaceFontFamily
+                font.pixelSize: readout.labelSize
+                verticalAlignment: Text.AlignVCenter
+            }
+            Rectangle {
+                anchors.verticalCenter: parent.verticalCenter
+                width: 1; height: 16
+                color: Theme.border
+            }
+            Text {
+                id: frameLabel
+                height: readout.height
+                text: root.formatFrame(readout.frame)
+                color: Theme.mutedText
+                font.family: Theme.monospaceFontFamily
+                font.pixelSize: readout.labelSize
+                verticalAlignment: Text.AlignVCenter
+            }
+        }
+    }
     Item {
         id: transportViewport
         objectName: "timelineTransportBar"
@@ -135,48 +186,29 @@ FocusScope {
         anchors.margins: 8
         height: Theme.controlHeight
         readonly property real gap: 6
-        readonly property bool compactButtons: width < playback.textWidth
-            + 2 * Math.max(timeField.implicitWidth + gap + slotLabel.implicitWidth, layoutActions.textWidth) + 24
+        readonly property bool compactButtons: width < playback.textWidth + currentReadout.implicitWidth * 2 + 24
         readonly property real sideWidth: Math.max(0, (width - playback.width) / 2 - 12)
 
-        Item {
+        TimelineReadout {
+            id: currentReadout
+            objectName: "timelineCurrentReadout"
             anchors.left: parent.left
-            width: transportViewport.sideWidth; height: parent.height
-            AppTextField {
-                id: timeField
-                objectName: "timelineTimeField"
-                implicitWidth: 116
-                width: Math.min(implicitWidth, parent.width); height: Theme.controlHeight
-                leftPadding: 6; rightPadding: 6
-                topPadding: 0; bottomPadding: 0
-                font.family: Theme.monospaceFontFamily
-                font.pixelSize: Theme.controlFontSize
-                verticalAlignment: TextInput.AlignVCenter
-                selectByMouse: true
-                enabled: !!root.timeline && !root.timeline.remoteActive
-                Accessible.name: "Timeline position, minutes:seconds.milliseconds"
-                text: root.formatTime(root.timeline ? root.timeline.positionMs : 0)
-                onEditingFinished: {
-                    var ms = root.parseTime(text)
-                    if (isFinite(ms) && root.timeline) root.timeline.seek(root.clampTime(ms))
-                    text = Qt.binding(function() { return root.formatTime(root.timeline ? root.timeline.positionMs : 0) })
-                }
-            }
-            Text {
-                id: slotLabel
-                objectName: "timelineSlotLabel"
-                anchors.left: timeField.right; anchors.leftMargin: transportViewport.gap
-                width: Math.max(0, parent.width - timeField.width - transportViewport.gap)
-                height: Theme.controlHeight
-                text: "#" + (root.timeline ? root.timeline.positionSlot : 0) + " · "
-                    + (root.timeline ? root.timeline.slotsPerSecond : 30) + " slots/s  / "
-                    + root.formatTime(root.timeline ? root.timeline.effectiveEndMs : root.maximumMs)
-                color: Theme.mutedText; font.pixelSize: Theme.controlFontSize
-                verticalAlignment: Text.AlignVCenter; elide: Text.ElideRight
-                ToolTip.visible: truncated && slotHover.hovered
-                ToolTip.text: text
-                HoverHandler { id: slotHover }
-            }
+            width: Math.min(implicitWidth, transportViewport.sideWidth)
+            timeObjectName: "timelineCurrentTime"
+            frameObjectName: "timelineCurrentFrame"
+            description: "Current position"
+            timeMs: root.timeline ? root.timeline.positionMs : 0
+            frame: root.timeline ? root.timeline.positionSlot : 0
+        }
+        TimelineReadout {
+            objectName: "timelineMaximumReadout"
+            anchors.right: parent.right
+            width: Math.min(implicitWidth, transportViewport.sideWidth)
+            timeObjectName: "timelineMaximumTime"
+            frameObjectName: "timelineMaximumFrame"
+            description: "Maximum duration"
+            timeMs: root.maximumMs
+            frame: root.maximumFrame
         }
         Row {
             id: playback
@@ -184,7 +216,7 @@ FocusScope {
             anchors.horizontalCenter: parent.horizontalCenter
             height: parent.height
             spacing: transportViewport.gap
-            readonly property real textWidth: startButton.textWidth + playButton.implicitWidth
+            readonly property real textWidth: startButton.textWidth + playButton.textWidth
                 + endButton.textWidth + spacing * 2
                 + (remoteStopButton.visible ? remoteStopButton.textWidth + spacing : 0)
             TimelineButton {
@@ -201,9 +233,10 @@ FocusScope {
                 id: playButton
                 objectName: "timelinePlayPause"
                 text: root.timeline && root.timeline.playing ? "Pause" : "Play"
+                textVariants: ["Play", "Pause"]
                 iconSource: root.timeline && root.timeline.playing
                     ? "qrc:/icons/icons/pause.svg" : "qrc:/icons/icons/play.svg"
-                iconOnly: true
+                iconOnly: transportViewport.compactButtons
                 primary: true
                 checked: !!root.timeline && root.timeline.playing
                 enabled: !!root.timeline && !root.timeline.remoteActive
@@ -231,42 +264,6 @@ FocusScope {
                 onClicked: root.session.toggleRemoteScene()
             }
         }
-        Row {
-            id: layoutActions
-            objectName: "timelineLayoutControls"
-            anchors.right: parent.right
-            height: parent.height
-            spacing: transportViewport.gap
-            readonly property real textWidth: zoomOutButton.textWidth + zoomInButton.textWidth
-                + fitButton.textWidth + spacing * 2
-            TimelineButton {
-                id: zoomOutButton
-                objectName: "timelineZoomOut"
-                text: "Zoom out"
-                iconSource: "qrc:/icons/icons/timeline/zoom-out.svg"
-                iconOnly: transportViewport.compactButtons
-                enabled: !!root.timeline
-                onClicked: root.zoom(2)
-            }
-            TimelineButton {
-                id: zoomInButton
-                objectName: "timelineZoomIn"
-                text: "Zoom in"
-                iconSource: "qrc:/icons/icons/timeline/zoom-in.svg"
-                iconOnly: transportViewport.compactButtons
-                enabled: !!root.timeline
-                onClicked: root.zoom(0.5)
-            }
-            TimelineButton {
-                id: fitButton
-                objectName: "timelineFitDuration"
-                text: "Fit duration"
-                iconSource: "qrc:/icons/icons/timeline/fit.svg"
-                iconOnly: transportViewport.compactButtons
-                enabled: !!root.timeline
-                onClicked: { root.viewDurationMs = root.maximumMs; trackViewport.contentX = 0 }
-            }
-        }
     }
     Rectangle {
         id: transportSeparator
@@ -275,113 +272,158 @@ FocusScope {
         height: 1
         color: Theme.border
     }
-    Flickable {
-        id: actionViewport
+    Item {
+        id: editBar
         objectName: "timelineEditBar"
         anchors.left: parent.left; anchors.right: parent.right
         anchors.top: transportSeparator.bottom
         anchors.leftMargin: 8; anchors.rightMargin: 8; anchors.topMargin: 8
-        height: Theme.controlHeight + (contentWidth > width ? 8 : 0)
-        clip: true
-        contentWidth: actions.width; contentHeight: height
-        boundsBehavior: Flickable.StopAtBounds
-        interactive: false
-        ScrollBar.horizontal: ScrollBar { policy: ScrollBar.AsNeeded }
-        Row {
-            id: actions
-            spacing: 6
-            TimelineButton {
-                objectName: "timelinePlaceKeyframe"
-                text: root.timeline && root.timeline.hasKeyframeAtPosition ? "Update keyframe" : "Place keyframe"
-                textVariants: ["Update keyframe", "Place keyframe"]
-                iconSource: root.timeline && root.timeline.hasKeyframeAtPosition
-                    ? "qrc:/icons/icons/timeline/keyframe-update.svg" : "qrc:/icons/icons/timeline/keyframe-add.svg"
-                enabled: root.editable && root.timeline.canCapture
-                onClicked: { root.focusTrack(); root.timeline.placeKeyframe() }
-            }
-            TimelineButton {
-                objectName: "timelineSplitClip"
-                text: "Split clip"
-                iconSource: "qrc:/icons/icons/timeline/split.svg"
-                visible: !!root.timeline && root.timeline.primaryIsVideo
-                enabled: root.editable && root.timeline.canSplit
-                onClicked: { root.focusTrack(); root.timeline.splitClip() }
-            }
-            TimelineButton {
-                objectName: "timelineInsertClip"
-                text: "Insert full video"
-                iconSource: "qrc:/icons/icons/timeline/insert.svg"
-                visible: !!root.timeline && root.timeline.primaryIsVideo
-                enabled: root.editable
-                onClicked: { root.focusTrack(); root.timeline.insertFullClip() }
-            }
-            TimelineButton {
-                objectName: "timelineCopy"
-                text: "Copy"
-                iconSource: "qrc:/icons/icons/timeline/copy.svg"
-                enabled: root.editable && (root.timeline.selectedKeyframeId !== "" || root.timeline.selectedClipId !== "")
-                onClicked: { root.focusTrack(); root.timeline.copySelected() }
-            }
-            TimelineButton {
-                objectName: "timelinePaste"
-                text: "Paste"
-                iconSource: "qrc:/icons/icons/timeline/paste.svg"
-                enabled: root.editable && root.timeline.canPaste
-                onClicked: { root.focusTrack(); root.timeline.paste() }
-            }
-            TimelineButton {
-                objectName: "timelineDelete"
-                text: "Delete"
-                iconSource: "qrc:/icons/icons/delete.svg"
-                destructive: true
-                enabled: root.editable && (root.timeline.selectedKeyframeId !== "" || root.timeline.selectedClipId !== "")
-                onClicked: { root.focusTrack(); root.timeline.deleteSelected() }
-            }
-            TimelineButton {
-                objectName: "timelinePlaceStop"
-                text: root.timeline && root.timeline.stopTimeMs >= 0 ? "Move Stop here" : "Place Stop"
-                textVariants: ["Move Stop here", "Place Stop"]
-                iconSource: "qrc:/icons/icons/timeline/stop-add.svg"
-                enabled: root.editable
-                onClicked: { root.focusTrack(); root.timeline.placeStop() }
-            }
-            TimelineButton {
-                objectName: "timelineRemoveStop"
-                text: "Remove Stop"
-                iconSource: "qrc:/icons/icons/timeline/stop-remove.svg"
-                destructive: true
-                visible: !!root.timeline && root.timeline.stopTimeMs >= 0
-                enabled: root.editable
-                onClicked: { root.focusTrack(); root.timeline.removeStop() }
-            }
-            Text {
-                height: Theme.controlHeight
-                visible: !!root.timeline && root.timeline.hasDraft
-                text: "Unsaved draft · place a keyframe to keep changes"
-                color: Theme.warningText; font.pixelSize: Theme.controlFontSize
-                verticalAlignment: Text.AlignVCenter
+        height: Theme.controlHeight + (actionViewport.contentWidth > actionViewport.width ? 8 : 0)
+        Flickable {
+            id: actionViewport
+            objectName: "timelineEditActions"
+            anchors.left: parent.left; anchors.right: layoutActions.left
+            anchors.rightMargin: 12
+            height: parent.height
+            clip: true
+            contentWidth: actions.width; contentHeight: height
+            boundsBehavior: Flickable.StopAtBounds
+            interactive: false
+            ScrollBar.horizontal: ScrollBar { policy: ScrollBar.AsNeeded }
+            Row {
+                id: actions
+                spacing: 6
+                TimelineButton {
+                    id: placeKeyframeButton
+                    objectName: "timelinePlaceKeyframe"
+                    text: root.timeline && root.timeline.hasKeyframeAtPosition ? "Update keyframe" : "Place keyframe"
+                    textVariants: ["Update keyframe", "Place keyframe"]
+                    iconSource: root.timeline && root.timeline.hasKeyframeAtPosition
+                        ? "qrc:/icons/icons/timeline/keyframe-update.svg" : "qrc:/icons/icons/timeline/keyframe-add.svg"
+                    enabled: root.editable && root.timeline.canCapture
+                    onClicked: { root.focusTrack(); root.timeline.placeKeyframe() }
+                }
+                TimelineButton {
+                    objectName: "timelineSplitClip"
+                    text: "Split clip"
+                    iconSource: "qrc:/icons/icons/timeline/split.svg"
+                    visible: !!root.timeline && root.timeline.primaryIsVideo
+                    enabled: root.editable && root.timeline.canSplit
+                    onClicked: { root.focusTrack(); root.timeline.splitClip() }
+                }
+                TimelineButton {
+                    objectName: "timelineInsertClip"
+                    text: "Insert full video"
+                    iconSource: "qrc:/icons/icons/timeline/insert.svg"
+                    visible: !!root.timeline && root.timeline.primaryIsVideo
+                    enabled: root.editable
+                    onClicked: { root.focusTrack(); root.timeline.insertFullClip() }
+                }
+                TimelineButton {
+                    objectName: "timelineCopy"
+                    text: "Copy"
+                    iconSource: "qrc:/icons/icons/timeline/copy.svg"
+                    enabled: root.editable && (root.timeline.selectedKeyframeId !== "" || root.timeline.selectedClipId !== "")
+                    onClicked: { root.focusTrack(); root.timeline.copySelected() }
+                }
+                TimelineButton {
+                    objectName: "timelinePaste"
+                    text: "Paste"
+                    iconSource: "qrc:/icons/icons/timeline/paste.svg"
+                    enabled: root.editable && root.timeline.canPaste
+                    onClicked: { root.focusTrack(); root.timeline.paste() }
+                }
+                TimelineButton {
+                    objectName: "timelineDelete"
+                    text: "Delete"
+                    iconSource: "qrc:/icons/icons/delete.svg"
+                    destructive: true
+                    enabled: root.editable && (root.timeline.selectedKeyframeId !== "" || root.timeline.selectedClipId !== "")
+                    onClicked: { root.focusTrack(); root.timeline.deleteSelected() }
+                }
+                TimelineButton {
+                    objectName: "timelinePlaceStop"
+                    text: root.timeline && root.timeline.stopTimeMs >= 0 ? "Move Stop here" : "Place Stop"
+                    textVariants: ["Move Stop here", "Place Stop"]
+                    iconSource: "qrc:/icons/icons/timeline/stop-add.svg"
+                    enabled: root.editable
+                    onClicked: { root.focusTrack(); root.timeline.placeStop() }
+                }
+                TimelineButton {
+                    objectName: "timelineRemoveStop"
+                    text: "Remove Stop"
+                    iconSource: "qrc:/icons/icons/timeline/stop-remove.svg"
+                    destructive: true
+                    visible: !!root.timeline && root.timeline.stopTimeMs >= 0
+                    enabled: root.editable
+                    onClicked: { root.focusTrack(); root.timeline.removeStop() }
+                }
+                Text {
+                    height: Theme.controlHeight
+                    visible: !!root.timeline && root.timeline.hasDraft
+                    text: "Unsaved draft · place a keyframe to keep changes"
+                    color: Theme.warningText; font.pixelSize: Theme.controlFontSize
+                    verticalAlignment: Text.AlignVCenter
+                }
             }
         }
-    }
-    MouseArea {
-        anchors.fill: actionViewport
-        acceptedButtons: Qt.NoButton
-        cursorShape: undefined
-        scrollGestureEnabled: true
-        onWheel: wheel => {
-            var precise = wheel.pixelDelta.x !== 0 || wheel.pixelDelta.y !== 0
-            var dx = precise ? wheel.pixelDelta.x : wheel.angleDelta.x / 8
-            var dy = precise ? wheel.pixelDelta.y : wheel.angleDelta.y / 8
-            var delta = (Math.abs(dx) > Math.abs(dy) ? dx : dy) * (precise ? 1 : 3)
-            actionViewport.contentX = Math.max(0, Math.min(actionViewport.contentWidth - actionViewport.width,
-                actionViewport.contentX - delta))
-            wheel.accepted = true
+        MouseArea {
+            anchors.fill: actionViewport
+            acceptedButtons: Qt.NoButton
+            cursorShape: undefined
+            scrollGestureEnabled: true
+            onWheel: wheel => {
+                var precise = wheel.pixelDelta.x !== 0 || wheel.pixelDelta.y !== 0
+                var dx = precise ? wheel.pixelDelta.x : wheel.angleDelta.x / 8
+                var dy = precise ? wheel.pixelDelta.y : wheel.angleDelta.y / 8
+                var delta = (Math.abs(dx) > Math.abs(dy) ? dx : dy) * (precise ? 1 : 3)
+                actionViewport.contentX = Math.max(0, Math.min(actionViewport.contentWidth - actionViewport.width,
+                    actionViewport.contentX - delta))
+                wheel.accepted = true
+            }
+        }
+        Row {
+            id: layoutActions
+            objectName: "timelineLayoutControls"
+            anchors.right: parent.right
+            height: Theme.controlHeight
+            spacing: transportViewport.gap
+            readonly property bool compactButtons: editBar.width < textWidth + 12 + placeKeyframeButton.textWidth
+            readonly property real textWidth: zoomOutButton.textWidth + zoomInButton.textWidth
+                + fitButton.textWidth + spacing * 2
+            TimelineButton {
+                id: zoomOutButton
+                objectName: "timelineZoomOut"
+                text: "Zoom out"
+                iconSource: "qrc:/icons/icons/timeline/zoom-out.svg"
+                iconOnly: layoutActions.compactButtons
+                enabled: !!root.timeline
+                onClicked: root.zoom(2)
+            }
+            TimelineButton {
+                id: zoomInButton
+                objectName: "timelineZoomIn"
+                text: "Zoom in"
+                iconSource: "qrc:/icons/icons/timeline/zoom-in.svg"
+                iconOnly: layoutActions.compactButtons
+                enabled: !!root.timeline
+                onClicked: root.zoom(0.5)
+            }
+            TimelineButton {
+                id: fitButton
+                objectName: "timelineFitDuration"
+                text: "Fit duration"
+                iconSource: "qrc:/icons/icons/timeline/fit.svg"
+                iconOnly: layoutActions.compactButtons
+                enabled: !!root.timeline
+                onClicked: { root.viewDurationMs = root.maximumMs; trackViewport.contentX = 0 }
+            }
         }
     }
     Rectangle {
         id: tracksSeparator
         anchors.left: parent.left; anchors.right: parent.right
-        anchors.top: actionViewport.bottom; anchors.topMargin: 8
+        anchors.top: editBar.bottom; anchors.topMargin: 8
         height: 1
         color: Theme.border
     }

@@ -71,8 +71,12 @@ private slots:
         auto* layout = f.item("timelineLayoutControls");
         auto* edit = f.item("timelineEditBar");
         auto* play = f.item("timelinePlayPause");
-        auto* time = f.item("timelineTimeField");
-        QVERIFY(playback && layout && edit && play && time);
+        auto* editActions = f.item("timelineEditActions");
+        auto* current = f.item("timelineCurrentReadout");
+        auto* maximum = f.item("timelineMaximumReadout");
+        auto* time = f.item("timelineCurrentTime");
+        auto* frame = f.item("timelineCurrentFrame");
+        QVERIFY(playback && layout && edit && editActions && play && current && maximum && time && frame);
         const auto belongsTo = [](QQuickItem* child, QQuickItem* ancestor) {
             for (auto* item = child; item; item = item->parentItem())
                 if (item == ancestor) return true;
@@ -86,15 +90,37 @@ private slots:
             QCOMPARE(button->height(), play->height());
             QVERIFY(!button->property("iconSource").toUrl().isEmpty());
         }
-        QVERIFY(play->property("iconOnly").toBool());
+        QVERIFY(belongsTo(layout, edit));
+        QVERIFY(!play->property("iconOnly").toBool());
+        QCOMPARE(play->property("text").toString(), QStringLiteral("Play"));
         QCOMPARE(time->height(), play->height());
+        const auto timing = f.host->document()->timelineSettings();
+        const auto maxFrame = QString::number(timing.maxSlot());
+        QCOMPARE(f.item("timelineMaximumFrame")->property("text").toString(), "#" + maxFrame);
+        QCOMPARE(frame->property("text").toString(), "#" + QString(maxFrame.size(), '0'));
+        const auto timeWidth = time->width();
+        const auto frameWidth = frame->width();
+        const auto maximumTime = f.item("timelineMaximumTime")->property("text").toString();
+        // The Stop at zero must not replace the timeline maximum or its padding.
+        QVERIFY(maximumTime != time->property("text").toString());
+        for (int slot : {9, 10, 99, 100}) {
+            f.timeline.seek(timing.timeMs(slot));
+            QTRY_COMPARE(frame->property("text").toString(), "#" + QString::number(slot).rightJustified(maxFrame.size(), '0'));
+            QCOMPARE(time->width(), timeWidth);
+            QCOMPARE(frame->width(), frameWidth);
+            QCOMPARE(f.item("timelineMaximumTime")->property("text").toString(), maximumTime);
+        }
+        f.timeline.goToStart();
         for (int width : {1100, 680, 420}) {
             f.view.resize(width, 240);
             QTRY_COMPARE(f.view.rootObject()->width(), qreal(width));
-            QTRY_VERIFY(qAbs(playback->mapToScene({playback->width()/2, 0}).x() - width/2.0) < 0.01);
-            QTRY_VERIFY(time->mapToScene({time->width(), 0}).x() <= playback->mapToScene({0, 0}).x());
-            QTRY_VERIFY(playback->mapToScene({playback->width(), 0}).x() <= layout->mapToScene({0, 0}).x());
-            QTRY_VERIFY(layout->mapToScene({layout->width(), 0}).x() <= width);
+            QTRY_VERIFY(qAbs(playback->mapToScene({playback->width()/2, 0}).x() - width/2.0) <= 0.5);
+            QTRY_VERIFY(current->mapToScene({current->width(), 0}).x() <= playback->mapToScene({0, 0}).x());
+            QTRY_VERIFY(playback->mapToScene({playback->width(), 0}).x() <= maximum->mapToScene({0, 0}).x());
+            QTRY_COMPARE(maximum->mapToScene({maximum->width(), 0}).x(), qreal(width - 8));
+            QTRY_COMPARE(layout->mapToScene({layout->width(), 0}).x(), qreal(width - 8));
+            QTRY_COMPARE(layout->mapToScene({0, 0}).y(), edit->y());
+            QTRY_VERIFY(editActions->mapToScene({editActions->width(), 0}).x() <= layout->mapToScene({0, 0}).x());
             QVERIFY(edit->y() >= playback->mapToScene({0, playback->height()}).y());
             const auto screenshotPrefix = qEnvironmentVariable("MOUFFETTE_TIMELINE_SCREENSHOT");
             if (!screenshotPrefix.isEmpty()) {
@@ -102,17 +128,26 @@ private slots:
                 QVERIFY(f.view.grabWindow().save(screenshotPrefix + QString::number(width) + ".png"));
             }
         }
-        QVERIFY(edit->property("contentWidth").toReal() > edit->width());
+        QVERIFY(editActions->property("contentWidth").toReal() > editActions->width());
         const auto position = f.timeline.positionMs();
-        f.wheel(edit->mapToScene({50, 12}).toPoint(), {0, -80}, {});
-        QVERIFY(edit->property("contentX").toReal() > 0);
+        const auto zoomPosition = layout->mapToScene({0, 0});
+        f.wheel(editActions->mapToScene({50, 12}).toPoint(), {0, -80}, {});
+        QVERIFY(editActions->property("contentX").toReal() > 0);
+        QCOMPARE(layout->mapToScene({0, 0}), zoomPosition);
         QCOMPARE(f.timeline.positionMs(), position);
+        f.view.resize(1100, 240);
+        QTRY_VERIFY(!play->property("iconOnly").toBool());
+        const auto playWidth = play->width();
         f.timeline.removeStop();
         f.timeline.togglePlayback();
         QTRY_VERIFY(play->property("checked").toBool());
+        QCOMPARE(play->property("text").toString(), QStringLiteral("Pause"));
+        QCOMPARE(play->width(), playWidth);
         QVERIFY(play->property("iconSource").toUrl().path().endsWith("pause.svg"));
         f.timeline.togglePlayback();
         QTRY_VERIFY(!play->property("checked").toBool());
+        QCOMPARE(play->property("text").toString(), QStringLiteral("Play"));
+        QCOMPARE(play->width(), playWidth);
         QVERIFY(play->property("iconSource").toUrl().path().endsWith("play.svg"));
     }
 
@@ -610,10 +645,10 @@ private slots:
             capture->mapToScene(QPointF(capture->width()/2, capture->height()/2)).toPoint());
         QTRY_COMPARE(media->timelineTrack().keyframes.size(), 1);
         QCOMPARE(media->timelineTrack().keyframes.first().slot, 40);
-        auto* timeField = view.rootObject()->findChild<QQuickItem*>(QStringLiteral("timelineTimeField"));
-        QVERIFY(timeField);
-        timeField->forceActiveFocus();
-        QTRY_VERIFY(view.rootObject()->property("textInputFocused").toBool());
+        auto* timeLabel = timelineItems(view.rootObject(), QStringLiteral("timelineCurrentTime")).value(0);
+        QVERIFY(timeLabel);
+        QCOMPARE(timeLabel->property("text").toString(), QStringLiteral("00:01.333"));
+        QVERIFY(!view.rootObject()->property("textInputFocused").toBool());
         QQuickItem* keyItem = nullptr;
         auto findKey = [&](auto&& find, QQuickItem* item) -> void {
             if (item->objectName() == QStringLiteral("timelineKeyframe")) keyItem = item;
@@ -641,8 +676,7 @@ private slots:
         QCOMPARE(timeline.selectedKeyframeId(), media->timelineTrack().keyframes.first().id);
         QTest::keyClick(&view, Qt::Key_Right); QTRY_COMPARE(timeline.positionSlot(),41);
         QTest::keyClick(&view, Qt::Key_Left); QTRY_COMPARE(timeline.positionSlot(),40);
-        timeField->forceActiveFocus(); timeField->setProperty("text", "00:00.050");
-        QTest::keyClick(&view, Qt::Key_Return); QTRY_COMPARE(timeline.positionSlot(),2);
+        QCOMPARE(timeLabel->property("text").toString(), QStringLiteral("00:01.333"));
         host->document()->removeMedia(other->mediaId());
         QCOMPARE(host->document()->media().size(), 1);
         QVERIFY(view.rootObject()->findChild<QQuickItem*>(QStringLiteral("timelinePlayPause")));
