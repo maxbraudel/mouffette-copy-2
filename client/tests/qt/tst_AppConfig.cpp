@@ -66,6 +66,7 @@ void AppConfigTest::configuresTimeline() {
     QVERIFY2(config.load(options, &error), qPrintable(error));
     QCOMPARE(config.timelineMaxDurationMs(), 240000);
     QCOMPARE(config.timelineSlotsPerSecond(), 30);
+    QCOMPARE(config.timelineDefaultClipDurationSlots(), 30);
     QCOMPARE(config.timelineOtherKeyframeOpacityPercent(), 45);
     QCOMPARE(config.timelineSnapDistancePx(), 0);
     QCOMPARE(config.timelineHeightPx(), 240);
@@ -73,6 +74,18 @@ void AppConfigTest::configuresTimeline() {
     QCOMPARE(config.timelineClipTrackHeightPx(), 48);
     QCOMPARE(config.timelineKeyframeSizePx(), 10);
     QCOMPARE(config.timelineInitialViewDurationMs(), 15000);
+    for (const QString length : {QStringLiteral("1"), QStringLiteral("12"), QStringLiteral("145152000")}) {
+        options.processEnvironment.insert(QStringLiteral("MOUFFETTE_TIMELINE_DEFAULT_CLIP_DURATION_SLOTS"), length);
+        QVERIFY2(config.load(options, &error), qPrintable(error));
+        QCOMPARE(config.timelineDefaultClipDurationSlots(), length.toInt());
+    }
+    for (const QString length : {QStringLiteral("0"), QStringLiteral("-1"), QStringLiteral("1.5"),
+                               QStringLiteral("abc"), QStringLiteral("145152001")}) {
+        options.processEnvironment.insert(QStringLiteral("MOUFFETTE_TIMELINE_DEFAULT_CLIP_DURATION_SLOTS"), length);
+        QVERIFY(!config.load(options, &error));
+        QVERIFY(error.contains(QStringLiteral("MOUFFETTE_TIMELINE_DEFAULT_CLIP_DURATION_SLOTS")));
+    }
+    options.processEnvironment.remove(QStringLiteral("MOUFFETTE_TIMELINE_DEFAULT_CLIP_DURATION_SLOTS"));
     options.processEnvironment.insert(QStringLiteral("MOUFFETTE_TIMELINE_OTHER_KEYFRAME_OPACITY_PERCENT"), QStringLiteral("101"));
     QVERIFY(!config.load(options, &error));
     QVERIFY(error.contains(QStringLiteral("MOUFFETTE_TIMELINE_OTHER_KEYFRAME_OPACITY_PERCENT")));

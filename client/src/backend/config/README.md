@@ -13,6 +13,7 @@ Maximum duration and slot cadence are copied to each new project. Existing proje
 | --- | ---: | ---: |
 | `MOUFFETTE_TIMELINE_MAX_DURATION_MS` | 180000 | 1–604800000 |
 | `MOUFFETTE_TIMELINE_SLOTS_PER_SECOND` | 30 | integer 1–240 |
+| `MOUFFETTE_TIMELINE_DEFAULT_CLIP_DURATION_SLOTS` | 30 | integer 1–145152000 |
 | `MOUFFETTE_TIMELINE_HEIGHT_PX` | 240 | 120–1200 |
 | `MOUFFETTE_TIMELINE_RULER_HEIGHT_PX` | 28 | 16–160 |
 | `MOUFFETTE_TIMELINE_CLIP_TRACK_HEIGHT_PX` | 48 | 24–600 |
@@ -22,3 +23,8 @@ Maximum duration and slot cadence are copied to each new project. Existing proje
 | `MOUFFETTE_TIMELINE_INITIAL_VIEW_DURATION_MS` | 15000 | 1–604800000 |
 
 Production inherits these values unless explicitly overridden in `.env.production`. Shift snapping uses screen pixels, so its tolerance stays consistent at every zoom level.
+
+The default clip duration applies when creating images or texts in any project,
+and is capped at the scene maximum. It is measured in the project's slots
+(30 slots last one second at 30 slots/s). Existing clips keep their saved length;
+videos use their source duration.

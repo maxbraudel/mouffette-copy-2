@@ -11,6 +11,7 @@
 #include <QtTest>
 
 #include "backend/domain/canvas/CanvasDocument.h"
+#include "backend/config/AppConfig.h"
 #include "backend/domain/media/CanvasMedia.h"
 #include "backend/domain/scene/SceneTimeline.h"
 #include "backend/media/MediaResidencyManager.h"
@@ -706,10 +707,11 @@ private slots:
         f.timeline.seek(2000);
         auto* media = doc->addText({}, "Presence");
         QVERIFY(media);
-        const auto full = media->timelineTrack().clip;
-        QCOMPARE(full.startSlot, 0); QCOMPARE(full.durationSlots, doc->timelineSettings().maxSlot());
-        QVERIFY(!full.sourceStartSlot); QVERIFY(media->clipActive());
-        f.timeline.trimClip(full.id, 1000, 3000);
+        const auto initial = media->timelineTrack().clip;
+        QCOMPARE(initial.startSlot, 0);
+        QCOMPARE(initial.durationSlots, AppConfig::instance().timelineDefaultClipDurationSlots());
+        QVERIFY(!initial.sourceStartSlot); QVERIFY(!media->clipActive());
+        f.timeline.trimClip(initial.id, 1000, 3000);
         f.timeline.seek(0);
         QVERIFY(!media->clipActive()); QVERIFY(media->contentVisible());
         QVERIFY(f.host->controller()->selectionChromeModel().isEmpty());
@@ -718,7 +720,7 @@ private slots:
         f.timeline.seek(0); QCOMPARE(doc->serializeSceneState(), saved);
         f.timeline.placeKeyframe();
         const auto keyId = media->timelineTrack().keyframes.first().id;
-        f.timeline.moveClip(full.id, 4000);
+        f.timeline.moveClip(initial.id, 4000);
         QCOMPARE(media->timelineTrack().keyframes.first().slot, 0);
         f.timeline.seek(5000); QVERIFY(f.timeline.canSplit()); f.timeline.splitClip();
         QCOMPARE(doc->media().size(), 2);
@@ -862,6 +864,7 @@ private slots:
     {
         TimelineFixture f; QVERIFY(f.initialize());
         auto* media = f.host->document()->addText({}, "Drag");
+        f.timeline.trimClip(media->timelineTrack().clip.id, 0, f.timeline.maxDurationMs());
         auto* tracks = f.item("timelineTracks");
         auto* clip = f.item("timelineClip");
         auto* headers = f.item("timelineTrackHeaders");
@@ -889,7 +892,10 @@ private slots:
     {
         TimelineFixture f; QVERIFY(f.initialize());
         auto* doc = f.host->document();
-        for (int i = 0; i < 8; ++i) QVERIFY(doc->addText({}, QString::number(i)));
+        for (int i = 0; i < 8; ++i) {
+            auto* media = doc->addText({}, QString::number(i)); QVERIFY(media);
+            f.timeline.trimClip(media->timelineTrack().clip.id, 0, f.timeline.maxDurationMs());
+        }
         auto* first = doc->media().first();
         const auto clipId = first->timelineTrack().clip.id;
         f.view.resize(1100, 200);
@@ -914,7 +920,7 @@ private slots:
         QCOMPARE(doc->media().size(), 7); // The full-length destination was overwritten.
     }
 
-    void imagesReceiveFullSceneClipsEvenAfterStop()
+    void imagesReceiveDefaultLengthClipsEvenAfterStop()
     {
         TimelineFixture f; QVERIFY(f.initialize());
         auto* doc=f.host->document();
@@ -924,8 +930,12 @@ private slots:
         f.timeline.seek(1000); f.timeline.placeStop(); f.timeline.seek(2000);
         auto* media=doc->addPreparedFile(path,{64,64},false,{}); QVERIFY(media);
         const auto clip=media->timelineTrack().clip;
-        QCOMPARE(clip.startSlot,0); QCOMPARE(clip.endSlot(),doc->timelineSettings().maxSlot());
-        QVERIFY(!clip.sourceStartSlot); QVERIFY(media->clipActive());
+        QCOMPARE(clip.startSlot,0);
+        QCOMPARE(clip.durationSlots,AppConfig::instance().timelineDefaultClipDurationSlots());
+        QVERIFY(!clip.sourceStartSlot); QVERIFY(!media->clipActive());
+        f.timeline.seek(0); QVERIFY(media->clipActive());
+        f.timeline.seek(doc->timelineSettings().timeMs(clip.endSlot())); QVERIFY(!media->clipActive());
+        f.timeline.seek(2000);
         doc->select(media->mediaId()); QCOMPARE(f.timeline.clips().size(),1);
         f.timeline.trimClip(clip.id,3000,4000); QVERIFY(!media->clipActive());
         f.timeline.seek(3000); QVERIFY(media->clipActive());
@@ -1227,7 +1237,7 @@ private slots:
         const auto metadataDuration = media->sourceDurationMs();
         QTRY_VERIFY(media->residencyReady() && media->timelineTrack().clip.durationSlots > 0);
         const auto original = media->timelineTrack().clip;
-        QVERIFY(original.durationSlots > 100);
+        QVERIFY(original.durationSlots > 1);
         const auto& grid = host->document()->timelineSettings();
         QVERIFY(!publishedClips.isEmpty());
         for (const auto& row : publishedClips) {
@@ -1237,7 +1247,8 @@ private slots:
         }
         QCOMPARE(timeline.clips().first().toMap().value("actualSourceDurationMs").toLongLong(), media->sourceDurationMs());
         QCOMPARE(timeline.clipModel()->index(0, 0).data(Qt::UserRole).toMap().value("actualSourceDurationMs").toLongLong(), media->sourceDurationMs());
-        view.rootObject()->setProperty("viewDurationMs", qMax(40000.0, grid.timeMs(original.endSlot())));
+        view.rootObject()->setProperty("viewDurationMs", qMax(mediaType == "video" ? 40000.0 : 2000.0,
+                                                            grid.timeMs(original.endSlot())));
         const auto findItem = [&](const QString& name) {
             QQuickItem* result = nullptr;
             auto visit = [&](auto&& self, QQuickItem* item) -> void {

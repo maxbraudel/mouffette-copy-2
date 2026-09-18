@@ -24,7 +24,7 @@ struct SettingSpec {
     bool boolean;
 };
 
-constexpr std::array<SettingSpec, 83> kSpecs{{
+constexpr std::array<SettingSpec, 84> kSpecs{{
     {Key::ServerUrl, "MOUFFETTE_SERVER_URL", "server-url", "serverUrl", "ws://localhost:8080", false},
     {Key::RemoteSessionHiddenTimeoutMs, "MOUFFETTE_REMOTE_SESSION_HIDDEN_TIMEOUT_MS", "remote-session-hidden-timeout-ms", nullptr, "60000", false},
     {Key::ProjectMediaHiddenTimeoutMs, "MOUFFETTE_PROJECT_MEDIA_HIDDEN_TIMEOUT_MS", "project-media-hidden-timeout-ms", nullptr, "60000", false},
@@ -84,6 +84,7 @@ constexpr std::array<SettingSpec, 83> kSpecs{{
     {Key::UiSnapFreezeCleanupDelayMs, "MOUFFETTE_UI_SNAP_FREEZE_CLEANUP_DELAY_MS", "ui-snap-freeze-cleanup-delay-ms", nullptr, "300", false},
     {Key::TimelineMaxDurationMs, "MOUFFETTE_TIMELINE_MAX_DURATION_MS", "timeline-max-duration-ms", nullptr, "180000", false},
     {Key::TimelineSlotsPerSecond, "MOUFFETTE_TIMELINE_SLOTS_PER_SECOND", "timeline-slots-per-second", nullptr, "30", false},
+    {Key::TimelineDefaultClipDurationSlots, "MOUFFETTE_TIMELINE_DEFAULT_CLIP_DURATION_SLOTS", "timeline-default-clip-duration-slots", nullptr, "30", false},
     {Key::TimelineHeightPx, "MOUFFETTE_TIMELINE_HEIGHT_PX", "timeline-height-px", nullptr, "240", false},
     {Key::TimelineRulerHeightPx, "MOUFFETTE_TIMELINE_RULER_HEIGHT_PX", "timeline-ruler-height-px", nullptr, "28", false},
     {Key::TimelineClipTrackHeightPx, "MOUFFETTE_TIMELINE_CLIP_TRACK_HEIGHT_PX", "timeline-clip-track-height-px", nullptr, "48", false},
@@ -454,6 +455,7 @@ void AppConfig::resetToCompiledDefaults() {
     m_mediaRamReservePercent = 0;
     m_timelineMaxDurationMs = 180000;
     m_timelineSlotsPerSecond = 30;
+    m_timelineDefaultClipDurationSlots = 30;
     m_timelineHeightPx = 240;
     m_timelineRulerHeightPx = 28;
     m_timelineClipTrackHeightPx = 48;
@@ -672,6 +674,7 @@ bool AppConfig::load(const LoadOptions& options, QString* errorMessage) {
                          &candidate.m_canvasTextInitialHeightPercent)
         || !parseIntSetting(Key::TimelineMaxDurationMs, 1, 604800000, &candidate.m_timelineMaxDurationMs)
         || !parseIntSetting(Key::TimelineSlotsPerSecond, 1, 240, &candidate.m_timelineSlotsPerSecond)
+        || !parseIntSetting(Key::TimelineDefaultClipDurationSlots, 1, 145152000, &candidate.m_timelineDefaultClipDurationSlots)
         || !parseIntSetting(Key::TimelineHeightPx, 120, 1200, &candidate.m_timelineHeightPx)
         || !parseIntSetting(Key::TimelineRulerHeightPx, 16, 160, &candidate.m_timelineRulerHeightPx)
         || !parseIntSetting(Key::TimelineClipTrackHeightPx, 24, 600, &candidate.m_timelineClipTrackHeightPx)

@@ -82,6 +82,7 @@ public:
         UiSnapFreezeCleanupDelayMs,
         TimelineMaxDurationMs,
         TimelineSlotsPerSecond,
+        TimelineDefaultClipDurationSlots,
         TimelineHeightPx,
         TimelineRulerHeightPx,
         TimelineClipTrackHeightPx,
@@ -216,6 +217,7 @@ public:
     int uiSnapFreezeCleanupDelayMs() const { return m_uiSnapFreezeCleanupDelayMs; }
     int timelineMaxDurationMs() const { return m_timelineMaxDurationMs; }
     int timelineSlotsPerSecond() const { return m_timelineSlotsPerSecond; }
+    int timelineDefaultClipDurationSlots() const { return m_timelineDefaultClipDurationSlots; }
     int timelineHeightPx() const { return m_timelineHeightPx; }
     int timelineRulerHeightPx() const { return m_timelineRulerHeightPx; }
     int timelineClipTrackHeightPx() const { return m_timelineClipTrackHeightPx; }
@@ -312,6 +314,7 @@ private:
     int m_toastAnimationDurationMs = 300;
     int m_timelineMaxDurationMs = 180000;
     int m_timelineSlotsPerSecond = 30;
+    int m_timelineDefaultClipDurationSlots = 30;
     int m_timelineHeightPx = 240;
     int m_timelineRulerHeightPx = 28;
     int m_timelineClipTrackHeightPx = 48;

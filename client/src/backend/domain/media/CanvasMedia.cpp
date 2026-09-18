@@ -1,4 +1,5 @@
 #include "backend/domain/media/CanvasMedia.h"
+#include "backend/config/AppConfig.h"
 #include "backend/domain/media/TextRenderState.h"
 #include "backend/media/MediaResidencyManager.h"
 #include "backend/media/MediaBackendBootstrap.h"
@@ -855,7 +856,8 @@ void CanvasMedia::ensureDefaultClip(const SceneTimeline::SceneSettings& settings
     auto track=m_timelineTrack;
     track.clip = {SceneTimeline::newId(),0,
         isVideo() ? std::optional<qint64>(0) : std::nullopt,
-        isVideo() ? qMin(settings.maxSlot(),settings.sourceSlots(duration)) : settings.maxSlot()};
+        qMin(settings.maxSlot(), isVideo() ? settings.sourceSlots(duration)
+            : qint64(AppConfig::instance().timelineDefaultClipDurationSlots()))};
     setTimelineTrack(track);
 }
 
