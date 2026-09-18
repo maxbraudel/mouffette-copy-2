@@ -25,6 +25,6 @@ Maximum duration and slot cadence are copied to each new project. Existing proje
 Production inherits these values unless explicitly overridden in `.env.production`. Shift snapping uses screen pixels, so its tolerance stays consistent at every zoom level.
 
 The default clip duration applies when creating images or texts in any project,
-and is capped at the scene maximum. It is measured in the project's slots
+and is capped at the space remaining after the playhead. It is measured in the project's slots
 (30 slots last one second at 30 slots/s). Existing clips keep their saved length;
 videos use their source duration.

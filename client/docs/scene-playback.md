@@ -37,11 +37,13 @@ an authoring or keyframe property. Empty intermediate tracks are retained. The
 editor derives one trailing empty track from the last occupied index, or presents
 one empty track for an empty project.
 
-A new image or text receives one clip starting at zero, regardless of the head
-or Stop, with `MOUFFETTE_TIMELINE_DEFAULT_CLIP_DURATION_SLOTS` slots (default 30),
-capped at the scene maximum. Existing clips retain their saved duration.
-A new video uses its source duration, rounded up to the grid
-and capped at the scene maximum. New instances use the first track free over
+A new image, text or video starts at the playhead's current slot. Pending imports
+retain the slot captured when the file was added, including across project reloads.
+Images and texts use `MOUFFETTE_TIMELINE_DEFAULT_CLIP_DURATION_SLOTS` slots
+(default 30); videos use their source duration, rounded up to the grid.
+The duration is capped at the space remaining before the scene maximum,
+independently of Stop. At the final boundary no new instance can be added.
+Existing clips retain their saved timing. New instances use the first track free over
 their complete interval. Video imports remain pending until metadata or decoded
 residency supplies a valid duration; no instance with an empty clip is published.
 

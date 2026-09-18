@@ -150,6 +150,7 @@ private:
         QString sourcePath;
         QString sourceSignature;
         QPointF center;
+        qint64 startSlot = 0;
         std::shared_ptr<std::atomic_bool> cancelled;
         QPointer<CanvasMedia> candidate;
     };

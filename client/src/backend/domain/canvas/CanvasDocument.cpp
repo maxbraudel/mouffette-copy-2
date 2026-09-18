@@ -113,6 +113,8 @@ void CanvasDocument::setClientWorkspaceId(const QString& id)
 QString CanvasDocument::queueFileImport(const QString& sourcePath,
                                        const QPointF& center)
 {
+    const qint64 startSlot = m_timelineSettings.slotAt(m_timelinePositionMs);
+    if (startSlot >= m_timelineSettings.maxSlot()) return {};
     if (m_editsLocked || m_media.size() + m_pendingImports.size() >= SceneTimeline::MaximumMediaCount || !std::isfinite(center.x()) || !std::isfinite(center.y())) return {};
     const QFileInfo info(sourcePath);
     const QString signature = sourceSignature(sourcePath);
@@ -122,6 +124,7 @@ QString CanvasDocument::queueFileImport(const QString& sourcePath,
     pending.sourcePath = info.canonicalFilePath();
     pending.sourceSignature = signature;
     pending.center = center;
+    pending.startSlot = startSlot;
     const QString id = pending.mediaId;
     m_pendingImports.insert(id, pending);
     emit pendingImportsChanged();
@@ -207,7 +210,7 @@ void CanvasDocument::finishPendingImport(const QString& mediaId)
             : QStringLiteral("The video duration is unavailable or the scene instance limit was reached."));
         return;
     }
-    media->ensureDefaultClip(m_timelineSettings);
+    media->ensureDefaultClip(m_timelineSettings, found->startSlot);
     auto track = media->timelineTrack();
     track.trackIndex = firstFreeTimelineTrack(track.clip);
     media->setTimelineTrack(track);
@@ -246,11 +249,11 @@ void CanvasDocument::adoptMedia(CanvasMedia* media)
     });
     connect(media, &CanvasMedia::residencyChanged, this, [this, media]() {
         if (!m_media.contains(media)) return;
-        media->ensureDefaultClip(m_timelineSettings);
+        media->ensureDefaultClip(m_timelineSettings, m_timelineSettings.slotAt(m_timelinePositionMs));
         if (!m_publishingTimelineEdit) emit mediaChanged(media->mediaId());
     });
     connect(media, &CanvasMedia::runtimeStateChanged, this, [this, media]() {
-        media->ensureDefaultClip(m_timelineSettings);
+        media->ensureDefaultClip(m_timelineSettings, m_timelineSettings.slotAt(m_timelinePositionMs));
     });
     connect(media, &CanvasMedia::identityReady, this, [this, media](const QString& fileId) {
         if (!m_media.contains(media)) return;
@@ -274,7 +277,7 @@ void CanvasDocument::adoptMedia(CanvasMedia* media)
         if (!m_projectId.isEmpty())
             m_fileManager->associateFileWithProject(media->fileId(), m_projectId);
     }
-    media->ensureDefaultClip(m_timelineSettings);
+    media->ensureDefaultClip(m_timelineSettings, m_timelineSettings.slotAt(m_timelinePositionMs));
     media->setClipActive(SceneTimeline::activeClip(media->timelineTrack(), m_timelineSettings.slotAt(m_timelinePositionMs)) != nullptr);
     if (!m_publishingTimelineEdit) {
         emit mediaAdded(media);
@@ -286,6 +289,8 @@ CanvasMedia* CanvasDocument::addText(const QPointF& position,
                                      const QString& text,
                                      qreal initialSceneHeight)
 {
+    const qint64 startSlot = m_timelineSettings.slotAt(m_timelinePositionMs);
+    if (startSlot >= m_timelineSettings.maxSlot()) return nullptr;
     if (m_editsLocked || m_media.size() + m_pendingImports.size() >= SceneTimeline::MaximumMediaCount || !std::isfinite(initialSceneHeight)
         || initialSceneHeight < 0.0) return nullptr;
     auto* media = new CanvasMedia(CanvasMedia::Type::Text, QSize(400, 200));
@@ -302,7 +307,7 @@ CanvasMedia* CanvasDocument::addText(const QPointF& position,
     }
     media->setPosition(position - QPointF(media->sceneRect().width() * 0.5,
                                           media->sceneRect().height() * 0.5));
-    media->ensureDefaultClip(m_timelineSettings);
+    media->ensureDefaultClip(m_timelineSettings, startSlot);
     auto track = media->timelineTrack();
     track.trackIndex = firstFreeTimelineTrack(track.clip);
     media->setTimelineTrack(track);
@@ -315,6 +320,8 @@ CanvasMedia* CanvasDocument::addPreparedFile(
     const QString& sourcePath, const QSize& nativeSize, bool video,
     const QPointF& position, qint64 sourceDurationMs)
 {
+    const qint64 startSlot = m_timelineSettings.slotAt(m_timelinePositionMs);
+    if (startSlot >= m_timelineSettings.maxSlot()) return nullptr;
     if (m_editsLocked || m_media.size() + m_pendingImports.size() >= SceneTimeline::MaximumMediaCount || sourcePath.isEmpty()) return nullptr;
     if (video && sourceDurationMs <= 0) {
         const auto metadata = MediaDecoder::inspectGeometry(sourcePath);
@@ -330,7 +337,7 @@ CanvasMedia* CanvasDocument::addPreparedFile(
     media->setSourcePath(sourcePath);
     media->setPosition(position);
     if (video) media->initializeVideoRuntime();
-    media->ensureDefaultClip(m_timelineSettings);
+    media->ensureDefaultClip(m_timelineSettings, startSlot);
     auto track = media->timelineTrack();
     track.trackIndex = firstFreeTimelineTrack(track.clip);
     media->setTimelineTrack(track);
@@ -459,6 +466,10 @@ bool CanvasDocument::setTimelineSettings(const SceneTimeline::SceneSettings& set
     SceneTimeline::SceneSettings validated;
     if (m_editsLocked || !SceneTimeline::SceneSettings::fromJson(settings.toJson(),&validated)) return false;
     if (validated.toJson()==m_timelineSettings.toJson()) return true;
+    for (const auto& pending : m_pendingImports) {
+        if (validated.slotsPerSecond != m_timelineSettings.slotsPerSecond
+            || pending.startSlot >= validated.maxSlot()) return false;
+    }
     for (CanvasMedia* item:m_media) {
         const auto& t=item->timelineTrack();
         if (validated.slotsPerSecond != m_timelineSettings.slotsPerSecond
@@ -683,7 +694,8 @@ QJsonObject CanvasDocument::serializeProjectState() const
                 {QStringLiteral("sourcePath"), pending.sourcePath},
                 {QStringLiteral("sourceSignature"), pending.sourceSignature},
                 {QStringLiteral("centerX"), pending.center.x()},
-                {QStringLiteral("centerY"), pending.center.y()}
+                {QStringLiteral("centerY"), pending.center.y()},
+                {QStringLiteral("startSlot"), pending.startSlot}
             });
         }
         root.insert(QStringLiteral("pendingImports"), pendingImports);
@@ -757,11 +769,16 @@ bool CanvasDocument::restoreProjectState(
         pending.sourceSignature = item.value(QStringLiteral("sourceSignature")).toString();
         pending.center = {item.value(QStringLiteral("centerX")).toDouble(invalid),
                           item.value(QStringLiteral("centerY")).toDouble(invalid)};
+        // Older pending imports were always placed at zero.
+        const qreal startSlot = item.contains(QStringLiteral("startSlot"))
+            ? item.value(QStringLiteral("startSlot")).toDouble(invalid) : 0;
         // A synchronous snapshot during adoption can contain both forms of
         // the same import. The concrete media is already authoritative.
         if (mediaById(pending.mediaId) || m_pendingImports.contains(pending.mediaId)) continue;
         if (m_media.size() + m_pendingImports.size() >= SceneTimeline::MaximumMediaCount
             || pending.mediaId.isEmpty() || !std::isfinite(pending.center.x())
+            || !std::isfinite(startSlot) || std::floor(startSlot) != startSlot
+            || startSlot < 0 || startSlot >= m_timelineSettings.maxSlot()
             || !std::isfinite(pending.center.y()) || pending.sourceSignature.isEmpty()
             || !QFileInfo(pending.sourcePath).isAbsolute()
             || sourceSignature(pending.sourcePath) != pending.sourceSignature) {
@@ -770,6 +787,7 @@ bool CanvasDocument::restoreProjectState(
                 skippedMediaIds->append(pending.mediaId);
             continue;
         }
+        pending.startSlot = qint64(startSlot);
         m_pendingImports.insert(pending.mediaId, pending);
     }
     if (hasPendingImports()) {

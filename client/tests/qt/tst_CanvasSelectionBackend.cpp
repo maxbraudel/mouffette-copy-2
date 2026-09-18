@@ -613,11 +613,15 @@ private slots:
         // Simulate a full video validation occupying every bulk worker. The
         // canvas shell only needs metadata and must still be adopted now.
         CanvasDocument document;
+        document.setTimelinePosition(2000);
         const QPointF center(431.25, -62.5);
         const QString id = document.queueFileImport(path, center);
         QVERIFY(!id.isEmpty());
+        document.setTimelinePosition(4000);
         QTRY_VERIFY_WITH_TIMEOUT(document.mediaById(id) != nullptr, 5000);
         CanvasMedia* media = document.mediaById(id);
+        QCOMPARE(media->timelineTrack().clip.startSlot, 60);
+        if (video) QCOMPARE(media->timelineTrack().clip.sourceStartSlot.value(), 0);
         QCOMPARE(media->sceneRect().size(), QSizeF(geometry.displaySize));
         QCOMPARE(media->sceneRect().center(), center);
         QVERIFY(media->selected());
@@ -633,8 +637,16 @@ private slots:
         }
     }
 
+    void pendingMetadataImportSurvivesProjectRoundTrip_data()
+    {
+        QTest::addColumn<bool>("legacy");
+        QTest::newRow("captured-playhead") << false;
+        QTest::newRow("legacy-zero-start") << true;
+    }
+
     void pendingMetadataImportSurvivesProjectRoundTrip()
     {
+        QFETCH(bool, legacy);
         QTemporaryDir directory;
         const QString path = directory.filePath(QStringLiteral("pending.png"));
         QImage image(96, 54, QImage::Format_ARGB32);
@@ -642,6 +654,7 @@ private slots:
         QVERIFY(image.save(path));
         const QPointF center(431.25, -62.5);
         auto original = std::make_unique<CanvasDocument>();
+        original->setTimelinePosition(4000);
         const QString id = original->queueFileImport(path, center);
         QVERIFY(!id.isEmpty());
         QVERIFY(original->hasPendingImports());
@@ -652,9 +665,15 @@ private slots:
             .toObject().value(QStringLiteral("pendingImports")).toArray();
         QCOMPARE(pending.size(), 1);
         QCOMPARE(pending.first().toObject().value(QStringLiteral("mediaId")).toString(), id);
+        QCOMPARE(pending.first().toObject().value(QStringLiteral("startSlot")).toInt(), 120);
         QVERIFY(!pending.first().toObject().value(QStringLiteral("sourceSignature")).toString().isEmpty());
         QVERIFY(!original->serializeSceneState().contains(QStringLiteral("pendingImports")));
         original.reset(); // Closing the document cannot publish its old callback.
+        if (legacy) {
+            auto imports = saved.canvasState.value("pendingImports").toArray();
+            auto item = imports.first().toObject(); item.remove("startSlot");
+            imports[0] = item; saved.canvasState.insert("pendingImports", imports);
+        }
 
         CanvasDocument restored;
         QStringList skipped;
@@ -665,6 +684,7 @@ private slots:
         QCOMPARE(restored.media().size(), 1);
         CanvasMedia* media = restored.mediaById(id);
         QVERIFY(media);
+        QCOMPARE(media->timelineTrack().clip.startSlot, legacy ? 0 : 120);
         QCOMPARE(media->baseSize(), QSize(96, 54));
         QCOMPARE(media->sceneRect().center(), center);
         QVERIFY(media->selected());

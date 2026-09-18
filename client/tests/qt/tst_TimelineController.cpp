@@ -708,9 +708,9 @@ private slots:
         auto* media = doc->addText({}, "Presence");
         QVERIFY(media);
         const auto initial = media->timelineTrack().clip;
-        QCOMPARE(initial.startSlot, 0);
+        QCOMPARE(initial.startSlot, 60);
         QCOMPARE(initial.durationSlots, AppConfig::instance().timelineDefaultClipDurationSlots());
-        QVERIFY(!initial.sourceStartSlot); QVERIFY(!media->clipActive());
+        QVERIFY(!initial.sourceStartSlot); QVERIFY(media->clipActive());
         f.timeline.trimClip(initial.id, 1000, 3000);
         f.timeline.seek(0);
         QVERIFY(!media->clipActive()); QVERIFY(media->contentVisible());
@@ -920,6 +920,38 @@ private slots:
         QCOMPARE(doc->media().size(), 7); // The full-length destination was overwritten.
     }
 
+    void newClipsFitAtTimelineEnd()
+    {
+        CanvasDocument doc;
+        doc.setMediaResidencySuspended(true);
+        SceneTimeline::SceneSettings grid;
+        grid.maxDurationMs = 2000;
+        grid.slotsPerSecond = 60;
+        QVERIFY(doc.setTimelineSettings(grid));
+        QTemporaryDir temporary; QVERIFY(temporary.isValid());
+        const auto path = temporary.filePath("image.png");
+        QImage image(64, 64, QImage::Format_RGB32); image.fill(Qt::green); QVERIFY(image.save(path));
+        const auto create = [&](const QString& type) {
+            if (type == "text") return doc.addText({}, "Last slot");
+            return doc.addPreparedFile(type == "video" ? QString::fromUtf8(TEST_VIDEO_FILE) : path,
+                                       {64, 64}, type == "video", {}, 5000);
+        };
+        doc.setTimelinePosition(grid.timeMs(grid.maxSlot() - 1));
+        for (const QString type : {"text", "image", "video"}) {
+            auto* media = create(type); QVERIFY(media);
+            const auto clip = media->timelineTrack().clip;
+            QCOMPARE(clip.startSlot, grid.maxSlot() - 1);
+            QCOMPARE(clip.durationSlots, 1);
+            QVERIFY(media->clipActive());
+            if (type == "video") QCOMPARE(clip.sourceStartSlot.value(), 0);
+        }
+        doc.setTimelinePosition(grid.timeMs(grid.maxSlot()));
+        const auto saved = doc.serializeProjectState();
+        for (const QString type : {"text", "image", "video"}) QVERIFY(!create(type));
+        QVERIFY(doc.queueFileImport(path, {}).isEmpty());
+        QCOMPARE(doc.serializeProjectState(), saved);
+    }
+
     void imagesReceiveDefaultLengthClipsEvenAfterStop()
     {
         TimelineFixture f; QVERIFY(f.initialize());
@@ -930,10 +962,10 @@ private slots:
         f.timeline.seek(1000); f.timeline.placeStop(); f.timeline.seek(2000);
         auto* media=doc->addPreparedFile(path,{64,64},false,{}); QVERIFY(media);
         const auto clip=media->timelineTrack().clip;
-        QCOMPARE(clip.startSlot,0);
+        QCOMPARE(clip.startSlot,60);
         QCOMPARE(clip.durationSlots,AppConfig::instance().timelineDefaultClipDurationSlots());
-        QVERIFY(!clip.sourceStartSlot); QVERIFY(!media->clipActive());
-        f.timeline.seek(0); QVERIFY(media->clipActive());
+        QVERIFY(!clip.sourceStartSlot); QVERIFY(media->clipActive());
+        f.timeline.seek(0); QVERIFY(!media->clipActive());
         f.timeline.seek(doc->timelineSettings().timeMs(clip.endSlot())); QVERIFY(!media->clipActive());
         f.timeline.seek(2000);
         doc->select(media->mediaId()); QCOMPARE(f.timeline.clips().size(),1);
@@ -946,10 +978,14 @@ private slots:
     {
         TimelineFixture f; QVERIFY(f.initialize());
         auto* doc=f.host->document();
+        f.timeline.seek(2000);
         auto* media=doc->addPreparedFile(QString::fromUtf8(TEST_VIDEO_FILE),{160,90},true,{});
         QVERIFY(media); QTRY_VERIFY(media->residencyReady() && media->timelineTrack().clip.durationSlots > 0);
         doc->select(media->mediaId());
         const auto clip=media->timelineTrack().clip;
+        QCOMPARE(clip.startSlot, 60);
+        QCOMPARE(clip.sourceStartSlot.value(), 0);
+        QVERIFY(media->clipActive());
         f.timeline.moveClip(clip.id,2000);
         const qreal end=doc->timelineSettings().timeMs(media->timelineTrack().clip.endSlot());
         f.timeline.trimClip(clip.id,1000,end+2000);

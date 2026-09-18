@@ -94,7 +94,7 @@ public:
     void beginElementEdit();
     const SceneTimeline::MediaTrack& timelineTrack() const { return m_timelineTrack; }
     void setTimelineTrack(const SceneTimeline::MediaTrack& track);
-    void ensureDefaultClip(const SceneTimeline::SceneSettings& settings);
+    void ensureDefaultClip(const SceneTimeline::SceneSettings& settings, qint64 startSlot);
 
     const MediaSettingsState& settings() const { return m_settings; }
     void setSettings(const MediaSettingsState& settings);

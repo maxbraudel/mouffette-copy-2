@@ -848,15 +848,16 @@ void CanvasMedia::setClipActive(bool active)
     m_clipActive = active;
     emit presentationChanged();
 }
-void CanvasMedia::ensureDefaultClip(const SceneTimeline::SceneSettings& settings)
+void CanvasMedia::ensureDefaultClip(const SceneTimeline::SceneSettings& settings, qint64 startSlot)
 {
     if (!m_timelineTrack.clip.id.isEmpty()) return;
+    if (startSlot < 0 || startSlot >= settings.maxSlot()) return;
     const qint64 duration = isVideo() ? sourceDurationMs() : 0;
     if (isVideo() && duration <= 0) return;
     auto track=m_timelineTrack;
-    track.clip = {SceneTimeline::newId(),0,
+    track.clip = {SceneTimeline::newId(),startSlot,
         isVideo() ? std::optional<qint64>(0) : std::nullopt,
-        qMin(settings.maxSlot(), isVideo() ? settings.sourceSlots(duration)
+        qMin(settings.maxSlot() - startSlot, isVideo() ? settings.sourceSlots(duration)
             : qint64(AppConfig::instance().timelineDefaultClipDurationSlots()))};
     setTimelineTrack(track);
 }
