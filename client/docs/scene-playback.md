@@ -34,8 +34,11 @@ Every image, text and video instance owns exactly one presence `clip`, an intege
 `trackIndex`, and its absolute scene keyframes. Clips on a track do not overlap.
 The first track renders in front; `z` is derived at presentation time and is not
 an authoring or keyframe property. Empty intermediate tracks are retained. The
-editor derives one empty insertion row above the first occupied track and one
-below the last, or presents Track 0 for an empty project. Track 0 remains the
+editor retains a minimum range from Track +10 through Track -10, including in
+empty projects. `MOUFFETTE_TIMELINE_MIN_TRACKS_ABOVE` and
+`MOUFFETTE_TIMELINE_MIN_TRACKS_BELOW` configure these nonnegative counts independently.
+One empty insertion row remains above the first occupied track and below the last,
+extending beyond the minimum range when necessary. Track 0 remains the
 fixed origin: positive labels extend upwards, negative labels downwards. Saved
 `trackIndex` coordinates grow downwards, so the displayed number is `-trackIndex`.
 The visible range includes zero, interior gaps and the two insertion rows, bounded
@@ -186,7 +189,7 @@ See [window presentation](window-presentation.md).
 
 ## Configuration and formats
 
-`AppConfig` exposes the nine `MOUFFETTE_TIMELINE_*` settings documented in the
+`AppConfig` exposes the `MOUFFETTE_TIMELINE_*` settings documented in the
 [configuration registry](../src/backend/config/README.md). Maximum duration is
 captured in each new project (default 180000 ms), together with cadence
 (`MOUFFETTE_TIMELINE_SLOTS_PER_SECOND`, integer 1–240, default 30); visual settings apply globally.

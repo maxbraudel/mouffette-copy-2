@@ -86,6 +86,8 @@ public:
         TimelineHeightPx,
         TimelineRulerHeightPx,
         TimelineClipTrackHeightPx,
+        TimelineMinTracksAbove,
+        TimelineMinTracksBelow,
         TimelineKeyframeSizePx,
         TimelineOtherKeyframeOpacityPercent,
         TimelineSnapDistancePx,
@@ -225,6 +227,8 @@ public:
     int timelineHeightPx() const { return m_timelineHeightPx; }
     int timelineRulerHeightPx() const { return m_timelineRulerHeightPx; }
     int timelineClipTrackHeightPx() const { return m_timelineClipTrackHeightPx; }
+    int timelineMinTracksAbove() const { return m_timelineMinTracksAbove; }
+    int timelineMinTracksBelow() const { return m_timelineMinTracksBelow; }
     int timelineKeyframeSizePx() const { return m_timelineKeyframeSizePx; }
     int timelineOtherKeyframeOpacityPercent() const { return m_timelineOtherKeyframeOpacityPercent; }
     int timelineSnapDistancePx() const { return m_timelineSnapDistancePx; }
@@ -327,6 +331,8 @@ private:
     int m_timelineHeightPx = 240;
     int m_timelineRulerHeightPx = 28;
     int m_timelineClipTrackHeightPx = 48;
+    int m_timelineMinTracksAbove = 10;
+    int m_timelineMinTracksBelow = 10;
     int m_timelineKeyframeSizePx = 10;
     int m_timelineOtherKeyframeOpacityPercent = 30;
     int m_timelineSnapDistancePx = 10;

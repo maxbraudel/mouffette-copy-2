@@ -38,6 +38,7 @@
 
 #include "backend/domain/canvas/CanvasDocument.h"
 #include "backend/config/AppConfig.h"
+#include "../fixtures/TimelineTrackRangeConfig.h"
 #include "backend/domain/media/CanvasMedia.h"
 #include "backend/domain/project/ProjectModel.h"
 #include "frontend/rendering/canvas/MediaListModel.h"
@@ -568,7 +569,7 @@ private slots:
         document.setMediaResidencySuspended(false);
         QTRY_VERIFY(document.mediaById(id));
         QVERIFY(document.mediaById(id)->z() > underneath->z());
-        QCOMPARE(document.timelineRow(document.mediaById(id)->timelineTrack().trackIndex), 1);
+        QCOMPARE(document.mediaById(id)->timelineTrack().trackIndex, -1);
         QCOMPARE(document.mediaById(id)->sceneRect().center(), QPointF(31, 47));
         QCOMPARE(added.count(), 1);
         QVERIFY(!document.hasPendingImports());
@@ -1923,6 +1924,7 @@ private slots:
 
     void timelineCoordinatesStayStableAcrossInsertionAndRoundTrip()
     {
+        TimelineTrackRangeConfig config(0, 0); QVERIFY2(config.loaded, qPrintable(config.error));
         CanvasDocument doc;
         QCOMPARE(doc.timelineTrackCount(), 1);
         auto* first = doc.addText({}, "First"); QVERIFY(first);
@@ -1990,7 +1992,7 @@ private slots:
         const auto saved = doc.serializeProjectState();
         CanvasDocument restored; QVERIFY(restored.restoreProjectState(saved, {}));
         QCOMPARE(restored.serializeProjectState(), saved);
-        QCOMPARE(restored.timelineTrackCount(), SceneTimeline::MaximumTrackIndex + 3);
+        QCOMPARE(restored.timelineTrackCount(), SceneTimeline::MaximumTrackIndex + 11);
         QVERIFY(doc.addText({}, "Above without shifting the bottom"));
         QCOMPARE(bottom->timelineTrack().trackIndex, SceneTimeline::MaximumTrackIndex);
         QVERIFY(doc.moveTimelineClip(top->timelineTrack().clip.id, 0, SceneTimeline::MinimumTrackIndex));
@@ -2042,11 +2044,11 @@ private slots:
         QCOMPARE(right->timelineTrack().keyframes.last().slot, 120);
         QCOMPARE(SceneTimeline::evaluate(right->authorElementState(), right->timelineTrack(), 90).toJson(),
                  SceneTimeline::evaluate(a, track, 90).toJson());
-        QCOMPARE(document.timelineTrackCount(), 3);
+        QCOMPARE(document.timelineTrackCount(), 21);
         QVERIFY(document.moveTimelineClip(incoming->timelineTrack().clip.id, 200, 3));
-        QCOMPARE(document.timelineTrackCount(), 6); // Interior empty tracks are retained.
+        QCOMPARE(document.timelineTrackCount(), 21); // Empty tracks remain within the minimum range.
         QVERIFY(document.removeMedia(incoming->mediaId()));
-        QCOMPARE(document.timelineTrackCount(), 3);
+        QCOMPARE(document.timelineTrackCount(), 21);
         QVERIFY(document.moveTimelineClip(right->timelineTrack().clip.id, 200, 2));
         QCOMPARE(right->timelineTrack().keyframes.first().slot, 0);
         QCOMPARE(right->timelineTrack().keyframes.last().slot, 120);
@@ -2141,7 +2143,7 @@ private slots:
         media->setTimelineTrack(track);
         const auto snapshot = document.timelineMediaSnapshot(media->mediaId());
         const QString originalId = media->mediaId();
-        QVERIFY(document.removeMedia(originalId)); QCOMPARE(document.timelineTrackCount(), 1);
+        QVERIFY(document.removeMedia(originalId)); QCOMPARE(document.timelineTrackCount(), 21);
         const QString pasted = document.pasteTimelineClip(snapshot, {}, 28, 0);
         QVERIFY(!pasted.isEmpty() && pasted != originalId);
         const auto* copy = document.mediaById(pasted); QVERIFY(copy);

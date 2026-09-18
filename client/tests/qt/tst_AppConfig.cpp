@@ -37,6 +37,7 @@ private slots:
     void loadsEmbeddedDefaults();
     void validatesRetentionAndDiagnostics();
     void configuresTimeline();
+    void configuresMinimumTimelineTracks();
     void appAlwaysOnTopIsOptionalAndPersistent();
     void configuresMediaRamReserve();
     void configuresProjectMediaHiddenTimeout();
@@ -75,6 +76,36 @@ void AppConfigTest::validatesRetentionAndDiagnostics() {
     QVERIFY(config.networkDiagnosticsVerbose());
     options.processEnvironment.insert("MOUFFETTE_REMOTE_MEDIA_RETENTION_MS", "0");
     QVERIFY(!config.load(options, &error));
+}
+
+void AppConfigTest::configuresMinimumTimelineTracks() {
+    AppConfig config;
+    QCOMPARE(config.timelineMinTracksAbove(), 10);
+    QCOMPARE(config.timelineMinTracksBelow(), 10);
+    QTemporaryDir directory;
+    const auto path = writeEnvFile(directory, "tracks.env",
+        "MOUFFETTE_TIMELINE_MIN_TRACKS_ABOVE=12\n"
+        "MOUFFETTE_TIMELINE_MIN_TRACKS_BELOW=4\n");
+    QVERIFY(!path.isEmpty());
+    auto options = isolatedOptions(path);
+    QString error;
+    QVERIFY2(config.load(options, &error), qPrintable(error));
+    QCOMPARE(config.timelineMinTracksAbove(), 12);
+    QCOMPARE(config.timelineMinTracksBelow(), 4);
+    for (const auto* key : {"MOUFFETTE_TIMELINE_MIN_TRACKS_ABOVE", "MOUFFETTE_TIMELINE_MIN_TRACKS_BELOW"}) {
+        for (const auto* value : {"0", "9999"}) {
+            options.processEnvironment.insert(key, value);
+            QVERIFY2(config.load(options, &error), qPrintable(error));
+            QCOMPARE(key == QStringLiteral("MOUFFETTE_TIMELINE_MIN_TRACKS_ABOVE")
+                ? config.timelineMinTracksAbove() : config.timelineMinTracksBelow(), QString(value).toInt());
+        }
+        for (const auto* value : {"-1", "10000", "1.5", "abc"}) {
+            options.processEnvironment.insert(key, value);
+            QVERIFY(!config.load(options, &error));
+            QVERIFY(error.contains(key));
+        }
+        options.processEnvironment.remove(key);
+    }
 }
 
 void AppConfigTest::configuresTimeline() {

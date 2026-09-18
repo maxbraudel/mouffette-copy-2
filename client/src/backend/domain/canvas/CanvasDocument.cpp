@@ -906,19 +906,22 @@ int CanvasDocument::firstTimelineTrack() const
 
 int CanvasDocument::timelineTrackCount() const
 {
-    if (m_media.isEmpty()) return 1;
     int last = 0;
     for (auto* media : m_media) last = qMax(last, media->timelineTrack().trackIndex);
-    const int firstRowTrack = qMax(SceneTimeline::MinimumTrackIndex, qMin(0, firstTimelineTrack() - 1));
-    const int lastRowTrack = qMin(SceneTimeline::MaximumTrackIndex, last + 1);
-    return lastRowTrack - firstRowTrack + 1;
+    const int lastRowTrack = qMin(SceneTimeline::MaximumTrackIndex,
+        qMax(AppConfig::instance().timelineMinTracksBelow(), last + (m_media.isEmpty() ? 0 : 1)));
+    return lastRowTrack - timelineTrackAtRow(0) + 1;
 }
 
 int CanvasDocument::timelineRow(int trackIndex) const
 { return trackIndex - timelineTrackAtRow(0); }
 
 int CanvasDocument::timelineTrackAtRow(int row) const
-{ return m_media.isEmpty() ? 0 : qMax(SceneTimeline::MinimumTrackIndex, qMin(0, firstTimelineTrack() - 1)) + row; }
+{
+    const int firstRowTrack = qMax(SceneTimeline::MinimumTrackIndex,
+        qMin(-AppConfig::instance().timelineMinTracksAbove(), firstTimelineTrack() - (m_media.isEmpty() ? 0 : 1)));
+    return firstRowTrack + row;
+}
 
 bool CanvasDocument::timelinePlacementFree(const QString& clipId, const ClipPlacement& placement) const
 {

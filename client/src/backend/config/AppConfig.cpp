@@ -24,7 +24,7 @@ struct SettingSpec {
     bool boolean;
 };
 
-constexpr std::array<SettingSpec, 88> kSpecs{{
+constexpr std::array<SettingSpec, 90> kSpecs{{
     {Key::ServerUrl, "MOUFFETTE_SERVER_URL", "server-url", "serverUrl", "ws://localhost:8080", false},
     {Key::RemoteSessionHiddenTimeoutMs, "MOUFFETTE_REMOTE_SESSION_HIDDEN_TIMEOUT_MS", "remote-session-hidden-timeout-ms", nullptr, "60000", false},
     {Key::ProjectMediaHiddenTimeoutMs, "MOUFFETTE_PROJECT_MEDIA_HIDDEN_TIMEOUT_MS", "project-media-hidden-timeout-ms", nullptr, "60000", false},
@@ -88,6 +88,8 @@ constexpr std::array<SettingSpec, 88> kSpecs{{
     {Key::TimelineHeightPx, "MOUFFETTE_TIMELINE_HEIGHT_PX", "timeline-height-px", nullptr, "240", false},
     {Key::TimelineRulerHeightPx, "MOUFFETTE_TIMELINE_RULER_HEIGHT_PX", "timeline-ruler-height-px", nullptr, "28", false},
     {Key::TimelineClipTrackHeightPx, "MOUFFETTE_TIMELINE_CLIP_TRACK_HEIGHT_PX", "timeline-clip-track-height-px", nullptr, "48", false},
+    {Key::TimelineMinTracksAbove, "MOUFFETTE_TIMELINE_MIN_TRACKS_ABOVE", "timeline-min-tracks-above", nullptr, "10", false},
+    {Key::TimelineMinTracksBelow, "MOUFFETTE_TIMELINE_MIN_TRACKS_BELOW", "timeline-min-tracks-below", nullptr, "10", false},
     {Key::TimelineKeyframeSizePx, "MOUFFETTE_TIMELINE_KEYFRAME_SIZE_PX", "timeline-keyframe-size-px", nullptr, "10", false},
     {Key::TimelineOtherKeyframeOpacityPercent, "MOUFFETTE_TIMELINE_OTHER_KEYFRAME_OPACITY_PERCENT", "timeline-other-keyframe-opacity-percent", nullptr, "30", false},
     {Key::TimelineSnapDistancePx, "MOUFFETTE_TIMELINE_SNAP_DISTANCE_PX", "timeline-snap-distance-px", nullptr, "10", false},
@@ -463,6 +465,8 @@ void AppConfig::resetToCompiledDefaults() {
     m_timelineHeightPx = 240;
     m_timelineRulerHeightPx = 28;
     m_timelineClipTrackHeightPx = 48;
+    m_timelineMinTracksAbove = 10;
+    m_timelineMinTracksBelow = 10;
     m_timelineKeyframeSizePx = 10;
     m_timelineOtherKeyframeOpacityPercent = 30;
     m_timelineSnapDistancePx = 10;
@@ -688,6 +692,8 @@ bool AppConfig::load(const LoadOptions& options, QString* errorMessage) {
         || !parseIntSetting(Key::TimelineHeightPx, 120, 1200, &candidate.m_timelineHeightPx)
         || !parseIntSetting(Key::TimelineRulerHeightPx, 16, 160, &candidate.m_timelineRulerHeightPx)
         || !parseIntSetting(Key::TimelineClipTrackHeightPx, 24, 600, &candidate.m_timelineClipTrackHeightPx)
+        || !parseIntSetting(Key::TimelineMinTracksAbove, 0, 9999, &candidate.m_timelineMinTracksAbove)
+        || !parseIntSetting(Key::TimelineMinTracksBelow, 0, 9999, &candidate.m_timelineMinTracksBelow)
         || !parseIntSetting(Key::TimelineKeyframeSizePx, 4, 64, &candidate.m_timelineKeyframeSizePx)
         || !parseIntSetting(Key::TimelineOtherKeyframeOpacityPercent, 0, 100, &candidate.m_timelineOtherKeyframeOpacityPercent)
         || !parseIntSetting(Key::TimelineSnapDistancePx, 0, 100, &candidate.m_timelineSnapDistancePx)

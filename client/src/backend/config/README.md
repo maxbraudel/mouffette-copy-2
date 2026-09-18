@@ -17,12 +17,20 @@ Maximum duration and slot cadence are copied to each new project. Existing proje
 | `MOUFFETTE_TIMELINE_HEIGHT_PX` | 240 | 120–1200 |
 | `MOUFFETTE_TIMELINE_RULER_HEIGHT_PX` | 28 | 16–160 |
 | `MOUFFETTE_TIMELINE_CLIP_TRACK_HEIGHT_PX` | 48 | 24–600 |
+| `MOUFFETTE_TIMELINE_MIN_TRACKS_ABOVE` | 10 | integer 0–9999 |
+| `MOUFFETTE_TIMELINE_MIN_TRACKS_BELOW` | 10 | integer 0–9999 |
 | `MOUFFETTE_TIMELINE_KEYFRAME_SIZE_PX` | 10 | 4–64 |
 | `MOUFFETTE_TIMELINE_OTHER_KEYFRAME_OPACITY_PERCENT` | 30 | 0–100 |
 | `MOUFFETTE_TIMELINE_SNAP_DISTANCE_PX` | 10 | 0–100 |
 | `MOUFFETTE_TIMELINE_INITIAL_VIEW_DURATION_MS` | 15000 | 1–604800000 |
 
 Production inherits these values unless explicitly overridden in `.env.production`. Shift snapping uses screen pixels, so its tolerance stays consistent at every zoom level.
+
+The minimum track counts retain empty tracks above and below Track 0, including in
+empty projects. The defaults keep 21 tracks, labeled +10 through -10. Occupied
+edges still extend the range to leave an empty insertion track; deleting clips
+never shrinks the range below these configured minima. Setting both values to 0
+restores the occupied range with its insertion tracks, or just Track 0 when empty.
 
 The default clip duration applies when creating images or texts in any project,
 and is capped at the space remaining after the playhead. It is measured in the project's slots

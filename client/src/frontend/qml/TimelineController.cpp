@@ -199,7 +199,7 @@ QAbstractItemModel* TimelineController::clipModel() const { return m_clipModel; 
 int TimelineController::trackCount() const { return m_document ? m_document->timelineTrackCount() : 1; }
 int TimelineController::firstTrackIndex() const { return m_document ? m_document->timelineTrackAtRow(0) : 0; }
 int TimelineController::activeTrackIndex() const
-{ return m_activeTrackIndex < 0 ? 0 : qMin(m_activeTrackIndex, trackCount() - 1); }
+{ return m_activeTrackIndex < 0 ? (m_document ? m_document->timelineRow(0) : 0) : qMin(m_activeTrackIndex, trackCount() - 1); }
 void TimelineController::setActiveTrackIndex(int index)
 {
     if (!editable() || index < 0 || index >= trackCount()) return;

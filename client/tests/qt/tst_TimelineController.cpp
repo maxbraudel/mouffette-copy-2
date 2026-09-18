@@ -10,6 +10,7 @@
 #include <QTemporaryDir>
 #include <QImage>
 #include <QtTest>
+#include "../fixtures/TimelineTrackRangeConfig.h"
 
 #include "backend/domain/canvas/CanvasDocument.h"
 #include "backend/config/AppConfig.h"
@@ -76,8 +77,59 @@ class TimelineControllerTest final : public QObject
 {
     Q_OBJECT
 private slots:
+    void minimumTrackRangeSurvivesEditsAndExtendsAtOccupiedEdges_data()
+    {
+        QTest::addColumn<int>("above");
+        QTest::addColumn<int>("below");
+        QTest::newRow("defaults") << 10 << 10;
+        QTest::newRow("asymmetric") << 12 << 4;
+    }
+
+    void minimumTrackRangeSurvivesEditsAndExtendsAtOccupiedEdges()
+    {
+        QFETCH(int, above); QFETCH(int, below);
+        TimelineTrackRangeConfig config(above, below); QVERIFY2(config.loaded, qPrintable(config.error));
+        TimelineFixture f; QVERIFY(f.initialize());
+        auto* doc = f.host->document();
+        auto* viewport = f.item("timelineClipViewport"); QVERIFY(viewport);
+        QCOMPARE(f.timeline.trackCount(), above + below + 1);
+        QCOMPARE(f.timeline.firstTrackIndex(), -above);
+        QCOMPARE(f.timeline.activeTrackIndex(), above); // Paste initially targets Track 0.
+        QCOMPARE(doc->timelineTrackAtRow(above + below), below);
+        const auto names = f.view.rootObject()->property("trackNames").toStringList();
+        QCOMPARE(names.first(), "Track " + QString::number(above));
+        QCOMPARE(names.last(), "Track " + QString::number(-below));
+        QTRY_COMPARE(viewport->property("contentY").toReal(), (f.timeline.clipTrackHeightPx() - viewport->height()) / 2);
+        const auto initialScroll = viewport->property("contentY").toReal();
+        auto* media = doc->addText({}, "Zero"); QVERIFY(media);
+        const auto id = media->timelineTrack().clip.id;
+        QTest::qWait(20);
+        QCOMPARE(media->timelineTrack().trackIndex, 0);
+        QCOMPARE(f.timeline.trackCount(), above + below + 1);
+        QCOMPARE(viewport->property("contentY").toReal(), initialScroll);
+        f.timeline.moveClip(id, 0, 0);
+        QCOMPARE(media->timelineTrack().trackIndex, -above);
+        QCOMPARE(f.timeline.firstTrackIndex(), -above - 1);
+        QCOMPARE(f.timeline.trackCount(), above + below + 2);
+        f.timeline.moveClip(id, 0, f.timeline.trackCount() - 1);
+        QCOMPARE(media->timelineTrack().trackIndex, below);
+        QCOMPARE(f.timeline.firstTrackIndex(), -above);
+        QCOMPARE(doc->timelineTrackAtRow(f.timeline.trackCount() - 1), below + 1);
+        QCOMPARE(f.timeline.trackCount(), above + below + 2);
+        QVERIFY(doc->removeMedia(media->mediaId()));
+        QTest::qWait(20);
+        QCOMPARE(f.timeline.firstTrackIndex(), -above);
+        QCOMPARE(f.timeline.trackCount(), above + below + 1);
+        const auto point = viewport->mapToScene({100, viewport->height()/2}).toPoint();
+        f.wheel(point, {0, 10000}, {});
+        QCOMPARE(viewport->property("contentY").toReal(), -above * qreal(f.timeline.clipTrackHeightPx()));
+        f.wheel(point, {0, -10000}, {});
+        QCOMPARE(viewport->property("contentY").toReal() + viewport->height(), (below + 1) * qreal(f.timeline.clipTrackHeightPx()));
+    }
+
     void trackZeroStartsCenteredAndInsertionPreservesValidScrollPosition()
     {
+        TimelineTrackRangeConfig config(0, 0); QVERIFY2(config.loaded, qPrintable(config.error));
         TimelineFixture f; QVERIFY(f.initialize());
         f.view.resize(1100, 500);
         auto* viewport = f.item("timelineClipViewport"); QVERIFY(viewport);
@@ -127,6 +179,7 @@ private slots:
 
     void tracksUseOnlyAvailableSpaceAndNeverScrollPastTheirEdges()
     {
+        TimelineTrackRangeConfig config(0, 0); QVERIFY2(config.loaded, qPrintable(config.error));
         TimelineFixture f; QVERIFY(f.initialize());
         f.view.resize(1100, 500);
         auto* viewport = f.item("timelineClipViewport"); QVERIFY(viewport);
@@ -166,6 +219,7 @@ private slots:
 
     void outerTrackSeparatorsOnlyAppearInsideTheViewport()
     {
+        TimelineTrackRangeConfig config(0, 0); QVERIFY2(config.loaded, qPrintable(config.error));
         TimelineFixture f; QVERIFY(f.initialize());
         auto* viewport = f.item("timelineClipViewport"); QVERIFY(viewport);
         const qreal trackHeight = f.timeline.clipTrackHeightPx();
@@ -725,10 +779,10 @@ private slots:
         f.timeline.moveClip(id, 0, 0);
         QCOMPARE(f.timeline.activeTrackIndex(), 1);
         QCOMPARE(doc->timelineRow(a->timelineTrack().trackIndex), 1);
-        QVERIFY(a->z() > b->z()); QCOMPARE(f.timeline.trackCount(), 5);
+        QVERIFY(a->z() > b->z()); QCOMPARE(f.timeline.trackCount(), 22);
         f.timeline.moveClip(id, 0, f.timeline.trackCount() - 1);
-        QVERIFY(a->z() < b->z()); QCOMPARE(f.timeline.trackCount(), 5);
-        QCOMPARE(f.timeline.activeTrackIndex(), 3);
+        QVERIFY(a->z() < b->z()); QCOMPARE(f.timeline.trackCount(), 22);
+        QCOMPARE(f.timeline.activeTrackIndex(), 20);
         f.timeline.copySelected();
         f.timeline.setActiveTrackIndex(0);
         f.timeline.paste();
@@ -753,7 +807,7 @@ private slots:
         second->setTimelineTrack(secondTrack);
         doc->select(first->mediaId());
         QCOMPARE(f.timeline.clips().size(), 2);
-        QCOMPARE(f.timeline.trackCount(), 4);
+        QCOMPARE(f.timeline.trackCount(), 21);
         for (const auto& row : f.timeline.clips()) {
             const auto clip = row.toMap();
             QCOMPARE(clip.value("selected").toBool(), clip.value("mediaId").toString() == first->mediaId());
@@ -777,11 +831,11 @@ private slots:
         QVERIFY(target->property("modelData").toMap().value("selected").toBool());
         QCOMPARE(f.timeline.positionMs(), position);
         QTest::mouseMove(&f.view, to, 20);
-        QCOMPARE(target->property("previewTrack").toInt(), 2);
+        QCOMPARE(target->property("previewTrack").toInt(), doc->timelineRow(0));
         QTest::mouseRelease(&f.view, Qt::LeftButton, Qt::NoModifier, to);
         QCOMPARE(second->timelineTrack().trackIndex, 0);
         QCOMPARE(second->timelineTrack().keyframes.first().slot, 60);
-        QCOMPARE(f.timeline.trackCount(), 3);
+        QCOMPARE(f.timeline.trackCount(), 21);
         QCOMPARE(f.timeline.keyframes().first().toMap().value("id").toString(), QString("second-key"));
         doc->clearSelection();
         QCOMPARE(f.timeline.clips().size(), 2);
@@ -1004,7 +1058,7 @@ private slots:
         const auto originalRight = right->mediaId();
         f.timeline.deleteSelected();
         QVERIFY(!doc->mediaById(originalRight));
-        f.timeline.setActiveTrackIndex(1); f.timeline.seek(8000);
+        f.timeline.setActiveTrackIndex(doc->timelineRow(0)); f.timeline.seek(8000);
         QVERIFY(f.timeline.canPaste()); f.timeline.paste();
         QCOMPARE(doc->media().size(), 2);
         auto* copy = doc->primarySelectedMedia(); QVERIFY(copy);
@@ -1015,14 +1069,14 @@ private slots:
         CanvasDocument restored;
         QVERIFY(restored.restoreProjectState(doc->serializeProjectState(), {}));
         QCOMPARE(restored.media().size(), 2);
-        QCOMPARE(restored.timelineTrackCount(), 3);
+        QCOMPARE(restored.timelineTrackCount(), 21);
     }
 
     void verticalScrollingKeepsKeysFixedAndEmptyTracksReachable()
     {
         TimelineFixture f; QVERIFY(f.initialize());
         for (int i = 0; i < 8; ++i) QVERIFY(f.host->document()->addText({}, QString::number(i)));
-        QCOMPARE(f.timeline.trackCount(), 10);
+        QCOMPARE(f.timeline.trackCount(), 21);
         auto* viewport = f.item("timelineClipViewport"); QVERIFY(viewport);
         const qreal keyY = f.item("timelineKeyframeTrack")->mapToScene({0, 0}).y();
         const auto head = f.timeline.positionMs();
@@ -1168,6 +1222,7 @@ private slots:
 
     void trackHeadersMeasureAllNamesAndFollowVerticalScroll()
     {
+        TimelineTrackRangeConfig config(0, 0); QVERIFY2(config.loaded, qPrintable(config.error));
         TimelineFixture f; QVERIFY(f.initialize());
         auto* headers = f.item("timelineTrackHeaders");
         auto* keyHeader = f.item("timelineKeyframeHeader");
@@ -1243,7 +1298,7 @@ private slots:
         auto* media = f.host->document()->addText({}, "Clip");
         auto track = media->timelineTrack(); track.trackIndex = 1;
         media->setTimelineTrack(track);
-        f.timeline.setActiveTrackIndex(1);
+        f.timeline.setActiveTrackIndex(f.host->document()->timelineRow(1));
         auto* viewport = f.item("timelineClipViewport");
         viewport->setProperty("contentY", 0.0);
         QTest::qWait(30);
@@ -1254,7 +1309,7 @@ private slots:
         };
         const QImage before = f.view.grabWindow(); QVERIFY(!before.isNull());
         QTest::mouseClick(&f.view, Qt::LeftButton, Qt::NoModifier, point);
-        QCOMPARE(f.timeline.activeTrackIndex(), 0);
+        QCOMPARE(f.timeline.activeTrackIndex(), f.host->document()->timelineRow(0));
         QTest::qWait(30);
         const QImage after = f.view.grabWindow(); QVERIFY(!after.isNull());
         QCOMPARE(colorAt(after), colorAt(before));
