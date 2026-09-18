@@ -100,8 +100,11 @@ public:
     Q_INVOKABLE void moveKeyframe(const QString& id, qreal timeMs);
     Q_INVOKABLE void selectClip(const QString& id);
     Q_INVOKABLE void setActiveTrackIndex(int index);
-    Q_INVOKABLE void moveClip(const QString& id, qreal startMs, int trackIndex = -1);
-    Q_INVOKABLE void trimClip(const QString& id, qreal startMs, qreal endMs);
+    Q_INVOKABLE void moveClip(const QString& id, qreal startMs, int row = -1, bool overwrite = false);
+    Q_INVOKABLE void trimClip(const QString& id, qreal startMs, qreal endMs, bool overwrite = false);
+    Q_INVOKABLE QVariantMap previewClipEdit(const QString& id, qreal startMs, qreal endMs, int row,
+                                          int edge, qreal lastStartMs, qreal lastEndMs, int lastRow,
+                                          bool overwrite) const;
     Q_INVOKABLE void splitClip();
     Q_INVOKABLE void deleteSelected();
     Q_INVOKABLE void copySelected();
@@ -118,6 +121,7 @@ signals:
     void changed();
     void transportChanged();
     void tracksChanged();
+    void revealTrack(int row);
 
 private:
     SceneTimeline::SceneSettings grid() const;

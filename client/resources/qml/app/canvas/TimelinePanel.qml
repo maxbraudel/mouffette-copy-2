@@ -35,6 +35,14 @@ FocusScope {
     readonly property real gridStep: gridStride * slotMs
     readonly property real tickStep: Math.max(1, Math.ceil(80 / (gridStep * pixelsPerMs))) * gridStep
     property bool shiftHeld: false
+    property bool controlHeld: false
+    // Qt maps the physical macOS Control key to Meta, and Command to Control.
+    readonly property int controlModifier: Qt.platform.os === "osx" ? Qt.MetaModifier : Qt.ControlModifier
+    readonly property int controlKey: Qt.platform.os === "osx" ? Qt.Key_Meta : Qt.Key_Control
+    function updateModifiers(modifiers) {
+        shiftHeld = !!(modifiers & Qt.ShiftModifier)
+        controlHeld = !!(modifiers & controlModifier)
+    }
     property var activeDrag: null
     property real snapGuideMs: -1
     property string snapGuideLabel: ""
@@ -128,17 +136,41 @@ FocusScope {
                 head - trackViewport.width * 0.2))
     }
     onShiftHeldChanged: if (activeDrag) activeDrag.refreshPreview()
+    onControlHeldChanged: if (activeDrag && activeDrag.isClipDrag) activeDrag.refreshPreview()
     onTimelineChanged: {
         viewDurationMs = timeline ? Math.min(maximumMs, timeline.initialViewDurationMs) : 15000
         trackViewport.contentX = 0
         clipViewport.contentY = 0
-        endDrag()
+        endDrag(); shiftHeld = false; controlHeld = false
     }
-    Keys.onPressed: event => { if (event.key === Qt.Key_Shift) { shiftHeld = true; event.accepted = true } }
-    Keys.onReleased: event => { if (event.key === Qt.Key_Shift) { shiftHeld = false; event.accepted = true } }
+    Keys.onPressed: event => {
+        if (event.key === Qt.Key_Shift) { shiftHeld = true; event.accepted = true }
+        else if (event.key === controlKey) { controlHeld = true; event.accepted = true }
+    }
+    Keys.onReleased: event => {
+        if (event.key === Qt.Key_Shift) { shiftHeld = false; event.accepted = true }
+        else if (event.key === controlKey) { controlHeld = false; event.accepted = true }
+    }
+    Connections {
+        target: root.Window.window
+        function onActiveChanged() {
+            if (root.Window.window && !root.Window.window.active) {
+                if (root.activeDrag && root.activeDrag.isClipDrag) root.activeDrag.cancelEdit()
+                root.shiftHeld = false; root.controlHeld = false
+            }
+        }
+    }
     Connections {
         target: root.timeline
         function onTransportChanged() { root.followHead() }
+        function onRevealTrack(row) {
+            if (root.activeDrag || !root.timeline || root.timeline.activeTrackIndex !== row) return
+            var top = row * root.clipHeight
+            var bottom = top + root.clipHeight
+            if (top < clipViewport.contentY) clipViewport.contentY = top
+            else if (bottom > clipViewport.contentY + clipViewport.height)
+                clipViewport.contentY = Math.max(0, bottom - clipViewport.height)
+        }
     }
     Rectangle {
         anchors.fill: parent

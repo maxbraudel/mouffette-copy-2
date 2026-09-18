@@ -14,13 +14,17 @@ Rectangle {
     property bool dragging: false
     property int initialTrack: 0
     property int previewTrack: 0
+    property int requestedTrack: 0
+    property int lastValidTrack: 0
+    property real lastValidStart: 0
+    property real lastValidEnd: 0
     property real pressContentX: 0
     property real pressContentY: 0
     property real pressPanelX: 0
     property real pressPanelY: 0
     property real pointerPanelX: 0
     property real pointerPanelY: 0
-    readonly property int shownTrack: dragging ? previewTrack : modelData.trackIndex
+    readonly property int shownTrack: dragging ? previewTrack : modelData.displayTrackIndex
     property int editEdge: 0
     property real previewStart: 0
     property real previewEnd: 0
@@ -44,20 +48,37 @@ Rectangle {
             previewEnd = Math.max(initialStart + panel.slotMs, Math.min(panel.maximumMs,
                 panel.snapTime(rawMs, modelData.id, 0)))
         }
+        var wantedStart = previewStart
+        var wantedEnd = previewEnd
+        var result = panel.timeline.previewClipEdit(modelData.id, wantedStart, wantedEnd, requestedTrack,
+            editEdge, lastValidStart, lastValidEnd, lastValidTrack, panel.controlHeld)
+        if (result.startMs === undefined) { cancelEdit(); return }
+        previewStart = result.startMs; previewEnd = result.endMs; previewTrack = result.row
+        if (result.free) {
+            lastValidStart = previewStart; lastValidEnd = previewEnd; lastValidTrack = previewTrack
+        }
+        if (previewStart !== wantedStart || previewEnd !== wantedEnd || previewTrack !== requestedTrack) {
+            panel.snapGuideMs = -1; panel.snapGuideLabel = ""
+        }
     }
     function refreshFromPointer() {
         var point = timeContent.mapFromItem(panel, pointerPanelX, pointerPanelY)
         rawMs = (editEdge > 0 ? initialEnd : initialStart) + (point.x - pressContentX) / panel.pixelsPerMs
-        previewTrack = editEdge === 0 ? Math.max(0, Math.min(panel.timeline.trackCount - 1,
+        requestedTrack = editEdge === 0 ? Math.max(0, Math.min(panel.timeline.trackCount - 1,
             initialTrack + Math.round((point.y - pressContentY) / trackHeight))) : initialTrack
         refreshPreview()
     }
     function beginEdit(edge, mouse, area) {
-        panel.focusTrack(); panel.shiftHeld = !!(mouse.modifiers & Qt.ShiftModifier)
+        if (mouse.button !== Qt.LeftButton && !(mouse.modifiers & panel.controlModifier)) {
+            mouse.accepted = false; return
+        }
+        panel.focusTrack(); panel.updateModifiers(mouse.modifiers)
         panel.timeline.selectClip(modelData.id)
-        initialTrack = modelData.trackIndex; previewTrack = initialTrack
+        initialTrack = modelData.displayTrackIndex; previewTrack = initialTrack
+        requestedTrack = initialTrack; lastValidTrack = initialTrack
         initialStart = modelData.startMs; initialEnd = modelData.startMs + modelData.durationMs
         previewStart = initialStart; previewEnd = initialEnd
+        lastValidStart = initialStart; lastValidEnd = initialEnd
         editEdge = edge; rawMs = edge > 0 ? initialEnd : initialStart
         var point = area.mapToItem(timeContent, mouse.x, mouse.y)
         pressContentX = point.x; pressContentY = point.y
@@ -66,7 +87,7 @@ Rectangle {
         pointerPanelX = panelPoint.x; pointerPanelY = panelPoint.y
     }
     function updateEdit(mouse, area) {
-        panel.shiftHeld = !!(mouse.modifiers & Qt.ShiftModifier)
+        panel.updateModifiers(mouse.modifiers)
         var point = area.mapToItem(panel, mouse.x, mouse.y)
         pointerPanelX = point.x; pointerPanelY = point.y
         if (!dragging) {
@@ -78,13 +99,19 @@ Rectangle {
         }
         refreshFromPointer()
     }
-    function finishEdit() {
+    function cancelEdit() { dragging = false; panel.endDrag() }
+    function finishEdit(mouse, area) {
         if (!dragging) return
+        panel.updateModifiers(mouse.modifiers)
+        var point = area.mapToItem(panel, mouse.x, mouse.y)
+        pointerPanelX = point.x; pointerPanelY = point.y
+        refreshFromPointer()
+        var overwrite = panel.controlHeld
         var id = modelData.id; var start = panel.clampTime(previewStart); var end = panel.clampTime(previewEnd); var edge = editEdge; var track = previewTrack
         dragging = false; panel.endDrag()
         if (start === initialStart && end === initialEnd && track === initialTrack) return
-        if (edge === 0) panel.timeline.moveClip(id, start, track)
-        else panel.timeline.trimClip(id, start, end)
+        if (edge === 0) panel.timeline.moveClip(id, start, track, overwrite)
+        else panel.timeline.trimClip(id, start, end, overwrite)
     }
     x: 12 + shownStart * panel.pixelsPerMs
     y: shownTrack * trackHeight + 5
@@ -124,7 +151,7 @@ Rectangle {
         // Center the label within the intersection of this clip and the viewport.
         readonly property real leftBound: Math.max(8, panel.visibleStartX - clipItem.x + 8)
         readonly property real rightBound: Math.min(clipItem.width - 8, panel.visibleEndX - clipItem.x - 8)
-        implicitWidth: clipTitle.implicitWidth + clipDuration.implicitWidth
+        implicitWidth: clipTitle.implicitWidth
         width: Math.min(implicitWidth, Math.max(0, rightBound - leftBound))
         height: parent.height
         x: leftBound + Math.max(0, rightBound - leftBound - width) / 2
@@ -132,20 +159,10 @@ Rectangle {
         Text {
             id: clipTitle
             objectName: "timelineClipTitle"
-            width: Math.max(0, parent.width - clipDuration.width)
+            width: parent.width
             height: parent.height
             text: clipItem.modelData.mediaName
             textFormat: Text.PlainText
-            font.pixelSize: 10; color: Theme.overlayText
-            verticalAlignment: Text.AlignVCenter; elide: Text.ElideRight
-        }
-        Text {
-            id: clipDuration
-            objectName: "timelineClipDuration"
-            anchors.right: parent.right
-            width: Math.min(implicitWidth, parent.width)
-            height: parent.height
-            text: "  ·  " + panel.formatTime(clipItem.shownDuration)
             font.pixelSize: 10; color: Theme.overlayText
             verticalAlignment: Text.AlignVCenter; elide: Text.ElideRight
         }
@@ -161,10 +178,11 @@ Rectangle {
         anchors.fill: parent
         enabled: clipItem.interactive && panel.editable
         cursorShape: Qt.SizeAllCursor
+        acceptedButtons: Qt.LeftButton | (Qt.platform.os === "osx" ? Qt.RightButton : Qt.NoButton)
         onPressed: mouse => clipItem.beginEdit(0, mouse, clipMove)
         onPositionChanged: mouse => { if (pressed) clipItem.updateEdit(mouse, clipMove) }
-        onReleased: clipItem.finishEdit()
-        onCanceled: { clipItem.dragging = false; panel.endDrag() }
+        onReleased: mouse => clipItem.finishEdit(mouse, clipMove)
+        onCanceled: clipItem.cancelEdit()
     }
     Repeater {
         model: [-1, 1]
@@ -177,11 +195,11 @@ Rectangle {
             visible: clipItem.interactive
             enabled: clipItem.interactive && panel.editable
             cursorShape: Qt.SizeHorCursor
-            Rectangle { anchors.centerIn: parent; width: 2; height: Math.min(20, parent.height - 6); color: Theme.overlayText }
+            acceptedButtons: Qt.LeftButton | (Qt.platform.os === "osx" ? Qt.RightButton : Qt.NoButton)
             onPressed: mouse => clipItem.beginEdit(modelData, mouse, trimHandle)
             onPositionChanged: mouse => { if (pressed) clipItem.updateEdit(mouse, trimHandle) }
-            onReleased: clipItem.finishEdit()
-            onCanceled: { clipItem.dragging = false; panel.endDrag() }
+            onReleased: mouse => clipItem.finishEdit(mouse, trimHandle)
+            onCanceled: clipItem.cancelEdit()
         }
     }
 }

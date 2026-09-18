@@ -34,8 +34,15 @@ Every image, text and video instance owns exactly one presence `clip`, an intege
 `trackIndex`, and its absolute scene keyframes. Clips on a track do not overlap.
 The first track renders in front; `z` is derived at presentation time and is not
 an authoring or keyframe property. Empty intermediate tracks are retained. The
-editor derives one trailing empty track from the last occupied index, or presents
-one empty track for an empty project.
+editor derives one empty insertion row above the first occupied track and one
+below the last, or presents one empty row for an empty project. Displayed rows
+are numbered Track 1, Track 2, etc. independently of saved indices:
+`displayTrackIndex = trackIndex - firstOccupiedIndex + 1`. Leading/trailing unused
+indices are hidden, while interior gaps remain. Dropping into an insertion row
+creates a track at that end, then regenerates the empty row on release. Prepending
+shifts saved indices only when necessary; saved identities and relative Z order
+are preserved. Existing schema-6 projects require no migration. A shift beyond
+the maximum track index rejects the whole edit.
 
 A new image, text or video starts at the playhead's current slot. Pending imports
 retain the slot captured when the file was added, including across project reloads.
@@ -43,9 +50,11 @@ Images and texts use `MOUFFETTE_TIMELINE_DEFAULT_CLIP_DURATION_SLOTS` slots
 (default 30); videos use their source duration, rounded up to the grid.
 The duration is capped at the space remaining before the scene maximum,
 independently of Stop. At the final boundary no new instance can be added.
-Existing clips retain their saved timing. New instances use the first track free over
-their complete interval. Video imports remain pending until metadata or decoded
-residency supplies a valid duration; no instance with an empty clip is published.
+Existing clips retain their saved timing. Each new canvas instance gets a new
+track above all existing instances, even when an existing track has temporal space.
+Video imports remain pending until metadata or decoded residency supplies a valid
+duration; they are inserted above existing tracks when ready. No instance with an
+empty clip is published.
 
 Clips define half-open presence intervals `[startSlot, endSlot)`. Outside its clip,
 the instance is absent from rendering, canvas picking, selection chrome and
@@ -53,8 +62,22 @@ overlays. Its clip remains selectable in the timeline without seeking. Runtime
 `clipActive` is separate from intrinsic visibility/opacity and is never captured
 in a key or saved in the project.
 
-Moving, extending and pasting overwrite only the arrival interval on the target
-track. A covered instance is removed; one remaining fragment retains its identity;
+Moving and extending avoid other clips by default. Horizontal movement stops at
+the nearest neighbour in either direction, including fast pointer jumps across a
+whole clip. A track change is accepted only if the whole clip fits at the requested
+time; otherwise the last valid placement remains. Resize clamps the manipulated
+edge against its neighbour while retaining the opposite edge and at least one slot.
+Preview resolution does not mutate the document; the commit validates again.
+
+Holding the physical Control key enables overwrite for moving and resizing.
+Pressing/releasing it refreshes the preview immediately, including with a stationary
+pointer; releasing it over an overlap restores an allowed placement. On macOS this
+is Control, not Command (Qt maps physical Control to `MetaModifier`/`Key_Meta`).
+Shift snapping remains independent, and collision constraints take priority.
+Timeline paste retains overwrite without requiring this modifier.
+
+Overwrite affects only the arrival interval on the target track. A covered
+instance is removed; one remaining fragment retains its identity;
 two remaining fragments retain the original at the left and create a new instance
 at the right. Splitting also creates two independent instances. Every fragment
 copies all absolute keyframes, including keys outside its presence interval, so
@@ -68,8 +91,8 @@ The scene retains its 512-instance and 8 MiB payload limits; a rejected edit has
 no partial effect. Timeline clipboard snapshots contain the full instance and
 source path, stay scoped to their project, and create new identities at the head
 on the active track. Paste truncates at scene end. A lane click selects the target
-track; without one the trailing empty track is used. Canvas paste keeps the copied
-times and moves the group to a new block below existing tracks, preserving gaps
+track; without one the leading empty row is used. Canvas paste keeps the copied
+times and moves the group to a new block above existing tracks, preserving gaps
 and relative order; cross-project canvas paste requires matching cadence.
 
 `sourceStartSlot` is null for static clips and a signed grid offset for video.
@@ -115,10 +138,12 @@ font, plus 12 px padding on each side and a 1 px separator. Clip track names fol
 the clips' vertical scroll; the Keyframes header stays fixed. Header clicks are
 informational and wheel events navigate the same timeline. Track backgrounds do
 not highlight the active paste destination. Clips fill their track with a 5 px
-top and bottom inset. The media name and duration are centered in the intersection
-of their clip with the visible time viewport, including during drag and resize.
-Long names elide before the duration. Clips support temporal and vertical dragging with edge
-auto-scroll. Clip rows retain their identities when selection
+top and bottom inset. Only the media name is shown, centered in the intersection
+of its clip with the visible time viewport, including during drag and resize.
+Long names elide to the available width. Resize zones remain on the edges with a
+horizontal resize cursor but no visible handle bars. Clips support temporal and
+vertical dragging with edge auto-scroll. After insertion or renumbering, the
+selected clip remains visible and the active paste row follows its identity. Clip rows retain their identities when selection
 changes. The horizontal scrollbar overlays content without reserving a gutter.
 Vertical wheel motion over clips scrolls tracks; horizontal motion or Shift+wheel
 scrolls time. Ctrl/Cmd+wheel zooms.

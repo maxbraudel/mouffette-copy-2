@@ -188,14 +188,17 @@ QVariantList TimelineController::otherKeyframes() const
 QVariantList TimelineController::clips() const
 {
     QVariantList rows;
-    if (m_document) for (auto* media : m_document->media())
-        rows.append(clipRow(media->timelineTrack().clip, media, grid()));
+    if (m_document) for (auto* media : m_document->media()) {
+        auto row = clipRow(media->timelineTrack().clip, media, grid());
+        row.insert(QStringLiteral("displayTrackIndex"), m_document->timelineRow(media->timelineTrack().trackIndex));
+        rows.append(row);
+    }
     return rows;
 }
 QAbstractItemModel* TimelineController::clipModel() const { return m_clipModel; }
 int TimelineController::trackCount() const { return m_document ? m_document->timelineTrackCount() : 1; }
 int TimelineController::activeTrackIndex() const
-{ return m_activeTrackIndex < 0 ? trackCount() - 1 : qMin(m_activeTrackIndex, trackCount() - 1); }
+{ return m_activeTrackIndex < 0 ? 0 : qMin(m_activeTrackIndex, trackCount() - 1); }
 void TimelineController::setActiveTrackIndex(int index)
 {
     if (!editable() || index < 0 || index >= trackCount()) return;
@@ -235,14 +238,22 @@ int TimelineController::initialViewDurationMs() const { return AppConfig::instan
 
 void TimelineController::refresh()
 {
-    if (m_primaryId != primaryMediaId()) {
+    const bool primaryChanged = m_primaryId != primaryMediaId();
+    int previousRow = -1;
+    for (const auto& value : m_publishedClips) {
+        const auto row = value.toMap();
+        if (row.value("mediaId").toString() == primaryMediaId()) {
+            previousRow = row.value("displayTrackIndex").toInt(); break;
+        }
+    }
+    if (primaryChanged) {
         m_primaryId = primaryMediaId();
         m_keyframeId.clear();
-        if (primary()) m_activeTrackIndex = primary()->timelineTrack().trackIndex;
         m_error.clear();
     }
     if (auto* media = primary()) {
         const auto& track = media->timelineTrack();
+        m_activeTrackIndex = m_document->timelineRow(track.trackIndex);
         if (std::none_of(track.keyframes.cbegin(), track.keyframes.cend(),
                         [this](const auto& key) { return key.id == m_keyframeId; })) m_keyframeId.clear();
     }
@@ -257,6 +268,7 @@ void TimelineController::refresh()
     }
     emit changed();
     emit transportChanged();
+    if (primary() && previousRow != m_activeTrackIndex) emit revealTrack(activeTrackIndex());
 }
 void TimelineController::error(const QString& text) { m_error = text; emit changed(); }
 bool TimelineController::commitTrack(CanvasMedia* media, const SceneTimeline::MediaTrack& track)
@@ -356,35 +368,55 @@ void TimelineController::selectClip(const QString& id)
     auto* media = m_document->mediaForTimelineClip(id);
     if (!media) return;
     m_document->select(media->mediaId());
-    m_activeTrackIndex = media->timelineTrack().trackIndex;
+    m_activeTrackIndex = m_document->timelineRow(media->timelineTrack().trackIndex);
     m_keyframeId.clear();
     emit changed();
 }
-void TimelineController::moveClip(const QString& id, qreal startMs, int trackIndex)
+void TimelineController::moveClip(const QString& id, qreal startMs, int row, bool overwrite)
 {
     if (!editable() || !m_document) return;
     auto* media = m_document->mediaForTimelineClip(id);
     if (!media) return;
     QString reason;
-    const int destination = trackIndex < 0 ? media->timelineTrack().trackIndex : trackIndex;
-    if (!m_document->moveTimelineClip(id, grid().nearestSlot(startMs), destination, &reason)) {
+    if (row >= trackCount()) return;
+    const int destination = row < 0 ? media->timelineTrack().trackIndex : m_document->timelineTrackAtRow(row);
+    const auto mode = overwrite ? CanvasDocument::PlacementMode::Overwrite : CanvasDocument::PlacementMode::Avoid;
+    if (!m_document->moveTimelineClip(id, grid().nearestSlot(startMs), destination, &reason, mode)) {
         if (!reason.isEmpty()) error(reason);
         return;
     }
-    m_keyframeId.clear(); m_activeTrackIndex = destination;
+    m_keyframeId.clear(); m_activeTrackIndex = m_document->timelineRow(media->timelineTrack().trackIndex);
     reevaluate();
+    emit revealTrack(activeTrackIndex());
 }
-void TimelineController::trimClip(const QString& id, qreal startMs, qreal endMs)
+void TimelineController::trimClip(const QString& id, qreal startMs, qreal endMs, bool overwrite)
 {
     if (!editable() || !m_document) return;
     QString reason;
-    if (!m_document->trimTimelineClip(id, grid().nearestSlot(startMs), grid().nearestSlot(endMs), &reason)) {
+    const auto mode = overwrite ? CanvasDocument::PlacementMode::Overwrite : CanvasDocument::PlacementMode::Avoid;
+    if (!m_document->trimTimelineClip(id, grid().nearestSlot(startMs), grid().nearestSlot(endMs), &reason, mode)) {
         if (!reason.isEmpty()) error(reason);
         return;
     }
     m_keyframeId.clear();
     reevaluate();
 }
+QVariantMap TimelineController::previewClipEdit(const QString& id, qreal startMs, qreal endMs, int row,
+    int edge, qreal lastStartMs, qreal lastEndMs, int lastRow, bool overwrite) const
+{
+    if (!m_document || !m_document->mediaForTimelineClip(id)) return {};
+    const auto timing = grid();
+    const CanvasDocument::ClipPlacement requested{timing.nearestSlot(startMs), timing.nearestSlot(endMs),
+        m_document->timelineTrackAtRow(qBound(0, row, trackCount() - 1))};
+    const CanvasDocument::ClipPlacement last{timing.nearestSlot(lastStartMs), timing.nearestSlot(lastEndMs),
+        m_document->timelineTrackAtRow(qBound(0, lastRow, trackCount() - 1))};
+    const auto result = m_document->previewTimelineClip(id, requested, edge, last,
+        overwrite ? CanvasDocument::PlacementMode::Overwrite : CanvasDocument::PlacementMode::Avoid);
+    return {{"startMs", timing.timeMs(result.startSlot)}, {"endMs", timing.timeMs(result.endSlot)},
+            {"row", m_document->timelineRow(result.trackIndex)},
+            {"free", m_document->timelinePlacementFree(id, result)}};
+}
+
 void TimelineController::splitClip()
 {
     if (!canSplit()) return;
@@ -446,11 +478,11 @@ void TimelineController::paste()
         QHash<QString, QString> paths;
         paths.insert(snapshot.value("mediaId").toString(), value.value("sourcePath").toString());
         QString reason;
-        const auto id = m_document->pasteTimelineClip(snapshot, paths, positionSlot(), activeTrackIndex(), &reason);
+        const auto id = m_document->pasteTimelineClip(snapshot, paths, positionSlot(), m_document->timelineTrackAtRow(activeTrackIndex()), &reason);
         if (id.isEmpty()) { if (!reason.isEmpty()) error(reason); return; }
         if (auto* media = m_document->mediaById(id)) {
             m_document->select(id);
-            m_activeTrackIndex = media->timelineTrack().trackIndex;
+            m_activeTrackIndex = m_document->timelineRow(media->timelineTrack().trackIndex);
             m_keyframeId.clear();
         }
     }

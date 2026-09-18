@@ -55,10 +55,25 @@ public:
     bool removeMedia(const QString& mediaId);
     void clear();
     CanvasMedia* mediaForTimelineClip(const QString& clipId) const;
+    int firstTimelineTrack() const;
     int timelineTrackCount() const;
+    int timelineRow(int trackIndex) const;
+    int timelineTrackAtRow(int row) const;
+    enum class PlacementMode { Avoid, Overwrite };
+    struct ClipPlacement {
+        qint64 startSlot = 0;
+        qint64 endSlot = 0;
+        int trackIndex = 0;
+    };
+    bool timelinePlacementFree(const QString& clipId, const ClipPlacement& placement) const;
+    ClipPlacement previewTimelineClip(const QString& clipId, ClipPlacement requested,
+                                      int edge, const ClipPlacement& lastValid,
+                                      PlacementMode mode = PlacementMode::Avoid) const;
     QJsonObject timelineMediaSnapshot(const QString& mediaId) const;
-    bool moveTimelineClip(const QString& clipId, qint64 startSlot, int trackIndex, QString* error = nullptr);
-    bool trimTimelineClip(const QString& clipId, qint64 startSlot, qint64 endSlot, QString* error = nullptr);
+    bool moveTimelineClip(const QString& clipId, qint64 startSlot, int trackIndex, QString* error = nullptr,
+                          PlacementMode mode = PlacementMode::Avoid);
+    bool trimTimelineClip(const QString& clipId, qint64 startSlot, qint64 endSlot, QString* error = nullptr,
+                          PlacementMode mode = PlacementMode::Avoid);
     bool splitTimelineClip(const QString& clipId, qint64 slot, QString* error = nullptr);
     QString pasteTimelineClip(const QJsonObject& snapshot, const QHash<QString, QString>& sourcePaths,
                              qint64 startSlot, int trackIndex, QString* error = nullptr);
@@ -157,10 +172,13 @@ private:
     void startPendingImport(const QString& mediaId);
     void cancelPendingImportTasks();
     void finishPendingImport(const QString& mediaId);
-    int firstFreeTimelineTrack(const SceneTimeline::Clip& clip) const;
-    bool applyTimelinePlacement(const QJsonObject& snapshot, const QString& sourcePath, bool freshInstance, QString* error);
+    QJsonObject timelineMediaSnapshot(const CanvasMedia* media) const;
+    bool insertMediaAbove(CanvasMedia* media, QString* error = nullptr);
+    bool applyTimelinePlacement(const QJsonObject& snapshot, const QString& sourcePath, bool freshInstance,
+                                QString* error, PlacementMode mode);
     bool applyMediaPlan(const QJsonArray& items, const QHash<QString, QString>& sourcePaths,
-                        const QString& primaryId, bool selectOnly, QString* error, const QStringList& selectedIds = {});
+                        const QString& primaryId, bool selectOnly, QString* error, const QStringList& selectedIds = {},
+                        CanvasMedia* preparedMedia = nullptr);
     CanvasMedia* createMediaFromSnapshot(const QJsonObject& snapshot, const QString& sourcePath) const;
     void adoptMedia(CanvasMedia* media);
     QStringList insertProjectMedia(const QJsonObject& state,
