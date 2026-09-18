@@ -1,6 +1,6 @@
-# Connection and session recovery (protocol v7)
+# Connection and session recovery (protocol v12, policy v5)
 
-Deploy the v7 server and clients together. Authentication is versioned; an
+Deploy the v12 server and clients together. Authentication is versioned; an
 incompatible client receives a terminal compatibility error instead of retrying.
 A process/server restart ends old sessions. Retained selection can create a new
 empty session, but recovery never issues PLAY or COMMIT.
@@ -45,7 +45,7 @@ abort a newly authenticating socket.
 ## State, action and retry configuration
 
 After an established connection is interrupted, the network badge stays Degraded
-for the server's recovery window (3 seconds by default), including TCP,
+for the server's recovery window (15 seconds by default), including TCP,
 authentication and synchronization retries. Failed attempts do not restart that
 window. Successful synchronization clears it; intentional Disable bypasses it.
 Outside recovery the badge is Disconnected between attempts and Connecting
@@ -82,8 +82,9 @@ RetryPolicy supplies bounded delays and injectable randomness; RetryScheduler
 uses an injectable suspend-inclusive clock and a single-shot timer for the next
 operation. Replaced/cancelled keys cannot run obsolete callbacks. The upload
 channel has its own backoff and a combined token/connection/authentication timeout;
-losing it can resume an existing transfer from durable offsets on the control
-channel. Receiver cleanup and residual staging cleanup retry independently of
+losing it pauses the transfer until a replacement authenticated data channel can
+resume from durable offsets. Payloads and inventories never fall back to control.
+Receiver cleanup and residual staging cleanup retry independently of
 network enablement and do not require a new connection.
 
 All client keys below start with `MOUFFETTE_`; durations are milliseconds:
@@ -118,15 +119,17 @@ The server advertises these policy values in the signed connection's welcome:
 | Policy | Default | Configuration in `server/.env` |
 | --- | ---: | --- |
 | Heartbeat interval | 750 ms | `MOUFFETTE_PEER_HEARTBEAT_INTERVAL_MS` |
-| Detect silence and replace transport | 1,500 ms | Derived: two heartbeat intervals |
-| Recovery after interruption detection | 3,000 ms | `MOUFFETTE_REMOTE_SESSION_RECOVERY_TIMEOUT_MS` |
+| Detect degradation | 1,500 ms | Derived: two heartbeat intervals |
+| Replace silent transport | 5,000 ms | `MOUFFETTE_TRANSPORT_TIMEOUT_MS` |
+| Recovery after interruption detection | 15,000 ms | `MOUFFETTE_REMOTE_SESSION_RECOVERY_TIMEOUT_MS` |
 | New session opening deadline | 5,000 ms | `MOUFFETTE_REMOTE_SESSION_OPEN_TIMEOUT_MS` |
 
-Policy version 4 (still protocol v7) starts a **single three-second recovery
+Policy version 5 (protocol v12) starts a **single fifteen-second recovery
 period at interruption detection**: immediately on an unexpected socket close,
 or after two missed heartbeat intervals for silent loss. At defaults, silent
-loss therefore expires no later than 4.5 seconds after the last relevant proof;
-an explicit socket loss expires three seconds after its detection. The old
+loss therefore expires no later than 16.5 seconds after the last relevant proof;
+an explicit socket loss expires fifteen seconds after its detection. A new retry
+cannot move the original deadline; session proofs may shorten it. The old
 `MOUFFETTE_PEER_LEASE_TIMEOUT_MS` and `MOUFFETTE_REMOTE_SESSION_DEGRADED_AFTER_MS`
 knobs are removed; old configuration entries generate an unknown-key warning.
 Deploy server and clients together: older clients reject the new timing policy.
@@ -147,11 +150,15 @@ processing a late command. Local clocks include system sleep (continuous Mach
 time on macOS, GetTickCount64 on Windows and CLOCK_BOOTTIME on Linux). Civil
 clock adjustments do not extend running deadlines.
 
-During degradation/recovery only a scene already Live may continue. Preparation,
-activation, new commands and upload streaming stop. STOP and cleanup remain
-possible. At expiration each participant revokes the session locally even when
-the server is unreachable; renderers stop and transfers are cancelled. Recovery
-of selection never restarts the old scene.
+During degradation/recovery a Live scene continues and existing preparations are
+retained. New commands and upload streaming wait for readiness; PREPARED/STARTED
+acknowledgements retry after reconciliation. Before COMMIT, participants refresh
+their clock agreement. After COMMIT, the original decision and schedule remain
+immutable; a start missed beyond the allowed tolerance ends explicitly. STOP and
+cleanup remain possible. At expiration each participant revokes the session
+locally even when the server is unreachable and stops the renderer. Uncancelled
+runtime upload requests may bind to a new authenticated session using new upload
+IDs and retained durable bytes. Recovery of selection never restarts an old scene.
 
 ## Reconciliation, replay and command fencing
 
@@ -237,8 +244,16 @@ not create additional toasts.
 Incoming chunk writes and fsync run on a serialized worker queue. Only persisted
 bytes advance progress; a cancelled generation's late completion cannot emit an
 ACK. Resume waits for outstanding writers before rebinding/truncating to durable
-offsets. The client bounds queued bytes to 8 MiB; the server allows eight target
-upload slots with 1 MiB unacknowledged per slot and queues additional starts.
+offsets. The client bounds queued disk work to 8 MiB. The server permits eight
+target upload slots and shares an adaptive 32–256 KiB credit budget per target,
+starting at 64 KiB. Chunks are at most 32 KiB; additional starts wait.
+
+Durable complete and partial manifests can retain bytes for ten minutes after
+session loss, within a 10 GiB profile limit. New sessions reuse only matching
+authenticated owner/target identities and SHA-256, size and extension. Adoption
+does not renew expiry. Final content validation precedes the uploaded state;
+explicit removal durably invalidates retained copies before physical deletion.
+Compatible primary-profile caches survive restart; legacy manifests are reset.
 
 Runtime quarantine, targeted asset quarantine, durable recovery and physical
 deletion metadata run on a serialized I/O queue. A scope is fenced before work is
@@ -261,14 +276,16 @@ not free resources needed by a running scene.
 
 ## Validation and diagnostics
 
-See the [implementation validation record](connection-recovery-validation.md) for
-results and the remaining general graphical test failures.
+See the [v12 validation record](network-v12-validation.md) for current results and
+platform limits, and the [network guide](../src/backend/network/README.md) for
+the bounded asynchronous JSONL diagnostics and their configuration.
 
 `server/connection_recovery_v6.test.js` exercises deterministic deadlines,
 simultaneous recovery, state acknowledgements, replay, admission and cleanup.
 `RemoteSessionIntegration` starts the real Node relay and uses actual Qt clients;
 Node and `npm ci` in `server` are required. It covers recovery after a 2-second
-socket interruption, terminal expiration after 4/6 seconds, peer ordering,
+socket interruption, recovery after 4/6 seconds, terminal expiry beyond fifteen
+seconds, peer ordering,
 lost replies/ACKs and duplicate OPEN. Real runtime/relay cases also verify
 Degraded in the list and Canvas header, unchanged project/Canvas during the
 period, Connected after recovery, and Disconnected after expiration when the

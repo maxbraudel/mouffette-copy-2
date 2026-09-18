@@ -284,7 +284,7 @@ private slots:
         RemoteSessionCoordinator sessions;
         sessions.setLocalEndpointId(kOwner);
         auto opened = sessionEnvelope();
-        opened.insert("protocolVersion", 11);
+        opened.insert("protocolVersion", 12);
         opened.insert("stateRevision", 1);
         opened.insert("validUntilServerMonotonicMs", 5000);
         opened.insert("snapshotSequence", 1);
@@ -313,7 +313,7 @@ private slots:
         coordinator.setLocalEndpointId(kTarget);
         QVERIFY(coordinator.upsertSession(sessionEnvelope(), 1));
         auto terminal = sessionEnvelope(3, "CleanupPending", "remote_session_terminating");
-        terminal.insert("protocolVersion", 11);
+        terminal.insert("protocolVersion", 12);
         terminal.insert("stateRevision", 8);
         terminal.insert("teardownId", "missed_generation_cleanup");
         QVERIFY(coordinator.upsertSession(terminal, 3));
@@ -580,6 +580,31 @@ private slots:
         QVERIFY(!restartedTarget.removeSession(closed, 1));
     }
 
+    void terminalSessionHistoryCannotAdmitOldIdsAfterDetailEviction()
+    {
+        RemoteSessionCoordinator coordinator;
+        coordinator.setLocalEndpointId(kOwner);
+        QJsonObject oldest;
+        for (int i = 0; i < 4096; ++i) {
+            QJsonObject opened = sessionEnvelope();
+            const QString id = QStringLiteral("retired-session-%1").arg(i);
+            opened.insert("remoteSessionId", id);
+            if (i == 0) oldest = opened;
+            QVERIFY(coordinator.upsert(opened, 1));
+            coordinator.remove(id);
+            if (i == 2050) QVERIFY(!coordinator.upsert(oldest, 1));
+        }
+        QVERIFY(!coordinator.upsert(oldest, 1));
+        auto fresh = sessionEnvelope();
+        fresh.insert("remoteSessionId", "new-after-capacity");
+        QString reason;
+        QVERIFY(!coordinator.upsert(fresh, 1, &reason));
+        QCOMPARE(reason, QStringLiteral("session_history_capacity"));
+        QVERIFY(coordinator.all().isEmpty());
+        coordinator.clear(); // An established transport/boot boundary clears authority.
+        QVERIFY(coordinator.upsert(fresh, 1));
+    }
+
     void commandReadinessRequiresBothPartiesAndFinishedHistoryIsBounded()
     {
         SceneRunCoordinator coordinator;
@@ -601,6 +626,13 @@ private slots:
         }
         QVERIFY(coordinator.run(oldest).sceneRunId.isEmpty());
         QCOMPARE(coordinator.run(run.sceneRunId).phase, SceneRunCoordinator::Phase::Stopped);
+        const QJsonObject delayedPrepare{{"type", "scene_prepare"},
+            {"remoteSessionId", run.remoteSessionId}, {"generation", 1},
+            {"sceneRunId", oldest}, {"revision", 1}, {"digest", run.digest},
+            {"ownerEndpointId", kOwner}, {"targetEndpointId", kTarget},
+            {"manifest", manifest()}, {"scene", scene()}};
+        QVERIFY(!coordinator.acceptInboundEnvelope(delayedPrepare));
+        QVERIFY(coordinator.run(oldest).sceneRunId.isEmpty());
     }
 
     void protocolIntegersMustBeExactAndSafeBeforeMutation()
@@ -673,6 +705,55 @@ private slots:
         QVERIFY(SceneRunCoordinator::normalizeManifest(
                     fractionalManifest, &error).isEmpty());
         QVERIFY(!error.isEmpty());
+    }
+
+    void recoveryReplaysCannotRewriteCommitOrRestartTerminalRun()
+    {
+        SceneRunCoordinator coordinator;
+        coordinator.setPrepareTimeoutMs(15000);
+        coordinator.setLocalEndpointId(kOwner);
+        QVERIFY(coordinator.upsertSession(sessionEnvelope(), 1));
+        SceneRunCoordinator::Run run;
+        QVERIFY(coordinator.createOutgoingRun(kTarget, 1, manifest(), scene(), &run));
+        QJsonObject envelope{{"type", "prepared"}, {"remoteSessionId", run.remoteSessionId},
+            {"generation", 1}, {"sceneRunId", run.sceneRunId}, {"revision", 1},
+            {"digest", run.digest}, {"ownerEndpointId", kOwner}, {"targetEndpointId", kTarget},
+            {"allPrepared", true}};
+        QVERIFY(coordinator.acceptInboundEnvelope(envelope));
+        coordinator.remoteSessions()->suspend(run.remoteSessionId);
+        QCOMPARE(coordinator.run(run.sceneRunId).phase, SceneRunCoordinator::Phase::Prepared);
+        QVERIFY(!coordinator.sessionById(run.remoteSessionId).commandReady);
+        QVERIFY(coordinator.upsertSession(sessionEnvelope(2, "Active", "remote_session_resumed"), 2));
+        envelope["generation"] = 2;
+        envelope["type"] = "armed";
+        QVERIFY(coordinator.acceptInboundEnvelope(envelope));
+        envelope["type"] = "commit";
+        envelope["startEpochMs"] = 10000;
+        envelope["startServerMonotonicMs"] = 5000;
+        QVERIFY(coordinator.acceptInboundEnvelope(envelope));
+        QVERIFY(coordinator.acceptInboundEnvelope(envelope));
+        envelope["startServerMonotonicMs"] = 5001;
+        QString reason;
+        QVERIFY(!coordinator.acceptInboundEnvelope(envelope, &reason));
+        QCOMPARE(reason, QStringLiteral("Scene commitment is immutable"));
+        QCOMPARE(coordinator.run(run.sceneRunId).startServerMonotonicMs, qint64(5000));
+        envelope["startServerMonotonicMs"] = 5000;
+        envelope["type"] = "prepared";
+        QVERIFY(coordinator.acceptInboundEnvelope(envelope));
+        QCOMPARE(coordinator.run(run.sceneRunId).phase, SceneRunCoordinator::Phase::Scheduled);
+        envelope["type"] = "started";
+        envelope["allStarted"] = true;
+        QVERIFY(coordinator.acceptInboundEnvelope(envelope));
+        envelope["type"] = "commit";
+        QVERIFY(coordinator.acceptInboundEnvelope(envelope));
+        QCOMPARE(coordinator.run(run.sceneRunId).phase, SceneRunCoordinator::Phase::Live);
+        coordinator.finishRun(run.sceneRunId, true);
+        envelope["type"] = "scene_prepare";
+        envelope["scene"] = scene();
+        envelope["manifest"] = manifest();
+        QVERIFY(!coordinator.acceptInboundEnvelope(envelope, &reason));
+        QCOMPARE(reason, QStringLiteral("Scene run is terminal"));
+        QCOMPARE(coordinator.run(run.sceneRunId).phase, SceneRunCoordinator::Phase::Failed);
     }
 
     void remoteSessionCloseMustMatchTheCurrentBinding()

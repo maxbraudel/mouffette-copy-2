@@ -1,4 +1,5 @@
 #include "backend/network/SceneRunCoordinator.h"
+#include "backend/network/NetworkDiagnostics.h"
 #include "MediaFormatContract.h"
 
 #include <QCryptographicHash>
@@ -16,6 +17,7 @@
 namespace {
 constexpr qsizetype kMaximumManifestItems = 256;
 constexpr qsizetype kMaximumChecklistItems = 2048;
+constexpr qsizetype kMaximumTerminalRunsPerSession = 4096;
 constexpr qint64 kMaximumAssetBytes = 16LL * 1024 * 1024 * 1024;
 constexpr double kMaximumSafeJsonInteger = 9007199254740991.0;
 
@@ -197,6 +199,7 @@ bool SceneRunCoordinator::removeSession(const QJsonObject& envelope,
     const QString remoteSessionId =
         envelope.value(QStringLiteral("remoteSessionId")).toString();
     m_remoteSessions->remove(remoteSessionId, envelope);
+    m_terminalRunIdsBySession.remove(remoteSessionId);
     for (auto it = m_runsById.begin(); it != m_runsById.end();) {
         if (it->remoteSessionId == remoteSessionId) it = m_runsById.erase(it);
         else ++it;
@@ -212,6 +215,7 @@ bool SceneRunCoordinator::discardSessionAfterAuthoritativeRejection(
         return false;
     }
     m_remoteSessions->remove(remoteSessionId);
+    m_terminalRunIdsBySession.remove(remoteSessionId);
     for (auto it = m_runsById.begin(); it != m_runsById.end();) {
         if (it->remoteSessionId == remoteSessionId) {
             it = m_runsById.erase(it);
@@ -227,6 +231,7 @@ void SceneRunCoordinator::clearSessions()
     m_remoteSessions->clear();
     m_runsById.clear();
     m_finishedRunOrder.clear();
+    m_terminalRunIdsBySession.clear();
 }
 
 SceneRunCoordinator::SessionBinding SceneRunCoordinator::sessionForPeer(
@@ -270,6 +275,10 @@ bool SceneRunCoordinator::createOutgoingRun(const QString& peerEndpointId,
         if (errorMessage) *errorMessage = QStringLiteral("No active outgoing remote session for this device");
         return false;
     }
+    if (m_terminalRunIdsBySession.value(binding.remoteSessionId).size() >= kMaximumTerminalRunsPerSession) {
+        if (errorMessage) *errorMessage = QStringLiteral("Scene history capacity reached; open a new remote session");
+        return false;
+    }
     if (revision < 1
         || static_cast<double>(revision) > kMaximumSafeJsonInteger
         || !scene.value(QStringLiteral("screens")).isArray()
@@ -296,6 +305,10 @@ bool SceneRunCoordinator::createOutgoingRun(const QString& peerEndpointId,
     created.phase = Phase::Preparing;
     created.prepareDeadlineEpochMs = QDateTime::currentMSecsSinceEpoch() + m_prepareTimeoutMs;
     m_runsById.insert(created.sceneRunId, created);
+    NetworkDiagnostics::record(QStringLiteral("scene_transition"), {
+        {"remoteSessionId", created.remoteSessionId}, {"sceneRunId", created.sceneRunId},
+        {"generation", static_cast<qint64>(created.generation)},
+        {"before", "Draft"}, {"after", "Preparing"}, {"reason", "prepare"}});
     if (result) *result = created;
     emit runChanged(created.sceneRunId, created.phase);
     return true;
@@ -344,6 +357,12 @@ bool SceneRunCoordinator::acceptInboundEnvelope(const QJsonObject& envelope,
 
     auto iterator = m_runsById.find(sceneRunId);
     if (iterator == m_runsById.end()) {
+        const auto terminalIds = m_terminalRunIdsBySession.constFind(remoteSessionId);
+        if (terminalIds != m_terminalRunIdsBySession.cend()
+            && (terminalIds->contains(sceneRunId) || terminalIds->size() >= kMaximumTerminalRunsPerSession)) {
+            if (errorMessage) *errorMessage = QStringLiteral("Scene run is terminal or session history is full");
+            return false;
+        }
         if (envelope.value(QStringLiteral("type")).toString() != QLatin1String("scene_prepare")) {
             if (errorMessage) *errorMessage = QStringLiteral("Unknown scene run");
             return false;
@@ -380,6 +399,14 @@ bool SceneRunCoordinator::acceptInboundEnvelope(const QJsonObject& envelope,
         return false;
     }
 
+    if (current.phase == Phase::Stopped || current.phase == Phase::Failed) {
+        // A retained terminal run is a tombstone, never a new PREPARE. In
+        // particular, reconciliation must not resurrect an old presentation.
+        if (type == QLatin1String("stopped")) return true;
+        if (errorMessage) *errorMessage = QStringLiteral("Scene run is terminal");
+        return false;
+    }
+
     Phase next = current.phase;
     qint64 scheduledEpochMs = current.startEpochMs;
     qint64 scheduledServerMonotonicMs = current.startServerMonotonicMs;
@@ -405,6 +432,15 @@ bool SceneRunCoordinator::acceptInboundEnvelope(const QJsonObject& envelope,
         }
         next = Phase::Scheduled;
         updateSchedule = true;
+        if (current.startEpochMs > 0 || current.startServerMonotonicMs > 0) {
+            if (current.startEpochMs != scheduledEpochMs
+                || current.startServerMonotonicMs != scheduledServerMonotonicMs) {
+                if (errorMessage) *errorMessage = QStringLiteral("Scene commitment is immutable");
+                return false;
+            }
+            // Replaying the same decision is harmless even after STARTED.
+            return current.phase == Phase::Scheduled || current.phase == Phase::Live;
+        }
     } else if (type == QLatin1String("started")) {
         // A SceneRun is Live only after both first frames were presented.
         next = envelope.value(QStringLiteral("allStarted")).toBool(false)
@@ -430,7 +466,12 @@ bool SceneRunCoordinator::acceptInboundEnvelope(const QJsonObject& envelope,
     }
 
     if (!isLegalTransition(current.phase, next)) {
-        // Repeated server broadcasts are idempotent, backwards transitions are not.
+        // Resume replays acknowledged barriers. Accept their evidence without
+        // rewinding a phase that this endpoint already reached.
+        if ((type == QLatin1String("prepared") || type == QLatin1String("armed")
+             || type == QLatin1String("started"))
+            && current.phase >= Phase::Prepared && current.phase <= Phase::Live
+            && next >= Phase::Prepared && next < current.phase) return true;
         if (current.phase == next) return true;
         if (errorMessage) *errorMessage = QStringLiteral("Illegal scene state transition");
         return false;
@@ -439,17 +480,29 @@ bool SceneRunCoordinator::acceptInboundEnvelope(const QJsonObject& envelope,
         current.startEpochMs = scheduledEpochMs;
         current.startServerMonotonicMs = scheduledServerMonotonicMs;
     }
+    const Phase previous = current.phase;
     current.phase = next;
+    NetworkDiagnostics::record(QStringLiteral("scene_transition"), {
+        {"remoteSessionId", current.remoteSessionId}, {"sceneRunId", sceneRunId},
+        {"generation", static_cast<qint64>(current.generation)},
+        {"before", phaseName(previous)}, {"after", phaseName(next)}, {"reason", type}});
     if (next == Phase::Stopped || next == Phase::Failed) rememberFinishedRun(sceneRunId);
     emit runChanged(sceneRunId, next);
     return true;
 }
 
-void SceneRunCoordinator::finishRun(const QString& sceneRunId, bool failed)
+void SceneRunCoordinator::finishRun(const QString& sceneRunId, bool failed, const QString& reason)
 {
     auto iterator = m_runsById.find(sceneRunId);
     if (iterator == m_runsById.end()) return;
+    if (iterator->phase == Phase::Stopped || iterator->phase == Phase::Failed) return;
     const Phase terminal = failed ? Phase::Failed : Phase::Stopped;
+    NetworkDiagnostics::record(QStringLiteral("scene_transition"), {
+        {"remoteSessionId", iterator->remoteSessionId}, {"sceneRunId", sceneRunId},
+        {"generation", static_cast<qint64>(iterator->generation)},
+        {"before", phaseName(iterator->phase)}, {"after", phaseName(terminal)},
+        {"reason", reason.isEmpty() ? (failed ? QStringLiteral("local_failure")
+            : QStringLiteral("local_stop")) : reason}}, failed);
     iterator->phase = terminal;
     rememberFinishedRun(sceneRunId);
     emit runChanged(sceneRunId, terminal);
@@ -457,6 +510,8 @@ void SceneRunCoordinator::finishRun(const QString& sceneRunId, bool failed)
 
 void SceneRunCoordinator::rememberFinishedRun(const QString& sceneRunId)
 {
+    const auto run = m_runsById.constFind(sceneRunId);
+    if (run != m_runsById.cend()) m_terminalRunIdsBySession[run->remoteSessionId].insert(sceneRunId);
     if (m_finishedRunOrder.contains(sceneRunId)) return;
     m_finishedRunOrder.append(sceneRunId);
     while (m_finishedRunOrder.size() > 512) {

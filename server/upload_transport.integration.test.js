@@ -48,7 +48,7 @@ function trackedSocket(url) {
 }
 
 function assertEnvelope(message, context) {
-    assert.equal(message.protocolVersion, 11);
+    assert.equal(message.protocolVersion, 12);
     assert.equal(message.serverBootId, context.serverBootId);
     assert.equal(message.connectionGeneration, context.connectionGeneration);
     assert.match(message.messageId,
@@ -77,7 +77,7 @@ async function connectDevice(url, machineName) {
     const endpointId = endpointIdForInstallation(installationId, instanceId);
     peer.ws.send(JSON.stringify({
         type: 'auth_response',
-        protocolVersion: 11,
+        protocolVersion: 12,
         serverBootId: challenge.serverBootId,
         messageId: crypto.randomUUID(),
         runtimeId,
@@ -98,7 +98,7 @@ async function connectDevice(url, machineName) {
     };
     peer.send = (type, body = {}) => peer.ws.send(JSON.stringify({
         type,
-        protocolVersion: 11,
+        protocolVersion: 12,
         serverBootId: peer.context.serverBootId,
         connectionGeneration: peer.context.connectionGeneration,
         messageId: crypto.randomUUID(),
@@ -123,12 +123,17 @@ async function connectDevice(url, machineName) {
         activationLeadMs: 4_000,
         maximumClockUncertaintyMs: 50,
     });
+    // The registry is deliberately virtual here; periodic real socket sweeps
+    // must use that same domain instead of comparing native uptime to 10,000.
+    const sweepSceneRuns = server.sweepSceneRuns.bind(server);
+    server.sweepSceneRuns = () => sweepSceneRuns(sceneEpoch, sceneMonotonic);
     server.start();
     await new Promise(resolve => server.wss.once('listening', resolve));
     const url = `ws://127.0.0.1:${server.wss.address().port}`;
     const owner = await connectDevice(url, 'owner');
     const target = await connectDevice(url, 'target');
     let uploadChannel = null;
+    let targetDataChannel = null;
 
     try {
         owner.send('remote_session_open', {
@@ -169,6 +174,19 @@ async function connectDevice(url, machineName) {
         const ready = await uploadChannel.next(message => message.type === 'upload_channel_ready');
         assertEnvelope(ready, owner.context);
 
+        target.send('request_upload_channel');
+        const targetToken = await target.next(message => message.type === 'upload_channel_token');
+        targetDataChannel = trackedSocket(`${url}?channel=upload&token=${encodeURIComponent(targetToken.token)}`);
+        await targetDataChannel.opened();
+        await targetDataChannel.next(message => message.type === 'upload_channel_ready');
+        const targetControlSend = target.send;
+        target.send = (type, body = {}) => {
+            if (!server.uploadDataMessageTypes.has(type)) return targetControlSend(type, body);
+            targetDataChannel.ws.send(JSON.stringify({ type, protocolVersion: 12,
+                serverBootId: target.context.serverBootId, messageId: crypto.randomUUID(),
+                connectionGeneration: target.context.connectionGeneration, ...body }));
+        };
+
         const bytes = Buffer.alloc(128, 0x4d);
         const sha256 = crypto.createHash('sha256').update(bytes).digest('hex');
         const uploadId = 'upload-integration-1';
@@ -178,7 +196,7 @@ async function connectDevice(url, machineName) {
             mediaIds: ['media-integration-1'],
         };
         const uploadEnvelope = body => ({
-            protocolVersion: 11,
+            protocolVersion: 12,
             serverBootId: owner.context.serverBootId,
             messageId: crypto.randomUUID(),
             connectionGeneration: owner.context.connectionGeneration,
@@ -189,26 +207,26 @@ async function connectDevice(url, machineName) {
         uploadChannel.ws.send(JSON.stringify(uploadEnvelope({
             type: 'upload_start', uploadId, files: [asset],
         })));
-        await target.next(message => message.type === 'upload_start'
+        await targetDataChannel.next(message => message.type === 'upload_start'
             && message.uploadId === uploadId);
         target.send('upload_ready', {
             ...session, uploadId,
             assets: [{ assetId: asset.assetId, offset: 0, size: 128, sha256 }],
         });
-        await owner.next(message => message.type === 'upload_ready'
+        await uploadChannel.next(message => message.type === 'upload_ready'
             && message.uploadId === uploadId);
 
         uploadChannel.ws.send(JSON.stringify(uploadEnvelope({
             type: 'upload_chunk', uploadId, assetId: asset.assetId,
             offset: 0, size: 64, sha256, data: bytes.subarray(0, 64).toString('base64'),
         })));
-        await target.next(message => message.type === 'upload_chunk'
+        await targetDataChannel.next(message => message.type === 'upload_chunk'
             && message.uploadId === uploadId);
         target.send('upload_progress', {
             ...session, uploadId,
             assets: [{ assetId: asset.assetId, offset: 64, size: 128, sha256 }],
         });
-        await owner.next(message => message.type === 'upload_progress'
+        await uploadChannel.next(message => message.type === 'upload_progress'
             && message.durableBytes === 64);
 
         await closeSocket(uploadChannel.ws);
@@ -227,34 +245,34 @@ async function connectDevice(url, machineName) {
         uploadChannel.ws.send(JSON.stringify(uploadEnvelope({
             type: 'upload_resume', uploadId,
         })));
-        const resumed = await owner.next(message => message.type === 'upload_resume_ready');
+        const resumed = await uploadChannel.next(message => message.type === 'upload_resume_ready');
         assert.equal(resumed.assets[0].offset, 64);
-        await target.next(message => message.type === 'upload_resume'
+        await targetDataChannel.next(message => message.type === 'upload_resume'
             && message.uploadId === uploadId);
         target.send('upload_ready', {
             ...session, uploadId,
             assets: [{ assetId: asset.assetId, offset: 64, size: 128, sha256 }],
         });
-        await owner.next(message => message.type === 'upload_ready'
+        await uploadChannel.next(message => message.type === 'upload_ready'
             && message.uploadId === uploadId);
 
         uploadChannel.ws.send(JSON.stringify(uploadEnvelope({
             type: 'upload_chunk', uploadId, assetId: asset.assetId,
             offset: 64, size: 64, sha256, data: bytes.subarray(64).toString('base64'),
         })));
-        await target.next(message => message.type === 'upload_chunk'
+        await targetDataChannel.next(message => message.type === 'upload_chunk'
             && message.offset === 64);
         target.send('upload_progress', {
             ...session, uploadId,
             assets: [{ assetId: asset.assetId, offset: 128, size: 128, sha256 }],
         });
-        await owner.next(message => message.type === 'upload_progress'
+        await uploadChannel.next(message => message.type === 'upload_progress'
             && message.uploadId === uploadId && message.durableBytes === 128);
         uploadChannel.ws.send(JSON.stringify(uploadEnvelope({
             type: 'upload_complete', uploadId,
             assets: [{ assetId: asset.assetId, offset: 128, size: 128, sha256 }],
         })));
-        const firstCompletion = await target.next(message => message.type === 'upload_complete'
+        const firstCompletion = await targetDataChannel.next(message => message.type === 'upload_complete'
             && message.uploadId === uploadId);
         assert.deepEqual(firstCompletion.assets,
             [{ assetId: asset.assetId, offset: 128, size: 128, sha256 }]);
@@ -274,11 +292,11 @@ async function connectDevice(url, machineName) {
         uploadChannel.ws.send(JSON.stringify(uploadEnvelope({
             type: 'upload_start', uploadId, files: [asset],
         })));
-        const completionReplay = await target.next(message =>
+        const completionReplay = await targetDataChannel.next(message =>
             message.type === 'upload_complete' && message.uploadId === uploadId
             && message.replay === true);
         assert.deepEqual(completionReplay.assets, firstCompletion.assets);
-        const resumeReadyAfterPromotion = await owner.next(message =>
+        const resumeReadyAfterPromotion = await uploadChannel.next(message =>
             message.type === 'upload_resume_ready' && message.uploadId === uploadId);
         assert.equal(resumeReadyAfterPromotion.replay, true);
         assert.deepEqual(resumeReadyAfterPromotion.assets,
@@ -287,7 +305,7 @@ async function connectDevice(url, machineName) {
             ...session, uploadId,
             assets: [{ assetId: asset.assetId, offset: 128, size: 128, sha256 }],
         });
-        await owner.next(message => message.type === 'upload_finished'
+        await uploadChannel.next(message => message.type === 'upload_finished'
             && message.uploadId === uploadId);
 
         target.send('media_residency', {
@@ -379,13 +397,14 @@ async function connectDevice(url, machineName) {
             const output = peer.ws === owner.ws ? owner : target;
             // A representative post-auth message proves centralized envelopes.
             const clientList = await output.next(message => message.type === 'client_list');
-            assert.equal(clientList.protocolVersion, 11);
+            assert.equal(clientList.protocolVersion, 12);
             assert.equal(clientList.serverBootId, server.serverBootId);
             assert.equal(clientList.connectionGeneration,
                 output.context.connectionGeneration);
             assert.equal(typeof clientList.messageId, 'string');
         }
     } finally {
+        await closeSocket(targetDataChannel && targetDataChannel.ws);
         await closeSocket(uploadChannel && uploadChannel.ws);
         await Promise.all([closeSocket(owner.ws), closeSocket(target.ws)]);
         clearInterval(server.uploadCleanupInterval);
@@ -393,7 +412,7 @@ async function connectDevice(url, machineName) {
         await new Promise(resolve => server.wss.close(resolve));
     }
 })().then(() => {
-    console.log('upload transport v11 integration tests passed');
+    console.log('upload transport v12 integration tests passed');
 }).catch(error => {
     console.error(error);
     process.exitCode = 1;

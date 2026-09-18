@@ -28,3 +28,16 @@ The default clip duration applies when creating images or texts in any project,
 and is capped at the space remaining after the playhead. It is measured in the project's slots
 (30 slots last one second at 30 slots/s). Existing clips keep their saved length;
 videos use their source duration.
+
+## Network recovery diagnostics and retained media
+
+| Variable | Default | Accepted range |
+|---|---:|---|
+| `MOUFFETTE_REMOTE_MEDIA_RETENTION_MS` | 600000 | 1000–86400000 |
+| `MOUFFETTE_REMOTE_MEDIA_CACHE_MAX_MIB` | 10240 | 1–1048576 |
+| `MOUFFETTE_NETWORK_DIAGNOSTICS` | true | boolean |
+| `MOUFFETTE_NETWORK_DIAGNOSTICS_VERBOSE` | false | boolean |
+
+Transport recovery timing is server authority, advertised by protocol v12 policy
+v5. The client cannot renew its fixed session deadline with a local retry.
+Diagnostics are profile scoped, rate limited and written by a bounded worker.

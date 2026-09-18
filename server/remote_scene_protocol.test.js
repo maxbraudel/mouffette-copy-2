@@ -44,7 +44,7 @@ function messages(ws, type) {
 
 function envelope(session, extra = {}) {
     return {
-        protocolVersion: 11,
+        protocolVersion: 12,
         serverBootId: session.serverBootId,
         messageId: crypto.randomUUID(),
         remoteSessionId: session.remoteSessionId,
@@ -270,7 +270,7 @@ const checklist = Object.freeze([
     assert.equal(liveReplay.run.startServerMonotonicMs, scheduledStart);
 }
 
-// Grace cancels pre-start graphs while retaining the resumable session.
+// Grace retains pre-start graphs until its fixed recovery deadline.
 {
     let now = 100_000;
     let sequence = 0;
@@ -308,9 +308,9 @@ const checklist = Object.freeze([
     assert.equal(server.handleRemoteSessionDeparture(
         server.clients.get('grace-owner'), now), true);
     assert.equal(session.phase, 'Grace');
-    assert.equal(run.phase, SCENE_PHASES.STOPPING);
-    assert.equal(messages(owner, 'stop').length, 1,
-        'Grace must prevent a delayed start');
+    assert.equal(run.phase, SCENE_PHASES.PREPARING);
+    assert.equal(messages(owner, 'stop').length, 0,
+        'Grace preserves preparation without dispatching playback');
 
     now = 102_999;
     server.clients.get('grace-owner').connectionGeneration = 2;
@@ -324,7 +324,7 @@ const checklist = Object.freeze([
     assert.equal(resumed.ok, true);
     server.rebindSessionGeneration(resumed.session);
     assert.equal(resumed.session.phase, 'Active');
-    assert.equal(run.phase, SCENE_PHASES.STOPPING);
+    assert.equal(run.phase, SCENE_PHASES.PREPARING);
     assert.equal(run.generation, resumed.session.generation);
 }
 
@@ -708,7 +708,7 @@ for (const invalidCase of [
     assert.equal(messages(owner, 'stopped').at(-1).success, true);
 
     server.handleMessage('owner-connection', {
-        protocolVersion: 11, serverBootId: server.serverBootId,
+        protocolVersion: 12, serverBootId: server.serverBootId,
         messageId: crypto.randomUUID(),
         type: 'remote_scene_start',
     });
@@ -751,8 +751,7 @@ for (const invalidCase of [
     assert.equal(server.metrics.value('scene_prepare_failed_total'), 1);
 }
 
-// If the owner cannot receive the acceptance barrier, the target must not keep
-// a preparation graph alive waiting for an owner that never became accepted.
+// A lost acceptance barrier retains preparation until the bounded recovery deadline.
 {
     const server = new MouffetteServer(0);
     const owner = addClient(server, 'ack-owner-connection', 'A');
@@ -780,11 +779,11 @@ for (const invalidCase of [
 
     const run = server.sceneRuns.get('run-ack-failure');
     assert.equal(messages(target, 'scene_prepare').length, 1);
-    assert.equal(run.phase, SCENE_PHASES.STOPPING);
-    assert.equal(run.failed, true);
-    assert.equal(run.stopReason, 'scene_prepare_ack_delivery_failed');
-    assert.equal(messages(target, 'stop').at(-1).reason,
-        'scene_prepare_ack_delivery_failed');
+    assert.equal(run.phase, SCENE_PHASES.PREPARING);
+    assert.equal(run.failed, false);
+    assert.equal(run.stopReason, null);
+    assert.equal(messages(target, 'stop').length, 0);
+    assert.equal(run.prepareDeadlineServerMonotonicMs, server.remoteSessions.validUntil(session));
 }
 
 // Timeline clips and keyframes are validated before creating a remote graph.
@@ -850,7 +849,7 @@ for (const [overrides, accepted, secondTrack] of [
     }
 }
 
-console.log('scene protocol v11 tests passed');
+console.log('scene protocol v12 tests passed');
 
 // Residency is a separate, authenticated barrier; upload completion never implies it.
 {

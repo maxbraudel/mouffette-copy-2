@@ -16,6 +16,11 @@ class RemoteCacheStoreTest final : public QObject {
     Q_OBJECT
 
 private slots:
+    void retainedAssetsSurviveRestartAndIsolateIdentities_data();
+    void retainedAssetsSurviveRestartAndIsolateIdentities();
+    void retentionNeverRenewsAndRejectsCorruption();
+    void retentionCapacityAndExplicitPurge();
+    void retainedPurgeIsDurableWhenPhysicalDeletionFails();
     void strictIdentifiersAndGenerationBinding();
     void teardownIsAtomicAndIdempotent();
     void queuedTeardownFencesOnlyItsScopeAndCommitsOnce();
@@ -988,6 +993,155 @@ void RemoteCacheStoreTest::queuedTeardownFencesOnlyItsScopeAndCommitsOnce()
     QCOMPARE(store.requestTeardown(first, kTeardown).outcome,
              RemoteCacheStore::CommitOutcome::AlreadyCommitted);
     QCOMPARE(commits.count(), 1);
+}
+
+
+void RemoteCacheStoreTest::retainedAssetsSurviveRestartAndIsolateIdentities_data()
+{
+    QTest::addColumn<bool>("complete");
+    QTest::newRow("partial") << false;
+    QTest::newRow("complete") << true;
+}
+
+void RemoteCacheStoreTest::retainedAssetsSurviveRestartAndIsolateIdentities()
+{
+    QFETCH(bool, complete);
+    QTemporaryDir temporary;
+    const QString target(64, QLatin1Char('c'));
+    const QByteArray content("a durable asset with content identity");
+    const QString digest = QString::fromLatin1(QCryptographicHash::hash(content, QCryptographicHash::Sha256).toHex());
+    const qint64 offset = complete ? content.size() : 11;
+    const auto oldScope = scope();
+    {
+        RemoteCacheStore store(temporary.path());
+        QVERIFY(store.initialize());
+        QVERIFY(store.ensureSession(oldScope));
+        const QString path = store.stagingAssetPath(oldScope, "old-upload", digest, "png");
+        QVERIFY(writeBytes(path, content.left(offset)));
+        QVERIFY(store.checkpointAsset(oldScope, target, path, digest, content.size(), offset, "png"));
+        // Process restart must retain manifested live bytes and terminally fence
+        // the previous session, even if no terminal callback ran before exit.
+    }
+    RemoteCacheStore store(temporary.path());
+    QVERIFY(store.initialize());
+    QVERIFY(!store.ensureSession(oldScope));
+    const RemoteCacheStore::Scope newScope{kSender, kOtherTeardown, 1};
+    QVERIFY(store.ensureSession(newScope));
+    const QString path = store.stagingAssetPath(newScope, "new-upload", digest, "png");
+    QCOMPARE(store.restoreRetainedAsset(newScope, QString(64, 'e'), path, digest, content.size(), "png"), 0);
+    QCOMPARE(store.restoreRetainedAsset(newScope, target, path, digest, content.size() + 1, "png"), 0);
+    QCOMPARE(store.restoreRetainedAsset(newScope, target, path, digest, content.size(), "webp"), 0);
+    const RemoteCacheStore::Scope foreign{QString(64, 'f'), kTeardown, 1};
+    QVERIFY(store.ensureSession(foreign));
+    const QString foreignPath = store.stagingAssetPath(foreign, "foreign-upload", digest, "png");
+    QCOMPARE(store.restoreRetainedAsset(foreign, target, foreignPath, digest, content.size(), "png"), 0);
+    QCOMPARE(store.restoreRetainedAsset(newScope, target, path, digest, content.size(), "png"), offset);
+    QFile restored(path);
+    QVERIFY(restored.open(QIODevice::ReadOnly));
+    QCOMPARE(restored.readAll(), content.left(offset));
+    QCOMPARE(readObject(path + ".manifest.json").value("remoteSessionId").toString(), newScope.remoteSessionId);
+}
+
+void RemoteCacheStoreTest::retentionNeverRenewsAndRejectsCorruption()
+{
+    QTemporaryDir temporary;
+    const QString target(64, 'c');
+    const QByteArray content("durable contents");
+    const QString digest = QString::fromLatin1(QCryptographicHash::hash(content, QCryptographicHash::Sha256).toHex());
+    RemoteCacheStore store(temporary.path());
+    store.setRetentionPolicy(1000, 1024);
+    QVERIFY(store.initialize());
+    QVERIFY(store.ensureSession(scope()));
+    const QString path = store.stagingAssetPath(scope(), "upload", digest, "png");
+    QVERIFY(writeBytes(path, content));
+    QVERIFY(store.checkpointAsset(scope(), target, path, digest, content.size(), content.size(), "png"));
+    QVERIFY(store.beginTeardown(scope(), kTeardown));
+    QVERIFY(store.commitTeardown(scope(), kTeardown).acknowledgementSafe());
+    const QDir retained(QDir(temporary.path()).filePath(".retained"));
+    const QString entry = retained.entryList(QDir::Dirs | QDir::NoDotAndDotDot).first();
+    const QString retainedBytes = retained.filePath(entry + "/bytes");
+    const QString retainedManifest = retained.filePath(entry + "/manifest.json");
+    const QString expiry = readObject(retainedManifest).value("expiresAt").toString();
+    const RemoteCacheStore::Scope next{kSender, kOtherTeardown, 1};
+    QVERIFY(store.ensureSession(next));
+    const QString restored = store.stagingAssetPath(next, "new-upload", digest, "png");
+    QVERIFY(writeBytes(retainedBytes, QByteArray(content.size(), 'x')));
+    QCOMPARE(store.restoreRetainedAsset(next, target, restored, digest, content.size(), "png"), 0);
+    QVERIFY(writeBytes(retainedBytes, content));
+    QCOMPARE(store.restoreRetainedAsset(next, target, restored, digest, content.size(), "png"), content.size());
+    QCOMPARE(readObject(restored + ".manifest.json").value("expiresAt").toString(), expiry);
+    QVERIFY(store.checkpointAsset(next, target, restored, digest, content.size(), content.size(), "png"));
+    QCOMPARE(readObject(restored + ".manifest.json").value("expiresAt").toString(), expiry);
+    store.sweepRetainedAssets();
+    QCOMPARE(readObject(retainedManifest).value("expiresAt").toString(), expiry);
+    QTest::qWait(1050);
+    store.sweepRetainedAssets();
+    QVERIFY(!QFileInfo::exists(retainedBytes));
+    QVERIFY(store.beginTeardown(next, kTeardown));
+    QVERIFY(store.commitTeardown(next, kTeardown).acknowledgementSafe());
+    QVERIFY(retained.entryList(QDir::Dirs | QDir::NoDotAndDotDot).isEmpty());
+}
+
+void RemoteCacheStoreTest::retentionCapacityAndExplicitPurge()
+{
+    QTemporaryDir temporary;
+    const QString target(64, 'c');
+    RemoteCacheStore store(temporary.path());
+    store.setRetentionPolicy(600000, 8);
+    QVERIFY(store.initialize());
+    QVERIFY(store.ensureSession(scope()));
+    QStringList digests;
+    for (const QByteArray bytes : {QByteArray("123456"), QByteArray("abcdef")}) {
+        const QString digest = QString::fromLatin1(QCryptographicHash::hash(bytes, QCryptographicHash::Sha256).toHex());
+        digests.append(digest);
+        const QString path = store.stagingAssetPath(scope(), "upload", digest, "png");
+        QVERIFY(writeBytes(path, bytes));
+        QVERIFY(store.checkpointAsset(scope(), target, path, digest, bytes.size(), bytes.size(), "png"));
+    }
+    QVERIFY(store.beginTeardown(scope(), kTeardown));
+    QVERIFY(store.commitTeardown(scope(), kTeardown).acknowledgementSafe());
+    const QDir retained(QDir(temporary.path()).filePath(".retained"));
+    QCOMPARE(retained.entryList(QDir::Dirs | QDir::NoDotAndDotDot).size(), 1);
+    for (const QString& digest : digests) store.purgeRetainedAsset(kSender, digest);
+    QVERIFY(retained.entryList(QDir::Dirs | QDir::NoDotAndDotDot).isEmpty());
+}
+
+
+void RemoteCacheStoreTest::retainedPurgeIsDurableWhenPhysicalDeletionFails()
+{
+#ifdef Q_OS_WIN
+    QSKIP("Symlink creation is not guaranteed on Windows CI");
+#else
+    QTemporaryDir temporary;
+    const QString target(64, 'c');
+    const QByteArray bytes("complete asset");
+    const QString digest = QString::fromLatin1(QCryptographicHash::hash(bytes, QCryptographicHash::Sha256).toHex());
+    RemoteCacheStore store(temporary.path());
+    QVERIFY(store.initialize());
+    QVERIFY(store.ensureSession(scope()));
+    const QString path = store.stagingAssetPath(scope(), "upload", digest, "png");
+    QVERIFY(writeBytes(path, bytes));
+    QVERIFY(store.checkpointAsset(scope(), target, path, digest, bytes.size(), bytes.size(), "png"));
+    QVERIFY(store.beginTeardown(scope(), kTeardown));
+    QVERIFY(store.commitTeardown(scope(), kTeardown).acknowledgementSafe());
+    const QDir retained(QDir(temporary.path()).filePath(".retained"));
+    const QString entry = retained.filePath(retained.entryList(QDir::Dirs | QDir::NoDotAndDotDot).first());
+    const QString outside = QDir(temporary.path()).filePath("outside-sentinel");
+    QVERIFY(writeBytes(outside, "untouched"));
+    const QString blocker = QDir(entry).filePath("a-blocker");
+    QVERIFY(QFile::link(outside, blocker));
+    QVERIFY(store.purgeRetainedAsset(kSender, digest));
+    QVERIFY(QFileInfo::exists(QDir(entry).filePath("bytes")));
+    QCOMPARE(readObject(QDir(entry).filePath("manifest.json")).value("expiresAt").toString(), QStringLiteral("0"));
+    const RemoteCacheStore::Scope next{kSender, kOtherTeardown, 1};
+    QVERIFY(store.ensureSession(next));
+    const QString restored = store.stagingAssetPath(next, "new-upload", digest, "png");
+    QCOMPARE(store.restoreRetainedAsset(next, target, restored, digest, bytes.size(), "png"), 0);
+    QVERIFY(QFile::remove(blocker));
+    store.sweepRetainedAssets();
+    QVERIFY(!QFileInfo::exists(entry));
+    QVERIFY(QFileInfo::exists(outside));
+#endif
 }
 
 QTEST_GUILESS_MAIN(RemoteCacheStoreTest)

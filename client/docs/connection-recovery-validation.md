@@ -3,10 +3,11 @@
 Implementation and test configuration are described in
 [remote-session-recovery.md](remote-session-recovery.md).
 
-This is the historical v6 validation record. The current protocol is v7; see
-[multiple-instance identity](multi-instance-identity.md) for the subsequent
-identity migration and its validation. The graphical limitations recorded below
-are not superseded by the network/identity checks.
+This is the historical v6 validation record. The subsequent v7 migration and
+its validation are in [multiple-instance identity](multi-instance-identity.md).
+Current v12 validation is recorded in
+[network-v12-validation.md](network-v12-validation.md); the results below describe
+the earlier run.
 
 ## Verified
 

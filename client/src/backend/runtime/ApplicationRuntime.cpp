@@ -290,7 +290,10 @@ void ApplicationRuntime::refreshRemoteConnectionPresentation(bool propagateLoss)
         && !m_locallyTerminatingRemoteSessions.contains(binding.remoteSessionId);
     m_remoteBusy = m_remoteStatusText == QLatin1String("CONNECTING");
     if (!m_remoteClientConnected) m_remoteVolumePercent = -1;
-    refreshOverlayActionsState(m_remoteClientConnected, propagateLoss);
+    const bool retainedRecovery = m_webSocketClient && !binding.remoteSessionId.isEmpty()
+        && (binding.phase == QLatin1String("Active") || binding.phase == QLatin1String("Grace"))
+        && m_webSocketClient->sessionRecoveryRemainingMs(binding.remoteSessionId) > 0;
+    refreshOverlayActionsState(m_remoteClientConnected, propagateLoss && !retainedRecovery);
     emit presentationStateChanged();
 }
 

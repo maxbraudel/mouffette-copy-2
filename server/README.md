@@ -1,6 +1,6 @@
 # Mouffette Server
 
-Node.js WebSocket coordinator for Mouffette protocol v11.
+Node.js WebSocket coordinator for Mouffette protocol v12.
 
 ## Run and test
 
@@ -16,7 +16,7 @@ override it. Invalid critical values fail startup.
 ## Protocol envelope
 
 The server sends `auth_challenge` first. The client signs
-`mouffette-v11\n<serverBootId>\n<nonce>\n<runtimeId>\n<instanceId>\n<instanceOrdinal>` with its
+`mouffette-v12\n<serverBootId>\n<nonce>\n<runtimeId>\n<instanceId>\n<instanceOrdinal>` with its
 Ed25519 installation key and returns the SPKI public key and signature as
 base64url. The SHA-256 of the SPKI key is the stable `installationId`; the
 server domain-separates and hashes `installationId + instanceId` to derive and
@@ -46,7 +46,7 @@ Every subsequent message uses:
 ```json
 {
   "type": "message_type",
-  "protocolVersion": 11,
+  "protocolVersion": 12,
   "serverBootId": "uuid-from-welcome",
   "messageId": "unique-uuid",
   "connectionGeneration": 1
@@ -64,13 +64,15 @@ An owner opens `remote_session_open` with `targetEndpointId` and a stable
 same endpoint. An existing scene, another controller, or local UI activity does
 not make the endpoint unavailable for another session.
 
-The v11 welcome uses timing policy version 4:
+The v12 welcome uses timing policy version 5:
 
 - `heartbeatIntervalMs`: 750 ms. Two missed intervals detect silent loss;
   `transportSuspectAfterMs` and `leaseTimeoutMs` both equal 1,500 ms (derived).
-  The suspect socket is fenced immediately and replacement attempts may start.
-- `sessionRecoveryTimeoutMs`: **3,000 ms after interruption detection**
-  (`MOUFFETTE_REMOTE_SESSION_RECOVERY_TIMEOUT_MS=3000`). Socket closure detects
+  Commands pause at suspicion; the transport remains open for late heartbeats.
+  `transportTimeoutMs`: 5,000 ms (`MOUFFETTE_TRANSPORT_TIMEOUT_MS=5000`),
+  after which the silent socket is fenced and replaced.
+- `sessionRecoveryTimeoutMs`: **15,000 ms after interruption detection**
+  (`MOUFFETTE_REMOTE_SESSION_RECOVERY_TIMEOUT_MS=15000`). Socket closure detects
   immediately; silence is detected at the second missed heartbeat, even if the
   event loop wakes later. There is one fixed deadline for the whole session.
   Reauthentication, one returning participant and retries never extend it.
@@ -88,8 +90,11 @@ Each nonterminal session state carries `generation`, `stateRevision`,
 `serverMonotonicMs`, and `validUntilServerMonotonicMs`. Heartbeat acknowledgements
 carry `sessionStates` so both parties know their absolute deadline before a
 network failure. The connected party cannot extend the disconnected party's
-lease. A scene already Live may continue within that lease; pre-start scenes are
-cancelled on transport loss. New commands wait for successful recovery. STOP,
+lease. A scene already Live may continue within that lease; pre-start preparations remain retained
+and reconcile on recovery. Before COMMIT the peers refresh their clock approvals;
+a published COMMIT and its schedule never change. A missed schedule beyond the
+start-skew tolerance is not replayed and fails explicitly. Delayed STARTED receipts
+can still prove an on-time presentation within the recovery deadline. New commands wait for successful recovery. STOP,
 CLOSE and cleanup acknowledgements remain admissible during recovery or cleanup.
 Clients must also enforce the deadline locally with a suspend-inclusive clock.
 
@@ -145,7 +150,7 @@ a bounded 4,096-entry presence cache. Pair cleanup and scene ownership remain
 private and do not label an endpoint Busy. Offline entries retain the entire
 authenticated identity tuple; `lastSeenAt` uses epoch milliseconds.
 
-Protocol v11 is a coordinated client/server cut-over. Older versions receive an
+Protocol v12 is a coordinated client/server cut-over. Older versions receive an
 explicit protocol-version rejection; the server does not silently translate
 lease or cleanup semantics. Run `npm test` before deploying both artifacts.
 
@@ -158,12 +163,26 @@ accepted; both endpoints remain responsible for decoding and content checks.
 
 `upload_chunk` contains `assetId`, contiguous byte `offset`, chunk `size`, file
 `sha256`, and base64 data. Target `upload_progress` reports a durable contiguous
-offset for each asset. `upload_resume` rewinds the relay to that durable offset.
+offset only for changed assets (`delta: true`); startup, resume and completion
+retain full inventories. `upload_resume` rewinds the relay to the durable offsets.
+The authenticated receiver may confirm a positive initial offset for matching
+retained content. Final full-inventory validation is still required. Temporary
+errors carry `temporary: true` and `errorClass: "temporary"`; channel loss, pending
+synchronization and changing credit preserve the upload ID and durable offsets.
+Queued chunks following a temporary rejection remain paused until resume; stale
+ACKs cannot rewind progress. Integrity, authorization and explicit cancellation
+remain terminal.
 `upload_complete` enters final validation only after every asset's durable offset
 equals its declared size; bytes merely queued or relayed stay behind this barrier.
 The server permits two concurrent outgoing uploads per endpoint and one per remote
-session. Each sender has a 1 MiB durable-ACK window. Eight relay slots per target
-bound its outstanding bytes to 8 MiB. Additional transfers wait before receiver
+session. Data and inventories travel bidirectionally on the authenticated data
+socket, with no control-socket fallback. Missing data channels pause the transfer.
+Chunks are at most 32 KiB. Each target begins with a 64 KiB aggregate durable-ACK
+window, adjusted from confirmed throughput within 32–256 KiB and divided fairly
+among its eight relay slots. Payloads advertise `windowBytes` (per-transfer credit),
+`recipientWindowBytes` (aggregate credit), and `maxChunkBytes`. A sender may need
+smaller chunks when its fair share is below 32 KiB. Serialized data queues are
+bounded at 512 KiB and immutable upload manifests at 256 KiB. Additional transfers wait before receiver
 allocation and receive periodic `upload_resume_ready` capacity-wait receipts;
 they do not consume a receiver timer or fail merely because another transfer is
 active. A slot is released when bytes become fully durable, or on abort. Only an exact target `upload_finished` acknowledgement enters the
@@ -172,7 +191,9 @@ session asset inventory.
 ## Scene runs
 
 `scene_prepare` carries an immutable revision, normalized manifest, scene, and
-digest:
+digest. Combined scene/manifest commands are limited to 240 KiB so their
+envelope fits the bounded 256 KiB client control queue; oversized commands fail
+with `scene_payload_too_large` before a run exists:
 
 ```text
 SHA-256(canonical JSON { manifest, revision, scene })
@@ -293,6 +314,20 @@ at most eight durable proofs for its eight reused cache scopes.
 
 ### Timeline render schema 6
 
-Protocol 11 scenes use render schema 6. Each media instance has `timeline: {trackIndex, clip, keyframes}` with exactly one clip and absolute keyframe slots. Track indices are integers from 0 through 9999; gaps are retained. Clips on the same track must not overlap (touching endpoints are allowed), and all instance/clip/keyframe identifiers are distinct across the scene (source identifiers remain shared). Different tracks may overlap in time. Track 0 renders above later tracks; `z` is no longer an element or keyframe field. Scene limits remain 512 instances and 4096 spans.
+Protocol 12 scenes use render schema 6. Each media instance has `timeline: {trackIndex, clip, keyframes}` with exactly one clip and absolute keyframe slots. Track indices are integers from 0 through 9999; gaps are retained. Clips on the same track must not overlap (touching endpoints are allowed), and all instance/clip/keyframe identifiers are distinct across the scene (source identifiers remain shared). Different tracks may overlap in time. Track 0 renders above later tracks; `z` is no longer an element or keyframe field. Scene limits remain 512 instances and 4096 spans.
 
-Deploy server and clients together. Protocol 10 clients fail the existing compatibility check; previous saved project schemas reset to schema 8 independently of network negotiation.
+Deploy server and clients together. Clients using earlier protocols fail the compatibility check; previous saved project schemas reset to schema 8 independently of network negotiation.
+
+## Reproducible constrained-link validation
+
+`npm run test:slow-link` runs 18 real WebSocket/TCP-shaped transfers: 64, 256 and
+512 KiB/s, uplink and downlink, batches of 1, 32 and 256 files. Each case transfers
+1 MiB, verifies every SHA-256, checks that upload frames never enter control, and
+measures heartbeat gaps. `node diagnostics/slow-link-probe.js 64 downlink 256`
+runs one case. The receiver in this probe is synthetic: disk checkpoints, decoder
+behavior and native scene presentation require the separate Qt/platform tests.
+
+`protocol_v12_reliability.test.js` covers fixed recovery expiry, transport timing,
+receiver-channel loss, retained initial offsets, delta ACKs, fair adaptive credit,
+and scene recovery before and after immutable COMMIT. Existing real-socket
+integration also covers a lost final upload ACK and replacement data socket.

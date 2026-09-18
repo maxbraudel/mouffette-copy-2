@@ -2,9 +2,10 @@
 
 // Diagnostic, not a regression test: measure control-message starvation on the
 // production relay with real WebSockets and a byte-rate-limited TCP downlink.
-// Run: node server/diagnostics/slow-link-probe.js [KiB/s, default 256] [downlink|uplink-fallback]
-// The synthetic recipient keeps heartbeating and deliberately does not run the
-// Qt expiry watchdog, so we can observe messages arriving AFTER its deadlines.
+// Run: node server/diagnostics/slow-link-probe.js [KiB/s, default 256] [downlink|uplink] [file count: 1|32|256]
+// Both directions use dedicated data sockets; control heartbeat latency and
+// the final per-file SHA-256 are verified. Receiver durability is synthetic,
+// so this probe complements the Qt disk checkpoint tests.
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const net = require('node:net');
@@ -16,7 +17,9 @@ const { challengePayload, installationIdForPublicKey, endpointIdForInstallation 
 const rateKiB = Number(process.argv[2] || 256);
 assert(Number.isFinite(rateKiB) && rateKiB >= 32 && rateKiB <= 4096);
 const mode = process.argv[3] || 'downlink';
-assert(['downlink', 'uplink-fallback'].includes(mode));
+assert(['downlink', 'uplink'].includes(mode));
+const fileCount = Number(process.argv[4] || 1);
+assert([1, 32, 256].includes(fileCount));
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 function trackedSocket(url) {
@@ -114,7 +117,7 @@ async function main() {
             }
         }
     }, 20);
-    let upload;
+    let upload, targetData;
     try {
         server.start();
         await new Promise(resolve => server.wss.once('listening', resolve));
@@ -133,89 +136,101 @@ async function main() {
         for (const peer of peers) peer.send('remote_session_state_ack', { ...session, stateRevision: opened.stateRevision });
         await owner.next(message => message.type === 'remote_session_lease_state' && message.commandReady);
         await target.next(message => message.type === 'remote_session_lease_state' && message.commandReady);
-        if (mode === 'downlink') {
-            owner.send('request_upload_channel');
-            const token = await owner.next(message => message.type === 'upload_channel_token');
-            upload = trackedSocket(`${directUrl}?channel=upload&token=${encodeURIComponent(token.token)}`);
-            await upload.next(message => message.type === 'upload_channel_ready');
-        } else {
-            upload = owner; // Production's permitted control-socket fallback.
+        for (const peer of [owner, target]) {
+            peer.send('request_upload_channel');
+            const token = await peer.next(message => message.type === 'upload_channel_token');
+            const peerUrl = (mode === 'downlink' ? peer === target : peer === owner) ? proxyUrl : directUrl;
+            peer.data = trackedSocket(`${peerUrl}?channel=upload&token=${encodeURIComponent(token.token)}`);
+            await peer.data.next(message => message.type === 'upload_channel_ready');
         }
-        const size = 1024 * 1024;
-        const bytes = Buffer.alloc(size, 0x4d);
-        const sha256 = crypto.createHash('sha256').update(bytes).digest('hex');
-        const uploadId = crypto.randomUUID();
-        const assetId = crypto.randomUUID();
-        const sendUpload = body => upload.ws.send(JSON.stringify(owner.envelope({ ...session, uploadId, ...body })));
-        sendUpload({ type: 'upload_start', files: [{ assetId, fileId: sha256, sha256,
-            name: 'diagnostic.png', extension: 'png', size, mediaIds: [crypto.randomUUID()] }] });
-        await target.next(message => message.type === 'upload_start');
-        target.send('upload_ready', { ...session, uploadId, assets: [{ assetId, offset: 0, size, sha256 }] });
-        await owner.next(message => message.type === 'upload_ready');
-        // Start just after a proof-bearing ACK, the most generous alignment.
-        const limitedPeer = mode === 'downlink' ? target : owner;
-        await limitedPeer.next(message => message.type === 'heartbeat_ack' && message.sessionStates?.length > 0);
-        const start = performance.now();
-        let receivedBytes = 0;
-        target.observe(message => {
-            if (message.type !== 'upload_chunk') return;
-            receivedBytes += message.size;
-            // A synthetic durable receiver: no disk/decoding delay is needed
-            // to exhibit the starvation. Never complete/promote this dummy PNG.
-            target.send('upload_progress', { ...session, uploadId,
-                assets: [{ assetId, offset: receivedBytes, size, sha256 }] });
+        upload = owner.data; targetData = target.data;
+        const totalSize = 1024 * 1024;
+        const fileSize = totalSize / fileCount;
+        const sourceFiles = Array.from({ length: fileCount }, (_, index) => {
+            const bytes = Buffer.alloc(fileSize, index % 256);
+            const sha256 = crypto.createHash('sha256').update(bytes).digest('hex');
+            return { bytes, assetId: crypto.randomUUID(), fileId: sha256, sha256,
+                name: 'diagnostic.png', extension: 'png', size: fileSize,
+                mediaIds: [crypto.randomUUID()], sent: 0, confirmed: 0, received: 0,
+                destination: Buffer.alloc(fileSize) };
         });
+        const uploadId = crypto.randomUUID();
+        const sendUpload = body => upload.ws.send(JSON.stringify(owner.envelope({ ...session, uploadId, ...body })));
+        const sendTarget = body => targetData.ws.send(JSON.stringify(target.envelope({ ...session, uploadId, ...body })));
+        const inventory = () => sourceFiles.map(file => ({ assetId: file.assetId,
+            offset: file.received, size: file.size, sha256: file.sha256 }));
+        sendUpload({ type: 'upload_start', files: sourceFiles.map(({ bytes, sent, confirmed,
+            received, destination, ...file }) => file) });
+        await targetData.next(message => message.type === 'upload_start');
+        sendTarget({ type: 'upload_ready', assets: inventory() });
+        const ready = await upload.next(message => message.type === 'upload_ready');
+        let windowBytes = ready.windowBytes;
+        let sentBytes = 0, confirmedBytes = 0, receivedBytes = 0;
+        targetData.observe(message => {
+            if (message.type !== 'upload_chunk') return;
+            const file = sourceFiles.find(file => file.assetId === message.assetId);
+            assert.equal(message.offset, file.received);
+            const decoded = Buffer.from(message.data, 'base64');
+            assert.equal(decoded.length, message.size);
+            decoded.copy(file.destination, file.received);
+            file.received += decoded.length; receivedBytes += decoded.length;
+            sendTarget({ type: 'upload_progress', delta: true,
+                assets: [{ assetId: file.assetId, offset: file.received, size: file.size, sha256: file.sha256 }] });
+        });
+        upload.observe(message => {
+            if (message.type !== 'upload_progress') return;
+            windowBytes = message.windowBytes;
+            for (const entry of message.assets) {
+                const file = sourceFiles.find(file => file.assetId === entry.assetId);
+                confirmedBytes += entry.offset - file.confirmed; file.confirmed = entry.offset;
+            }
+        });
+        const start = performance.now();
         limited = true;
-        for (let offset = 0; offset < size; offset += 128 * 1024) {
-            sendUpload({ type: 'upload_chunk', assetId, offset, size: 128 * 1024,
-                sha256, data: bytes.subarray(offset, offset + 128 * 1024).toString('base64') });
+        // One acknowledged block per pump makes queue occupancy measurable and
+        // handles every batch size without turning latency into an idle error.
+        while (confirmedBytes < totalSize) {
+            assert(performance.now() - start < 90000, 'transfer exceeds bounded probe runtime');
+            if (sentBytes === confirmedBytes) {
+                const file = sourceFiles.find(file => file.sent < file.size);
+                if (file) {
+                    const size = Math.min(32768, windowBytes, file.size - file.sent);
+                    sendUpload({ type: 'upload_chunk', assetId: file.assetId, offset: file.sent, size,
+                        sha256: file.sha256, data: file.bytes.subarray(file.sent, file.sent + size).toString('base64') });
+                    file.sent += size; sentBytes += size;
+                }
+            }
+            await sleep(2);
         }
-        if (mode === 'uplink-fallback') {
-            const end = performance.now() + 10000;
-            while (owner.ws.readyState !== WebSocket.CLOSED && performance.now() < end) await sleep(20);
-            const closed = owner.observations.find(event => event.at >= start && event.closeCode);
-            const stored = server.remoteSessions.get(session.remoteSessionId);
-            const result = { mode, uplinkKiBPerSecond: rateKiB, protocolVersion: server.protocolVersion,
-                dedicatedSenderSocket: false, receivedPayloadBytes: receivedBytes, intendedPayloadBytes: size,
-                deliveredWireBytes, ownerControlClosed: owner.ws.readyState === WebSocket.CLOSED,
-                closedAfterMs: closed ? Math.round(closed.at - start) : null,
-                closeCode: closed?.closeCode, closeReason: closed?.closeReason,
-                transportAbortThresholdMs: server.config.leaseTimeoutMs,
-                serverSessionPhase: stored?.phase,
-                note: 'Real production server closes the fallback sender despite continuing upload bytes; no synthetic watchdog.' };
-            assert.equal(result.ownerControlClosed, true);
-            assert(receivedBytes < size);
-            console.log(`AUDIT_RESULT ${JSON.stringify(result)}`);
-            return;
+        sendUpload({ type: 'upload_complete', assets: inventory() });
+        await targetData.next(message => message.type === 'upload_complete');
+        for (const file of sourceFiles) {
+            assert.equal(crypto.createHash('sha256').update(file.destination).digest('hex'), file.sha256);
         }
-        const ack = await target.next(message => message.type === 'heartbeat_ack', 60000);
-        const after = target.observations.filter(event => event.at >= start && event.message);
-        const chunks = after.filter(event => event.message.type === 'upload_chunk');
-        const ackEvent = after.find(event => event.message === ack);
-        const times = [start, ...after.map(event => event.at)];
-        const maxMessageGap = Math.max(...times.slice(1).map((at, index) => at - times[index]));
-        const heartbeatDelay = ackEvent.at - start;
-        const proofBudget = server.config.leaseTimeoutMs + server.config.sessionRecoveryTimeoutMs;
-        const stored = server.remoteSessions.get(session.remoteSessionId);
-        const result = {
-            mode, downlinkKiBPerSecond: rateKiB, protocolVersion: server.protocolVersion,
-            uploadUsedDedicatedSenderSocket: true,
-            uploadChunksReceivedOnTargetControlSocket: chunks.length, receivedPayloadBytes: receivedBytes,
-            deliveredWireBytes, firstChunkAfterMs: Math.round(chunks[0]?.at - start),
-            maxCompleteMessageGapMs: Math.round(maxMessageGap), nextHeartbeatAckAfterMs: Math.round(heartbeatDelay),
-            transportAbortThresholdMs: server.config.leaseTimeoutMs, maximumSessionProofBudgetMs: proofBudget,
-            exceedsQtTransportAbortThreshold: maxMessageGap >= server.config.leaseTimeoutMs,
-            exceedsQtSessionProofBudget: heartbeatDelay >= proofBudget,
-            relayStillConsidersSessionCommandReady: server.remoteSessions.commandReady(stored),
-            note: 'Real relay and TCP shaping; Qt watchdog outcomes inferred from measured deadlines. No Qt client or disk validation in this probe.',
-        };
-        assert.equal(receivedBytes, size);
-        assert.equal(result.relayStillConsidersSessionCommandReady, true);
-        console.log(`AUDIT_RESULT ${JSON.stringify(result)}`);
+        sendTarget({ type: 'upload_finished', assets: inventory() });
+        await upload.next(message => message.type === 'upload_finished');
+        for (const peer of peers) {
+            assert.equal(peer.ws.readyState, WebSocket.OPEN);
+            assert.equal(peer.observations.some(event => event.message
+                && server.uploadDataMessageTypes.has(event.message.type)), false,
+                'upload data must never be received on control');
+        }
+        const limitedPeer = mode === 'downlink' ? target : owner;
+        const heartbeatEvents = limitedPeer.observations.filter(event => event.at >= start
+            && event.message?.type === 'heartbeat_ack');
+        const heartbeatTimes = [start, ...heartbeatEvents.map(event => event.at), performance.now()];
+        const maxHeartbeatGapMs = Math.max(...heartbeatTimes.slice(1).map((at, index) => at - heartbeatTimes[index]));
+        assert(maxHeartbeatGapMs < server.config.transportTimeoutMs);
+        assert.equal(server.remoteSessions.commandReady(server.remoteSessions.get(session.remoteSessionId)), true);
+        console.log(`AUDIT_RESULT ${JSON.stringify({ mode, rateKiB, fileCount,
+            protocolVersion: server.protocolVersion, sha256Verified: true, receivedBytes, deliveredWireBytes,
+            durationMs: Math.round(performance.now() - start), maxHeartbeatGapMs: Math.round(maxHeartbeatGapMs),
+            uploadChunksOnControl: 0, note: 'Real WebSockets and shaped TCP; synthetic receiver durability, no Qt playback.' })}`);
     } finally {
         clearInterval(drain);
         for (const peer of peers) { clearInterval(peer.heartbeat); peer.ws.terminate(); }
         upload?.ws.terminate();
+        targetData?.ws.terminate();
         for (const socket of sockets) socket.destroy();
         await new Promise(resolve => proxy.close(resolve));
         clearInterval(server.uploadCleanupInterval);

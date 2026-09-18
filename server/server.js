@@ -239,13 +239,16 @@ class MouffetteServer {
         this.MAX_UPLOAD_FILES = 256;
         this.MAX_UPLOAD_FILE_BYTES = 16 * 1024 * 1024 * 1024;
         this.MAX_UPLOAD_TOTAL_BYTES = 64 * 1024 * 1024 * 1024;
-        this.MAX_UPLOAD_CHUNK_BASE64_LENGTH = Math.ceil((128 * 1024) / 3) * 4;
-        this.MAX_TARGET_BUFFERED_UPLOAD_BYTES = 8 * 1024 * 1024;
-        this.MAX_UPLOAD_UNACKNOWLEDGED_BYTES = 1024 * 1024;
+        this.MAX_UPLOAD_CHUNK_BASE64_LENGTH = Math.ceil((32 * 1024) / 3) * 4;
+        this.MAX_TARGET_BUFFERED_UPLOAD_BYTES = 256 * 1024;
+        this.MIN_UPLOAD_WINDOW_BYTES = 32 * 1024;
+        this.INITIAL_UPLOAD_WINDOW_BYTES = 64 * 1024;
+        this.recipientUploadWindows = new Map();
         this.MAX_TARGET_STREAMING_UPLOADS = 8;
         this.MAX_OWNER_BUFFERED_CURSOR_BYTES = 64 * 1024;
         this.MAX_PENDING_REMOVALS = 4096;
         this.MAX_REMOTE_SCENE_BYTES = 8 * 1024 * 1024;
+        this.MAX_REMOTE_SCENE_COMMAND_BYTES = 240 * 1024;
         this.MAX_REMOTE_SCENE_SYNC_BYTES = 256 * 1024;
         this.MAX_REMOTE_SCENE_STATE_SNAPSHOT_BYTES = 8 * 1024 * 1024;
         this.MAX_REMOTE_SCENE_SCREENS = 64;
@@ -258,7 +261,13 @@ class MouffetteServer {
         this.uploadChannelTokens = new Map();
         this.uploadSocketsByClient = new Map();
         this.uploadChannelMessageTypes = new Set([
-            'upload_start', 'upload_resume', 'upload_chunk', 'upload_complete', 'upload_abort'
+            'upload_start', 'upload_resume', 'upload_chunk', 'upload_complete', 'upload_abort',
+            'upload_ready', 'upload_progress', 'upload_finished', 'upload_rejected',
+            'upload_abort_ack'
+        ]);
+        this.uploadDataMessageTypes = new Set([
+            'upload_start', 'upload_resume', 'upload_resume_ready', 'upload_chunk',
+            'upload_ready', 'upload_progress', 'upload_complete', 'upload_finished',
         ]);
         this.uploadCleanupInterval = null;
         this.leaseSweepInterval = null;
@@ -315,8 +324,8 @@ class MouffetteServer {
         this.wss = new WebSocket.Server({
             port: this.port,
             host: this.host,
-            // Upload chunks are much smaller, while legitimate scene-control
-            // payloads can exceed 512 KiB on complex canvases.
+            // Envelope admission remains explicit so oversized manifests receive
+            // a correlated error before any transfer or scene is allocated.
             maxPayload: 16 * 1024 * 1024,
             perMessageDeflate: false
         });
@@ -394,6 +403,7 @@ class MouffetteServer {
                     endpointId: boundClient.endpointId,
                     connectionGeneration: boundClient.connectionGeneration,
                 }));
+                this.restoreUploadsForDataChannel(boundClient);
                 return;
             }
             
@@ -619,10 +629,36 @@ class MouffetteServer {
             sockets.delete(existing);
             if (existing && (existing.readyState === WebSocket.OPEN
                 || existing.readyState === WebSocket.CONNECTING)) {
+                this.abortUploadsForUploadSocket(client.id, existing, 'upload_channel_replaced');
                 existing.close(1008, 'Upload channel replaced');
             }
         }
         sockets.add(ws);
+    }
+
+    restoreUploadsForDataChannel(client) {
+        const awaitingFirstDispatch = new Set([...this.uploads.values()]
+            .filter(upload => upload.targetEndpointId === client.endpointId && upload.pendingRelayStart)
+            .map(upload => upload.uploadId));
+        this.grantPendingUploadCapacity(client.endpointId);
+        for (const upload of this.uploads.values()) {
+            if (upload.targetEndpointId !== client.endpointId || upload.pendingRelayStart
+                || awaitingFirstDispatch.has(upload.uploadId)) continue;
+            const session = this.remoteSessions.get(upload.remoteSessionId);
+            if (!session || !this.remoteSessions.commandReady(session)) continue;
+            if (upload.awaitingTargetValidation) {
+                this.sendToEndpoint(client.endpointId, this.uploadPayload(upload, 'upload_complete', {
+                    replay: true, assets: this.uploadCompletionInventory(upload),
+                }));
+            } else {
+                upload.awaitingTargetReady = true;
+                const type = upload.targetReadyAcknowledged ? 'upload_resume' : 'upload_start';
+                this.sendToEndpoint(client.endpointId, this.uploadPayload(upload, type,
+                    upload.targetReadyAcknowledged
+                        ? { replay: true, assets: this.uploadOffsets(upload) }
+                        : { replay: true, files: upload.assets, totalSize: upload.totalSize }));
+            }
+        }
     }
 
     unregisterUploadSocket(client, ws) {
@@ -651,6 +687,7 @@ class MouffetteServer {
 
     handleUploadChannelMessage(boundClient, ws, message) {
         if (!boundClient || this.clients.get(boundClient.id) !== boundClient
+            || !this.uploadSocketsByClient.get(boundClient)?.has(ws)
             || !boundClient.ws || boundClient.ws.readyState !== WebSocket.OPEN) {
             ws.send(JSON.stringify({
                 type: 'error',
@@ -718,6 +755,8 @@ class MouffetteServer {
             messageId: uuidv4(),
             scope: 'scene',
             code,
+            temporary: this.isTemporaryProtocolError(code),
+            errorClass: this.isTemporaryProtocolError(code) ? 'temporary' : 'terminal',
             message: String(message || code).slice(0, 512),
         };
         const source = run || correlation;
@@ -810,7 +849,7 @@ class MouffetteServer {
             return { ok: false, error: lease.error };
         }
         if (!options.allowGrace && session.phase !== 'Active') {
-            return { ok: false, error: 'remote_session_not_active' };
+            return { ok: false, error: 'remote_session_reconnecting' };
         }
         if (!options.allowGrace && session.degradedEndpoints.size > 0) {
             return { ok: false, error: 'remote_session_reconnecting' };
@@ -907,6 +946,11 @@ class MouffetteServer {
             return reject('uploads_still_active',
                 'Every upload must be validated before scene preparation');
         }
+        if (!this.serializedJsonWithinLimit({ scene: message.scene, manifest: message.manifest },
+            this.MAX_REMOTE_SCENE_COMMAND_BYTES)) {
+            this.countScenePreparationFailure(message);
+            return reject('scene_payload_too_large', 'Scene command exceeds the bounded control-channel payload');
+        }
         const manifest = this.normalizeSceneManifest(message.manifest);
         const scene = message.scene;
         if (!this.isValidOpaqueId(message.sceneRunId)
@@ -966,14 +1010,14 @@ class MouffetteServer {
                     stage: 'accepted',
                 }));
             if (!delivered) {
-                this.initiateSceneStop(run, 'scene_prepare_ack_delivery_failed', true);
+                this.pauseSceneForRecovery(run, session);
             }
             return;
         }
         const delivered = this.sendToEndpoint(session.targetEndpointId,
             this.scenePayload(run, 'scene_prepare', { manifest, scene }));
         if (!delivered) {
-            this.initiateSceneStop(run, 'scene_target_unavailable', true);
+            this.pauseSceneForRecovery(run, session);
             return this.sendSceneError(clientId, 'scene_target_unavailable',
                 'Scene target is unavailable', run);
         }
@@ -984,7 +1028,7 @@ class MouffetteServer {
                 stage: 'accepted',
             }));
         if (!acceptedDelivered) {
-            this.initiateSceneStop(run, 'scene_prepare_ack_delivery_failed', true);
+            this.pauseSceneForRecovery(run, session);
         }
     }
 
@@ -1088,7 +1132,7 @@ class MouffetteServer {
     }
 
     handleScenePrepared(clientId, message) {
-        const validated = this.validateSessionMessage(clientId, message);
+        const validated = this.validateSessionMessage(clientId, message, { allowGrace: true });
         const run = this.sceneRuns.get(message.sceneRunId);
         if (!validated.ok || !run || run.remoteSessionId !== message.remoteSessionId) {
             const code = validated.ok ? 'unknown_scene_run' : validated.error;
@@ -1153,6 +1197,9 @@ class MouffetteServer {
             this.sendToEndpoint(run.targetEndpointId, payload);
             return;
         }
+        if (run.phase === SCENE_PHASES.LIVE) return;
+        if (result.replay && this.monotonicNow() > run.startServerMonotonicMs
+            + this.config.sceneMaxClockSkewMs) return;
         const commit = this.scenePayload(run, 'commit', {
             allArmed: true,
             startEpochMs: run.startEpochMs,
@@ -1163,7 +1210,7 @@ class MouffetteServer {
         const ownerDelivered = this.sendToEndpoint(run.ownerEndpointId, commit);
         const targetDelivered = this.sendToEndpoint(run.targetEndpointId, commit);
         if (!ownerDelivered || !targetDelivered) {
-            this.initiateSceneStop(run, 'scene_commit_delivery_failed', true);
+            this.pauseSceneForRecovery(run, validated.session);
         }
     }
 
@@ -1317,6 +1364,60 @@ class MouffetteServer {
         this.dispatchReadyAssetRemovalsForSession(result.run.remoteSessionId);
     }
 
+    pauseSceneForRecovery(run, session) {
+        if (!run || !session || !this.sceneRuns.isPreStart(run)) return;
+        const deadline = this.remoteSessions.validUntil(session);
+        if (!Number.isFinite(deadline)) return;
+        if (!run.recoveryDeadlineServerMonotonicMs) {
+            run.recoveryDeadlineServerMonotonicMs = deadline;
+        } else {
+            run.recoveryDeadlineServerMonotonicMs = Math.min(
+                run.recoveryDeadlineServerMonotonicMs, deadline);
+        }
+        if (run.phase === SCENE_PHASES.SCHEDULED) {
+            // Presentation schedule is immutable; only delivery of its durable
+            // STARTED evidence may wait through a recoverable interruption.
+            run.startedDeadlineServerMonotonicMs = run.recoveryDeadlineServerMonotonicMs;
+        } else {
+            run.prepareDeadlineServerMonotonicMs = run.recoveryDeadlineServerMonotonicMs;
+            // Clocks from the previous transport can never approve a new COMMIT.
+            run.armedEndpoints.clear();
+            run.armedClockUncertaintyByEndpoint.clear();
+            if (run.phase === SCENE_PHASES.ARMED) run.phase = SCENE_PHASES.PREPARED;
+        }
+    }
+
+    reconcileSceneAfterRecovery(session) {
+        const run = this.sceneRuns.getForSession(session.remoteSessionId);
+        if (!run || !this.remoteSessions.commandReady(session)) return;
+        if (run.phase === SCENE_PHASES.PREPARING) {
+            this.sendToEndpoint(run.ownerEndpointId, this.scenePayload(run, 'prepare_progress', {
+                aggregate: true, replay: true, percent: 0, stage: 'accepted',
+            }));
+            if (!run.preparedEndpoints.has(run.targetEndpointId)) {
+                this.sendToEndpoint(run.targetEndpointId, this.scenePayload(run, 'scene_prepare', {
+                    replay: true, manifest: run.manifest, scene: run.scene,
+                }));
+            }
+        } else if ([SCENE_PHASES.PREPARED, SCENE_PHASES.ARMED].includes(run.phase)) {
+            const prepared = this.scenePayload(run, 'prepared', { replay: true,
+                allPrepared: true, reporterEndpointId: run.targetEndpointId });
+            this.sendToEndpoint(run.ownerEndpointId, prepared);
+            this.sendToEndpoint(run.targetEndpointId, prepared);
+        } else if (run.phase === SCENE_PHASES.SCHEDULED
+            && this.monotonicNow() <= run.startServerMonotonicMs + this.config.sceneMaxClockSkewMs) {
+            const commit = this.scenePayload(run, 'commit', { replay: true, allArmed: true,
+                startEpochMs: run.startEpochMs, startServerMonotonicMs: run.startServerMonotonicMs,
+                activationLeadMs: run.activationLeadMs,
+                maximumClockUncertaintyMs: this.config.sceneMaxClockSkewMs });
+            for (const endpointId of [run.ownerEndpointId, run.targetEndpointId]) {
+                if (!run.startedEndpoints.has(endpointId)) this.sendToEndpoint(endpointId, commit);
+            }
+        }
+        // No old COMMIT is replayed once its presentation tolerance elapsed.
+        // Retained STARTED receipts can still establish that both actually ran.
+    }
+
     sweepSceneRuns(now = this.epochNow(), nowMonotonic = undefined) {
         if (nowMonotonic === undefined) {
             this.monotonicNow.refresh?.();
@@ -1363,21 +1464,21 @@ class MouffetteServer {
             return;
         }
         if (!this.isValidOpaqueId(message.type)) {
-            this.sendError(clientId, 'Invalid protocol v11 message type',
+            this.sendError(clientId, 'Invalid protocol v12 message type',
                 'invalid_message_type');
             return;
         }
         if (REMOVED_MESSAGE_TYPES.has(message.type)
             || (typeof message.type === 'string' && message.type.startsWith('remote_scene_'))) {
             this.sendError(clientId,
-                `Obsolete message type is not supported by protocol v11: ${message.type}`,
+                `Obsolete message type is not supported by protocol v12: ${message.type}`,
                 'removed_message_type');
             return;
         }
         const removedField = findRemovedWireField(message);
         if (removedField) {
             this.sendError(clientId,
-                `Obsolete field is not supported by protocol v11: ${removedField}`,
+                `Obsolete field is not supported by protocol v12: ${removedField}`,
                 'removed_protocol_field');
             return;
         }
@@ -1414,6 +1515,10 @@ class MouffetteServer {
                 'stale_connection_generation');
             return;
         }
+        if (this.uploadDataMessageTypes.has(message.type) && !uploadTransportSocket) {
+            return this.sendUploadRejected(clientId, message.uploadId,
+                'upload_channel_unavailable', 'Upload data requires the authenticated data channel');
+        }
         const receivedAt = this.monotonicNow();
         if (this.clientLeaseExpired(client, receivedAt)) {
             this.sendError(clientId, 'Heartbeat lease expired', 'lease_expired');
@@ -1427,7 +1532,7 @@ class MouffetteServer {
         if (message.type !== 'heartbeat' && message.type !== 'remote_session_state_ack'
             && message.type !== 'upload_chunk' && message.type !== 'upload_progress'
             && message.type !== 'prepare_progress' && message.type !== 'state_snapshot'
-            && message.type !== 'remote_session_cursor') {
+            && message.type !== 'remote_session_cursor' && message.type !== 'media_residency') {
             this.logProtocolEvent('protocol_message_received', {
                 connectionId: clientId,
                 endpointId: client.endpointId,
@@ -1557,7 +1662,7 @@ class MouffetteServer {
                 this.handleRemoteSessionTeardownAck(clientId, message);
                 break;
             default:
-                this.sendError(clientId, 'Unknown protocol v11 message type', 'unknown_message_type');
+                this.sendError(clientId, 'Unknown protocol v12 message type', 'unknown_message_type');
         }
     }
 
@@ -1566,7 +1671,7 @@ class MouffetteServer {
             ? client.lastHeartbeatMonotonicAt : client && client.lastHeartbeatAt;
         return !!client && client.authenticated
             && Number.isFinite(lastContact)
-            && now >= lastContact + this.config.leaseTimeoutMs;
+            && now >= lastContact + this.config.transportTimeoutMs;
     }
 
     expireRemoteSessionsForClient(client, now = this.monotonicNow()) {
@@ -1719,6 +1824,7 @@ class MouffetteServer {
                 heartbeatIntervalMs: this.config.heartbeatIntervalMs,
                 leaseTimeoutMs: this.config.leaseTimeoutMs,
                 transportSuspectAfterMs: this.config.leaseTimeoutMs,
+                transportTimeoutMs: this.config.transportTimeoutMs,
                 sessionRecoveryTimeoutMs: this.config.sessionRecoveryTimeoutMs,
                 remoteSessionOpenTimeoutMs: this.config.remoteSessionOpenTimeoutMs,
                 scenePrepareTimeoutMs: this.config.scenePrepareTimeoutMs,
@@ -1766,7 +1872,7 @@ class MouffetteServer {
         client.lastHeartbeatAt = epochNow;
         client.lastHeartbeatMonotonicAt = monotonicNow;
         client.heartbeatSamples = (client.heartbeatSamples || 0) + 1;
-        if (monotonicNow - (client.lastHeartbeatSummaryAt || monotonicNow) >= this.config.statsIntervalMs) {
+        if (monotonicNow - (client.lastHeartbeatSummaryAt || monotonicNow) >= 5000) {
             this.logProtocolEvent('heartbeat_summary', { endpointId: client.endpointId,
                 connectionGeneration: client.connectionGeneration, samples: client.heartbeatSamples });
             client.heartbeatSamples = 0;
@@ -1784,6 +1890,7 @@ class MouffetteServer {
                 const payload = this.remoteSessionPayload(session,
                     'remote_session_lease_state');
                 payload.degradedEndpointId = client.endpointId;
+                this.reconcileSceneAfterRecovery(session);
                 this.sendToEndpoint(session.ownerEndpointId, payload);
                 this.sendToEndpoint(session.targetEndpointId, payload);
             }
@@ -1844,6 +1951,12 @@ class MouffetteServer {
             return this.sendRemoteSessionError(ownerId,
                 'Target client is offline', 'target_offline', message,
                 message.targetEndpointId);
+        }
+        const targetContact = target.lastHeartbeatMonotonicAt ?? target.lastHeartbeatAt;
+        if (Number.isFinite(targetContact)
+            && commandNow - targetContact >= this.config.leaseTimeoutMs) {
+            return this.sendRemoteSessionError(ownerId, 'Target heartbeat is pending',
+                'remote_session_reconnecting', message, target.endpointId);
         }
         if (!this.isValidOpaqueId(message.requestId)) {
             return this.sendRemoteSessionError(ownerId,
@@ -2067,7 +2180,15 @@ class MouffetteServer {
         }
         const { session } = validated;
         const previous = session.mediaResidency;
-        const inventory = this.sessionAssets.get(session.remoteSessionId) || new Map();
+        const inventory = new Map(this.sessionAssets.get(session.remoteSessionId) || []);
+        // Receiver readiness travels on control while final upload validation
+        // travels on data. Their relative delivery order is not guaranteed.
+        // Buffer authenticated residency for that immutable final-validation
+        // inventory; scene admission still requires committed sessionAssets.
+        for (const upload of this.uploads.values()) {
+            if (upload.remoteSessionId !== session.remoteSessionId || !upload.awaitingTargetValidation) continue;
+            for (const asset of upload.assets) inventory.set(asset.assetId, asset);
+        }
         const states = new Set(['analysing', 'queued', 'decoding', 'ready',
             'waiting_for_memory', 'capacity_insufficient', 'error']);
         if (!Number.isSafeInteger(message.sequence) || message.sequence < 1
@@ -2090,11 +2211,29 @@ class MouffetteServer {
             }
             seen.add(asset.assetId);
         }
+        const now = this.monotonicNow();
+        const summary = session.mediaResidencySummary || { since: now, publications: 0, assetsChanged: 0 };
+        ++summary.publications;
+        summary.assetsChanged += message.assets.length;
+        const critical = message.assets.some(asset => ['error', 'capacity_insufficient'].includes(asset.state));
+        if (critical || now - summary.since >= 5000) {
+            this.logProtocolEvent(critical ? 'media_residency_critical' : 'media_residency_summary', {
+                remoteSessionId: session.remoteSessionId, generation: session.generation,
+                publications: summary.publications, assetsChanged: summary.assetsChanged,
+                intervalMs: now - summary.since, sequence: message.sequence,
+            });
+            summary.since = now; summary.publications = 0; summary.assetsChanged = 0;
+        }
+        session.mediaResidencySummary = summary;
+        const merged = new Map(message.delta === true && previous
+            ? previous.assets.filter(asset => inventory.has(asset.assetId))
+                .map(asset => [asset.assetId, asset]) : []);
+        for (const asset of message.assets) merged.set(asset.assetId, asset);
         session.mediaResidency = { generation: session.generation,
-            sequence: message.sequence, assets: message.assets };
+            sequence: message.sequence, assets: [...merged.values()] };
         this.sendToEndpoint(session.ownerEndpointId, {
             ...this.remoteSessionPayload(session, 'media_residency'),
-            sequence: message.sequence, assets: message.assets,
+            sequence: message.sequence, assets: message.assets, delta: message.delta === true,
         });
         const run = session.sceneRunId && this.sceneRuns.get(session.sceneRunId);
         if (run && ![SCENE_PHASES.STOPPED, SCENE_PHASES.FAILED, SCENE_PHASES.STOPPING].includes(run.phase)
@@ -2669,6 +2808,8 @@ class MouffetteServer {
                 const payload = this.remoteSessionPayload(session, 'remote_session_lease_state');
                 this.sendToEndpoint(session.ownerEndpointId, payload);
                 this.sendToEndpoint(session.targetEndpointId, payload);
+                this.reconcileSceneAfterRecovery(session);
+                this.grantPendingUploadCapacity(session.targetEndpointId);
             }
         }
     }
@@ -2759,11 +2900,30 @@ class MouffetteServer {
         return this.sendError(clientId, errorMessage, code, correlation);
     }
 
+    isTemporaryProtocolError(code) {
+        return new Set(['remote_session_reconnecting', 'remote_session_sync_pending',
+            'upload_channel_unavailable', 'upload_transport_changed', 'upload_window_wait',
+            'upload_target_not_ready', 'upload_session_busy', 'upload_concurrency_exceeded',
+            'asset_removal_pending', 'scene_target_unavailable', 'clock_sync_pending',
+            'scene_recovery_pending', 'uploads_still_active']).has(code);
+    }
+
+    uploadSocketForClient(client) {
+        return [...(this.uploadSocketsByClient.get(client) || [])]
+            .find(socket => socket.readyState === WebSocket.OPEN) || null;
+    }
+
     sendToEndpoint(endpointId, payload) {
         const resolvedId = this.resolveClientId(endpointId);
         const client = resolvedId ? this.clients.get(resolvedId) : null;
         if (!client || !client.authenticated || !client.ws
             || client.ws.readyState !== WebSocket.OPEN) return false;
+        const isData = this.uploadDataMessageTypes.has(payload.type);
+        const socket = isData ? this.uploadSocketForClient(client) : client.ws;
+        if (!socket) return false;
+        // Base64 and JSON overhead are bounded independently of durable-byte credit.
+        const encodedLimit = isData ? 512 * 1024 : this.MAX_REMOTE_SCENE_BUFFERED_BYTES;
+        if ((socket.bufferedAmount || 0) > encodedLimit) return false;
         try {
             const envelope = {
                 ...payload,
@@ -2775,7 +2935,10 @@ class MouffetteServer {
             if (!Object.hasOwn(envelope, 'connectionGeneration')) {
                 envelope.connectionGeneration = client.connectionGeneration;
             }
-            client.ws.send(JSON.stringify(envelope));
+            const encoded = JSON.stringify(envelope);
+            if (isData && Buffer.byteLength(encoded, 'utf8')
+                + (socket.bufferedAmount || 0) > encodedLimit) return false;
+            socket.send(encoded);
             return true;
         } catch (error) {
             console.error('❌ Device relay failed:', error);
@@ -2858,6 +3021,8 @@ class MouffetteServer {
         }
         this.lastLeaseSweepAt = now;
         for (const transition of this.remoteSessions.markDegraded(now, this.config.leaseTimeoutMs)) {
+            const run = this.sceneRuns.getForSession(transition.session.remoteSessionId);
+            if (run) this.pauseSceneForRecovery(run, transition.session);
             const payload = this.remoteSessionPayload(
                 transition.session, 'remote_session_lease_state');
             payload.degradedEndpointId = transition.endpointId;
@@ -2907,15 +3072,14 @@ class MouffetteServer {
                 ? session.targetEndpointId : session.ownerEndpointId;
             this.sendToEndpoint(peer, payload);
             const run = this.sceneRuns.getForSession(session.remoteSessionId);
-            if (run && this.sceneRuns.isPreStart(run)) {
-                this.initiateSceneStop(run, 'transport_lost_before_scene_live', true);
-            }
+            if (run) this.pauseSceneForRecovery(run, session);
         }
         if (changed.length > 0) this.broadcastClientList();
         return changed.length > 0;
     }
 
     rebindSessionGeneration(session) {
+        if (session.mediaResidency) session.mediaResidency.generation = session.generation;
         const assets = this.sessionAssets.get(session.remoteSessionId);
         if (assets) {
             for (const asset of assets.values()) asset.generation = session.generation;
@@ -2981,6 +3145,10 @@ class MouffetteServer {
             session.activeUploadIds.delete(uploadId);
         }
         this.grantPendingUploadCapacity(session.targetEndpointId);
+        this.publishUploadWindows(session.targetEndpointId);
+        if (![...this.uploads.values()].some(upload => upload.targetEndpointId === session.targetEndpointId)) {
+            this.recipientUploadWindows.delete(session.targetEndpointId);
+        }
     }
 
     purgeServerSessionState(session) {
@@ -3261,6 +3429,59 @@ class MouffetteServer {
     // Protocol v8 upload state. A transfer is immutable and belongs to one
     // RemoteSession generation; authenticated socket identity supplies both
     // parties, so client-provided sender/target aliases are never consulted.
+    recipientUploadWindow(targetEndpointId) {
+        let window = this.recipientUploadWindows.get(targetEndpointId);
+        if (!window) {
+            window = { bytes: this.INITIAL_UPLOAD_WINDOW_BYTES,
+                sampledAt: this.monotonicNow(), confirmed: 0, bytesPerSecond: 0 };
+            this.recipientUploadWindows.set(targetEndpointId, window);
+        }
+        return window;
+    }
+
+    uploadWindowBytes(upload) {
+        const participants = [...this.uploads.values()].filter(other =>
+            other.targetEndpointId === upload.targetEndpointId && other.relaySlotGranted);
+        const bytes = this.recipientUploadWindows.get(upload.targetEndpointId)?.bytes
+            || this.INITIAL_UPLOAD_WINDOW_BYTES;
+        return Math.floor(bytes / Math.max(1, participants.length));
+    }
+
+    recordUploadConfirmation(upload, bytes) {
+        const window = this.recipientUploadWindow(upload.targetEndpointId);
+        window.confirmed += bytes;
+        const elapsed = this.monotonicNow() - window.sampledAt;
+        if (elapsed < 250 || window.confirmed === 0) return;
+        const rate = window.confirmed * 1000 / Math.max(1, elapsed);
+        window.bytesPerSecond = window.bytesPerSecond > 0
+            ? .75 * window.bytesPerSecond + .25 * rate : rate;
+        // Half a second of confirmed throughput, rounded to one 32 KiB block.
+        const desired = Math.ceil(window.bytesPerSecond * .5 / 32768) * 32768;
+        window.bytes = Math.min(this.MAX_TARGET_BUFFERED_UPLOAD_BYTES,
+            Math.max(this.MIN_UPLOAD_WINDOW_BYTES, desired));
+        window.confirmed = 0;
+        window.sampledAt = this.monotonicNow();
+    }
+
+    markUploadOffsetsDelivered(upload) {
+        const owner = this.clients.get(this.resolveClientId(upload.ownerEndpointId));
+        upload.reportedOffsetSocket = this.uploadSocketForClient(owner);
+        upload.reportedDurableBytes = upload.durableBytes;
+    }
+
+    publishUploadWindows(targetEndpointId) {
+        for (const upload of this.uploads.values()) {
+            if (upload.targetEndpointId !== targetEndpointId || upload.awaitingTargetReady) continue;
+            const owner = this.clients.get(this.resolveClientId(upload.ownerEndpointId));
+            if (upload.reportedDurableBytes !== upload.durableBytes
+                || !upload.reportedOffsetSocket
+                || upload.reportedOffsetSocket !== this.uploadSocketForClient(owner)) continue;
+            this.sendToEndpoint(upload.ownerEndpointId,
+                this.uploadPayload(upload, 'upload_progress', { delta: true, assets: [],
+                    durableBytes: upload.durableBytes, totalSize: upload.totalSize }));
+        }
+    }
+
     uploadPayload(upload, type, extra = {}) {
         return {
             type,
@@ -3273,6 +3494,10 @@ class MouffetteServer {
             uploadId: upload.uploadId,
             ownerEndpointId: upload.ownerEndpointId,
             targetEndpointId: upload.targetEndpointId,
+            maxChunkBytes: 32 * 1024,
+            windowBytes: this.uploadWindowBytes(upload),
+            recipientWindowBytes: this.recipientUploadWindows.get(upload.targetEndpointId)?.bytes
+                || this.INITIAL_UPLOAD_WINDOW_BYTES,
             ...extra,
         };
     }
@@ -3295,9 +3520,10 @@ class MouffetteServer {
         })).sort((left, right) => left.assetId.localeCompare(right.assetId));
     }
 
-    validateUploadInventory(upload, entries, validateOffset) {
+    validateUploadInventory(upload, entries, validateOffset, delta = false) {
         if (!upload || !Array.isArray(entries)
-            || entries.length !== upload.assetStates.size) return false;
+            || entries.length > upload.assetStates.size
+            || (!delta && entries.length !== upload.assetStates.size)) return false;
         const seen = new Set();
         for (const entry of entries) {
             if (!isPlainObject(entry) || !this.isValidOpaqueId(entry.assetId)
@@ -3308,7 +3534,7 @@ class MouffetteServer {
                 || !validateOffset(asset, entry.offset)) return false;
             seen.add(entry.assetId);
         }
-        return seen.size === upload.assetStates.size;
+        return delta || seen.size === upload.assetStates.size;
     }
 
     sendUploadRejected(clientId, uploadId, code, detail = '', upload = null) {
@@ -3321,6 +3547,8 @@ class MouffetteServer {
             messageId: uuidv4(),
             uploadId: typeof uploadId === 'string' ? uploadId : '',
             code,
+            temporary: this.isTemporaryProtocolError(code),
+            errorClass: this.isTemporaryProtocolError(code) ? 'temporary' : 'terminal',
             reason: String(detail || code).slice(0, 512),
         };
         if (upload) {
@@ -3383,6 +3611,9 @@ class MouffetteServer {
             });
         }
         assets.sort((left, right) => left.assetId.localeCompare(right.assetId));
+        if (!this.serializedJsonWithinLimit(assets, 256 * 1024)) {
+            return { ok: false, error: 'upload_manifest_too_large' };
+        }
         return { ok: true, assets, totalSize };
     }
 
@@ -3402,6 +3633,11 @@ class MouffetteServer {
         const session = this.remoteSessions.get(upload.remoteSessionId);
         if (session) session.activeUploadIds.delete(upload.uploadId);
         this.grantPendingUploadCapacity(upload.targetEndpointId);
+        this.publishUploadWindows(upload.targetEndpointId);
+        if (![...this.uploads.values()].some(other =>
+            other.targetEndpointId === upload.targetEndpointId)) {
+            this.recipientUploadWindows.delete(upload.targetEndpointId);
+        }
     }
 
     grantPendingUploadCapacity(targetEndpointId) {
@@ -3411,7 +3647,7 @@ class MouffetteServer {
         for (const upload of targetUploads) {
             if (upload.relaySlotGranted || !upload.pendingRelayStart) continue;
             const session = this.remoteSessions.get(upload.remoteSessionId);
-            if (!session || session.phase !== 'Active') continue;
+            if (!session || !this.remoteSessions.commandReady(session)) continue;
             if (reserved >= this.MAX_TARGET_STREAMING_UPLOADS) {
                 this.sendUploadCapacityWait(upload);
                 continue;
@@ -3429,8 +3665,10 @@ class MouffetteServer {
                 upload.relaySlotGranted = false;
                 upload.pendingRelayStart = true;
                 --reserved;
+                this.sendUploadCapacityWait(upload);
             }
         }
+        this.publishUploadWindows(targetEndpointId);
     }
 
     sendUploadCapacityWait(upload) {
@@ -3928,6 +4166,12 @@ class MouffetteServer {
 
     rejectTrackedUpload(upload, code, detail = code, notifyTarget = true) {
         if (!upload) return;
+        if (this.isTemporaryProtocolError(code)) {
+            upload.pauseReason = code;
+            const ownerId = this.resolveClientId(upload.ownerEndpointId);
+            if (ownerId) this.sendUploadRejected(ownerId, upload.uploadId, code, detail, upload);
+            return;
+        }
         if (notifyTarget) {
             this.sendToEndpoint(upload.targetEndpointId,
                 this.uploadPayload(upload, 'upload_abort', { code, reason: detail }));
@@ -4005,6 +4249,19 @@ class MouffetteServer {
                 && duplicate.ownerRuntimeId === session.ownerRuntimeId
                 && duplicate.ownerConnectionGeneration === owner.connectionGeneration
                 && duplicate.manifestDigest === manifestDigest) {
+                if (!duplicate.awaitingTargetReady && !duplicate.awaitingTargetValidation) {
+                    return this.handleUploadResume(senderId, message, transportSocket);
+                }
+                duplicate.transportSocket = transportSocket;
+                duplicate.pauseReason = null;
+                duplicate.transportDisconnectedAt = null;
+                if (duplicate.awaitingTargetReady && !duplicate.pendingRelayStart) {
+                    this.sendToEndpoint(duplicate.targetEndpointId,
+                        this.uploadPayload(duplicate, 'upload_start', {
+                            replay: true, files: duplicate.assets, totalSize: duplicate.totalSize,
+                        }));
+                }
+                if (duplicate.pendingRelayStart) this.grantPendingUploadCapacity(duplicate.targetEndpointId);
                 if (duplicate.awaitingTargetValidation) {
                     // B may already have promoted every asset while its final
                     // ACK was lost. Ask it to replay only that exact terminal
@@ -4059,6 +4316,7 @@ class MouffetteServer {
             relayedBytes: 0,
             durableBytes: 0,
             awaitingTargetReady: true,
+            targetReadyAcknowledged: false,
             awaitingTargetValidation: false,
             completionRequested: false,
             transportSocket,
@@ -4087,8 +4345,17 @@ class MouffetteServer {
         upload.ownerConnectionGeneration = validated.client.connectionGeneration;
         upload.transportSocket = transportSocket;
         upload.transportDisconnectedAt = null;
+        upload.pauseReason = null;
+        if (upload.awaitingTargetValidation) {
+            this.sendToEndpoint(upload.targetEndpointId, this.uploadPayload(upload, 'upload_complete', {
+                replay: true, assets: this.uploadCompletionInventory(upload),
+            }));
+            this.sendToEndpoint(upload.ownerEndpointId, this.uploadPayload(upload, 'upload_resume_ready', {
+                replay: true, assets: this.uploadOffsets(upload),
+            }));
+            return;
+        }
         upload.awaitingTargetReady = true;
-        upload.awaitingTargetValidation = false;
         upload.completionRequested = false;
         upload.relayedBytes = 0;
         upload.durableBytes = 0;
@@ -4126,16 +4393,24 @@ class MouffetteServer {
             || upload.targetEndpointId !== validated.client.endpointId
             || !this.validateUploadInventory(
                 upload, message.assets,
-                (asset, offset) => offset === asset.durableOffset)) {
+                (asset, offset) => offset >= asset.durableOffset && offset <= asset.size)) {
             return this.rejectTrackedUpload(upload,
                 'invalid_upload_ready_inventory');
         }
+        for (const entry of message.assets) {
+            const asset = upload.assetStates.get(entry.assetId);
+            asset.durableOffset = entry.offset;
+            asset.nextOffset = entry.offset;
+        }
+        upload.durableBytes = message.assets.reduce((total, entry) => total + entry.offset, 0);
+        upload.relayedBytes = upload.durableBytes;
         upload.awaitingTargetReady = false;
+        upload.targetReadyAcknowledged = true;
         upload.lastActivity = Date.now();
-        this.sendToEndpoint(upload.ownerEndpointId,
+        if (this.sendToEndpoint(upload.ownerEndpointId,
             this.uploadPayload(upload, 'upload_ready', {
                 assets: this.uploadOffsets(upload),
-            }));
+            }))) this.markUploadOffsetsDelivered(upload);
     }
 
     decodeUploadChunk(message) {
@@ -4144,7 +4419,7 @@ class MouffetteServer {
             || message.data.length % 4 !== 0
             || !/^[A-Za-z0-9+/]*={0,2}$/.test(message.data)) return null;
         const decoded = Buffer.from(message.data, 'base64');
-        if (decoded.length < 1 || decoded.length > 128 * 1024
+        if (decoded.length < 1 || decoded.length > 32 * 1024
             || decoded.toString('base64') !== message.data) return null;
         return decoded;
     }
@@ -4161,9 +4436,13 @@ class MouffetteServer {
         if (upload.transportSocket !== transportSocket) {
             return this.rejectTrackedUpload(upload, 'upload_transport_changed');
         }
+        if (upload.pauseReason) return this.rejectTrackedUpload(upload, upload.pauseReason);
         const asset = upload.assetStates.get(message.assetId);
         const decoded = this.decodeUploadChunk(message);
-        if (upload.awaitingTargetReady || upload.awaitingTargetValidation || !asset || !decoded
+        if (upload.awaitingTargetReady || upload.awaitingTargetValidation) {
+            return this.rejectTrackedUpload(upload, 'upload_target_not_ready');
+        }
+        if (!asset || !decoded
             || message.offset !== asset.nextOffset || message.size !== decoded.length
             || message.sha256 !== asset.sha256
             || decoded.length > asset.size - asset.nextOffset) {
@@ -4171,16 +4450,18 @@ class MouffetteServer {
         }
         const targetId = this.resolveClientId(upload.targetEndpointId);
         const target = targetId ? this.clients.get(targetId) : null;
-        if (!target || !target.ws || target.ws.readyState !== WebSocket.OPEN) return;
+        if (!target || !this.uploadSocketForClient(target)) {
+            return this.rejectTrackedUpload(upload, 'upload_channel_unavailable');
+        }
         const outstanding = upload.relayedBytes - upload.durableBytes;
         const targetOutstanding = [...this.uploads.values()]
             .filter(other => other.targetEndpointId === upload.targetEndpointId)
             .reduce((total, other) => total + other.relayedBytes - other.durableBytes, 0);
-        if (outstanding + decoded.length > this.MAX_UPLOAD_UNACKNOWLEDGED_BYTES
-            || targetOutstanding + decoded.length > this.MAX_TARGET_BUFFERED_UPLOAD_BYTES) {
-            // Correct v8 senders wait for durable progress at the advertised
-            // fixed 1 MiB window. Reject only a sender violating that bound.
-            return this.rejectTrackedUpload(upload, 'upload_flow_control_violation');
+        if (outstanding + decoded.length > this.uploadWindowBytes(upload)
+            || targetOutstanding + decoded.length > this.recipientUploadWindow(upload.targetEndpointId).bytes) {
+            // A changing fair credit can race data already queued by the sender.
+            // Preserve the transfer and reconcile durable offsets before retry.
+            return this.rejectTrackedUpload(upload, 'upload_window_wait');
         }
         const delivered = this.sendToEndpoint(upload.targetEndpointId,
             this.uploadPayload(upload, 'upload_chunk', {
@@ -4191,7 +4472,7 @@ class MouffetteServer {
                 sha256: asset.sha256,
                 data: message.data,
             }));
-        if (!delivered) return;
+        if (!delivered) return this.rejectTrackedUpload(upload, 'upload_channel_unavailable');
         asset.nextOffset += decoded.length;
         upload.relayedBytes += decoded.length;
         upload.lastActivity = Date.now();
@@ -4203,16 +4484,21 @@ class MouffetteServer {
         if (!validated.ok || !upload || upload.protocolVersion !== this.protocolVersion
             || upload.remoteSessionId !== message.remoteSessionId
             || !Array.isArray(message.assets)) return;
+        // Delayed ACKs from the retired data stream cannot precede the full
+        // receiver reconciliation inventory on a resumed stream.
+        if (upload.awaitingTargetReady || upload.pendingRelayStart) return;
         if (upload.generation !== validated.session.generation
             || upload.targetEndpointId !== validated.client.endpointId
             || !this.validateUploadInventory(
                 upload, message.assets,
-                (asset, offset) => offset >= asset.durableOffset
-                    && offset <= asset.nextOffset)) {
+                (asset, offset) => offset >= 0 && offset <= asset.nextOffset, true)) {
             return this.rejectTrackedUpload(upload,
                 'invalid_upload_progress_inventory');
         }
+        const changedAssets = message.assets.filter(entry =>
+            entry.offset >= upload.assetStates.get(entry.assetId).durableOffset);
         let progressed = false;
+        const previousDurableBytes = upload.durableBytes;
         for (const entry of message.assets) {
             const asset = upload.assetStates.get(entry.assetId);
             if (entry.offset > asset.durableOffset) {
@@ -4224,13 +4510,19 @@ class MouffetteServer {
             upload.durableBytes = Array.from(upload.assetStates.values())
                 .reduce((total, asset) => total + asset.durableOffset, 0);
             upload.lastActivity = Date.now();
+            this.recordUploadConfirmation(upload, upload.durableBytes - previousDurableBytes);
         }
-        this.sendToEndpoint(upload.ownerEndpointId,
+        const owner = this.clients.get(this.resolveClientId(upload.ownerEndpointId));
+        const needsReconciliation = upload.reportedDurableBytes !== previousDurableBytes
+            || upload.reportedOffsetSocket !== this.uploadSocketForClient(owner);
+        if (this.sendToEndpoint(upload.ownerEndpointId,
             this.uploadPayload(upload, 'upload_progress', {
                 durableBytes: upload.durableBytes,
                 totalSize: upload.totalSize,
-                assets: this.uploadOffsets(upload),
-            }));
+                delta: !needsReconciliation,
+                assets: needsReconciliation ? this.uploadOffsets(upload) : changedAssets,
+            }))) this.markUploadOffsetsDelivered(upload);
+        this.publishUploadWindows(upload.targetEndpointId);
         if (upload.completionRequested && this.uploadIsFullyDurable(upload)) {
             this.beginUploadTargetValidation(upload);
         }
@@ -4375,14 +4667,18 @@ class MouffetteServer {
     }
 
     abortUploadsForUploadSocket(senderId, socket, reason) {
-        void senderId;
+        const client = this.clients.get(senderId);
         for (const upload of this.uploads.values()) {
             if (!upload || upload.protocolVersion !== this.protocolVersion
-                || upload.transportSocket !== socket) continue;
+                || (upload.transportSocket !== socket
+                    && upload.targetEndpointId !== client?.endpointId)) continue;
             upload.transportSocket = null;
             upload.transportDisconnectedAt = Date.now();
             upload.lastActivity = Date.now();
-            upload.pauseReason = String(reason || 'upload_transport_lost').slice(0, 128);
+            upload.pauseReason = 'upload_channel_unavailable';
+            const ownerId = this.resolveClientId(upload.ownerEndpointId);
+            if (ownerId) this.sendUploadRejected(ownerId, upload.uploadId,
+                'upload_channel_unavailable', reason, upload);
         }
     }
 
@@ -4408,6 +4704,12 @@ class MouffetteServer {
         if (this.remoteSessions.cleanupJobs.size > 0) this.updateCleanupPendingMetric();
         for (const upload of Array.from(this.uploads.values())) {
             if (!upload || upload.protocolVersion !== this.protocolVersion) continue;
+            const session = this.remoteSessions.get(upload.remoteSessionId);
+            if (session && !this.remoteSessions.commandReady(session)
+                && ['Active', 'Grace'].includes(session.phase)) continue;
+            const owner = this.clients.get(this.resolveClientId(upload.ownerEndpointId));
+            const target = this.clients.get(this.resolveClientId(upload.targetEndpointId));
+            if (!this.uploadSocketForClient(owner) || !this.uploadSocketForClient(target)) continue;
             if (upload.pendingRelayStart) {
                 this.grantPendingUploadCapacity(upload.targetEndpointId);
                 if (upload.pendingRelayStart) this.sendUploadCapacityWait(upload);
@@ -4436,6 +4738,8 @@ class MouffetteServer {
                 connectionGeneration: client.authenticated
                     ? client.connectionGeneration : undefined,
                 code,
+                temporary: this.isTemporaryProtocolError(code),
+                errorClass: this.isTemporaryProtocolError(code) ? 'temporary' : 'terminal',
                 message: errorMessage
             };
             if (correlation && typeof correlation === 'object') {

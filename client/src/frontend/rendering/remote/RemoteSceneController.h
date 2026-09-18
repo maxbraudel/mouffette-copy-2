@@ -195,6 +195,7 @@ private:
 	bool matchesSceneEnvelope(const QJsonObject& envelope) const;
 	void sendPrepareResult(bool success, const QString& message = QString());
 	void tryArmPreparedScene();
+	void retrySceneAcknowledgements(bool replay = false);
 	void sendFirstFramePresented(bool forceReplay = false);
 	void disconnectFirstFrameObservers();
 	void updatePrepareProgress();
@@ -222,11 +223,16 @@ private:
 	quint64 m_pendingSessionGeneration = 0;
 	quint64 m_pendingSceneRevision = 0;
 	QJsonArray m_prepareChecklist;
+	QJsonObject m_pendingSceneCommit;
 	bool m_scenePreparedReported = false;
 	bool m_sceneAllPrepared = false;
 	bool m_sceneArmedReported = false;
 	bool m_sceneCommitReceived = false;
 	bool m_firstFrameReported = false;
+	bool m_firstFrameAcknowledged = false;
+	qint64 m_lastPrepareAckAttemptMs = -1;
+	qint64 m_lastArmedAckAttemptMs = -1;
+	qint64 m_lastStartedAckAttemptMs = -1;
 	qint64 m_firstFramePresentedServerMonotonicMs = -1;
 	qint64 m_firstFramePresentedLocalSteadyMs = -1;
 	QSet<int> m_screensAwaitingFirstFrame;
@@ -241,6 +247,8 @@ private:
 	bool m_sceneActivationRequested = false;
 	bool m_sceneActivated = false;
 	qint64 m_committedActivationLeadMs = 0;
+	qint64 m_activationLocalSteadyMs = -1;
+	qint64 m_sceneRecoveryDeadlineMs = -1;
 	qint64 m_activationEpochMs = 0;
 	bool m_activationClockPlausible = false;
 	qint64 m_lastVideoSyncSequence = 0;

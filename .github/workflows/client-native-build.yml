@@ -54,6 +54,10 @@ jobs:
         working-directory: server
         run: npm test
 
+      - name: Test bidirectional slow-link matrix
+        working-directory: server
+        run: npm run test:slow-link
+
       - name: Install toolchain
         run: brew install qt openssl@3 cmake ninja ffmpeg pkg-config
 
@@ -116,6 +120,10 @@ jobs:
       - name: Test server protocol
         working-directory: server
         run: npm test
+
+      - name: Test bidirectional slow-link matrix
+        working-directory: server
+        run: npm run test:slow-link
 
       - name: Install MSYS2 UCRT64 toolchain
         id: msys2

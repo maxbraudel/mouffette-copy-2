@@ -5,6 +5,7 @@ const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 const { MouffetteServer } = require('./server');
+const { loadServerConfig } = require('./config');
 const { RemoteSessionRegistry, TERMINAL_PHASES } = require('./remote_session_registry');
 const { RemoteCacheStore } = require('./remote_cache_store');
 const { ProtocolMetrics } = require('./protocol_metrics');
@@ -27,7 +28,7 @@ function protocolSoak() {
     const statistics = { cycles: 0, departures: 0, resumes: 0, duplicateResumes: 0,
         lostReplies: 0, lostOwnerStateAcks: 0, lostTargetStateAcks: 0,
         lostCleanupAcks: 0, cleanupErrors: 0, expired: 0, wallJumps: 0 };
-    const server = new MouffetteServer({ port: 0, monotonicNow: () => now,
+    const server = new MouffetteServer({ port: 0, config: { ...loadServerConfig(), transportTimeoutMs: 1500 }, monotonicNow: () => now,
         epochNow: () => wallOffset + now, protocolLogger: () => {},
         metrics: new ProtocolMetrics({ logger: () => {}, maximumOnceKeys: 64 }) });
     server.remoteSessions = new RemoteSessionRegistry({ leaseTimeoutMs: 4500, recoveryTimeoutMs: 3000,
@@ -62,7 +63,7 @@ function protocolSoak() {
     const send = (id, type, fields = {}) => {
         const client = server.clients.get(id);
         assert.ok(client, `missing sender ${id}`);
-        server.handleMessage(id, { type, protocolVersion: 11, serverBootId: server.serverBootId,
+        server.handleMessage(id, { type, protocolVersion: 12, serverBootId: server.serverBootId,
             connectionGeneration: client.connectionGeneration,
             messageId: `00000000-0000-4000-8000-${String(++serial).padStart(12, '0')}`,
             ...fields });

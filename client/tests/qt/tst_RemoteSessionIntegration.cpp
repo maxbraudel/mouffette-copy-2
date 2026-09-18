@@ -229,7 +229,7 @@ void RemoteSessionIntegrationTest::reconnectsAutomaticallyAfterProlongedServerOu
     // must not clear the network intent or the background retry loop.
     m_relay.kill();
     QVERIFY(m_relay.waitForFinished(2000));
-    QTRY_VERIFY_WITH_TIMEOUT(!client.hasUnexpiredLease(), 6000);
+    QTRY_VERIFY_WITH_TIMEOUT(!client.hasUnexpiredLease(), 18000);
     for (int attempt = 0; attempt < 32; ++attempt) {
         const qsizetype failures = errors.count();
         // Accelerate only the waiting between these genuine refused TCP
@@ -460,7 +460,7 @@ void RemoteSessionIntegrationTest::degradedSessionPresentation()
         QTRY_COMPARE_WITH_TIMEOUT(observer.remoteStatusText(), QStringLiteral("CONNECTED"), 1000);
         QCOMPARE(owner->remoteSessionCoordinator()->outgoingForPeer(target.endpointId()).remoteSessionId, id);
     } else {
-        QTRY_VERIFY_WITH_TIMEOUT(owner->sessionRecoveryRemainingMs(id) == 0, 3000);
+        QTRY_VERIFY_WITH_TIMEOUT(owner->sessionRecoveryRemainingMs(id) == 0, 16000);
         QTRY_COMPARE_WITH_TIMEOUT(observer.remoteStatusText(), QStringLiteral("DISCONNECTED"), 1000);
         QCOMPARE(observer.displayClients().size(), 1);
         QCOMPARE(observer.displayClients().first().availabilityBadgeText(), QStringLiteral("Disconnected"));
@@ -478,8 +478,9 @@ void RemoteSessionIntegrationTest::recovery_data()
     QTest::addColumn<bool>("reverseOrder");
     QTest::addColumn<int>("lostReply");
     QTest::newRow("two-seconds") << 2000 << false << false << 0;
-    QTest::newRow("four-seconds-terminal") << 4000 << false << false << 0;
-    QTest::newRow("six-seconds-terminal") << 6000 << false << false << 0;
+    QTest::newRow("four-seconds-recoverable") << 4000 << false << false << 0;
+    QTest::newRow("six-seconds-recoverable") << 6000 << false << false << 0;
+    QTest::newRow("sixteen-seconds-terminal") << 16000 << false << false << 0;
     QTest::newRow("both-owner-first") << 100 << true << false << 0;
     QTest::newRow("both-target-first") << 100 << true << true << 0;
     QTest::newRow("lost-resume-owner") << 100 << true << false << 1;
@@ -520,7 +521,7 @@ void RemoteSessionIntegrationTest::recovery()
     if (dropBoth) QTRY_VERIFY_WITH_TIMEOUT(!target.isConnected(), 1000);
     QVERIFY(!owner.canIssueSessionCommands(id));
     QTest::qWait(gapMs);
-    if (gapMs >= 3000) {
+    if (gapMs >= 15000) {
         QVERIFY(!expired.isEmpty());
         QVERIFY(!owner.canIssueSessionCommands(id));
     }
@@ -531,7 +532,7 @@ void RemoteSessionIntegrationTest::recovery()
     owner.connectToServer(m_url);
     if (!reverseOrder && dropBoth) target.connectToServer(m_url);
     QTRY_VERIFY_WITH_TIMEOUT(owner.isConnected() && target.isConnected(), 3000);
-    if (gapMs >= 3000) {
+    if (gapMs >= 15000) {
         QTest::qWait(500);
         QVERIFY(!owner.canIssueSessionCommands(id));
         QCOMPARE(opened.count(), 1); // no implicit new OPEN or scene launch
@@ -610,7 +611,7 @@ void RemoteSessionIntegrationTest::localProofExpiryClosesAStillHealthyServerSess
     const QString id = opened.first().first().toJsonObject().value("remoteSessionId").toString();
     QTRY_VERIFY_WITH_TIMEOUT(owner.canIssueSessionCommands(id) && target.canIssueSessionCommands(id), 3000);
     command({{"action", "suppressSessionProof"}, {"endpoint", owner.endpointId()}});
-    QTRY_COMPARE_WITH_TIMEOUT(expired.count(), 1, 6500);
+    QTRY_COMPARE_WITH_TIMEOUT(expired.count(), 1, 18000);
     // Generic transport ACKs kept both sockets fresh, but they could not renew
     // the withheld session proof. Local expiry must converge the relay too.
     QVERIFY(owner.isConnected());

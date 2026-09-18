@@ -780,7 +780,7 @@ if(BUILD_TESTING)
     target_link_libraries(tst_RemoteSessionIntegration PRIVATE
         "$<TARGET_PROPERTY:MouffetteClient,LINK_LIBRARIES>" Qt6::Test)
     add_test(NAME RemoteSessionIntegration COMMAND tst_RemoteSessionIntegration)
-    set_tests_properties(RemoteSessionIntegration PROPERTIES TIMEOUT 180
+    set_tests_properties(RemoteSessionIntegration PROPERTIES TIMEOUT 300
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_CONTROLS_STYLE=Basic")
 
     add_executable(tst_ScreenCoordinateMapping
@@ -1237,3 +1237,29 @@ if(APPLE OR WIN32)
         endforeach()
     endif()
 endif()
+
+# Shared worker logger. Static dependencies are pulled only when a test does
+# not already provide its own config/profile object files.
+add_library(MouffetteNetworkDiagnostics STATIC
+    src/backend/network/NetworkDiagnostics.cpp
+    src/backend/config/AppConfig.cpp
+    src/backend/runtime/RuntimeProfile.cpp)
+target_include_directories(MouffetteNetworkDiagnostics PUBLIC src)
+target_link_libraries(MouffetteNetworkDiagnostics PUBLIC Qt6::Core Qt6::Network)
+if(BUILD_TESTING)
+    add_executable(tst_NetworkDiagnostics tests/qt/tst_NetworkDiagnostics.cpp)
+    target_link_libraries(tst_NetworkDiagnostics PRIVATE Qt6::Test)
+    add_test(NAME NetworkDiagnostics COMMAND tst_NetworkDiagnostics)
+endif()
+get_property(mouffette_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+foreach(mouffette_target IN LISTS mouffette_targets)
+    get_target_property(mouffette_target_type ${mouffette_target} TYPE)
+    if(mouffette_target_type STREQUAL "EXECUTABLE")
+        get_target_property(mouffette_target_links ${mouffette_target} LINK_LIBRARIES)
+        # Tests which consume the application object files already inherit its
+        # link libraries through this generator expression.
+        if(NOT "${mouffette_target_links}" MATCHES "TARGET_PROPERTY:MouffetteClient,LINK_LIBRARIES")
+            target_link_libraries(${mouffette_target} PRIVATE MouffetteNetworkDiagnostics)
+        endif()
+    endif()
+endforeach()

@@ -50,12 +50,8 @@ public:
     bool ensureUploadChannel(); // opens m_uploadSocket if needed (async); returns true if already connected or opening
     void closeUploadChannel();  // closes m_uploadSocket if open
     bool isUploadChannelConnected() const;
-    // Pins one already-connected transport shared by the admitted outgoing
-    // transfers. Calls are reference-counted, allowing protocol v5's two
-    // concurrent RemoteSession uploads without reordering either stream. This never
-    // spins a nested event loop: if the dedicated channel is not ready yet, the
-    // authenticated control channel is selected immediately and the dedicated
-    // channel continues warming up for a later transfer.
+    // Data and inventories always use the dedicated bidirectional socket.
+    // An unavailable socket leaves transfers paused; no control fallback.
     bool beginUploadSession(bool preferUploadChannel);
     void endUploadSession();
     qint64 uploadTransportBytesToWrite() const;
@@ -103,7 +99,7 @@ public:
     // Target-side upload_ready/progress/finished/rejected/abort_ack response.
     bool sendUploadProtocolResponse(const QJsonObject& response);
     bool sendMediaResidency(const QString& remoteSessionId, quint64 generation,
-                            quint64 sequence, const QJsonArray& assets);
+                            quint64 sequence, const QJsonArray& assets, bool delta = false);
     
     // RemoteSession lifecycle. Tokens remain memory-only and are never
     // exposed in generic logs or durable project state.
@@ -209,6 +205,7 @@ public:
     QJsonObject serverPolicy() const { return m_serverPolicy; }
     bool hasUnexpiredLease() const;
     qint64 leaseRemainingMs() const;
+    qint64 transportRecoveryRemainingMs() const;
     QString getConnectionStatus() const { return m_connectionStatus; }
 
 signals:
@@ -330,6 +327,7 @@ private:
         qint64 proofDeadlineMs = -1;
         qint64 interruptionDeadlineMs = -1;
         bool expired = false;
+        qint64 lastProofAtMs = -1;
     };
     QHash<QString, QJsonObject> m_assetRemovalObligations;
     QHash<QString, SessionDeadline> m_sessionDeadlines;
@@ -410,6 +408,20 @@ private:
     int m_leaseTimeoutMs = 0;
     int m_sessionRecoveryTimeoutMs = 0;
     int m_transportSuspectAfterMs = 0;
+    int m_transportTimeoutMs = 0;
+    qint64 m_transportRecoveryDeadlineMs = -1;
+    qint64 m_lastHeartbeatAckMs = -1;
+    qint64 m_lastRttMs = -1;
+    qint64 m_lastDiagnosticsAtMs = -1;
+    qint64 m_maxLoopLagMs = 0;
+    quint64 m_controlSentBytes = 0;
+    quint64 m_dataSentBytes = 0;
+    quint64 m_confirmedDataBytes = 0;
+    QHash<QString, qint64> m_confirmedUploadOffsets;
+    bool m_dispatchingData = false;
+    QHash<QString, QJsonObject> m_pendingScenePrepares;
+    QHash<QString, QJsonObject> m_pendingUploadResponses;
+    void flushPendingUploadResponses();
     bool m_authenticated = false;
     bool m_hasEstablishedLease = false;
     bool m_leaseExpired = false;

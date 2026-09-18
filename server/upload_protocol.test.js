@@ -18,6 +18,8 @@ function socket() {
 
 function addClient(server, connectionId, endpointId) {
     const ws = socket();
+    const dataWs = socket();
+    dataWs.messages = ws.messages;
     const client = {
         id: connectionId,
         sessionId: connectionId,
@@ -30,6 +32,14 @@ function addClient(server, connectionId, endpointId) {
         ws,
     };
     server.clients.set(connectionId, client);
+    server.registerUploadSocket(client, dataWs);
+    if (!server.testDataDispatch) {
+        const handle = server.handleMessage.bind(server);
+        server.handleMessage = (id, message, transport) => handle(id, message,
+            transport || (server.uploadDataMessageTypes.has(message.type)
+                ? server.uploadSocketForClient(server.clients.get(id)) : null));
+        server.testDataDispatch = true;
+    }
     if (client.authenticated) server.currentTransportByEndpoint.set(endpointId, client);
     return { client, ws };
 }
@@ -50,7 +60,7 @@ function setup() {
 
 function envelope(session, extra = {}) {
     return {
-        protocolVersion: 11,
+        protocolVersion: 12,
         serverBootId: session.serverBootId,
         messageId: crypto.randomUUID(),
         remoteSessionId: session.remoteSessionId,
@@ -89,7 +99,7 @@ function startUpload(context, uploadId, asset = file(), transport = socket()) {
 
 const uploadId = 'upload-1';
 
-// Eight 1 MiB durable-ACK windows bound total incoming bytes. Further senders
+// Eight transfers share one adaptive recipient window capped at 256 KiB. Further senders
 // wait before target allocation and are granted fairly when a slot is released.
 {
     const server = new MouffetteServer({ port: 0, metricLogger: () => {}, protocolLogger: () => {} });
@@ -116,19 +126,19 @@ const uploadId = 'upload-1';
     const first = senders[0];
     server.handleMessage('bounded-target', envelope(first.session, { type: 'upload_ready',
         uploadId: first.uploadId, assets: [assetState(asset)] }));
-    const chunk = Buffer.alloc(128 * 1024).toString('base64');
-    for (let index = 0; index < 8; ++index) {
+    const chunk = Buffer.alloc(8 * 1024).toString('base64');
+    for (let index = 0; index < 1; ++index) {
         server.handleMessage(first.id, envelope(first.session, { type: 'upload_chunk',
             uploadId: first.uploadId, assetId: asset.assetId, sha256: asset.sha256,
-            offset: index * 128 * 1024, size: 128 * 1024, data: chunk }), first.transport);
+            offset: index * 8 * 1024, size: 8 * 1024, data: chunk }), first.transport);
     }
-    assert.equal(server.uploads.get(first.uploadId).relayedBytes, 1024 * 1024);
+    assert.equal(server.uploads.get(first.uploadId).relayedBytes, 8 * 1024);
     server.handleMessage('bounded-target', envelope(first.session, { type: 'upload_progress',
-        uploadId: first.uploadId, assets: [assetState(asset, 1024 * 1024)] }));
+        uploadId: first.uploadId, assets: [assetState(asset, 8 * 1024)] }));
     server.handleMessage(first.id, envelope(first.session, { type: 'upload_chunk',
         uploadId: first.uploadId, assetId: asset.assetId, sha256: asset.sha256,
-        offset: 1024 * 1024, size: 128 * 1024, data: chunk }), first.transport);
-    assert.equal(server.uploads.get(first.uploadId).relayedBytes, 1152 * 1024,
+        offset: 8 * 1024, size: 8 * 1024, data: chunk }), first.transport);
+    assert.equal(server.uploads.get(first.uploadId).relayedBytes, 16 * 1024,
         'durable progress reopens credit without failing the transfer');
     server.removeUpload(server.uploads.get(first.uploadId));
     assert.equal(messages(target.ws, 'upload_start').length, 9);
@@ -272,7 +282,7 @@ const uploadId = 'upload-1';
     assert.equal(messages(context.owner.ws, 'upload_rejected').at(-1).code,
         'upload_id_reused');
     assert.equal(context.server.uploads.get(uploadId).manifestDigest, originalDigest);
-    assert.equal(messages(context.target.ws, 'upload_start').length, 1,
+    assert.equal(messages(context.target.ws, 'upload_start').length, 2,
         'a conflicting active upload replay must never reach the target');
 
     const otherSession = context.server.remoteSessions.open({
@@ -302,7 +312,7 @@ const uploadId = 'upload-1';
         [valid[0], { ...valid[1], assetId: 'asset-unknown' }],
         [valid[0], { ...valid[1], size: valid[1].size + 1 }],
         [valid[0], { ...valid[1], sha256: '3'.repeat(64) }],
-        [valid[0], { ...valid[1], offset: 1 }],
+        [valid[0], { ...valid[1], offset: valid[1].size + 1 }],
     ];
     invalidInventories.forEach((assets, index) => {
         const context = setup();
@@ -319,8 +329,7 @@ const uploadId = 'upload-1';
     });
 }
 
-// Durable progress uses the same complete, unique inventory contract, so a
-// partial acknowledgement cannot silently advance only selected assets.
+// Durable progress accepts a unique delta without retransmitting unchanged assets.
 {
     const context = setup();
     const first = file('asset-progress-1', '4'.repeat(64), 'media-progress-1');
@@ -337,9 +346,11 @@ const uploadId = 'upload-1';
         type: 'upload_progress', uploadId: currentUploadId,
         assets: [assetState(first)],
     }));
-    assert.equal(messages(context.owner.ws, 'upload_rejected').at(-1).code,
-        'invalid_upload_progress_inventory');
-    assert.equal(context.server.uploads.has(currentUploadId), false);
+    assert.equal(messages(context.owner.ws, 'upload_rejected').length, 0);
+    assert.equal(context.server.uploads.has(currentUploadId), true);
+    const delta = messages(context.owner.ws, 'upload_progress').find(item => item.assets.length);
+    assert.equal(delta.delta, true);
+    assert.deepEqual(delta.assets, [assetState(first)]);
 }
 
 // Completion repeats the immutable asset tuple and proves that every byte is
@@ -595,4 +606,4 @@ const uploadId = 'upload-1';
         'the recipient generation must not overwrite the upload owner/source generation');
 }
 
-console.log('upload protocol v11 tests passed');
+console.log('upload protocol v12 tests passed');

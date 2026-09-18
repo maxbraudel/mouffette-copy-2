@@ -39,10 +39,11 @@ assert.equal(config.remoteSessionTeardownRetryInitialMs, 500);
 assert.equal(config.remoteSessionTeardownRetryMaxMs, 5000);
 assert.equal(config.remoteSessionOpenRequestTtlMs, 300000);
 assert.equal(config.remoteSessionTombstoneTtlMs, 300000);
-assert.equal(config.sessionRecoveryTimeoutMs, 3000);
+assert.equal(config.sessionRecoveryTimeoutMs, 15000);
 assert.equal(config.leaseTimeoutMs, 1500);
+assert.equal(config.transportTimeoutMs, 5000);
 assert.equal(config.remoteSessionOpenTimeoutMs, 5000);
-assert.equal(config.policyVersion, 4);
+assert.equal(config.policyVersion, 5);
 assert.ok(config.warnings.some((warning) => warning.includes('UNKNOWN_KEY')));
 
 process.env.MOUFFETTE_MISSPELLED_OPTION = 'true';
@@ -81,6 +82,7 @@ fs.writeFileSync(envFile, [
     'MOUFFETTE_PEER_HEARTBEAT_INTERVAL_MS=750',
     'MOUFFETTE_REMOTE_SESSION_OPEN_REQUEST_TTL_MS=6000',
     'MOUFFETTE_REMOTE_SESSION_TOMBSTONE_TTL_MS=5000',
+    'MOUFFETTE_REMOTE_SESSION_RECOVERY_TIMEOUT_MS=3000',
 ].join('\n'));
 assert.throws(() => loadServerConfig({ envFile }), (error) => {
     assert.equal(error.message,
@@ -97,5 +99,7 @@ assert.throws(() => loadServerConfig({ envFile }),
     /Twice MOUFFETTE_SCENE_MAX_CLOCK_SKEW_MS/,
     'the two endpoint clock-error bounds must fit inside the start-skew budget');
 
+fs.writeFileSync(envFile, 'MOUFFETTE_PEER_HEARTBEAT_INTERVAL_MS=750\nMOUFFETTE_TRANSPORT_TIMEOUT_MS=1500\n');
+assert.throws(() => loadServerConfig({ envFile }), /must exceed two heartbeat intervals/);
 fs.rmSync(temporary, { recursive: true, force: true });
 console.log('server config tests passed');

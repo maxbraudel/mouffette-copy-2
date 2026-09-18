@@ -892,6 +892,54 @@ private slots:
         QVERIFY(controller.m_screenWindows.isEmpty());
     }
 
+    void preparedGraphAndPresentationEvidenceSurviveTemporarySendRejection()
+    {
+        QTemporaryDir identity;
+        WebSocketClient socket(identity.path(), false);
+        RemoteSceneController controller(nullptr, &socket);
+        controller.m_ws = nullptr;
+        controller.onRemoteSceneStart(QStringLiteral("pending-owner"), textScene());
+        QTRY_VERIFY_WITH_TIMEOUT(controller.m_sceneActivationRequested, 2000);
+        controller.m_pendingRemoteSessionId = QStringLiteral("pending-session");
+        controller.m_pendingSceneDigest = QString(64, QLatin1Char('a'));
+        controller.m_pendingSessionGeneration = 1;
+        controller.m_prepareChecklist = QJsonArray{QJsonObject{
+            {"itemId", "screen"}, {"stage", "screen_render_graph_ready"}, {"ready", true}}};
+        controller.m_ws = &socket;
+        QPointer<QQuickWindow> window = findRemoteWindow();
+        QVERIFY(window);
+        const quint64 sceneEpoch = controller.m_sceneEpoch;
+        controller.sendPrepareResult(true); // Offline send rejection remains pending.
+        QVERIFY(!controller.m_scenePreparedReported);
+        QVERIFY(controller.m_sceneActivationRequested);
+        const QJsonObject temporary{{"remoteSessionId", "pending-session"},
+            {"sceneRunId", controller.m_pendingSceneInstanceId},
+            {"digest", controller.m_pendingSceneDigest}, {"generation", 1},
+            {"code", "remote_session_reconnecting"}};
+        controller.onSceneErrorEnvelope(temporary);
+        QVERIFY(window);
+        QCOMPARE(controller.m_sceneEpoch, sceneEpoch);
+        QVERIFY(controller.m_sceneActivationRequested);
+        controller.m_pendingSessionGeneration = 2;
+        QJsonObject oldTerminal = temporary;
+        oldTerminal.insert("code", "scene_prepare_failed");
+        controller.onSceneErrorEnvelope(oldTerminal);
+        QVERIFY(window);
+        QCOMPARE(controller.m_sceneEpoch, sceneEpoch);
+        controller.m_sceneActivated = true;
+        controller.m_sceneCommitReceived = true;
+        controller.m_firstFramePresentedServerMonotonicMs = 1234;
+        controller.m_firstFramePresentedLocalSteadyMs = 5678;
+        controller.retrySceneAcknowledgements(true);
+        QVERIFY(!controller.m_firstFrameReported);
+        QCOMPARE(controller.m_firstFramePresentedServerMonotonicMs, qint64(1234));
+        QCOMPARE(controller.m_firstFramePresentedLocalSteadyMs, qint64(5678));
+        QVERIFY(controller.m_sceneActivated);
+        QVERIFY(window);
+        emit socket.remoteSessionRecoveryExpired(QStringLiteral("pending-session"), 1);
+        QTRY_VERIFY_WITH_TIMEOUT(window.isNull(), 2000);
+    }
+
     void queuedActivationCannotStartWithoutAnUnexpiredSessionProof()
     {
         QTemporaryDir identity;

@@ -8,7 +8,8 @@ const DECLARATIONS = Object.freeze({
     MOUFFETTE_SERVER_PORT: { type: 'int', default: 8080, min: 1, max: 65535 },
     MOUFFETTE_AUTH_CHALLENGE_TIMEOUT_MS: { type: 'int', default: 10000, min: 1000, max: 120000 },
     MOUFFETTE_PEER_HEARTBEAT_INTERVAL_MS: { type: 'int', default: 750, min: 250, max: 5000 },
-    MOUFFETTE_REMOTE_SESSION_RECOVERY_TIMEOUT_MS: { type: 'int', default: 3000, min: 1000, max: 60000 },
+    MOUFFETTE_REMOTE_SESSION_RECOVERY_TIMEOUT_MS: { type: 'int', default: 15000, min: 1000, max: 60000 },
+    MOUFFETTE_TRANSPORT_TIMEOUT_MS: { type: 'int', default: 5000, min: 1000, max: 60000 },
     MOUFFETTE_SESSION_LEASE_SWEEP_INTERVAL_MS: { type: 'int', default: 100, min: 25, max: 5000 },
     MOUFFETTE_REMOTE_SESSION_OPEN_TIMEOUT_MS: { type: 'int', default: 5000, min: 250, max: 30000 },
     MOUFFETTE_REMOTE_SESSION_OPEN_REQUEST_TTL_MS: { type: 'int', default: 300000, min: 1000, max: 86400000 },
@@ -124,7 +125,11 @@ function loadServerConfig(options = {}) {
 
     // Two missed heartbeat intervals detect an interruption. There is only one
     // subsequent recovery period, starting at that detection (or socket loss).
-    const transportTimeoutMs = values.MOUFFETTE_PEER_HEARTBEAT_INTERVAL_MS * 2;
+    const suspectAfterMs = values.MOUFFETTE_PEER_HEARTBEAT_INTERVAL_MS * 2;
+    const transportTimeoutMs = values.MOUFFETTE_TRANSPORT_TIMEOUT_MS;
+    if (transportTimeoutMs <= suspectAfterMs) {
+        throw new Error("MOUFFETTE_TRANSPORT_TIMEOUT_MS must exceed two heartbeat intervals");
+    }
     if (values.MOUFFETTE_SESSION_LEASE_SWEEP_INTERVAL_MS
         > values.MOUFFETTE_PEER_HEARTBEAT_INTERVAL_MS) {
         throw new Error('MOUFFETTE_SESSION_LEASE_SWEEP_INTERVAL_MS must not exceed the heartbeat interval');
@@ -135,7 +140,7 @@ function loadServerConfig(options = {}) {
     }
     if (values.MOUFFETTE_REMOTE_SESSION_TOMBSTONE_TTL_MS
         < Math.max(values.MOUFFETTE_REMOTE_SESSION_OPEN_TIMEOUT_MS,
-            transportTimeoutMs + values.MOUFFETTE_REMOTE_SESSION_RECOVERY_TIMEOUT_MS)) {
+            suspectAfterMs + values.MOUFFETTE_REMOTE_SESSION_RECOVERY_TIMEOUT_MS)) {
         throw new Error('MOUFFETTE_REMOTE_SESSION_TOMBSTONE_TTL_MS must cover the open and lease timeouts');
     }
     if (values.MOUFFETTE_REMOTE_SESSION_OPEN_REQUEST_TTL_MS
@@ -176,7 +181,8 @@ function loadServerConfig(options = {}) {
         port: values.MOUFFETTE_SERVER_PORT,
         authChallengeTimeoutMs: values.MOUFFETTE_AUTH_CHALLENGE_TIMEOUT_MS,
         heartbeatIntervalMs: values.MOUFFETTE_PEER_HEARTBEAT_INTERVAL_MS,
-        leaseTimeoutMs: transportTimeoutMs,
+        leaseTimeoutMs: suspectAfterMs,
+        transportTimeoutMs,
         sessionRecoveryTimeoutMs: values.MOUFFETTE_REMOTE_SESSION_RECOVERY_TIMEOUT_MS,
         sessionLeaseSweepIntervalMs: values.MOUFFETTE_SESSION_LEASE_SWEEP_INTERVAL_MS,
         remoteSessionOpenTimeoutMs: values.MOUFFETTE_REMOTE_SESSION_OPEN_TIMEOUT_MS,
@@ -202,7 +208,7 @@ function loadServerConfig(options = {}) {
         assetRemovalTombstoneTtlMs: values.MOUFFETTE_ASSET_REMOVAL_TOMBSTONE_TTL_MS,
         statsIntervalMs: values.MOUFFETTE_STATS_INTERVAL_MS,
         cursorDebug: values.MOUFFETTE_CURSOR_DEBUG,
-        policyVersion: 4,
+        policyVersion: 5,
         values: Object.freeze(values),
         provenance: Object.freeze(provenance),
         warnings: Object.freeze(warnings),

@@ -22,7 +22,7 @@ const { MouffetteServer } = require('./server');
     const signature = crypto.sign(null,
         challengePayload({ ...challenge, runtimeId, instanceId, instanceOrdinal }), keys.privateKey);
     const response = {
-        protocolVersion: 11,
+        protocolVersion: 12,
         serverBootId,
         runtimeId,
         instanceId,
@@ -133,7 +133,7 @@ function addAuthenticationCandidate(server, connectionId, keyPair, runtimeId,
     };
     server.clients.set(connectionId, client);
     const response = {
-        protocolVersion: 11,
+        protocolVersion: 12,
         serverBootId: server.serverBootId,
         runtimeId,
         instanceId,
@@ -345,7 +345,7 @@ function messages(socket, type) {
         targetConnectionGeneration: 1,
     }).session;
 
-    registryNow = base + 3_000;
+    registryNow = base + boundaryServer.config.transportTimeoutMs;
     boundaryServer.handleAuthResponse(
         'candidate-boundary', boundaryCandidate.response, registryNow);
     assert.equal(boundaryCandidate.client.authenticated, true);
@@ -409,9 +409,9 @@ function messages(socket, type) {
     const ghostSocket = addAuthenticatedClient(server, 'ghost-connection', 'ghost-device');
     const ghost = server.clients.get('ghost-connection');
     ghost.lastHeartbeatAt = 50_000;
-    assert.equal(server.sweepExpiredClientTransports(50_000 + server.config.leaseTimeoutMs - 1), 0);
+    assert.equal(server.sweepExpiredClientTransports(50_000 + server.config.transportTimeoutMs - 1), 0);
     assert.equal(server.clients.get('ghost-connection'), ghost);
-    assert.equal(server.sweepExpiredClientTransports(50_000 + server.config.leaseTimeoutMs), 1);
+    assert.equal(server.sweepExpiredClientTransports(50_000 + server.config.transportTimeoutMs), 1);
     assert.equal(server.clients.has('ghost-connection'), false);
     assert.equal(ghostSocket.readyState, WebSocket.CLOSED);
 }
@@ -431,26 +431,26 @@ function messages(socket, type) {
     addAuthenticatedClient(server, 'clock-target', 'B');
     const session = server.remoteSessions.open(binding()).session;
     server.handleRemoteSessionDeparture(server.clients.get('clock-owner'));
-    assert.equal(session.graceDeadlineAt, 13_000);
-    assert.equal(session.graceDeadlineEpochMs, 1_003_000);
+    assert.equal(session.graceDeadlineAt, 25_000);
+    assert.equal(session.graceDeadlineEpochMs, 1_015_000);
 
     epoch += 24 * 60 * 60 * 1_000;
-    monotonic = 12_999;
+    monotonic = 24_999;
     server.sweepRemoteSessionLeases();
     assert.equal(session.phase, 'Grace',
         'a forward wall-clock jump must not expire the lease early');
-    assert.equal(session.graceDeadlineEpochMs, 1_003_000,
+    assert.equal(session.graceDeadlineEpochMs, 1_015_000,
         'the originally advertised wall deadline is not pushed');
 
     epoch -= 48 * 60 * 60 * 1_000;
-    monotonic = 13_000;
+    monotonic = 25_000;
     server.sweepRemoteSessionLeases();
     assert.equal(session.phase, 'CleanupPending',
         'the exact monotonic boundary stays terminal after a wall-clock rollback');
 }
 
 // OPEN permits healthy targets before the 1,500 ms suspicion threshold;
-// at 1,500 ms a silent transport is fenced before any new session exists.
+// at 1,500 ms admission pauses while the transport remains open until 5 seconds.
 {
     const createOpenServer = () => {
         let monotonic = 10_000;
@@ -490,10 +490,10 @@ function messages(socket, type) {
         requestId: 'open-at-boundary',
     });
     assert.equal(boundary.server.remoteSessions.sessions.size, 0);
-    assert.equal(boundary.server.clients.has('open-target'), false);
-    assert.equal(boundary.target.ws.readyState, WebSocket.CLOSED);
+    assert.equal(boundary.server.clients.has('open-target'), true);
+    assert.equal(boundary.target.ws.readyState, WebSocket.OPEN);
     assert.equal(messages(boundary.ownerSocket, 'error').at(-1).code,
-        'target_offline');
+        'remote_session_reconnecting');
 }
 
 // A healthy target accepts independent sessions from several controllers.
@@ -1803,7 +1803,7 @@ function cursorContext(prefix) {
     }];
     context.cursorMessage = (overrides = {}) => ({
         type: 'remote_session_cursor',
-        protocolVersion: 11,
+        protocolVersion: 12,
         serverBootId: context.server.serverBootId,
         messageId: crypto.randomUUID(),
         connectionGeneration: 1,
@@ -1876,7 +1876,7 @@ function cursorContext(prefix) {
         context.session.phase = phase;
         context.server.handleMessage('target-connection', context.cursorMessage());
         assert.equal(messages(context.targetSocket, 'error').at(-1).code,
-            'remote_session_not_active');
+            phase === 'Grace' ? 'remote_session_reconnecting' : 'remote_session_not_active');
     }
     assert.equal(messages(context.ownerSocket, 'remote_session_cursor').length, 0);
     assert.equal(context.session.cursorSample, undefined);

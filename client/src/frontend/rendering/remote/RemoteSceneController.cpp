@@ -6,6 +6,7 @@
 #include "backend/config/AppConfig.h"
 #include "backend/network/SceneRunCoordinator.h"
 #include "backend/network/WebSocketClient.h"
+#include "backend/runtime/SuspendInclusiveClock.h"
 #include "backend/domain/media/MediaFilePolicy.h"
 #include "frontend/rendering/canvas/CanvasQmlTypes.h"
 #include "frontend/rendering/canvas/MediaListModel.h"
@@ -94,8 +95,7 @@ bool readBoundedInt64(const QJsonObject& object,
 
 qint64 localSteadyMilliseconds()
 {
-	using namespace std::chrono;
-	return duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
+	return MouffetteClock::nowMs();
 }
 
 
@@ -200,6 +200,11 @@ RemoteSceneController::RemoteSceneController(FileManager* fileManager, WebSocket
                 this, &RemoteSceneController::onScenePreparedEnvelope);
         connect(m_ws, &WebSocketClient::sceneCommitReceived,
                 this, &RemoteSceneController::onSceneCommitEnvelope);
+        connect(m_ws, &WebSocketClient::sceneStartedReceived, this,
+                [this](const QJsonObject& envelope) {
+            if (matchesSceneEnvelope(envelope) && envelope.value(QStringLiteral("allStarted")).toBool())
+                m_firstFrameAcknowledged = true;
+        });
         connect(m_ws, &WebSocketClient::sceneStateSnapshotReceived,
                 this, &RemoteSceneController::onSceneStateSnapshotEnvelope);
         connect(m_ws, &WebSocketClient::sceneStopReceived,
@@ -210,13 +215,15 @@ RemoteSceneController::RemoteSceneController(FileManager* fileManager, WebSocket
                 this, &RemoteSceneController::onSceneErrorEnvelope);
         connect(m_ws, &WebSocketClient::remoteSessionResumed,
                 this, &RemoteSceneController::onRemoteSessionResumedEnvelope);
+        connect(m_ws, &WebSocketClient::reconciliationCompleted, this,
+                [this] { retrySceneAcknowledgements(true); });
         connect(m_ws, &WebSocketClient::heartbeatSampleReceived,
                 this, [this](quint64, qint64, qint64, qint64) {
                     // PREPARED can precede the first sufficiently precise
                     // sample (especially just after authentication/resume).
                     // ARMED is idempotent, so retry the pending barrier when
                     // the synchronization burst publishes each new sample.
-                    tryArmPreparedScene();
+                    retrySceneAcknowledgements();
                     // A compositor frame may land while the latest network
                     // sample is temporarily outside policy. Keep the observed
                     // presentation time and retry as soon as clock quality
@@ -347,7 +354,12 @@ void RemoteSceneController::resetSceneSynchronization() {
 	m_sceneAllPrepared = false;
 	m_sceneCommitReceived = false;
 	m_committedActivationLeadMs = 0;
+	m_activationLocalSteadyMs = -1;
+	m_sceneRecoveryDeadlineMs = -1;
+	m_pendingSceneCommit = {};
 	m_firstFrameReported = false;
+	m_firstFrameAcknowledged = false;
+	m_lastPrepareAckAttemptMs = m_lastArmedAckAttemptMs = m_lastStartedAckAttemptMs = -1;
 	m_firstFramePresentedServerMonotonicMs = -1;
 	m_firstFramePresentedLocalSteadyMs = -1;
     m_activationEpochMs = 0;
@@ -399,6 +411,13 @@ void RemoteSceneController::onScenePrepareEnvelope(const QJsonObject& envelope)
         || (!m_startingSceneInstanceId.isEmpty() && m_startingSceneInstanceId != runId)) {
         m_ws->sendScenePrepared(runId, false, {}, QStringLiteral("scene_target_busy"),
                                 QStringLiteral("Target is already preparing or presenting another scene"));
+        return;
+    }
+    if (runId == m_pendingSceneInstanceId) {
+        if (!matchesSceneEnvelope(envelope)) return;
+        // PREPARE is replayed after a lost acknowledgement. Do not reset an
+        // already primed graph, its barriers, or an immutable COMMIT.
+        retrySceneAcknowledgements(true);
         return;
     }
 
@@ -467,6 +486,8 @@ void RemoteSceneController::onScenePrepareEnvelope(const QJsonObject& envelope)
     m_sceneCommitReceived = false;
     m_committedActivationLeadMs = 0;
     m_firstFrameReported = false;
+    m_firstFrameAcknowledged = false;
+    m_lastPrepareAckAttemptMs = m_lastArmedAckAttemptMs = m_lastStartedAckAttemptMs = -1;
 	m_firstFramePresentedServerMonotonicMs = -1;
 	m_firstFramePresentedLocalSteadyMs = -1;
 
@@ -532,16 +553,24 @@ bool RemoteSceneController::remoteRenderGraphsReady() const
 
 void RemoteSceneController::onScenePreparedEnvelope(const QJsonObject& envelope)
 {
-    if (!matchesSceneEnvelope(envelope) || !m_scenePreparedReported
+    if (!matchesSceneEnvelope(envelope)
         || !envelope.value(QStringLiteral("allPrepared")).toBool(false)
         || !m_ws) return;
+    m_scenePreparedReported = true;
     m_sceneAllPrepared = true;
     tryArmPreparedScene();
 }
 
 void RemoteSceneController::onSceneCommitEnvelope(const QJsonObject& envelope)
 {
-    if (!matchesSceneEnvelope(envelope) || !m_sceneArmedReported || !m_ws) return;
+    if (!matchesSceneEnvelope(envelope) || !m_ws
+        || (!m_sceneActivationRequested && !m_sceneActivated)) return;
+    if (m_sceneCommitReceived) {
+        // SceneRunCoordinator has already checked that the decision matches.
+        // Never re-schedule an old timer or restart an existing presentation.
+        if (m_sceneActivated) sendFirstFramePresented(true);
+        return;
+    }
     for (const auto& item : m_mediaItems) {
         if (item->type != QLatin1String("text")
             && !MediaResidencyManager::instance().ready(item->residencyOwner)) {
@@ -576,7 +605,8 @@ void RemoteSceneController::onSceneCommitEnvelope(const QJsonObject& envelope)
     const qint64 serverNow = m_ws->estimatedServerMonotonicMs();
 	const qint64 localUncertainty = m_ws->sceneClockUncertaintyMs();
     if (serverNow < 0 || localUncertainty < 0 || localUncertainty > maximum) {
-        sendPrepareResult(false, QStringLiteral("Invalid synchronized scene commitment"));
+        m_pendingSceneCommit = envelope;
+        m_ws->requestSceneClockSynchronization();
         return;
     }
 	const qint64 remaining = startServerMonotonicMs - serverNow;
@@ -584,9 +614,14 @@ void RemoteSceneController::onSceneCommitEnvelope(const QJsonObject& envelope)
 		|| remaining > activationLeadMs + maximum
 		|| remaining > std::numeric_limits<int>::max()) {
         sendPrepareResult(false, QStringLiteral("Scene commitment missed its activation window"));
+        m_ws->sendSceneStop(m_pendingSceneInstanceId, QStringLiteral("scene_commit_deadline_missed"));
+        m_ws->sceneRunCoordinator()->finishRun(m_pendingSceneInstanceId, true,
+                                              QStringLiteral("scene_commit_deadline_missed"));
+        clearScene();
         return;
     }
     m_sceneCommitReceived = true;
+    m_pendingSceneCommit = {};
     m_timelineStartServerMs = startServerMonotonicMs;
     m_committedActivationLeadMs = activationLeadMs;
     onRemoteSceneActivate(
@@ -687,8 +722,21 @@ void RemoteSceneController::onSceneStoppedEnvelope(const QJsonObject& envelope)
 void RemoteSceneController::onSceneErrorEnvelope(const QJsonObject& envelope)
 {
     if (!matchesSceneEnvelope(envelope)) return;
+    const QString code = envelope.value(QStringLiteral("code")).toString();
+    if (code == QLatin1String("remote_session_reconnecting")
+        || code == QLatin1String("session_sync_pending")
+        || code == QLatin1String("session_reconciliation_pending")
+        || envelope.value(QStringLiteral("temporary")).toBool()
+        || envelope.value(QStringLiteral("errorClass")).toString() == QLatin1String("temporary")
+        || envelope.value(QStringLiteral("retryable")).toBool()) {
+        m_scenePreparedReported = false;
+        m_firstFrameReported = false;
+        if (!m_sceneCommitReceived) m_sceneArmedReported = false;
+        return;
+    }
     qWarning() << "Remote scene protocol error:"
                << envelope.value(QStringLiteral("code")).toString();
+    if (m_ws) m_ws->sceneRunCoordinator()->finishRun(m_pendingSceneInstanceId, true, code);
     ++m_sceneEpoch;
     clearScene();
 }
@@ -703,31 +751,37 @@ void RemoteSceneController::onRemoteSessionResumedEnvelope(const QJsonObject& en
 		return;
 	}
 	m_pendingSessionGeneration = static_cast<quint64>(generation);
-	if (m_sceneAllPrepared && !m_sceneCommitReceived) {
-		// The previous socket may have disappeared after ARMED was merely queued
-		// locally. Re-establish the clock map and replay the idempotent command on
-		// the rebound RemoteSession generation.
-		m_sceneArmedReported = false;
-		if (m_ws) m_ws->requestSceneClockSynchronization();
-		tryArmPreparedScene();
-	}
-	// A frame can genuinely reach the compositor while the transport is in its
-	// lease grace period. Re-send that exact observation after resumption; never
-	// manufacture a new presentation time merely because the socket returned.
-	if (m_sceneActivated && m_screensAwaitingFirstFrame.isEmpty()
-		&& m_firstFramePresentedLocalSteadyMs >= 0) {
-		sendFirstFramePresented(true);
-	}
+	retrySceneAcknowledgements(true);
+}
+
+void RemoteSceneController::retrySceneAcknowledgements(bool replay)
+{
+    if (!m_ws || m_pendingSceneInstanceId.isEmpty() || m_teardownInProgress) return;
+    if (replay) {
+        m_lastPrepareAckAttemptMs = m_lastArmedAckAttemptMs = m_lastStartedAckAttemptMs = -1;
+        m_scenePreparedReported = false;
+        m_firstFrameReported = false;
+        if (!m_sceneCommitReceived) m_sceneArmedReported = false;
+    }
+    if (m_sceneActivationRequested && !m_sceneCommitReceived) sendPrepareResult(true);
+    tryArmPreparedScene();
+    if (m_sceneActivated && m_screensAwaitingFirstFrame.isEmpty()
+        && m_firstFramePresentedLocalSteadyMs >= 0) sendFirstFramePresented();
+    if (!m_pendingSceneCommit.isEmpty()) onSceneCommitEnvelope(m_pendingSceneCommit);
 }
 
 void RemoteSceneController::sendPrepareResult(bool success, const QString& detail)
 {
     if (!m_ws || m_pendingSceneInstanceId.isEmpty()) return;
     if (success) {
-        if (m_scenePreparedReported) return;
+        if (m_sceneAllPrepared) return;
+        const qint64 now = localSteadyMilliseconds();
+        if (m_lastPrepareAckAttemptMs >= 0
+            && now - m_lastPrepareAckAttemptMs < AppConfig::instance().controlRequestRetryMs()) return;
         for (const QJsonValue& value : std::as_const(m_prepareChecklist)) {
             if (!value.toObject().value(QStringLiteral("ready")).toBool(false)) return;
         }
+        m_lastPrepareAckAttemptMs = now;
         m_scenePreparedReported = m_ws->sendScenePrepared(
             m_pendingSceneInstanceId, true, m_prepareChecklist);
     } else {
@@ -739,11 +793,14 @@ void RemoteSceneController::sendPrepareResult(bool success, const QString& detai
 
 void RemoteSceneController::tryArmPreparedScene()
 {
-	if (!m_ws || !m_scenePreparedReported || !m_sceneAllPrepared
-		|| m_sceneArmedReported || m_sceneCommitReceived
+	if (!m_ws || !m_sceneAllPrepared
+		|| m_sceneCommitReceived
 		|| m_pendingSceneInstanceId.isEmpty()) {
 		return;
 	}
+	const qint64 now = localSteadyMilliseconds();
+	if (m_lastArmedAckAttemptMs >= 0
+		&& now - m_lastArmedAckAttemptMs < AppConfig::instance().controlRequestRetryMs()) return;
 
 	qint64 maximum = -1;
 	const qint64 uncertainty = m_ws->sceneClockUncertaintyMs();
@@ -757,6 +814,7 @@ void RemoteSceneController::tryArmPreparedScene()
 		return;
 	}
 
+	m_lastArmedAckAttemptMs = now;
 	m_sceneArmedReported = m_ws->sendSceneArmed(
 		m_pendingSceneInstanceId, uncertainty);
 	if (!m_sceneArmedReported) {
@@ -777,9 +835,12 @@ void RemoteSceneController::updatePrepareProgress()
 
 void RemoteSceneController::sendFirstFramePresented(bool forceReplay)
 {
-	if ((!forceReplay && m_firstFrameReported)
+	if ((!forceReplay && m_firstFrameAcknowledged)
 		|| !m_screensAwaitingFirstFrame.isEmpty()
         || !m_ws || m_pendingSceneInstanceId.isEmpty()) return;
+	const qint64 now = localSteadyMilliseconds();
+	if (!forceReplay && m_lastStartedAckAttemptMs >= 0
+		&& now - m_lastStartedAckAttemptMs < AppConfig::instance().controlRequestRetryMs()) return;
 	if (m_firstFramePresentedServerMonotonicMs < 0) {
 		qint64 maximumClockSkewMs = -1;
 		const qint64 uncertaintyMs = m_ws->sceneClockUncertaintyMs();
@@ -800,6 +861,7 @@ void RemoteSceneController::sendFirstFramePresented(bool forceReplay)
 	}
 	const qint64 timestamp = m_firstFramePresentedServerMonotonicMs;
 	if (timestamp < 0) return;
+	m_lastStartedAckAttemptMs = now;
 	m_firstFrameReported = m_ws->sendSceneStarted(
 		m_pendingSceneInstanceId, true, timestamp) || m_firstFrameReported;
 	if (m_firstFrameReported) disconnectFirstFrameObservers();
@@ -1322,6 +1384,7 @@ void RemoteSceneController::onRemoteSceneActivate(const QString& senderClientId,
     }
 
     m_activationEpochMs = nowMs + remainingMs;
+    m_activationLocalSteadyMs = localSteadyMilliseconds() + remainingMs;
 	// ACTIVATE is a commit. Keep only the server-policy-derived STARTED bound
 	// until its timer fires; no independent client deadline may pre-empt it.
     if (m_sceneReadyTimeout) {
@@ -1423,6 +1486,8 @@ void RemoteSceneController::onRemoteSceneStop(const QString& senderClientId,
 }
 
 void RemoteSceneController::onConnectionLost() {
+    if (m_ws && !m_pendingSceneInstanceId.isEmpty())
+        m_ws->sceneRunCoordinator()->finishRun(m_pendingSceneInstanceId, true);
     const bool hadScene = !m_mediaItems.isEmpty() || !m_screenWindows.isEmpty();
     m_startingSenderClientId.clear();
     m_startingSceneInstanceId.clear();
@@ -1758,6 +1823,16 @@ void RemoteSceneController::activateScene() {
     }
 
     if (m_sceneActivated || !m_sceneActivationRequested) return;
+    if (m_ws && m_sceneCommitReceived && m_activationLocalSteadyMs >= 0
+        && localSteadyMilliseconds() - m_activationLocalSteadyMs
+            > m_ws->serverPolicy().value(QStringLiteral("sceneMaxClockSkewMs")).toInteger(0)) {
+        m_ws->sendSceneStop(m_pendingSceneInstanceId, QStringLiteral("scene_commit_deadline_missed"));
+        m_ws->sceneRunCoordinator()->finishRun(m_pendingSceneInstanceId, true,
+                                              QStringLiteral("scene_commit_deadline_missed"));
+        ++m_sceneEpoch;
+        clearScene();
+        return;
+    }
 	const quint64 activationEpoch = m_sceneEpoch;
 	bool activationGraphReady = remoteRenderGraphsReady();
 	for (auto it = m_screenWindows.cbegin();
@@ -1860,6 +1935,17 @@ void RemoteSceneController::activateScene() {
 }
 
 void RemoteSceneController::handleSceneReadyTimeout() {
+    if (m_ws && m_ws->isSessionRecovering(m_pendingRemoteSessionId)) {
+        const qint64 now = localSteadyMilliseconds();
+        const qint64 deadline = now + m_ws->sessionRecoveryRemainingMs(m_pendingRemoteSessionId);
+        m_sceneRecoveryDeadlineMs = m_sceneRecoveryDeadlineMs < 0
+            ? deadline : std::min(m_sceneRecoveryDeadlineMs, deadline);
+        const qint64 remaining = m_sceneRecoveryDeadlineMs - now;
+        if (remaining > 0 && m_sceneReadyTimeout) {
+            m_sceneReadyTimeout->start(int(remaining));
+            return;
+        }
+    }
     qWarning() << "RemoteSceneController: timed out waiting for remote media to load";
     sendPrepareResult(
         false,

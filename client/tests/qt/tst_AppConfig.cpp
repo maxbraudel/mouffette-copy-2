@@ -35,6 +35,7 @@ class AppConfigTest final : public QObject {
 
 private slots:
     void loadsEmbeddedDefaults();
+    void validatesRetentionAndDiagnostics();
     void configuresTimeline();
     void appAlwaysOnTopIsOptionalAndPersistent();
     void configuresMediaRamReserve();
@@ -52,6 +53,29 @@ private slots:
     void validatesIncomingSessionOrphanTimeoutFromCli();
     void warnsAndIgnoresUnknownNamespacedEnvKey();
 };
+
+void AppConfigTest::validatesRetentionAndDiagnostics() {
+    QTemporaryDir directory;
+    auto options = isolatedOptions(writeEnvFile(directory, "network.env", ""));
+    AppConfig config;
+    QString error;
+    QVERIFY(config.load(options, &error));
+    QCOMPARE(config.remoteMediaRetentionMs(), 600000);
+    QCOMPARE(config.remoteMediaCacheMaxMiB(), 10240);
+    QVERIFY(config.networkDiagnostics());
+    QVERIFY(!config.networkDiagnosticsVerbose());
+    options.processEnvironment.insert("MOUFFETTE_REMOTE_MEDIA_RETENTION_MS", "120000");
+    options.processEnvironment.insert("MOUFFETTE_REMOTE_MEDIA_CACHE_MAX_MIB", "256");
+    options.processEnvironment.insert("MOUFFETTE_NETWORK_DIAGNOSTICS", "false");
+    options.processEnvironment.insert("MOUFFETTE_NETWORK_DIAGNOSTICS_VERBOSE", "true");
+    QVERIFY(config.load(options, &error));
+    QCOMPARE(config.remoteMediaRetentionMs(), 120000);
+    QCOMPARE(config.remoteMediaCacheMaxMiB(), 256);
+    QVERIFY(!config.networkDiagnostics());
+    QVERIFY(config.networkDiagnosticsVerbose());
+    options.processEnvironment.insert("MOUFFETTE_REMOTE_MEDIA_RETENTION_MS", "0");
+    QVERIFY(!config.load(options, &error));
+}
 
 void AppConfigTest::configuresTimeline() {
     QTemporaryDir directory;
@@ -143,7 +167,7 @@ void AppConfigTest::loadsEmbeddedDefaults() {
     // The embedded .env also overrides the compiled hidden-media timeout.
     QCOMPARE(config.projectMediaHiddenTimeoutMs(), qint64(180000));
     QCOMPARE(config.projectHiddenRetentionMs(), qint64(240000));
-    QCOMPARE(config.incomingSessionOrphanTimeoutMs(), qint64(3000));
+    QCOMPARE(config.incomingSessionOrphanTimeoutMs(), qint64(5000));
     QCOMPARE(config.connectionAttemptTimeoutMs(), 10000);
     QCOMPARE(config.reconnectStableResetMs(), 30000);
     QCOMPARE(config.uploadActionMinIntervalMs(), 300);

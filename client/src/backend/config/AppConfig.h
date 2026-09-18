@@ -106,7 +106,11 @@ public:
         AllowMultipleInstances,
         CursorDebug,
         RuntimeDiagnostics,
-        CanvasProfiling
+        CanvasProfiling,
+        RemoteMediaRetentionMs,
+        RemoteMediaCacheMaxMiB,
+        NetworkDiagnostics,
+        NetworkDiagnosticsVerbose
     };
 
     struct LoadOptions {
@@ -243,6 +247,11 @@ public:
     bool runtimeDiagnostics() const { return m_runtimeDiagnostics; }
     bool canvasProfiling() const { return m_canvasProfiling; }
 
+    int remoteMediaRetentionMs() const { return m_remoteMediaRetentionMs; }
+    int remoteMediaCacheMaxMiB() const { return m_remoteMediaCacheMaxMiB; }
+    bool networkDiagnostics() const { return m_networkDiagnostics; }
+    bool networkDiagnosticsVerbose() const { return m_networkDiagnosticsVerbose; }
+
 private:
     void resetToCompiledDefaults();
 
@@ -334,6 +343,10 @@ private:
     bool m_cursorDebug = false;
     bool m_runtimeDiagnostics = false;
     bool m_canvasProfiling = false;
+    int m_remoteMediaRetentionMs = 600000;
+    int m_remoteMediaCacheMaxMiB = 10240;
+    bool m_networkDiagnostics = true;
+    bool m_networkDiagnosticsVerbose = false;
 };
 
 #endif // APPCONFIG_H

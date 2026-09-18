@@ -168,14 +168,17 @@ public:
 
     bool send(QJsonObject message)
     {
-        return sendOn(peer, bootId, std::move(message));
+        const QString type = message.value("type").toString();
+        static const QSet<QString> dataTypes {"upload_start", "upload_chunk", "upload_complete", "upload_resume",
+            "upload_ready", "upload_resume_ready", "upload_progress", "upload_finished"};
+        return sendOn(dataTypes.contains(type) ? dataPeer : peer, bootId, std::move(message));
     }
 
     bool sendOn(QWebSocket* socket, const QString& socketBootId,
                 QJsonObject message)
     {
         if (!socket) return false;
-        message.insert(QStringLiteral("protocolVersion"), 11);
+        message.insert(QStringLiteral("protocolVersion"), 12);
         message.insert(QStringLiteral("serverBootId"), socketBootId);
         completeV7TestEnvelope(message);
         if (message.value(QStringLiteral("messageId")).toString().isEmpty()) {
@@ -313,12 +316,13 @@ public:
 
     QWebSocketServer server;
     QPointer<QWebSocket> peer;
+    QPointer<QWebSocket> dataPeer;
     QString ownerEndpointId;
     QString bootId;
     quint64 connectionGeneration = 1;
     int heartbeatIntervalMs = 1'000;
     int leaseTimeoutMs = 10'000;
-    int policyVersion = 1;
+    int policyVersion = 5;
     int sessionRecoveryTimeoutMs = -1;
     bool acknowledgeHeartbeats = true;
     int acceptedConnections = 0;
@@ -340,6 +344,18 @@ private:
     {
         QWebSocket* socket = server.nextPendingConnection();
         if (!socket) return;
+        if (socket->requestUrl().hasQuery()) {
+            dataPeer = socket;
+            socket->setParent(&server);
+            connect(socket, &QWebSocket::textMessageReceived, this, [this](const QString& encoded) {
+                const QJsonObject message = QJsonDocument::fromJson(encoded.toUtf8()).object();
+                if (message.value("type") == "upload_start") uploadStarts.append(message);
+                if (message.value("type") == "upload_abort") uploadAborts.append(message);
+            });
+            sendOn(socket, bootId, {{"type", "upload_channel_ready"}, {"endpointId", ownerEndpointId},
+                {"connectionGeneration", double(connectionGeneration)}});
+            return;
+        }
         peer = socket;
         peer->setParent(&server);
         ++acceptedConnections;
@@ -387,6 +403,10 @@ private:
                     {"sessions", QJsonArray{}}, {"complete", true}, {"absentSessionIds", QJsonArray{}}
                 };
                 if (replyReconciliation) sendOn(socket, socketBootId, reconciliationReply);
+            } else if (type == QLatin1String("request_upload_channel")) {
+                sendOn(socket, socketBootId, {{"type", "upload_channel_token"}, {"token", QString(48, QLatin1Char('d'))},
+                    {"connectionGeneration", double(socketGeneration)}, {"expiresAt", double(QDateTime::currentMSecsSinceEpoch() + 10000)},
+                    {"requestId", message.value("requestId")}});
             } else if (type == QLatin1String("upload_start")) {
                 uploadStarts.append(message);
             } else if (type == QLatin1String("upload_abort")) {
@@ -423,10 +443,11 @@ private:
     {
         const QJsonObject policy{
             {QStringLiteral("policyVersion"), policyVersion},
+            {QStringLiteral("transportTimeoutMs"), 5000},
             {QStringLiteral("heartbeatIntervalMs"), heartbeatIntervalMs},
-            {QStringLiteral("transportSuspectAfterMs"), policyVersion >= 4 ? leaseTimeoutMs : qMax(250, leaseTimeoutMs / 2)},
+            {QStringLiteral("transportSuspectAfterMs"), heartbeatIntervalMs * 2},
             {QStringLiteral("sessionRecoveryTimeoutMs"), sessionRecoveryTimeoutMs > 0 ? sessionRecoveryTimeoutMs : leaseTimeoutMs},
-            {QStringLiteral("leaseTimeoutMs"), leaseTimeoutMs},
+            {QStringLiteral("leaseTimeoutMs"), heartbeatIntervalMs * 2},
             {QStringLiteral("scenePrepareTimeoutMs"), 15'000},
             {QStringLiteral("sceneActivationLeadMs"), 4'000},
             {QStringLiteral("sceneMaxClockSkewMs"), 50},
@@ -478,7 +499,7 @@ private slots:
         WebSocketClient client(root.path(), false);
         ConnectionManager connections(&client);
         RemoteSessionTestServer server(client.endpointId());
-        server.policyVersion = 4;
+        server.policyVersion = 5;
         server.heartbeatIntervalMs = 750;
         server.leaseTimeoutMs = 1'500;
         server.sessionRecoveryTimeoutMs = 3'000;
@@ -516,7 +537,7 @@ private slots:
         WebSocketClient client(root.path(), false, nullptr, [&] { return now; });
         ConnectionManager connections(&client, nullptr, [&] { return now; });
         RemoteSessionTestServer server(client.endpointId());
-        server.policyVersion = 4;
+        server.policyVersion = 5;
         server.heartbeatIntervalMs = 750;
         server.leaseTimeoutMs = 1'500;
         server.sessionRecoveryTimeoutMs = 3'000;
@@ -545,7 +566,7 @@ private slots:
         WebSocketClient client(root.path(), false);
         ConnectionManager connections(&client);
         RemoteSessionTestServer server(client.endpointId());
-        server.policyVersion = 4;
+        server.policyVersion = 5;
         server.heartbeatIntervalMs = 750;
         server.leaseTimeoutMs = 1'500;
         server.sessionRecoveryTimeoutMs = 3'000;
@@ -1869,7 +1890,7 @@ private slots:
         QJsonObject authentication;
         auto sendServerMessage = [&](QJsonObject message) {
             QVERIFY2(peer, "The fake server has no authenticated peer");
-            message.insert(QStringLiteral("protocolVersion"), 11);
+            message.insert(QStringLiteral("protocolVersion"), 12);
             message.insert(QStringLiteral("serverBootId"), bootId);
             completeV7TestEnvelope(message);
             if (message.value(QStringLiteral("messageId")).toString().isEmpty()) {
@@ -1903,11 +1924,12 @@ private slots:
                 if (type == QLatin1String("auth_response")) {
                     authentication = message;
                     const QJsonObject policy{
-                        {QStringLiteral("policyVersion"), 1},
+                        {QStringLiteral("policyVersion"), 5},
+                        {QStringLiteral("transportTimeoutMs"), 5000},
                         {QStringLiteral("heartbeatIntervalMs"), 1'000},
-                        {QStringLiteral("transportSuspectAfterMs"), 1500},
+                        {QStringLiteral("transportSuspectAfterMs"), 2000},
                         {QStringLiteral("sessionRecoveryTimeoutMs"), 10'000},
-                        {QStringLiteral("leaseTimeoutMs"), 10'000},
+                        {QStringLiteral("leaseTimeoutMs"), 2000},
                         {QStringLiteral("scenePrepareTimeoutMs"), 15'000},
                         {QStringLiteral("sceneActivationLeadMs"), 4'000},
                         {QStringLiteral("sceneMaxClockSkewMs"), 50},
@@ -4519,7 +4541,7 @@ private slots:
 
         auto sendServerMessage = [&](QJsonObject message) {
             QVERIFY2(peer, "The fake server has no authenticated peer");
-            message.insert(QStringLiteral("protocolVersion"), 11);
+            message.insert(QStringLiteral("protocolVersion"), 12);
             message.insert(QStringLiteral("serverBootId"), bootId);
             completeV7TestEnvelope(message);
             if (message.value(QStringLiteral("messageId")).toString().isEmpty()) {
@@ -4558,11 +4580,12 @@ private slots:
                                 .toString(),
                             message.value(QStringLiteral("instanceId")).toString());
                     const QJsonObject policy{
-                        {QStringLiteral("policyVersion"), 1},
+                        {QStringLiteral("policyVersion"), 5},
+                        {QStringLiteral("transportTimeoutMs"), 5000},
                         {QStringLiteral("heartbeatIntervalMs"), 1'000},
-                        {QStringLiteral("transportSuspectAfterMs"), 1500},
+                        {QStringLiteral("transportSuspectAfterMs"), 2000},
                         {QStringLiteral("sessionRecoveryTimeoutMs"), 10'000},
-                        {QStringLiteral("leaseTimeoutMs"), 10'000},
+                        {QStringLiteral("leaseTimeoutMs"), 2000},
                         {QStringLiteral("scenePrepareTimeoutMs"), 15'000},
                         {QStringLiteral("sceneActivationLeadMs"), 4'000},
                         {QStringLiteral("sceneMaxClockSkewMs"), 50},

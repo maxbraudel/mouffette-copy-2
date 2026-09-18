@@ -5,6 +5,7 @@
 #include <QJsonObject>
 #include <QJsonValue>
 #include <QObject>
+#include <QSet>
 #include <QString>
 
 #include "backend/network/RemoteSessionCoordinator.h"
@@ -79,7 +80,7 @@ public:
                            QString* errorMessage = nullptr);
     bool acceptInboundEnvelope(const QJsonObject& envelope,
                                QString* errorMessage = nullptr);
-    void finishRun(const QString& sceneRunId, bool failed);
+    void finishRun(const QString& sceneRunId, bool failed, const QString& reason = {});
 
     static QJsonArray normalizeManifest(const QJsonArray& manifest,
                                         QString* errorMessage = nullptr);
@@ -111,6 +112,7 @@ private:
     RemoteSessionCoordinator* m_remoteSessions = nullptr;
     QHash<QString, Run> m_runsById;
     QList<QString> m_finishedRunOrder;
+    QHash<QString, QSet<QString>> m_terminalRunIdsBySession;
 };
 
 Q_DECLARE_METATYPE(SceneRunCoordinator::Phase)

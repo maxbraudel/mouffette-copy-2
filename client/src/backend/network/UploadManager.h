@@ -38,6 +38,7 @@ struct UploadFileInfo {
 
 struct IncomingUploadSession {
     QString senderId;
+    QString targetEndpointId;
     QString remoteSessionId;
     quint64 generation = 0;                 // RemoteSession generation
     quint64 sourceConnectionGeneration = 0; // authenticated sender transport
@@ -61,9 +62,11 @@ struct IncomingUploadSession {
     qint64 lastProgressBytesReported = 0;
     int totalFiles = 0;
     bool suspendedForResume = false;
+    bool initializationPending = false;
     std::shared_ptr<std::atomic_bool> validationCancelled;
     quint64 completionValidationEpoch = 0;
     bool completionValidationPending = false;
+    bool completionPromotionPending = false;
     bool completionValidationDone = false;
     QHash<QString, QString> verifiedDigestsByPath;
     QTimer* stallTimer = nullptr;
@@ -214,6 +217,7 @@ signals:
     // Carries the immutable transfer identity so terminal UI/history events
     // remain correlated even after the runtime transfer state is cleared.
     void uploadFinished(const QString& uploadId);
+    void uploadReidentified(const QString& previousUploadId, const QString& uploadId, const QString& targetEndpointId);
     void uploadCancelled(const QString& uploadId);
     void uploadRejected(const QString& uploadId, const QString& reason);
     void assetRemovalCommitted(const QString& targetEndpointId,
@@ -321,6 +325,8 @@ private:
         qint64 totalBytes = 0;
         qint64 sentBytes = 0;
         qint64 remoteAcknowledgedBytes = 0;
+        qint64 windowBytes = 64 * 1024;
+        bool startAccepted = false;
         QTimer* pumpTimer = nullptr;
         QTimer* stallTimer = nullptr;
         QTimer* startAckTimer = nullptr;
@@ -338,6 +344,7 @@ private:
     void startUpload(const QVector<UploadFileInfo>& files);
     void startVerifiedUpload(const QVector<UploadFileInfo>& files, const QString& uploadId);
     QHash<QString, quint64> m_pendingUploadVerification;
+    QHash<QString, QPair<QVector<UploadFileInfo>, QString>> m_waitingVerifiedUploads;
     QHash<QString, std::shared_ptr<std::atomic_bool>> m_uploadVerificationCancellation;
     QHash<QString, QString> m_verifyingUploadIds;
     QHash<QString, QSet<QString>> m_verifyingFileIdsByTarget;
@@ -386,7 +393,7 @@ private:
     void cleanupOrphanedIncomingCache();
     void cleanupIncomingCacheForConnectionLoss();
     bool discardIncomingUpload(const QString& uploadId,
-                               bool rememberRejectedUpload);
+                               bool rememberRejectedUpload, bool preserveBytes = false);
     bool removeResidualIncomingStaging(const QString& senderId,
                                        const QString& uploadId);
     void rejectIncomingUpload(const QString& senderId,
@@ -412,6 +419,11 @@ private:
     void emitEffectivePerFileProgress(const QString& fileId);
     bool canAcceptNewAction() const;
     void recordAcceptedAction();
+    void finishIncomingPromotion(const QString& uploadId, const QString& senderId,
+                                 const QString& remoteSessionId, quint64 generation,
+                                 quint64 sourceConnectionGeneration,
+                                 const QHash<QString, QString>& selectedPathByAsset,
+                                 const QHash<QString, QString>& selectedPathByFileId);
     void restartIncomingStallTimer(IncomingUploadSession& incoming);
     void closeIncomingFiles(IncomingUploadSession& incoming, bool flush);
     void suspendIncomingForResume(IncomingUploadSession& incoming);
@@ -467,6 +479,9 @@ private:
     QHash<QString, quint64> m_residencySequences;
     QHash<QString, QJsonObject> m_remoteResidency;
     void publishResidency(const QString& sessionId);
+    QHash<QString, qint64> m_lastResidencyPublication;
+    QSet<QString> m_pendingResidencyPublications;
+    QHash<QString, QJsonArray> m_publishedResidency;
     void receiveResidency(const QJsonObject& envelope);
     void releaseResidency(const QString& sessionId, const QString& sha256 = {});
     void settleIncomingFileReaders();
@@ -526,6 +541,8 @@ private:
     bool m_outgoingPumpRunning = false;
     bool m_outgoingPayloadCompleteSent = false;
     qint64 m_remoteAcknowledgedBytes = 0;
+    qint64 m_outgoingWindowBytes = 64 * 1024;
+    bool m_outgoingStartAccepted = false;
     QMetaObject::Connection m_uploadBytesWrittenConnection;
     QMetaObject::Connection m_uploadTransportLostConnection;
     QVector<QMetaObject::Connection> m_webSocketConnections;

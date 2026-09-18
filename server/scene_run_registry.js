@@ -188,6 +188,9 @@ class SceneRunRegistry {
             }
             return { ok: false, error: 'scene_not_preparing' };
         }
+        if (this.monotonicNow() >= run.prepareDeadlineServerMonotonicMs) {
+            return { ok: false, error: 'scene_prepare_timeout' };
+        }
         const replay = run.preparedEndpoints.has(endpointId);
         run.preparedEndpoints.add(endpointId);
         if (run.preparedEndpoints.size === 2) run.phase = SCENE_PHASES.PREPARED;
@@ -218,6 +221,9 @@ class SceneRunRegistry {
                 return { ok: true, replay: true, scheduled: true, run };
             }
             return { ok: false, error: 'scene_not_prepared' };
+        }
+        if (this.monotonicNow() >= run.prepareDeadlineServerMonotonicMs) {
+            return { ok: false, error: 'scene_prepare_timeout' };
         }
         const replay = run.armedEndpoints.has(endpointId);
         run.armedEndpoints.add(endpointId);
@@ -318,6 +324,9 @@ class SceneRunRegistry {
                 startSkewMs: observedSkewMs,
                 run,
             };
+        }
+        if (presentedServerMonotonicMs > run.startServerMonotonicMs + this.maximumStartSkewMs) {
+            return { ok: false, error: 'scene_commit_deadline_missed' };
         }
         const replay = run.startedEndpoints.has(endpointId);
         run.startedEndpoints.add(endpointId);
@@ -421,10 +430,12 @@ class SceneRunRegistry {
                 actions.push({ type: 'stop', code: 'scene_prepare_timeout', run });
             } else if (run.phase === SCENE_PHASES.SCHEDULED
                 && nowMonotonic >= run.startedDeadlineServerMonotonicMs) {
-                this.stop(run.sceneRunId, 'scene_started_timeout', {
+                const code = run.recoveryDeadlineServerMonotonicMs
+                    ? 'scene_commit_deadline_missed' : 'scene_started_timeout';
+                this.stop(run.sceneRunId, code, {
                     failed: true, nowEpoch, nowMonotonic,
                 });
-                actions.push({ type: 'stop', code: 'scene_started_timeout', run });
+                actions.push({ type: 'stop', code, run });
             } else if (run.phase === SCENE_PHASES.STOPPING
                 && nowMonotonic >= run.stopDeadlineServerMonotonicMs) {
                 const terminal = this.forceFinalize(run.sceneRunId, run.failed, {

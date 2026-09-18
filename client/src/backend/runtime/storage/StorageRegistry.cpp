@@ -118,7 +118,7 @@ QList<Component> components(const RuntimeProfileContext& context)
              if (!purged.succeeded()) return purged;
              return writeJson(root, cacheMetadata,
                               {{QStringLiteral("schemaVersion"), StorageVersions::ReceivedMedia}});
-         }, {}}
+         }, {{1, 2, Transition::Kind::Reset, {}}}}
     };
 }
 }

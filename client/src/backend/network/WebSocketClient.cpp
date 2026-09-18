@@ -1,4 +1,5 @@
 #include "backend/network/WebSocketClient.h"
+#include "backend/network/NetworkDiagnostics.h"
 #include "backend/config/AppConfig.h"
 #include "backend/network/RetryPolicy.h"
 #include "backend/runtime/SuspendInclusiveClock.h"
@@ -19,6 +20,32 @@
 #include <utility>
 
 namespace {
+constexpr qint64 kControlQueueLimit = 256 * 1024;
+constexpr qint64 kDataQueueLimit = 512 * 1024;
+bool dataWireType(const QString& type) {
+    static const QSet<QString> types {"upload_start", "upload_resume", "upload_chunk", "upload_complete",
+        "upload_ready", "upload_resume_ready", "upload_progress", "upload_finished"};
+    return types.contains(type);
+}
+QString safeCloseReason(const QString& reason) {
+    static const QHash<QString, QString> known {
+        {"Upload channel authentication failed", "data_authentication_failed"},
+        {"Authentication timeout", "authentication_timeout"},
+        {"Stale control channel", "stale_control_channel"},
+        {"Upload channel replaced", "data_channel_replaced"},
+        {"Control channel disconnected", "control_disconnected"},
+        {"Control channel unavailable", "control_unavailable"},
+        {"Protocol version mismatch", "protocol_version_mismatch"},
+        {"Invalid protocol envelope", "invalid_protocol_envelope"},
+        {"Authentication required", "authentication_required"},
+        {"Identity verification failed", "identity_verification_failed"},
+        {"Endpoint already connected", "endpoint_already_connected"}
+    };
+    // Untrusted close strings can contain secrets. Preserve recognized reasons,
+    // and report an explicit redaction marker for arbitrary remote text.
+    return reason.isEmpty() ? QStringLiteral("no_reason")
+        : known.value(reason, QStringLiteral("unrecognized_reason_redacted"));
+}
 constexpr int kClockSyncBurstProbeCount = 5;
 constexpr int kClockSyncBurstIntervalMs = 100;
 constexpr int kClockSyncBurstCooldownMs = 1000;
@@ -278,6 +305,9 @@ WebSocketClient::WebSocketClient(const QString& identityFallbackDirectory,
         m_receivedCursorSequenceBySession.remove(sessionId);
         m_publishedDeviceSnapshots.remove(sessionId);
         m_sessionDeadlines.remove(sessionId);
+        for (const QString& id : m_pendingScenePrepares.keys())
+            if (m_pendingScenePrepares.value(id).value("remoteSessionId").toString() == sessionId)
+                m_pendingScenePrepares.remove(id);
         m_resumeRequestIds.remove(sessionId);
     });
 
@@ -353,13 +383,17 @@ void WebSocketClient::onUploadTextMessageReceived(const QString& message) {
             if (isUploadChannelConnected()) m_uploadRetryAttempt = 0;
         });
         m_uploadClientId = readyEndpointId;
-        qDebug() << "Upload channel authenticated for client:" << m_uploadClientId;
+        NetworkDiagnostics::record("data_channel_ready", {{"channel", "data"}, {"connectionGeneration", double(m_connectionGeneration)}});
+        m_uploadTransportLossReported = false;
+        // The server will replay RESUME/COMPLETE against durable receiver state.
+        // Receipts queued on the previous data socket cannot outrun that fence.
+        m_pendingUploadResponses.clear();
+        emit uploadTransportBytesWritten(0);
         return;
     }
     if (type == "welcome") {
         // The removed upload-channel welcome is not proof of identity. Keep the
-        // dedicated socket unauthenticated and let the upload fall back to the
-        // already authenticated control connection.
+        // dedicated socket unauthenticated while transfers wait.
         qWarning() << "Upload channel server did not provide authenticated readiness";
         failUploadChannelAttempt(QStringLiteral("Upload channel response rejected"));
         return;
@@ -375,8 +409,11 @@ void WebSocketClient::onUploadTextMessageReceived(const QString& message) {
         failUploadChannelAttempt(QStringLiteral("Upload channel response rejected"));
         return;
     }
-    // Reuse the same message handler for upload progress/finished/all_files_removed
+    if (!dataWireType(type) && type != "error" && type != "upload_rejected"
+        && type != "upload_abort" && type != "upload_abort_ack") return;
+    m_dispatchingData = true;
     handleMessage(obj);
+    m_dispatchingData = false;
 }
 
 WebSocketClient::~WebSocketClient() {
@@ -466,6 +503,7 @@ void WebSocketClient::disconnect() {
     clearControlRequests();
     m_endpointDraining = true;
     m_pendingServerBootId.clear();
+    m_pendingUploadResponses.clear();
     m_endpointDisableRequestId.clear();
     if (m_hasEstablishedLease) {
         emit sessionsInvalidated(QStringLiteral("user_disabled"), m_serverBootId, m_connectionGeneration);
@@ -515,6 +553,7 @@ void WebSocketClient::scheduleUploadChannelRetry(const QString& reason)
                                  config.reconnectJitterPercent()}.delay(m_uploadRetryAttempt);
     m_uploadRetryAttempt = RetryPolicy::increment(m_uploadRetryAttempt);
     const quint64 transport = m_connectionGeneration;
+    NetworkDiagnostics::record("transport_retry", {{"channel", "data"}, {"reason", "channel_unavailable"}, {"delayMs", delay}, {"connectionGeneration", double(transport)}});
     qInfo() << "upload_channel_retry" << "reason" << reason << "delayMs" << delay << "transport" << transport;
     m_uploadRetries.schedule(QStringLiteral("retry"), delay, [this, transport] {
         if (transport == m_connectionGeneration && isConnected() && !m_endpointDraining) ensureUploadChannel();
@@ -531,11 +570,13 @@ void WebSocketClient::failUploadChannelAttempt(const QString& reason)
 
 void WebSocketClient::onUploadDisconnected()
 {
+    NetworkDiagnostics::record("socket_closed", {{"channel", "data"}, {"closeCode", m_uploadSocket ? int(m_uploadSocket->closeCode()) : 0}, {"closeReason", safeCloseReason(m_uploadSocket ? m_uploadSocket->closeReason() : QString())}}, true);
     failUploadChannelAttempt(QStringLiteral("Dedicated upload connection was lost"));
 }
 
 void WebSocketClient::onUploadError(QAbstractSocket::SocketError error)
 {
+    NetworkDiagnostics::record("socket_error", {{"channel", "data"}, {"socketError", int(error)}}, true);
     failUploadChannelAttempt(QStringLiteral("Upload socket error: %1").arg(error));
 }
 
@@ -562,6 +603,13 @@ qint64 WebSocketClient::leaseRemainingMs() const {
                                   - leaseElapsedMs());
 }
 
+qint64 WebSocketClient::transportRecoveryRemainingMs() const {
+    if (m_leaseExpired || !m_hasEstablishedLease) return 0;
+    const qint64 proof = m_lastServerContactContinuousMs + sessionProofBudgetMs();
+    return std::max<qint64>(0, (m_transportRecoveryDeadlineMs >= 0
+        ? std::min(proof, m_transportRecoveryDeadlineMs) : proof) - suspendInclusiveNowMs());
+}
+
 bool WebSocketClient::isUploadChannelConnected() const {
     return m_uploadChannelAuthenticated && m_uploadSocket
         && m_uploadSocket->state() == QAbstractSocket::ConnectedState;
@@ -569,8 +617,7 @@ bool WebSocketClient::isUploadChannelConnected() const {
 
 bool WebSocketClient::isUploadSessionTransportAvailable() const {
     if (!m_uploadSessionActive) return false;
-    if (m_useUploadSocketForSession) return isUploadChannelConnected();
-    return isConnected();
+    return isUploadChannelConnected();
 }
 
 qint64 WebSocketClient::uploadTransportBytesToWrite() const {
@@ -580,24 +627,15 @@ qint64 WebSocketClient::uploadTransportBytesToWrite() const {
 }
 
 bool WebSocketClient::beginUploadSession(bool preferUploadChannel) {
-    if (m_uploadSessionActive) {
-        if (!isUploadSessionTransportAvailable()) return false;
-        ++m_uploadSessionRefCount;
-        return true;
-    }
+    Q_UNUSED(preferUploadChannel);
     if (!isConnected()) return false;
-
+    if (!isUploadChannelConnected()) { ensureUploadChannel(); return false; }
+    if (m_uploadSessionActive) { ++m_uploadSessionRefCount; return true; }
     m_uploadSessionActive = true;
     m_uploadSessionRefCount = 1;
     m_uploadTransportLossReported = false;
-    m_useUploadSocketForSession = preferUploadChannel
-        && isUploadChannelConnected();
-    if (preferUploadChannel && !m_useUploadSocketForSession) {
-        // Warm the fast path asynchronously without delaying or re-entering the
-        // UI. This transfer stays on the control socket from START to COMPLETE.
-        ensureUploadChannel();
-    }
-    return isUploadSessionTransportAvailable();
+    m_useUploadSocketForSession = true;
+    return true;
 }
 
 void WebSocketClient::endUploadSession() {
@@ -647,10 +685,9 @@ bool WebSocketClient::ensureUploadChannel() {
         });
         connect(uploadSocket, &QWebSocket::bytesWritten, this,
                 [this, uploadSocket](qint64 bytes) {
-            if (m_uploadSocket == uploadSocket && m_uploadSessionActive
-                && m_useUploadSocketForSession) {
+            if (m_uploadSocket != uploadSocket) return;
+            if (m_uploadSessionActive && m_useUploadSocketForSession)
                 emit uploadTransportBytesWritten(bytes);
-            }
         });
     }
 
@@ -936,7 +973,7 @@ bool WebSocketClient::sendUploadChunk(const QString& remoteSessionId,
     if (!m_uploadSessionActive || m_canceledUploads.contains(uploadId)
         || !m_sceneRuns || !isUploadOpaqueId(uploadId) || !isUploadOpaqueId(assetId)
         || offset < 0 || !isUploadSha256(sha256)
-        || data.isEmpty() || data.size() > 128 * 1024) return false;
+        || data.isEmpty() || data.size() > 32 * 1024) return false;
     const SceneRunCoordinator::SessionBinding binding =
         m_sceneRuns->sessionById(remoteSessionId);
     if (!binding.active || binding.generation != generation
@@ -1006,9 +1043,8 @@ bool WebSocketClient::sendUploadAbort(const QString& remoteSessionId,
     // Preserve START/CHUNK/ABORT ordering on the pinned socket whenever it is
     // still usable. The authenticated control connection is only the emergency
     // path after a dedicated payload transport has already failed.
-    if (m_uploadSessionActive && isUploadSessionTransportAvailable()) {
-        return sendMessageUpload(msg);
-    }
+    if (m_uploadSessionActive && isUploadSessionTransportAvailable()
+        && sendMessageUpload(msg)) return true;
     return sendControlMessage(msg);
 }
 
@@ -1050,7 +1086,7 @@ bool WebSocketClient::sendUploadRemove(const QString& remoteSessionId,
 }
 
 bool WebSocketClient::sendMediaResidency(const QString& sessionId, quint64 generation,
-                                        quint64 sequence, const QJsonArray& assets)
+                                        quint64 sequence, const QJsonArray& assets, bool delta)
 {
     if (!isConnected() || !m_sceneRuns || sequence == 0) return false;
     const auto binding = m_sceneRuns->sessionById(sessionId);
@@ -1060,7 +1096,7 @@ bool WebSocketClient::sendMediaResidency(const QString& sessionId, quint64 gener
         {QStringLiteral("remoteSessionId"), sessionId},
         {QStringLiteral("generation"), static_cast<double>(generation)},
         {QStringLiteral("sequence"), static_cast<double>(sequence)},
-        {QStringLiteral("assets"), assets}});
+        {QStringLiteral("assets"), assets}, {QStringLiteral("delta"), delta}});
 }
 
 bool WebSocketClient::sendUploadProtocolResponse(const QJsonObject& response) {
@@ -1109,10 +1145,60 @@ bool WebSocketClient::sendUploadProtocolResponse(const QJsonObject& response) {
     }
     message.remove(QStringLiteral("ownerEndpointId"));
     message.remove(QStringLiteral("targetEndpointId"));
-    const bool sent = sendControlMessage(message);
+    const QString responseKey = remoteSessionId + ":" + uploadId + ":" + type;
+    // Merge durable deltas while a bounded data queue is full; replacing a
+    // delta outright could forget an acknowledged file in a large batch.
+    const auto pending = m_pendingUploadResponses.value(responseKey);
+    if (message.value("delta").toBool() && pending.value("generation") == message.value("generation")) {
+        QHash<QString, QJsonObject> merged;
+        for (const auto& value : pending.value("assets").toArray()) {
+            auto row = value.toObject(); merged.insert(row.value("assetId").toString(), row);
+        }
+        for (const auto& value : message.value("assets").toArray()) {
+            auto row = value.toObject(); merged.insert(row.value("assetId").toString(), row);
+        }
+        QJsonArray assets;
+        for (const auto& row : merged) assets.append(row);
+        message.insert("assets", assets);
+        if (!pending.value("delta").toBool()) message.insert("delta", false);
+    }
+    const bool awaitingReady = type != QLatin1String("upload_ready")
+        && m_pendingUploadResponses.contains(remoteSessionId + ":" + uploadId + ":upload_ready");
+    const bool sent = !awaitingReady
+        && (dataWireType(type) ? sendMessageUpload(message) : sendControlMessage(message));
+    if (sent) m_pendingUploadResponses.remove(responseKey);
+    else if (dataWireType(type)) {
+        qint64 queued = QJsonDocument(message).toJson(QJsonDocument::Compact).size();
+        for (auto it = m_pendingUploadResponses.cbegin(); it != m_pendingUploadResponses.cend(); ++it)
+            if (it.key() != responseKey) queued += QJsonDocument(it.value()).toJson(QJsonDocument::Compact).size();
+        if ((m_pendingUploadResponses.contains(responseKey) || m_pendingUploadResponses.size() < 128)
+            && queued <= 1024 * 1024) m_pendingUploadResponses.insert(responseKey, message);
+        else NetworkDiagnostics::record("send_paused", {{"channel", "data"}, {"uploadId", uploadId}, {"reason", "response_queue_full"}});
+    }
     if (sent && type == QLatin1String("upload_removed"))
         m_assetRemovalObligations.remove(message.value(QStringLiteral("removalId")).toString());
     return sent;
+}
+
+void WebSocketClient::flushPendingUploadResponses() {
+    if (!isUploadChannelConnected()) return;
+    const auto pending = m_pendingUploadResponses;
+    auto keys = pending.keys();
+    const auto rank = [&](const QString& key) {
+        const QString type = pending.value(key).value("type").toString();
+        return type == QLatin1String("upload_ready") ? 0
+            : type == QLatin1String("upload_progress") ? 1 : 2;
+    };
+    std::sort(keys.begin(), keys.end(), [&](const QString& a, const QString& b) { return rank(a) < rank(b); });
+    for (const auto& key : keys) {
+        const auto message = pending.value(key);
+        const auto binding = remoteSessionCoordinator()->byId(message.value("remoteSessionId").toString());
+        if (binding.remoteSessionId.isEmpty()
+            || binding.generation != quint64(message.value("generation").toInteger())) {
+            m_pendingUploadResponses.remove(key); continue;
+        }
+        if (canIssueSessionCommands(binding.remoteSessionId)) sendUploadProtocolResponse(message);
+    }
 }
 
 bool WebSocketClient::openRemoteSession(const QString& targetEndpointId,
@@ -1347,6 +1433,10 @@ qint64 WebSocketClient::sessionProofBudgetMs() const
 void WebSocketClient::beginSessionRecovery(qint64 detectedAtMs)
 {
     if (m_endpointDraining || !m_hasEstablishedLease || m_leaseExpired) return;
+    const qint64 deadline = std::min(detectedAtMs + m_sessionRecoveryTimeoutMs,
+        m_lastServerContactContinuousMs + sessionProofBudgetMs());
+    m_transportRecoveryDeadlineMs = m_transportRecoveryDeadlineMs < 0
+        ? deadline : std::min(m_transportRecoveryDeadlineMs, deadline);
     for (auto it = m_sessionDeadlines.begin(); it != m_sessionDeadlines.end(); ++it) {
         if (it->expired) continue;
         const auto binding = remoteSessionCoordinator()->byId(it.key());
@@ -1378,6 +1468,7 @@ void WebSocketClient::updateSessionDeadline(const QJsonObject& envelope)
         checkSessionRecoveryDeadlines();
         return;
     }
+    if (deadline >= tracked.serverDeadlineMs) tracked.lastProofAtMs = now;
     const qint64 estimatedServerNow = m_serverClockAnchorMs + now - m_localClockAnchorMs;
     const qint64 remaining = std::clamp<qint64>(deadline - estimatedServerNow, 0,
         sessionProofBudgetMs());
@@ -1420,6 +1511,7 @@ void WebSocketClient::checkSessionRecoveryDeadlines()
         if (binding.remoteSessionId.isEmpty()) continue;
         if (!it->expired) {
             it->expired = true;
+            NetworkDiagnostics::record("session_expired", {{"remoteSessionId", id}, {"generation", double(binding.generation)}, {"reason", "recovery_deadline"}}, true);
             remoteSessionCoordinator()->suspend(id);
             emit remoteSessionRecoveryExpired(id, binding.generation);
         }
@@ -1634,6 +1726,11 @@ bool WebSocketClient::sendScenePrepare(const QString& targetEndpointId,
         if (errorMessage) *errorMessage = QStringLiteral("Remote session is recovering");
         return false;
     }
+    if (QJsonDocument(QJsonObject{{"manifest", manifest}, {"scene", scene}})
+            .toJson(QJsonDocument::Compact).size() > 236 * 1024) {
+        if (errorMessage) *errorMessage = QStringLiteral("scene_payload_too_large: scene preparation exceeds the bounded control channel");
+        return false;
+    }
     SceneRunCoordinator::Run run;
     if (!m_sceneRuns->createOutgoingRun(targetEndpointId, revision, manifest, scene,
                                         &run, errorMessage)) {
@@ -1642,11 +1739,8 @@ bool WebSocketClient::sendScenePrepare(const QString& targetEndpointId,
     QJsonObject message = sceneMessage(run.sceneRunId, QStringLiteral("scene_prepare"));
     message.insert(QStringLiteral("manifest"), run.manifest);
     message.insert(QStringLiteral("scene"), run.scene);
-    if (!sendControlMessage(message)) {
-        m_sceneRuns->finishRun(run.sceneRunId, true);
-        if (errorMessage) *errorMessage = QStringLiteral("Could not send scene preparation");
-        return false;
-    }
+    m_pendingScenePrepares.insert(run.sceneRunId, message);
+    sendControlMessage(message);
     if (sceneRunId) *sceneRunId = run.sceneRunId;
     if (digest) *digest = run.digest;
     return true;
@@ -1807,9 +1901,10 @@ void WebSocketClient::onConnected() {
 }
 
 void WebSocketClient::onDisconnected() {
+    NetworkDiagnostics::record("socket_closed", {{"channel", "control"}, {"closeCode", m_webSocket ? int(m_webSocket->closeCode()) : 0}, {"closeReason", safeCloseReason(m_webSocket ? m_webSocket->closeReason() : QString())}}, true);
     const qint64 now = suspendInclusiveNowMs();
-    const qint64 detectedAt = m_lastServerContactContinuousMs >= 0
-        ? std::min(now, m_lastServerContactContinuousMs + m_transportSuspectAfterMs) : now;
+    const qint64 detectedAt = m_lastHeartbeatAckMs >= 0
+        ? std::min(now, m_lastHeartbeatAckMs + m_transportSuspectAfterMs) : now;
     beginSessionRecovery(detectedAt);
     checkSessionRecoveryDeadlines();
     if (!m_endpointDraining && !m_degraded) {
@@ -1852,6 +1947,7 @@ void WebSocketClient::onTextMessageReceived(const QString& message) {
 
 void WebSocketClient::onError(QAbstractSocket::SocketError error) {
     if (m_endpointDraining && !m_authenticated) return;
+    NetworkDiagnostics::record("socket_error", {{"channel", "control"}, {"socketError", int(error)}}, true);
     QString errorString;
 
     switch (error) {
@@ -1912,32 +2008,69 @@ void WebSocketClient::checkLeaseHealth() {
     const qint64 lag = m_previousLeaseCheckMs >= 0
         ? now - m_previousLeaseCheckMs - m_leaseHealthTimer->interval() : 0;
     m_previousLeaseCheckMs = now;
-    if (lag > 250) qWarning() << "Network event loop delayed" << "lagMs" << lag;
+    m_maxLoopLagMs = std::max(m_maxLoopLagMs, lag);
+    if (m_lastDiagnosticsAtMs < 0 || now - m_lastDiagnosticsAtMs >= 5000) {
+        qint64 oldestProofAge = -1;
+        for (const auto& proof : m_sessionDeadlines) {
+            if (!proof.expired && proof.lastProofAtMs >= 0)
+                oldestProofAge = std::max(oldestProofAge, now - proof.lastProofAtMs);
+        }
+        NetworkDiagnostics::record("network_summary", {{"connectionGeneration", double(m_connectionGeneration)},
+            {"rttMs", double(m_lastRttMs)}, {"heartbeatAgeMs", double(m_lastHeartbeatAckMs < 0 ? -1 : now - m_lastHeartbeatAckMs)},
+            {"proofAgeMs", double(oldestProofAge)},
+            {"controlContactAgeMs", double(m_lastServerContactContinuousMs < 0 ? -1 : now - m_lastServerContactContinuousMs)},
+            {"loopLagMs", double(m_maxLoopLagMs)}, {"queueBytes", double(m_webSocket ? m_webSocket->bytesToWrite() : 0)},
+            {"dataQueueBytes", double(m_uploadSocket ? m_uploadSocket->bytesToWrite() : 0)},
+            {"sentBytes", double(m_controlSentBytes + m_dataSentBytes)}, {"confirmedBytes", double(m_confirmedDataBytes)}, {"remainingMs", double(transportRecoveryRemainingMs())}});
+        m_lastDiagnosticsAtMs = now; m_maxLoopLagMs = 0;
+    }
     checkSessionRecoveryDeadlines();
+    flushPendingUploadResponses();
+    if (isConnected()) {
+        for (const QString& id : m_pendingScenePrepares.keys()) {
+            const auto run = m_sceneRuns->run(id);
+            if (run.sceneRunId.isEmpty() || run.phase != SceneRunCoordinator::Phase::Preparing
+                || sessionRecoveryRemainingMs(run.remoteSessionId) <= 0) {
+                m_pendingScenePrepares.remove(id); continue;
+            }
+            if (!canIssueSessionCommands(run.remoteSessionId)) continue;
+            const QString retryKey = "scene-prepare:" + id;
+            if (m_controlRetries.contains(retryKey)) continue;
+            QJsonObject prepare = m_pendingScenePrepares.value(id);
+            prepare.insert("generation", double(run.generation));
+            sendControlMessage(prepare);
+            m_controlRetries.schedule(retryKey, AppConfig::instance().controlRequestRetryMs(), [] {});
+        }
+    }
     // A replacement transport authenticates independently of its predecessor.
     // Retained session deadlines still run, but the old transport watchdog
     // must never abort this new socket before welcome establishes its lease.
     if (!m_authenticated || m_leaseTimeoutMs <= 0 || !m_hasEstablishedLease || m_leaseExpired) return;
-    const qint64 elapsed = leaseElapsedMs();
-    if (elapsed >= m_leaseTimeoutMs) {
-        beginSessionRecovery(m_lastServerContactContinuousMs + m_transportSuspectAfterMs);
+    const qint64 elapsed = m_lastHeartbeatAckMs < 0 || now < m_lastHeartbeatAckMs
+        ? std::numeric_limits<qint64>::max() : now - m_lastHeartbeatAckMs;
+    if (elapsed >= m_transportSuspectAfterMs) {
+        beginSessionRecovery(m_lastHeartbeatAckMs + m_transportSuspectAfterMs);
         if (!m_degraded) {
             m_degraded = true;
             emit transportHealthChanged(true);
+            setConnectionStatus("Degraded");
+            NetworkDiagnostics::record("transport_degraded", {{"reason", "missed_heartbeats"},
+                {"remainingMs", double(transportRecoveryRemainingMs())}}, true);
         }
-        if (isTransportConnected()) {
-            setConnectionStatus("Disconnected");
+        if (transportRecoveryRemainingMs() <= 0) {
+            expireLease();
+            // A configured recovery budget can be shorter than the transport
+            // timeout. Never leave an authenticated socket with a terminal
+            // proof: no later heartbeat may revive that authority.
+            if (isTransportConnected()) abortConnectionAttempt();
+            return;
+        }
+        if (elapsed >= m_transportTimeoutMs && isTransportConnected()) {
+            NetworkDiagnostics::record("transport_timeout", {{"channel", "control"}, {"reason", "heartbeat_timeout"}}, true);
             abortConnectionAttempt();
         }
-        return;
     }
-    const bool degraded = elapsed >= (m_transportSuspectAfterMs > 0
-        ? m_transportSuspectAfterMs : std::max(1, m_leaseTimeoutMs / 2));
-    if (m_degraded != degraded) {
-        m_degraded = degraded;
-        emit transportHealthChanged(degraded);
-        if (isConnected()) setConnectionStatus(degraded ? "Degraded" : "Connected");
-    }
+
 }
 
 bool WebSocketClient::handleAuthChallenge(const QJsonObject& message) {
@@ -1998,7 +2131,8 @@ bool WebSocketClient::validateServerPolicy(const QJsonObject& policy,
                                            QString* errorMessage) const {
     struct Rule { const char* name; qint64 minimum; qint64 maximum; };
     static constexpr Rule rules[] = {
-        {"policyVersion", 1, 1000000},
+        {"policyVersion", 5, 5},
+        {"transportTimeoutMs", 500, 60000},
         {"heartbeatIntervalMs", 250, 5000},
         {"leaseTimeoutMs", 500, 30000},
         {"transportSuspectAfterMs", 250, 30000},
@@ -2026,13 +2160,9 @@ bool WebSocketClient::validateServerPolicy(const QJsonObject& policy,
         }
         values.insert(QString::fromLatin1(rule.name), value);
     }
-    const bool interruptionPolicy = values.value("policyVersion") >= 4;
-    const bool invalidTiming = interruptionPolicy
-        ? (values.value("leaseTimeoutMs") != values.value("heartbeatIntervalMs") * 2
-           || values.value("transportSuspectAfterMs") != values.value("leaseTimeoutMs"))
-        : (values.value("sessionRecoveryTimeoutMs") < values.value("leaseTimeoutMs")
-           || values.value("transportSuspectAfterMs") >= values.value("leaseTimeoutMs")
-           || values.value("leaseTimeoutMs") < values.value("heartbeatIntervalMs") * 4);
+    const bool invalidTiming = values.value("leaseTimeoutMs") != values.value("heartbeatIntervalMs") * 2
+        || values.value("transportSuspectAfterMs") != values.value("leaseTimeoutMs")
+        || values.value("transportTimeoutMs") <= values.value("transportSuspectAfterMs");
     if (invalidTiming
         || values.value("sceneMaxClockSkewMs") >= values.value("sceneActivationLeadMs")
         || values.value("sceneMaxClockSkewMs") * 2
@@ -2129,6 +2259,8 @@ bool WebSocketClient::handleWelcome(const QJsonObject& message) {
     m_leaseTimeoutMs = policy.value("leaseTimeoutMs").toInt();
     m_sessionRecoveryTimeoutMs = policy.value("sessionRecoveryTimeoutMs").toInt();
     m_transportSuspectAfterMs = policy.value("transportSuspectAfterMs").toInt();
+    m_transportTimeoutMs = policy.value("transportTimeoutMs").toInt();
+    NetworkDiagnostics::record("server_policy", policy, true);
     if (m_sceneRuns) {
         m_sceneRuns->setPrepareTimeoutMs(policy.value("scenePrepareTimeoutMs").toInt());
     }
@@ -2137,6 +2269,8 @@ bool WebSocketClient::handleWelcome(const QJsonObject& message) {
     m_leaseExpired = false;
     m_degraded = false;
     m_disconnectSignalEmitted = false;
+    m_transportRecoveryDeadlineMs = -1;
+    m_lastHeartbeatAckMs = suspendInclusiveNowMs();
     noteServerContact();
     m_heartbeatTimer->start(m_heartbeatIntervalMs);
     m_leaseHealthTimer->start();
@@ -2158,11 +2292,6 @@ bool WebSocketClient::handleWelcome(const QJsonObject& message) {
 void WebSocketClient::noteServerContact() {
     if (!m_authenticated || m_leaseExpired) return;
     m_lastServerContactContinuousMs = suspendInclusiveNowMs();
-    if (m_degraded) {
-        m_degraded = false;
-        emit transportHealthChanged(false);
-        setConnectionStatus("Connected");
-    }
 }
 
 qint64 WebSocketClient::suspendInclusiveNowMs() const
@@ -2201,6 +2330,7 @@ void WebSocketClient::expireLease() {
     emit leaseExpired(m_serverBootId, m_connectionGeneration);
     if (m_sceneRuns) m_sceneRuns->clearSessions();
     m_sessionDeadlines.clear();
+    m_pendingUploadResponses.clear();
     m_resumeRequestIds.clear();
     m_reconcileRequestId.clear();
 }
@@ -2249,10 +2379,18 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
         checkLeaseHealth();
         return;
     }
-    noteServerContact();
+    if (!m_dispatchingData) noteServerContact();
+    if (dataWireType(type) && !m_dispatchingData) {
+        NetworkDiagnostics::record("message_rejected", {{"type", type}, {"reason", "wrong_channel"}}, true);
+        return;
+    }
+    QJsonObject metadata = message;
+    metadata.insert("channel", m_dispatchingData ? "data" : "control");
+    NetworkDiagnostics::record("message_received", metadata);
     // Suppress noisy logs for high-frequency message types
     if (type != "upload_progress" && type != "upload_chunk"
-        && type != "heartbeat_ack" && type != "remote_session_cursor") {
+        && type != "heartbeat_ack" && type != "remote_session_cursor"
+        && type != "media_residency" && type != "remote_session_snapshot") {
         qDebug() << "Received message type:" << type;
     }
     
@@ -2279,6 +2417,14 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
         const qint64 receivedAt = m_processClock.elapsed();
         if (sentAt >= 0 && echoedAt == sentAt && serverAt >= 0 && receivedAt >= sentAt) {
             const qint64 rtt = receivedAt - sentAt;
+            m_lastRttMs = rtt;
+            m_lastHeartbeatAckMs = suspendInclusiveNowMs();
+            m_transportRecoveryDeadlineMs = -1;
+            if (m_degraded) {
+                m_degraded = false;
+                emit transportHealthChanged(false);
+                setConnectionStatus("Connected");
+            }
             qint64 offset = serverAt - (sentAt + rtt / 2);
             // Add one millisecond for the independent integer timestamp
             // quantization at the two clocks; the value remains a conservative
@@ -2349,6 +2495,18 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
     }
     else if (type == "error") {
         if (message.value("scope").toString() == QLatin1String("scene")) {
+            const auto run = m_sceneRuns->run(message.value("sceneRunId").toString());
+            quint64 generation = 0;
+            if (run.sceneRunId.isEmpty()
+                || message.value("remoteSessionId").toString() != run.remoteSessionId
+                || !readPositiveSafeJsonInteger(message.value("generation"), &generation)
+                || generation != run.generation
+                || (!message.value("digest").toString().isEmpty()
+                    && message.value("digest").toString() != run.digest)) {
+                NetworkDiagnostics::record("message_rejected", {{"type", "error"},
+                    {"reason", "stale_scene_error"}, {"sceneRunId", message.value("sceneRunId")}});
+                return;
+            }
             emit sceneErrorReceived(message);
             return;
         }
@@ -2434,9 +2592,8 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
                  << "runtime" << m_runtimeId;
         completeControlRequest(m_registrationRequestId);
         emit registrationConfirmed(clientInfo);
-        // Keep the optional high-throughput channel ready before the first
-        // upload. Failure is harmless; beginUploadSession() pins the control
-        // channel immediately when this fast path is unavailable.
+        // Both recipients and senders establish the required data channel.
+        // Transfers wait for its authenticated readiness.
         QTimer::singleShot(0, this, [this]() { ensureUploadChannel(); });
     }
     else if (type == "upload_channel_token") {
@@ -2603,6 +2760,19 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
                 }
             }
         }
+        if (binding.ownerEndpointId == m_endpointId) {
+            if (type == QLatin1String("upload_ready") || type == QLatin1String("upload_resume_ready")
+                || type == QLatin1String("upload_progress")) {
+                const qint64 confirmed = boundedInteger(message.value("durableBytes"), 0, 9007199254740991LL);
+                if (confirmed >= 0 && (m_confirmedUploadOffsets.contains(uploadId) || m_confirmedUploadOffsets.size() < 4096)) {
+                    const qint64 previous = m_confirmedUploadOffsets.value(uploadId, 0);
+                    if (confirmed > previous) m_confirmedDataBytes += quint64(confirmed - previous);
+                    m_confirmedUploadOffsets.insert(uploadId, std::max(previous, confirmed));
+                }
+            }
+            if (type == QLatin1String("upload_finished") || type == QLatin1String("upload_rejected")
+                || type == QLatin1String("upload_abort_ack")) m_confirmedUploadOffsets.remove(uploadId);
+        }
         emit uploadMessageReceived(message);
     }
     else if (type == "remote_session_offer") {
@@ -2672,7 +2842,7 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
     else if (type == "remote_session_snapshot") {
         RemoteSessionCoordinator* sessions = remoteSessionCoordinator();
         if (!sessions || !sessions->acceptSnapshot(message, m_connectionGeneration)) {
-            qWarning() << "Rejected stale or malformed RemoteSession snapshot";
+            // acceptSnapshot records a precise, rate-limited rejection reason.
             return;
         }
         emit remoteSessionSnapshotReceived(message);
@@ -2847,6 +3017,9 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
         }
         acknowledgeSessionState(message);
         m_sessionDeadlines.remove(sessionId);
+        for (const QString& id : m_pendingScenePrepares.keys())
+            if (m_pendingScenePrepares.value(id).value("remoteSessionId").toString() == sessionId)
+                m_pendingScenePrepares.remove(id);
         m_resumeRequestIds.remove(sessionId);
         emit remoteSessionClosed(message);
         m_targetSnapshotSequenceBySession.remove(sessionId);
@@ -2924,6 +3097,8 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
             qWarning() << "Rejected scene message:" << validationError;
             return;
         }
+        if (type == "prepare_progress" && message.value("stage").toString() == "accepted")
+            m_pendingScenePrepares.remove(message.value("sceneRunId").toString());
         if (type == "scene_prepare") emit scenePrepareReceived(message);
         else if (type == "prepare_progress") emit scenePrepareProgressReceived(message);
         else if (type == "prepared") emit scenePreparedReceived(message);
@@ -2957,8 +3132,18 @@ QJsonObject WebSocketClient::addProtocolEnvelope(const QJsonObject& message) con
 
 bool WebSocketClient::sendRawControlMessage(const QJsonObject& message) {
     if (!isTransportConnected() || !m_webSocket) return false;
-    const QJsonDocument document(message);
-    return m_webSocket->sendTextMessage(document.toJson(QJsonDocument::Compact)) >= 0;
+    const QByteArray bytes = QJsonDocument(message).toJson(QJsonDocument::Compact);
+    const QString type = message.value("type").toString();
+    const bool priority = type == "heartbeat" || type == "stop" || type == "stopped"
+        || type == "remote_session_close" || type == "remote_session_state_ack";
+    const qint64 limit = priority ? kControlQueueLimit : kControlQueueLimit - 16 * 1024;
+    if (bytes.size() > limit || m_webSocket->bytesToWrite() + bytes.size() > limit) {
+        NetworkDiagnostics::record("send_paused", {{"channel", "control"}, {"type", type}, {"reason", "queue_full"}});
+        return false;
+    }
+    const qint64 sent = m_webSocket->sendTextMessage(bytes);
+    if (sent >= 0) m_controlSentBytes += bytes.size();
+    return sent >= 0;
 }
 
 bool WebSocketClient::sendControlMessage(const QJsonObject& message) {
@@ -2973,6 +3158,7 @@ bool WebSocketClient::sendControlMessage(const QJsonObject& message) {
     }
     const QString sessionId = message.value(QStringLiteral("remoteSessionId")).toString();
     const QString commandType = message.value(QStringLiteral("type")).toString();
+    if (dataWireType(commandType)) return sendMessageUpload(message);
     static const QSet<QString> sessionCommands = {
         QStringLiteral("upload_start"), QStringLiteral("upload_resume"), QStringLiteral("upload_chunk"),
         QStringLiteral("upload_complete"), QStringLiteral("scene_prepare"), QStringLiteral("armed"),
@@ -2993,10 +3179,6 @@ bool WebSocketClient::sendControlMessage(const QJsonObject& message) {
 bool WebSocketClient::sendMessageUpload(const QJsonObject& message) {
     const QString sessionId = message.value(QStringLiteral("remoteSessionId")).toString();
     if (!sessionId.isEmpty() && !canIssueSessionCommands(sessionId)) return false;
-    if (!m_uploadSessionActive) {
-        qWarning() << "Cannot send upload payload before the session transport is locked";
-        return false;
-    }
     if (!hasUnexpiredLease()) {
         checkLeaseHealth();
         qWarning() << "Cannot send upload payload: connection lease expired";
@@ -3007,21 +3189,22 @@ bool WebSocketClient::sendMessageUpload(const QJsonObject& message) {
         return false;
     }
 
-    QWebSocket* channel = m_useUploadSocketForSession ? m_uploadSocket : m_webSocket;
-    const bool connected = m_useUploadSocketForSession
-        ? isUploadChannelConnected()
-        : (channel && channel->state() == QAbstractSocket::ConnectedState);
-    if (!channel || !connected) {
-        qWarning() << "Upload session transport was lost; refusing to switch sockets";
+    if (!isUploadChannelConnected()) { ensureUploadChannel(); return false; }
+    const QByteArray bytes = QJsonDocument(addProtocolEnvelope(message)).toJson(QJsonDocument::Compact);
+    if (bytes.size() > kDataQueueLimit || m_uploadSocket->bytesToWrite() + bytes.size() > kDataQueueLimit) {
+        NetworkDiagnostics::record("send_paused", {{"channel", "data"}, {"reason", "queue_full"},
+            {"uploadId", message.value("uploadId")}});
         return false;
     }
-
-    QJsonDocument doc(addProtocolEnvelope(message));
-    return channel->sendTextMessage(doc.toJson(QJsonDocument::Compact)) >= 0;
+    const qint64 sent = m_uploadSocket->sendTextMessage(bytes);
+    if (sent >= 0) m_dataSentBytes += bytes.size();
+    return sent >= 0;
 }
 
 void WebSocketClient::setConnectionStatus(const QString& status) {
     if (m_connectionStatus != status) {
+        NetworkDiagnostics::record("transport_transition", {{"before", m_connectionStatus}, {"after", status},
+            {"connectionGeneration", double(m_connectionGeneration)}, {"serverBootId", m_serverBootId}}, true);
         m_connectionStatus = status;
         qDebug() << "Connection status changed to:" << status;
         emit connectionStatusChanged(m_connectionStatus);

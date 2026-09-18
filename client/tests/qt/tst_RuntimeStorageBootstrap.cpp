@@ -222,7 +222,7 @@ void RuntimeStorageBootstrapTest::realProcessRestartsPreserveData()
         QVERIFY(next.value("autoUpload").toBool());
         for (const QJsonValue& action : next.value("actions").toArray()) QCOMPARE(action.toString(), QStringLiteral("preserved"));
         QCOMPARE(snapshots(context), before);
-        QVERIFY(!QFileInfo::exists(cached));
+        QVERIFY(QFileInfo::exists(cached));
     }
 }
 

@@ -24,7 +24,7 @@ struct SettingSpec {
     bool boolean;
 };
 
-constexpr std::array<SettingSpec, 84> kSpecs{{
+constexpr std::array<SettingSpec, 88> kSpecs{{
     {Key::ServerUrl, "MOUFFETTE_SERVER_URL", "server-url", "serverUrl", "ws://localhost:8080", false},
     {Key::RemoteSessionHiddenTimeoutMs, "MOUFFETTE_REMOTE_SESSION_HIDDEN_TIMEOUT_MS", "remote-session-hidden-timeout-ms", nullptr, "60000", false},
     {Key::ProjectMediaHiddenTimeoutMs, "MOUFFETTE_PROJECT_MEDIA_HIDDEN_TIMEOUT_MS", "project-media-hidden-timeout-ms", nullptr, "60000", false},
@@ -109,6 +109,10 @@ constexpr std::array<SettingSpec, 84> kSpecs{{
     {Key::CursorDebug, "MOUFFETTE_CURSOR_DEBUG", "cursor-debug", nullptr, "false", true},
     {Key::RuntimeDiagnostics, "MOUFFETTE_RUNTIME_DIAGNOSTICS", "runtime-diagnostics", nullptr, "false", true},
     {Key::CanvasProfiling, "MOUFFETTE_CANVAS_PROFILING", "canvas-profiling", nullptr, "false", true},
+    {Key::RemoteMediaRetentionMs, "MOUFFETTE_REMOTE_MEDIA_RETENTION_MS", "remote-media-retention-ms", nullptr, "600000", false},
+    {Key::RemoteMediaCacheMaxMiB, "MOUFFETTE_REMOTE_MEDIA_CACHE_MAX_MIB", "remote-media-cache-max-mib", nullptr, "10240", false},
+    {Key::NetworkDiagnostics, "MOUFFETTE_NETWORK_DIAGNOSTICS", "network-diagnostics", nullptr, "true", true},
+    {Key::NetworkDiagnosticsVerbose, "MOUFFETTE_NETWORK_DIAGNOSTICS_VERBOSE", "network-diagnostics-verbose", nullptr, "false", true},
 }};
 
 struct RawValue {
@@ -474,6 +478,10 @@ void AppConfig::resetToCompiledDefaults() {
     m_cursorDebug = false;
     m_runtimeDiagnostics = false;
     m_canvasProfiling = false;
+    m_remoteMediaRetentionMs = 600000;
+    m_remoteMediaCacheMaxMiB = 10240;
+    m_networkDiagnostics = true;
+    m_networkDiagnosticsVerbose = false;
 }
 
 bool AppConfig::initialize(const QStringList& arguments, QString* errorMessage) {
@@ -670,7 +678,9 @@ bool AppConfig::load(const LoadOptions& options, QString* errorMessage) {
         *destination = static_cast<int>(parsed);
         return true;
     };
-    if (!parseIntSetting(Key::CanvasTextInitialHeightPercent, 1, 100,
+    if (!parseIntSetting(Key::RemoteMediaRetentionMs, 1000, 86400000, &candidate.m_remoteMediaRetentionMs)
+        || !parseIntSetting(Key::RemoteMediaCacheMaxMiB, 1, 1048576, &candidate.m_remoteMediaCacheMaxMiB)
+        || !parseIntSetting(Key::CanvasTextInitialHeightPercent, 1, 100,
                          &candidate.m_canvasTextInitialHeightPercent)
         || !parseIntSetting(Key::TimelineMaxDurationMs, 1, 604800000, &candidate.m_timelineMaxDurationMs)
         || !parseIntSetting(Key::TimelineSlotsPerSecond, 1, 240, &candidate.m_timelineSlotsPerSecond)
@@ -813,7 +823,9 @@ bool AppConfig::load(const LoadOptions& options, QString* errorMessage) {
     }
     candidate.m_uploadConcurrency = static_cast<int>(uploadConcurrency);
 
-    if (!parseBoolean(rawValues.at(Key::AutoUploadImportedMedia),
+    if (!parseBoolean(rawValues.at(Key::NetworkDiagnostics), keyName(Key::NetworkDiagnostics), candidate.m_networkDiagnostics, errorMessage)
+        || !parseBoolean(rawValues.at(Key::NetworkDiagnosticsVerbose), keyName(Key::NetworkDiagnosticsVerbose), candidate.m_networkDiagnosticsVerbose, errorMessage)
+        || !parseBoolean(rawValues.at(Key::AutoUploadImportedMedia),
                       keyName(Key::AutoUploadImportedMedia),
                       candidate.m_autoUploadImportedMedia, errorMessage)
         || !parseBoolean(rawValues.at(Key::AppAlwaysOnTop),

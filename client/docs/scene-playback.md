@@ -161,7 +161,7 @@ The initial viewport spans 15000 ms and is independent of playback cadence.
 
 Project component version 8 has an explicit reset barrier from version 7. Older
 projects also reset directly to version 8; other profile components and external
-source files are preserved. Render schema 6 and wire protocol 11 require a
+source files are preserved. Render schema 6 and wire protocol 12 require a
 coordinated client/server rollout. Older render and clipboard formats are rejected.
 Client and server validate clip cardinality, global identities, non-overlapping
 intervals within each track, source intervals, track indices and payload limits.

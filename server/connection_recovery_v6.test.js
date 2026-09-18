@@ -3,6 +3,7 @@
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const { MouffetteServer } = require('./server');
+const { loadServerConfig } = require('./config');
 const { RemoteSessionRegistry } = require('./remote_session_registry');
 const { SCENE_PHASES } = require('./scene_run_registry');
 
@@ -14,7 +15,8 @@ const initialSnapshot = { screens: [], systemUI: [], volumePercent: 50,
     revision: 1, capturedAtEpochMs: 1000000 };
 function fixture() {
     let now = 1000;
-    const server = new MouffetteServer({ port: 0, monotonicNow: () => now,
+    const server = new MouffetteServer({ port: 0, config: { ...loadServerConfig(),
+        transportTimeoutMs: 1500, sessionRecoveryTimeoutMs: 3000 }, monotonicNow: () => now,
         epochNow: () => 1000000 + now, metricLogger: () => {}, protocolLogger: () => {} });
     const add = (id, generation = 1) => {
         const ws = { readyState: 1, bufferedAmount: 0, messages: [],
@@ -30,7 +32,7 @@ function fixture() {
         return client;
     };
     const send = (id, type, fields = {}) => server.handleMessage(id, {
-        type, protocolVersion: 11, serverBootId: server.serverBootId,
+        type, protocolVersion: 12, serverBootId: server.serverBootId,
         messageId: crypto.randomUUID(), connectionGeneration: server.clients.get(id).connectionGeneration,
         ...fields,
     });
@@ -309,4 +311,4 @@ const ofType = (client, type) => client.ws.messages.filter(message => message.ty
     assert.equal(registry.tick().length, 1);
 }
 
-console.log('connection recovery v11 tests passed');
+console.log('connection recovery v12 tests passed');

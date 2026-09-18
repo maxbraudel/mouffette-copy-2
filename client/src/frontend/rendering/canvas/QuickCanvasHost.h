@@ -85,6 +85,7 @@ public:
         QStringList* skippedMediaIds = nullptr) override;
 
 private:
+    friend class RemoteSceneLifecycleTest;
     QJsonArray buildSceneManifest(const QJsonObject& scene,
                                   QString* errorMessage) const;
     QJsonArray localPreparationChecklist(const QJsonObject& scene,
@@ -93,11 +94,16 @@ private:
     void reportLocalScenePrepared();
     void prepareSceneVideos(std::function<void()> ready);
     void tryArmRemoteScene();
+    void retrySceneAcknowledgements(bool replay = false);
+    void applyRemoteSceneCommit(const QJsonObject& envelope);
+    void reportFirstFramePresented();
+    bool deferSceneTimeoutDuringRecovery();
     void beginScenePresentation(bool remote);
     void stopScenePresentation();
     void startPresentationBarrier();
     void cancelPresentationBarrier();
-    void failScene(const QString& message, bool notifyServer);
+    void failScene(const QString& message, bool notifyServer,
+                   const QString& reason = QStringLiteral("client_scene_failure"));
     bool matchesScene(const QJsonObject& envelope) const;
     void publishActionState();
     void connectWebSocketSignals();
@@ -130,10 +136,17 @@ private:
     bool m_sceneArmed = false;
     bool m_sceneCommitScheduled = false;
     bool m_firstFrameReported = false;
+    qint64 m_firstFramePresentedServerMs = -1;
+    qint64 m_firstFramePresentedLocalMs = -1;
+    qint64 m_sceneRecoveryDeadlineMs = -1;
+    qint64 m_lastPrepareAckAttemptMs = -1;
+    qint64 m_lastArmedAckAttemptMs = -1;
+    qint64 m_lastStartedAckAttemptMs = -1;
     quint64 m_sceneRevision = 0;
     QString m_sceneRunId;
     QString m_sceneDigest;
     QJsonArray m_localPrepareChecklist;
+    QJsonObject m_pendingSceneCommit;
     QObject* m_sceneContext = nullptr;
     QPointer<QObject> m_videoPreparation;
     bool m_localVideosPrepared = false;

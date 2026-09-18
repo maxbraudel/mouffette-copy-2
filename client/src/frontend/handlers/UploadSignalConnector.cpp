@@ -78,6 +78,16 @@ void UploadSignalConnector::connectAllSignals(
 {
     if (uploadSignalsConnected || !uploadManager || !mainWindow) return;
     Q_UNUSED(webSocketClient);
+    connect(uploadManager, &UploadManager::uploadReidentified, mainWindow,
+            [mainWindow](const QString& previousId, const QString& uploadId, const QString& target) {
+        mainWindow->removeUploadWorkspaceByUploadId(previousId);
+        mainWindow->setUploadWorkspaceByUploadId(uploadId, target);
+        if (auto* session = mainWindow->findWorkspace(target)) {
+            session->upload.activeUploadId = uploadId;
+            session->upload.serverCompletedFileIds.clear();
+            session->upload.perFileProgress.clear();
+        }
+    });
     
     // Signal: File upload started - mark items as uploading
     connect(uploadManager, &UploadManager::fileUploadStarted, mainWindow, [mainWindow](const QString& fileId) {

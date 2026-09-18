@@ -13,6 +13,7 @@
 #include "frontend/ui/notifications/ToastNotificationSystem.h"
 #include "backend/domain/workspace/WorkspaceManager.h"
 #include <QFileInfo>
+#include <algorithm>
 #include <QDebug>
 
 UploadEventHandler::UploadEventHandler(ApplicationRuntime* mainWindow, QObject* parent)
@@ -79,7 +80,11 @@ void UploadEventHandler::uploadWorkspace(const QString& workspaceEndpointId, boo
 
     const bool managerHasActive = uploadManager->hasActiveUpload() &&
         uploadManager->activeUploadTargetClientId() == targetClientId;
-    const bool sessionHasRemote = upload.remoteFilesPresent;
+    const bool sessionHasRemote = std::any_of(session->knownRemoteFileIds.cbegin(), session->knownRemoteFileIds.cend(),
+        [this, &targetClientId](const QString& fileId) {
+            return m_mainWindow->getFileManager()->isFileUploadedToClient(fileId, targetClientId);
+        });
+    upload.remoteFilesPresent = sessionHasRemote || managerHasActive;
     const bool hasRemoteFiles = sessionHasRemote || managerHasActive;
     
     qDebug() << "=== Upload Button Clicked Debug ===";

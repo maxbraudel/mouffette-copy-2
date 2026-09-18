@@ -3,6 +3,8 @@
 #include "backend/network/WebSocketClient.h"
 #include "backend/network/RemoteSessionCoordinator.h"
 #include "backend/network/RetryPolicy.h"
+#include "backend/network/NetworkDiagnostics.h"
+#include <QMetaEnum>
 #include "backend/domain/models/ClientInfo.h"
 #include <QDebug>
 #include <algorithm>
@@ -54,6 +56,14 @@ ConnectionManager::ConnectionManager(WebSocketClient* wsClient, QObject* parent,
             this, &ConnectionManager::onLeaseExpired);
     connect(m_wsClient, &WebSocketClient::transportHealthChanged,
             this, &ConnectionManager::onTransportHealthChanged);
+    connect(m_wsClient, &WebSocketClient::remoteSessionRecoveryExpired, this,
+            [this](const QString&, quint64) {
+        if (m_recoveryDisplayDeadlineMs < 0) return;
+        m_recoveryDisplayDeadlineMs = m_clock();
+        m_recoveryDisplayTimer.stop();
+        emit statusChanged(getConnectionStatus());
+        emit retryStateChanged();
+    });
     connect(m_wsClient, &WebSocketClient::heartbeatSampleReceived, this, [this] {
         observeStability(m_state == State::Connected);
     });
@@ -229,6 +239,10 @@ QString ConnectionManager::getConnectionStatus() const
     // underlying connection is unauthenticated or not fully synchronized.
     if (recoveryDisplayActive() && m_state != State::CleanupPending)
         return QStringLiteral("Degraded");
+    if (m_recoveryDisplayDeadlineMs >= 0 && !recoveryDisplayActive()
+        && m_state != State::Connected && m_state != State::CleanupPending
+        && m_state != State::Disconnecting && m_state != State::Failed)
+        return QStringLiteral("Disconnected");
     switch (m_state) {
     case State::Disconnected: return QStringLiteral("Disconnected");
     case State::Disconnecting: return QStringLiteral("Disconnecting");
@@ -236,7 +250,8 @@ QString ConnectionManager::getConnectionStatus() const
     case State::Authenticating: return QStringLiteral("Connecting");
     case State::Synchronizing: return QStringLiteral("Connecting");
     case State::Connected: return QStringLiteral("Connected");
-    case State::Degraded: return QStringLiteral("Degraded");
+    case State::Degraded: return m_recoveryDisplayDeadlineMs >= 0
+        && !recoveryDisplayActive() ? QStringLiteral("Disconnected") : QStringLiteral("Degraded");
     case State::CleanupPending: return QStringLiteral("Cleanup pending");
     case State::Failed: return QStringLiteral("Failed");
     }
@@ -332,13 +347,15 @@ void ConnectionManager::onTransportHealthChanged(bool degraded)
         // The socket is already disconnected when a hard-loss health signal
         // arrives. Completed synchronization still proves this is recovery,
         // rather than a failed initial connection attempt.
-        const int duration = static_cast<int>(qMin<qint64>(
-            m_wsClient->serverPolicy().value(QStringLiteral("sessionRecoveryTimeoutMs")).toInt(3000),
-            m_wsClient->leaseRemainingMs()));
+        qint64 duration = m_wsClient->transportRecoveryRemainingMs();
+        for (const auto& binding : m_wsClient->remoteSessionCoordinator()->all()) {
+            if (binding.phase == QLatin1String("Active") || binding.phase == QLatin1String("Grace"))
+                duration = qMin(duration, m_wsClient->sessionRecoveryRemainingMs(binding.remoteSessionId));
+        }
         // A late callback after sleep/event-loop starvation cannot grant a
         // fresh grace period beyond the last authenticated contact's budget.
         m_recoveryDisplayDeadlineMs = m_clock() + duration;
-        m_recoveryDisplayTimer.start(duration);
+        m_recoveryDisplayTimer.start(static_cast<int>(qMax<qint64>(0, duration)));
     }
     m_degraded = degraded;
     refreshAuthenticatedState();
@@ -347,7 +364,8 @@ void ConnectionManager::onTransportHealthChanged(bool degraded)
 bool ConnectionManager::recoveryDisplayActive() const
 {
     return m_desiredEnabled && !m_draining && !m_fatalFailure
-        && m_recoveryDisplayDeadlineMs > m_clock();
+        && m_recoveryDisplayDeadlineMs > m_clock()
+        && m_wsClient->transportRecoveryRemainingMs() > 0;
 }
 
 void ConnectionManager::scheduleReconnect()
@@ -378,6 +396,10 @@ void ConnectionManager::scheduleReconnect()
     
     qDebug() << "ConnectionManager: Scheduling reconnect attempt" << (attempt + 1)
              << "in" << delay << "ms";
+    NetworkDiagnostics::record(QStringLiteral("transport_retry"), {
+        {"channel", "control"}, {"delayMs", delay}, {"count", attempt + 1},
+        {"reason", withinLease ? "session_recovery" : "background_reconnect"},
+        {"remainingMs", m_wsClient->transportRecoveryRemainingMs()}});
     
     setState(State::Disconnected);
     const quint64 cycle = m_transitionId;
@@ -470,6 +492,10 @@ void ConnectionManager::setState(State state)
     if (state == State::CleanupPending) setRetryAction(RetryAction::Suspended);
     if (state == State::Connecting || state == State::Authenticating || state == State::Synchronizing)
         setRetryAction(RetryAction::Running);
+    NetworkDiagnostics::record(QStringLiteral("connection_transition"), {
+        {"before", QString::fromLatin1(QMetaEnum::fromType<State>().valueToKey(static_cast<int>(m_state)))},
+        {"after", QString::fromLatin1(QMetaEnum::fromType<State>().valueToKey(static_cast<int>(state)))},
+        {"remainingMs", m_wsClient->transportRecoveryRemainingMs()}});
     m_state = state;
     emit retryStateChanged();
     emit stateChanged(state);

@@ -68,7 +68,7 @@ function setup() {
 
 function envelope(context, extra = {}) {
     return {
-        protocolVersion: 11,
+        protocolVersion: 12,
         serverBootId: context.server.serverBootId,
         messageId: crypto.randomUUID(),
         remoteSessionId: context.session.remoteSessionId,
@@ -405,4 +405,4 @@ function messages(ws, type) {
     assert.equal(messages(context.owner, 'upload_removed').length, before);
 }
 
-console.log('asset removal protocol v11 tests passed');
+console.log('asset removal protocol v12 tests passed');

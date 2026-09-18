@@ -143,6 +143,22 @@ public:
     bool requestRecovery();
     bool recoveryPending() const { return m_recoveryPending; }
 
+    // Durable manifests are private to the cache. Only a new authenticated
+    // scope can import retained bytes; no command addresses the retention area.
+    void setRetentionPolicy(qint64 retentionMs, qint64 maximumBytes);
+    bool checkpointAsset(const Scope& scope, const QString& targetEndpointId,
+                         const QString& path, const QString& sha256, qint64 size,
+                         qint64 durableOffset, const QString& extension,
+                         QString* errorCode = nullptr) const;
+    qint64 checkpointedAssetOffset(const Scope& scope, const QString& targetEndpointId,
+                                  const QString& path, const QString& sha256, qint64 size,
+                                  const QString& extension) const;
+    qint64 restoreRetainedAsset(const Scope& scope, const QString& targetEndpointId,
+                              const QString& path, const QString& sha256,
+                              qint64 size, const QString& extension);
+    bool purgeRetainedAsset(const QString& senderEndpointId, const QString& sha256);
+    void sweepRetainedAssets(qint64 reservedBytes = 0);
+
     QString rootPath() const { return m_rootPath; }
     QString lastErrorCode() const { return m_lastErrorCode; }
 
@@ -259,6 +275,11 @@ signals:
 
 private:
     struct DeleteResult;
+    void retainScopeAssets(const Scope& scope);
+    QString retainedDirectory() const;
+    qint64 m_retentionMs = 600000;
+    qint64 m_retentionMaximumBytes = 10LL * 1024 * 1024 * 1024;
+    QTimer m_retentionTimer;
 
     bool validateScope(const Scope& scope, QString* errorCode) const;
     QString scopeKey(const Scope& scope) const;

@@ -15,7 +15,7 @@ legacy `-v1`/`-v2` suffixes are not compatibility versions.
 | `settings` | `SettingsManager` / `AppConfig` | `settings/settings.ini`, `[storage] schemaVersion` | 1 | Unversioned valid INI: migrate 0 → 1 |
 | `projects` | `ProjectStore` | `projects/projects-v2.json`, `schemaVersion` | 8 | Versions 1–7: explicit project reset |
 | `history` | `HistoryStore` | `notification-history-v1.json`, `schemaVersion` | 1 | Unknown formats: reset |
-| `cache` | `RemoteCacheStore` | `cache/storage.json`, `schemaVersion` | 1 | Unknown formats: reset; session contents also purged on every launch |
+| `cache` | `RemoteCacheStore` | `cache/storage.json`, `schemaVersion` | 2 | Legacy/unreliable manifests reset; current primary-profile cache preserved for bounded retention |
 
 The installation identity is separate from these resettable profile components.
 `InstallationIdentityBootstrap` owns `installations/<channel>/storage.json` and

@@ -75,17 +75,8 @@ RuntimeStorageBootstrap::Result RuntimeStorageBootstrap::run(const ProgressCallb
         else if (component.id == QLatin1String("cache")) stage = Stage::PurgingCache;
         if (progress) progress(stage);
         RuntimeStorage::Report report = RuntimeStorage::upgrade(component);
-        if (report.succeeded() && component.id == QLatin1String("cache")) {
-            // Reset/initialization already emptied it. On compatible launches
-            // this is session maintenance, never a schema reset.
-            if (report.action == RuntimeStorage::Action::Preserved
-                || report.action == RuntimeStorage::Action::Migrated) {
-                const RuntimeStorage::Operation purged = RuntimeStorage::purgeReceivedMedia(m_context);
-                report.failure = purged.failure;
-                if (!purged.succeeded()) report.reason = purged.reason;
-            }
-            report.maintenancePerformed = report.succeeded();
-        }
+        // Compatible retained media survives a primary profile restart. The
+        // cache store fences abandoned sessions and expires retained bytes.
         result.components.append(report);
         qInfo().noquote() << "[Storage]" << m_context.channel << component.id
                          << report.foundVersion << "->" << report.expectedVersion

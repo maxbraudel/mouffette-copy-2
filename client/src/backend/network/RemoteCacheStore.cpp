@@ -1,4 +1,5 @@
 #include "backend/network/RemoteCacheStore.h"
+#include "backend/network/NetworkDiagnostics.h"
 #include "backend/network/RemoteCacheHistory.h"
 #include "backend/files/PathSafety.h"
 #include "backend/runtime/RuntimeProfile.h"
@@ -9,12 +10,16 @@
 #include <QDateTime>
 #include <QDebug>
 #include <QDir>
+#include <QDirIterator>
+#include <algorithm>
 #include <QFile>
 #include <QFileInfo>
 #include <QFutureWatcher>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonParseError>
+#include <QMutex>
+#include <QMutexLocker>
 #include <QRegularExpression>
 #include <QSaveFile>
 #include <QUuid>
@@ -22,6 +27,7 @@
 
 #ifdef Q_OS_WIN
 #include <qt_windows.h>
+#include <io.h>
 #else
 #include <cerrno>
 #include <fcntl.h>
@@ -34,6 +40,8 @@
 #endif
 
 namespace {
+
+QMutex tombstoneUpdateMutex;
 
 constexpr auto kStateDirectory = ".remote-cache-state";
 constexpr auto kIntentDirectory = "intents";
@@ -55,6 +63,13 @@ QString compactPathToken(const QString& identity)
         QCryptographicHash::hash(identity.toUtf8(), QCryptographicHash::Sha256)
             .toHex()
             .left(kCompactPathTokenHexLength));
+}
+
+qint64 retentionNowMs()
+{
+    static const qint64 epoch = QDateTime::currentMSecsSinceEpoch();
+    static const qint64 monotonic = MouffetteClock::nowMs();
+    return qMax(QDateTime::currentMSecsSinceEpoch(), epoch + qMax<qint64>(0, MouffetteClock::nowMs() - monotonic));
 }
 
 QString utcNow()
@@ -119,6 +134,16 @@ bool isDirectChild(const QString& parentPath, const QString& childPath)
     const QString child = normalizedPath(childPath);
     return PathSafety::samePath(QFileInfo(child).absolutePath(), parent)
         && !PathSafety::samePath(child, parent);
+}
+
+bool synchronizeData(QFile& file)
+{
+    if (!file.flush() || file.handle() < 0) return false;
+#ifdef Q_OS_WIN
+    return ::_commit(static_cast<int>(file.handle())) == 0;
+#else
+    return ::fsync(static_cast<int>(file.handle())) == 0;
+#endif
 }
 
 bool syncDirectory(const QString& path)
@@ -735,6 +760,13 @@ bool RemoteCacheStore::loadJsonObject(const QString& path,
 
 bool RemoteCacheStore::initialize(QString* errorCode)
 {
+    sweepRetainedAssets();
+    if (!m_backgroundTransaction && !m_retentionTimer.isActive()) {
+        m_retentionTimer.setInterval(30000);
+        connect(&m_retentionTimer, &QTimer::timeout, this, &RemoteCacheStore::requestCleanupSweep, Qt::UniqueConnection);
+        m_retentionTimer.start();
+    }
+
     m_lastErrorCode.clear();
     const QStringList privateDirectories = {
         m_rootPath,
@@ -781,9 +813,10 @@ bool RemoteCacheStore::requestRecovery()
         if (result.first) requestCleanupSweep();
         emit recoveryFinished(result.first, result.second);
     });
-    watcher->setFuture(QtConcurrent::run(&m_transactionPool, [root = m_rootPath, history = m_history]() {
+    watcher->setFuture(QtConcurrent::run(&m_transactionPool, [root = m_rootPath, history = m_history, retentionMs = m_retentionMs, maximumBytes = m_retentionMaximumBytes]() {
         RemoteCacheStore disk(root);
         disk.m_history = history;
+        disk.setRetentionPolicy(retentionMs, maximumBytes);
         disk.m_backgroundTransaction = true;
         QString error;
         const bool ready = disk.initialize(&error) && disk.receiverAdvertisementSafe(&error);
@@ -1094,6 +1127,11 @@ RemoteCacheStore::removeValidatedAsset(const Scope& scope,
         return result;
     }
 
+    if (!purgeRetainedAsset(scope.senderEndpointId, command.sha256)) {
+        result.outcome = CommitOutcome::CleanupError;
+        result.errorCode = QStringLiteral("retained_asset_purge_failed");
+        return result;
+    }
     const QString replayPath = assetRemovalTombstonePath(command.removalId);
     QSet<QString> retainedRemovalKeys;
     if (!QFileInfo::exists(replayPath) && !QFileInfo::exists(assetRemovalIntentPath(command.removalId))) {
@@ -1578,6 +1616,7 @@ bool RemoteCacheStore::adoptProvisionalTombstone(
     const QString& officialTeardownId,
     QString* errorCode)
 {
+    QMutexLocker lock(&tombstoneUpdateMutex);
     if (!isValidTeardownId(officialTeardownId)) {
         setError(QStringLiteral("invalid_teardown_id"), errorCode);
         return false;
@@ -1716,6 +1755,9 @@ RemoteCacheStore::CommitResult RemoteCacheStore::requestTeardown(
         }
         m_completedTransactions.insert(key, completed);
         if (completed.acknowledgementSafe()) {
+            NetworkDiagnostics::record(QStringLiteral("cache_logically_quarantined"), {
+                {"remoteSessionId", scope.remoteSessionId}, {"generation", static_cast<double>(scope.generation)},
+                {"size", static_cast<double>(completed.quarantinedBytes)}});
             m_transactionFailures.remove(key);
             m_transactionRetryAt.remove(key);
             m_transactionFences.remove(scope.remoteSessionId);
@@ -1746,7 +1788,7 @@ RemoteCacheStore::CommitResult RemoteCacheStore::requestTeardown(
                               scope.generation, teardownId);
     });
     watcher->setFuture(QtConcurrent::run(&m_transactionPool,
-        [root, history = m_history, scope, teardownId, provisionalReason]() {
+        [root, history = m_history, scope, teardownId, provisionalReason, retentionMs = m_retentionMs, maximumBytes = m_retentionMaximumBytes]() {
             // This isolated instance touches only the fenced scope. Startup
             // recovery must not run here: unrelated live sessions remain live.
             RemoteCacheStore disk(root);
@@ -1757,6 +1799,7 @@ RemoteCacheStore::CommitResult RemoteCacheStore::requestTeardown(
             const bool begun = provisionalReason.isEmpty()
                 ? disk.beginTeardown(scope, teardownId, &error)
                 : disk.beginProvisionalTeardown(scope, teardownId, provisionalReason, &error);
+            disk.setRetentionPolicy(retentionMs, maximumBytes);
             auto committed = disk.commitTeardown(scope, teardownId);
             if (!begun && !committed.acknowledgementSafe() && committed.errorCode.isEmpty())
                 committed.errorCode = error;
@@ -1885,6 +1928,7 @@ RemoteCacheStore::CommitResult RemoteCacheStore::commitTeardown(
         return result;
     }
 
+    retainScopeAssets(scope);
     const QString livePath = scopeDirectory(scope);
     const QString quarantinedPath = quarantinePath(quarantineEntry);
     const QFileInfo liveInfo(livePath);
@@ -2780,13 +2824,15 @@ void RemoteCacheStore::requestCleanupSweep()
         if (batch.first.isEmpty() && batch.second.isEmpty() && m_history->size() > 0)
             m_cleanupRetries.schedule(QStringLiteral("history"), 60000, [this] { requestCleanupSweep(); });
     });
-    watcher->setFuture(QtConcurrent::run(&m_transactionPool, [root = m_rootPath, history = m_history]() {
+    watcher->setFuture(QtConcurrent::run(&m_transactionPool, [root = m_rootPath, history = m_history, retentionMs = m_retentionMs, maximumBytes = m_retentionMaximumBytes]() {
         RemoteCacheStore disk(root);
         disk.m_history = history;
+        disk.setRetentionPolicy(retentionMs, maximumBytes);
         disk.m_backgroundTransaction = true;
         QString ignored;
         disk.sweepQuarantine(&ignored);
         disk.collectExpiredHistory();
+        disk.sweepRetainedAssets();
         return CleanupBatch(disk.m_collectedPhysicalDeletes, disk.m_collectedOrphanDeletes);
     }));
 }
@@ -2817,10 +2863,11 @@ void RemoteCacheStore::schedulePhysicalCleanup(const Tombstone& tombstoneValue,
         watcher->deleteLater();
         finishPhysicalCleanup(result);
     });
-    watcher->setFuture(QtConcurrent::run(&m_transactionPool, [work, path, root = m_rootPath, history = m_history]() mutable {
+    watcher->setFuture(QtConcurrent::run(&m_transactionPool, [work, path, root = m_rootPath, history = m_history, retentionMs = m_retentionMs, maximumBytes = m_retentionMaximumBytes]() mutable {
         work.success = deleteTreeWithoutFollowingLinks(path, &work.bytesRemoved, &work.errorCode);
         RemoteCacheStore disk(root);
         disk.m_history = history;
+        disk.setRetentionPolicy(retentionMs, maximumBytes);
         disk.m_backgroundTransaction = true;
         return disk.commitPhysicalCleanup(work);
     }));
@@ -2854,10 +2901,11 @@ void RemoteCacheStore::scheduleOrphanCleanup(const QString& quarantineEntry)
         watcher->deleteLater();
         finishPhysicalCleanup(result);
     });
-    watcher->setFuture(QtConcurrent::run(&m_transactionPool, [work, path, root = m_rootPath, history = m_history]() mutable {
+    watcher->setFuture(QtConcurrent::run(&m_transactionPool, [work, path, root = m_rootPath, history = m_history, retentionMs = m_retentionMs, maximumBytes = m_retentionMaximumBytes]() mutable {
         work.success = deleteTreeWithoutFollowingLinks(path, &work.bytesRemoved, &work.errorCode);
         RemoteCacheStore disk(root);
         disk.m_history = history;
+        disk.setRetentionPolicy(retentionMs, maximumBytes);
         disk.m_backgroundTransaction = true;
         return disk.commitPhysicalCleanup(work);
     }));
@@ -2865,6 +2913,7 @@ void RemoteCacheStore::scheduleOrphanCleanup(const QString& quarantineEntry)
 
 RemoteCacheStore::DeleteResult RemoteCacheStore::commitPhysicalCleanup(DeleteResult result)
 {
+    QMutexLocker lock(&tombstoneUpdateMutex);
     if (result.orphan) {
         if (result.success) {
             if (QFileInfo::exists(result.cleanupErrorFile)) {
@@ -2909,6 +2958,9 @@ RemoteCacheStore::DeleteResult RemoteCacheStore::commitPhysicalCleanup(DeleteRes
 
 void RemoteCacheStore::finishPhysicalCleanup(const DeleteResult& result)
 {
+    NetworkDiagnostics::record(QStringLiteral("cache_physical_cleanup"), {
+        {"remoteSessionId", result.tombstone.scope.remoteSessionId},
+        {"size", static_cast<double>(result.bytesRemoved)}, {"success", result.success}, {"errorCode", result.errorCode}}, !result.success);
     m_scheduledEntries.remove(result.quarantineEntry);
     const auto& scope = result.tombstone.scope;
     if (!result.orphan) {
@@ -2935,4 +2987,236 @@ void RemoteCacheStore::scheduleCleanupSweep(bool failed)
     const qint64 due = m_cleanupRetries.dueAt(key);
     if (due < 0 || MouffetteClock::nowMs() + delay < due)
         m_cleanupRetries.schedule(key, delay, [this] { requestCleanupSweep(); });
+}
+
+
+QString RemoteCacheStore::retainedDirectory() const
+{
+    return QDir(m_rootPath).filePath(QStringLiteral(".retained"));
+}
+
+void RemoteCacheStore::setRetentionPolicy(qint64 retentionMs, qint64 maximumBytes)
+{
+    m_retentionMs = qMax<qint64>(0, retentionMs);
+    m_retentionMaximumBytes = qMax<qint64>(0, maximumBytes);
+}
+
+bool RemoteCacheStore::checkpointAsset(const Scope& scope, const QString& targetEndpointId,
+    const QString& path, const QString& sha256, qint64 size, qint64 durableOffset,
+    const QString& extension, QString* errorCode) const
+{
+    if (!ownsPath(scope, path) || !isValidEndpointId(targetEndpointId)
+        || !isValidSha256(sha256) || size < 1 || durableOffset < 0 || durableOffset > size
+        || QFileInfo(path).suffix() != extension || QFileInfo(path).size() < durableOffset) {
+        setError(QStringLiteral("invalid_asset_checkpoint"), errorCode);
+        return false;
+    }
+    QJsonObject previous;
+    QString ignored;
+    const QString manifestPath = path + QStringLiteral(".manifest.json");
+    loadJsonObject(manifestPath, &previous, &ignored);
+    QJsonObject manifest = scopeJson(scope);
+    manifest.insert(QStringLiteral("schemaVersion"), MetadataSchemaVersion);
+    manifest.insert(QStringLiteral("targetEndpointId"), targetEndpointId);
+    manifest.insert(QStringLiteral("sha256"), sha256);
+    manifest.insert(QStringLiteral("size"), QString::number(size));
+    manifest.insert(QStringLiteral("durableOffset"), QString::number(durableOffset));
+    manifest.insert(QStringLiteral("extension"), extension);
+    // Importing a retained entry never grants it another ten minutes.
+    if (previous.contains(QStringLiteral("expiresAt")))
+        manifest.insert(QStringLiteral("expiresAt"), previous.value(QStringLiteral("expiresAt")));
+    return writeJsonAtomically(manifestPath, manifest, errorCode);
+}
+
+qint64 RemoteCacheStore::checkpointedAssetOffset(const Scope& scope, const QString& targetEndpointId,
+    const QString& path, const QString& sha256, qint64 size, const QString& extension) const
+{
+    QJsonObject manifest;
+    QString ignored;
+    if (!ownsPath(scope, path) || !loadJsonObject(path + QStringLiteral(".manifest.json"), &manifest, &ignored)
+        || manifest.value(QStringLiteral("schemaVersion")).toInt() != MetadataSchemaVersion
+        || manifest.value(QStringLiteral("senderEndpointId")).toString() != scope.senderEndpointId
+        || manifest.value(QStringLiteral("remoteSessionId")).toString() != scope.remoteSessionId
+        || manifest.value(QStringLiteral("targetEndpointId")).toString() != targetEndpointId
+        || manifest.value(QStringLiteral("sha256")).toString() != sha256
+        || manifest.value(QStringLiteral("extension")).toString() != extension
+        || manifest.value(QStringLiteral("size")).toString().toLongLong() != size) return -1;
+    bool ok = false;
+    const qint64 offset = manifest.value(QStringLiteral("durableOffset")).toString().toLongLong(&ok);
+    return ok && offset >= 0 && offset <= size && QFileInfo(path).size() >= offset ? offset : -1;
+}
+
+void RemoteCacheStore::retainScopeAssets(const Scope& scope)
+{
+    if (m_retentionMs <= 0 || m_retentionMaximumBytes <= 0) return;
+    const QString live = scopeDirectory(scope);
+    QString ignored;
+    if (!ensurePrivateDirectory(retainedDirectory(), &ignored)) return;
+    QDirIterator iterator(live, {QStringLiteral("*.manifest.json")},
+                          QDir::Files | QDir::NoSymLinks, QDirIterator::Subdirectories);
+    while (iterator.hasNext()) {
+        const QString manifestPath = iterator.next();
+        const QString dataPath = manifestPath.left(manifestPath.size() - QStringLiteral(".manifest.json").size());
+        QJsonObject manifest;
+        if (!ownsPath(scope, dataPath) || !loadJsonObject(manifestPath, &manifest, &ignored)
+            || manifest.value(QStringLiteral("schemaVersion")).toInt() != MetadataSchemaVersion
+            || manifest.value(QStringLiteral("senderEndpointId")).toString() != scope.senderEndpointId
+            || !isValidEndpointId(manifest.value(QStringLiteral("targetEndpointId")).toString())
+            || !isValidSha256(manifest.value(QStringLiteral("sha256")).toString())) continue;
+        const qint64 size = manifest.value(QStringLiteral("size")).toString().toLongLong();
+        const qint64 offset = manifest.value(QStringLiteral("durableOffset")).toString().toLongLong();
+        const qint64 now = retentionNowMs();
+        const qint64 expiresAt = manifest.contains(QStringLiteral("expiresAt"))
+            ? manifest.value(QStringLiteral("expiresAt")).toString().toLongLong() : now + m_retentionMs;
+        if (offset <= 0 || offset > size || offset > m_retentionMaximumBytes || expiresAt <= now) continue;
+        QFile data(dataPath);
+        if (!data.open(QIODevice::ReadWrite) || data.size() < offset || !data.resize(offset) || !synchronizeData(data)) continue;
+        QCryptographicHash digest(QCryptographicHash::Sha256);
+        if (!digest.addData(&data)) continue;
+        const QString prefixHash = QString::fromLatin1(digest.result().toHex());
+        if (offset == size && prefixHash != manifest.value(QStringLiteral("sha256")).toString()) continue;
+        data.close();
+        manifest.insert(QStringLiteral("prefixSha256"), prefixHash);
+        manifest.insert(QStringLiteral("expiresAt"), QString::number(expiresAt));
+        // Persist the first expiration before moving, including crash retries.
+        if (!writeJsonAtomically(manifestPath, manifest, &ignored)) continue;
+        const QString key = compactPathToken(manifest.value(QStringLiteral("senderEndpointId")).toString()
+            + QLatin1Char(':') + manifest.value(QStringLiteral("targetEndpointId")).toString()
+            + QLatin1Char(':') + manifest.value(QStringLiteral("sha256")).toString()
+            + QLatin1Char(':') + QString::number(size) + QLatin1Char(':')
+            + manifest.value(QStringLiteral("extension")).toString());
+        const QString destination = QDir(retainedDirectory()).filePath(key);
+        if (!ensurePrivateDirectory(destination, &ignored)) continue;
+        QJsonObject existing;
+        const QString retainedManifest = QDir(destination).filePath(QStringLiteral("manifest.json"));
+        if (loadJsonObject(retainedManifest, &existing, &ignored)) {
+            const qint64 oldExpiry = existing.value(QStringLiteral("expiresAt")).toString().toLongLong();
+            if (oldExpiry > now && existing.value(QStringLiteral("durableOffset")).toString().toLongLong() >= offset) continue;
+            if (oldExpiry > now) manifest.insert(QStringLiteral("expiresAt"), QString::number(qMin(oldExpiry, expiresAt)));
+        }
+        const QString retainedBytes = QDir(destination).filePath(QStringLiteral("bytes"));
+        QFile::remove(retainedBytes);
+        sweepRetainedAssets(offset);
+        if (!ensurePrivateDirectory(destination, &ignored)) continue;
+        // Keep the live source until the retained metadata commits. A crash
+        // between these writes is recoverable from its original checkpoint.
+#ifdef Q_OS_WIN
+        const bool linked = ::CreateHardLinkW(reinterpret_cast<LPCWSTR>(retainedBytes.utf16()),
+                                              reinterpret_cast<LPCWSTR>(dataPath.utf16()), nullptr);
+#else
+        const bool linked = ::link(QFile::encodeName(dataPath).constData(), QFile::encodeName(retainedBytes).constData()) == 0;
+#endif
+        if (!linked && !QFile::copy(dataPath, retainedBytes)) continue;
+        QFile retainedFile(retainedBytes);
+        if (!retainedFile.open(QIODevice::ReadWrite) || !synchronizeData(retainedFile)) continue;
+        retainedFile.close();
+        if (!writeJsonAtomically(retainedManifest, manifest, &ignored)) continue;
+        QFile::remove(dataPath);
+        QFile::remove(manifestPath);
+        syncDirectory(QFileInfo(dataPath).absolutePath());
+        NetworkDiagnostics::record(QStringLiteral("cache_retained"), {{"remoteSessionId", scope.remoteSessionId},
+            {"confirmedBytes", static_cast<double>(offset)}, {"remainingMs", static_cast<double>(expiresAt - now)}});
+    }
+    sweepRetainedAssets();
+}
+
+qint64 RemoteCacheStore::restoreRetainedAsset(const Scope& scope, const QString& targetEndpointId,
+    const QString& path, const QString& sha256, qint64 size, const QString& extension)
+{
+    if (!acceptsCommands(scope) || !ownsPath(scope, path) || !isValidEndpointId(targetEndpointId)) return 0;
+    const QString key = compactPathToken(scope.senderEndpointId + QLatin1Char(':') + targetEndpointId
+        + QLatin1Char(':') + sha256 + QLatin1Char(':') + QString::number(size) + QLatin1Char(':') + extension);
+    const QString directory = QDir(retainedDirectory()).filePath(key);
+    if (QFileInfo(directory).isSymLink() || QFileInfo(retainedDirectory()).isSymLink()) return 0;
+    QJsonObject manifest;
+    QString ignored;
+    if (!loadJsonObject(QDir(directory).filePath(QStringLiteral("manifest.json")), &manifest, &ignored)
+        || manifest.value(QStringLiteral("schemaVersion")).toInt() != MetadataSchemaVersion
+        || manifest.value(QStringLiteral("senderEndpointId")).toString() != scope.senderEndpointId
+        || manifest.value(QStringLiteral("targetEndpointId")).toString() != targetEndpointId
+        || manifest.value(QStringLiteral("sha256")).toString() != sha256
+        || manifest.value(QStringLiteral("extension")).toString() != extension
+        || manifest.value(QStringLiteral("size")).toString().toLongLong() != size
+        || manifest.value(QStringLiteral("expiresAt")).toString().toLongLong() <= retentionNowMs()) return 0;
+    const qint64 offset = manifest.value(QStringLiteral("durableOffset")).toString().toLongLong();
+    const QString source = QDir(directory).filePath(QStringLiteral("bytes"));
+    QFile data(source);
+    if (offset <= 0 || offset > size || QFileInfo(source).isSymLink() || !data.open(QIODevice::ReadOnly)
+        || data.size() != offset) return 0;
+    QCryptographicHash hash(QCryptographicHash::Sha256);
+    if (!hash.addData(&data) || QString::fromLatin1(hash.result().toHex()) != manifest.value(QStringLiteral("prefixSha256")).toString()) return 0;
+    if (offset == size && QString::fromLatin1(hash.result().toHex()) != sha256) return 0;
+    data.close();
+    if (QFileInfo::exists(path) || !QFile::copy(source, path)) return 0;
+    QFile restored(path);
+    if (!restored.open(QIODevice::ReadWrite) || !synchronizeData(restored)) {
+        restored.close();
+        QFile::remove(path);
+        return 0;
+    }
+    restored.close();
+    manifest.insert(QStringLiteral("remoteSessionId"), scope.remoteSessionId);
+    manifest.insert(QStringLiteral("generation"), generationString(scope.generation));
+    if (!writeJsonAtomically(path + QStringLiteral(".manifest.json"), manifest, &ignored)) {
+        QFile::remove(path);
+        return 0;
+    }
+    NetworkDiagnostics::record(QStringLiteral("cache_reused"), {{"remoteSessionId", scope.remoteSessionId},
+        {"reusedBytes", static_cast<double>(offset)}});
+    return offset;
+}
+
+bool RemoteCacheStore::purgeRetainedAsset(const QString& senderEndpointId, const QString& sha256)
+{
+    for (const auto& directory : QDir(retainedDirectory()).entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot | QDir::NoSymLinks)) {
+        QJsonObject manifest;
+        QString ignored;
+        if (loadJsonObject(QDir(directory.absoluteFilePath()).filePath(QStringLiteral("manifest.json")), &manifest, &ignored)
+            && manifest.value(QStringLiteral("senderEndpointId")).toString() == senderEndpointId
+            && manifest.value(QStringLiteral("sha256")).toString() == sha256) {
+            manifest.insert(QStringLiteral("expiresAt"), QStringLiteral("0"));
+            if (!writeJsonAtomically(QDir(directory.absoluteFilePath()).filePath(QStringLiteral("manifest.json")), manifest, &ignored))
+                return false;
+            // Logical purge is durable even if physical deletion fails; the
+            // expiry worker retries, and restore can never reuse this entry.
+            qint64 removed = 0;
+            const bool deleted = deleteTreeWithoutFollowingLinks(directory.absoluteFilePath(), &removed, &ignored);
+            NetworkDiagnostics::record(QStringLiteral("cache_retained_purged"), {
+                {"size", static_cast<double>(removed)}, {"success", deleted}, {"errorCode", ignored}});
+        }
+    }
+    return true;
+}
+
+void RemoteCacheStore::sweepRetainedAssets(qint64 reservedBytes)
+{
+    struct Entry { QString path; qint64 expires; qint64 bytes; };
+    QList<Entry> entries;
+    qint64 total = 0;
+    const qint64 now = retentionNowMs();
+    if (QFileInfo(retainedDirectory()).isSymLink()) return;
+    for (const auto& directory : QDir(retainedDirectory()).entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot | QDir::NoSymLinks)) {
+        QJsonObject manifest;
+        QString ignored;
+        const bool valid = loadJsonObject(QDir(directory.absoluteFilePath()).filePath(QStringLiteral("manifest.json")), &manifest, &ignored)
+            && manifest.value(QStringLiteral("schemaVersion")).toInt() == MetadataSchemaVersion;
+        const qint64 expiry = valid ? manifest.value(QStringLiteral("expiresAt")).toString().toLongLong() : 0;
+        const qint64 bytes = QFileInfo(QDir(directory.absoluteFilePath()).filePath(QStringLiteral("bytes"))).size();
+        entries.append({directory.absoluteFilePath(), expiry, bytes});
+        total += bytes;
+    }
+    std::sort(entries.begin(), entries.end(), [](const Entry& a, const Entry& b) { return a.expires < b.expires; });
+    qsizetype count = entries.size();
+    for (const Entry& entry : entries) {
+        if (entry.expires > now && total <= qMax<qint64>(0, m_retentionMaximumBytes - reservedBytes)
+            && count <= 4096) break;
+        qint64 removed = 0;
+        QString ignored;
+        if (deleteTreeWithoutFollowingLinks(entry.path, &removed, &ignored)) {
+            total -= entry.bytes;
+            --count;
+            NetworkDiagnostics::record(QStringLiteral("cache_physically_deleted"), {{"size", static_cast<double>(entry.bytes)},
+                {"reason", entry.expires <= now ? QStringLiteral("retention_expired") : QStringLiteral("retention_capacity")}});
+        }
+    }
 }

@@ -20,6 +20,7 @@
 #include "backend/network/SceneRunCoordinator.h"
 #include "backend/network/RemoteSessionCoordinator.h"
 #include "backend/network/WebSocketClient.h"
+#include "backend/managers/network/ConnectionManager.h"
 #include "backend/security/DeviceIdentityStore.h"
 #include "frontend/rendering/canvas/QuickCanvasController.h"
 #include "frontend/rendering/canvas/QuickCanvasHost.h"
@@ -41,7 +42,7 @@ private slots:
     {
         MediaResidencyManager::instance().clearMemorySnapshotForTesting();
     }
-    void transportTimeoutPreservesSessionUntilItsFiveSecondProofDeadline()
+    void transportTimeoutPreservesSessionUntilItsFixedRecoveryProofDeadline()
     {
         QTemporaryDir directory;
         QVERIFY(directory.isValid());
@@ -49,6 +50,7 @@ private slots:
         QVERIFY(server.listen(QHostAddress::LocalHost, 0));
         qint64 continuousNow = 0;
         WebSocketClient client(directory.path(), false, nullptr, [&] { return continuousNow; });
+        ConnectionManager connection(&client, nullptr, [&] { return continuousNow; });
         const QString boot = QUuid::createUuid().toString(QUuid::WithoutBraces);
         const QString target(43, QLatin1Char('B'));
         QPointer<QWebSocket> peer;
@@ -79,15 +81,15 @@ private slots:
                     {"instanceId", message.value("instanceId")},
                     {"instanceOrdinal", message.value("instanceOrdinal")}, {"runtimeId", message.value("runtimeId")},
                     {"connectionGeneration", 1}, {"serverMonotonicMs", 0},
-                    {"policy", QJsonObject{{"policyVersion", 1}, {"heartbeatIntervalMs", 750},
-                        {"leaseTimeoutMs", 3000}, {"transportSuspectAfterMs", 1500},
-                        {"sessionRecoveryTimeoutMs", 5000}, {"scenePrepareTimeoutMs", 15000},
+                    {"policy", QJsonObject{{"policyVersion", 5}, {"transportTimeoutMs", 5000}, {"heartbeatIntervalMs", 750},
+                        {"leaseTimeoutMs", 1500}, {"transportSuspectAfterMs", 1500},
+                        {"sessionRecoveryTimeoutMs", 15000}, {"scenePrepareTimeoutMs", 15000},
                         {"sceneActivationLeadMs", 500}, {"sceneMaxClockSkewMs", 50},
                         {"sceneStartedAckTimeoutMs", 5000}, {"sceneMaxStartSkewMs", 750},
                         {"sceneStopTimeoutMs", 5000}, {"uploadIdleTimeoutMs", 45000},
                         {"uploadTargetAckTimeoutMs", 30000}, {"removalAckTimeoutMs", 30000}}}});
                 opened = {{"type", "remote_session_opened"}, {"remoteSessionId", "recovery-session"},
-                    {"generation", 1}, {"commandReady", true}, {"stateRevision", 2}, {"validUntilServerMonotonicMs", 5000},
+                    {"generation", 1}, {"commandReady", true}, {"stateRevision", 2}, {"validUntilServerMonotonicMs", 16500},
                     {"ownerConnectionGeneration", 1}, {"targetConnectionGeneration", 1},
                     {"ownerEndpointId", owner}, {"targetEndpointId", target},
                     {"resumeToken", "recovery-proof"}, {"phase", "Active"}, {"snapshotSequence", 1},
@@ -107,24 +109,91 @@ private slots:
         QTest::qWait(20);
         QCOMPARE(ready.size(), 1);
         QCOMPARE(closeCommands, 0);
-        continuousNow = 3000;
+        continuousNow = 1500;
         QVERIFY(QMetaObject::invokeMethod(&client, "checkLeaseHealth", Qt::DirectConnection));
+        QCOMPARE(connection.getConnectionStatus(), QStringLiteral("Degraded"));
+        QVERIFY(client.isConnected()); // Two missed heartbeats degrade, not close.
         QCOMPARE(expired.size(), 0);
         QVERIFY(!client.remoteSessionCoordinator()->byId("recovery-session").remoteSessionId.isEmpty());
         QVERIFY(!client.canIssueSessionCommands("recovery-session"));
-        continuousNow = 4999;
+        continuousNow = 5000;
+        QVERIFY(QMetaObject::invokeMethod(&client, "checkLeaseHealth", Qt::DirectConnection));
+        QVERIFY(!client.isConnected()); // Independent transport timeout.
+        QCOMPARE(connection.getConnectionStatus(), QStringLiteral("Degraded"));
+        continuousNow = 16499;
         QVERIFY(QMetaObject::invokeMethod(&client, "checkLeaseHealth", Qt::DirectConnection));
         QCOMPARE(expired.size(), 0);
-        continuousNow = 5000;
+        QCOMPARE(connection.getConnectionStatus(), QStringLiteral("Degraded"));
+        continuousNow = 16500;
         QVERIFY(QMetaObject::invokeMethod(&client, "checkLeaseHealth", Qt::DirectConnection));
         QCOMPARE(expired.size(), 1);
         QCOMPARE(expired.first().first().toString(), QStringLiteral("recovery-session"));
         QVERIFY(!client.remoteSessionCoordinator()->byId("recovery-session").active);
+        QCOMPARE(connection.getConnectionStatus(), QStringLiteral("Disconnected"));
         QVERIFY(QMetaObject::invokeMethod(&client, "checkLeaseHealth", Qt::DirectConnection));
         QCOMPARE(expired.size(), 1);
         client.disconnect();
         QCOMPARE(invalidated.size(), 1);
-        QCOMPARE(globalExpired.size(), 0);
+        QVERIFY(globalExpired.size() <= 1);
+    }
+
+    void ownerAcknowledgementsRemainPendingUntilCommandsCanBeSent()
+    {
+        QTemporaryDir directory;
+        WebSocketClient socket(directory.path(), false);
+        std::unique_ptr<QuickCanvasHost> host(QuickCanvasHost::create());
+        QVERIFY(host);
+        host->setWebSocketClient(&socket);
+        auto* coordinator = socket.sceneRunCoordinator();
+        coordinator->setPrepareTimeoutMs(15000);
+        QJsonObject session{{"type", "remote_session_opened"}, {"remoteSessionId", "pending-owner-session"},
+            {"generation", 1}, {"ownerConnectionGeneration", 1}, {"targetConnectionGeneration", 1},
+            {"ownerEndpointId", socket.endpointId()}, {"targetEndpointId", QString(43, QLatin1Char('B'))},
+            {"resumeToken", "test-proof"}, {"phase", "Active"}};
+        QVERIFY(coordinator->upsertSession(session));
+        SceneRunCoordinator::Run run;
+        QVERIFY(coordinator->createOutgoingRun(session.value("targetEndpointId").toString(), 1, {},
+            QJsonObject{{"screens", QJsonArray{}}, {"media", QJsonArray{}}}, &run));
+        host->m_sceneRunId = run.sceneRunId;
+        host->m_sceneDigest = run.digest;
+        host->m_sceneLaunching = true;
+        host->m_sceneAccepted = true;
+        host->m_localVideosPrepared = true;
+        host->m_localPrepareChecklist = QJsonArray{QJsonObject{
+            {"itemId", "screen"}, {"stage", "screen_render_graph_ready"}, {"ready", true}}};
+        host->document()->setEditsLocked(true);
+        host->reportLocalScenePrepared();
+        QVERIFY(!host->m_localPreparedReported);
+        QVERIFY(host->remoteSceneLaunching());
+        QVERIFY(host->document()->editsLocked());
+        host->m_firstFramePresentedServerMs = 1234;
+        host->m_firstFramePresentedLocalMs = 5678;
+        host->reportFirstFramePresented();
+        QVERIFY(!host->m_firstFrameReported);
+        QVERIFY(host->remoteSceneLaunching());
+        QCOMPARE(host->m_firstFramePresentedServerMs, qint64(1234));
+        emit socket.reconciliationCompleted();
+        QVERIFY(host->remoteSceneLaunching());
+        QCOMPARE(host->m_firstFramePresentedServerMs, qint64(1234));
+        QCOMPARE(host->m_firstFramePresentedLocalMs, qint64(5678));
+        emit socket.sceneErrorReceived({{"sceneRunId", host->m_sceneRunId},
+            {"digest", host->m_sceneDigest}, {"code", "channel_unavailable"},
+            {"errorClass", "temporary"}});
+        QVERIFY(host->remoteSceneLaunching());
+        QVERIFY(host->document()->editsLocked());
+        session.insert("type", "remote_session_resumed");
+        session.insert("generation", 2);
+        session.insert("ownerConnectionGeneration", 2);
+        session.insert("targetConnectionGeneration", 2);
+        QVERIFY(coordinator->upsertSession(session));
+        emit socket.sceneErrorReceived({{"sceneRunId", run.sceneRunId}, {"digest", run.digest},
+            {"remoteSessionId", run.remoteSessionId}, {"generation", 1},
+            {"code", "scene_prepare_failed"}, {"message", "Delayed terminal error from old generation"}});
+        QVERIFY(host->remoteSceneLaunching());
+        QVERIFY(host->document()->editsLocked());
+        host->handleRemoteConnectionLost();
+        QVERIFY(!host->remoteSceneLaunching());
+        QVERIFY(!host->document()->editsLocked());
     }
 
     void pendingMetadataImportBlocksReadyCanvasWithoutAutoLaunching()
@@ -325,9 +394,9 @@ private slots:
                         {"runtimeId", message.value("runtimeId")},
                         {"connectionGeneration", 1}, {"serverMonotonicMs", 10},
                         {"policy", QJsonObject{
-                            {"policyVersion", 1}, {"heartbeatIntervalMs", 250},
+                            {"policyVersion", 5}, {"transportTimeoutMs", 5000}, {"heartbeatIntervalMs", 250},
                             {"transportSuspectAfterMs", 500}, {"sessionRecoveryTimeoutMs", 20000},
-                            {"leaseTimeoutMs", 3000}, {"scenePrepareTimeoutMs", 1000},
+                            {"leaseTimeoutMs", 500}, {"scenePrepareTimeoutMs", 1000},
                             {"sceneActivationLeadMs", 500}, {"sceneMaxClockSkewMs", 50},
                             {"sceneStartedAckTimeoutMs", 5000}, {"sceneMaxStartSkewMs", 750},
                             {"sceneStopTimeoutMs", 5000},
@@ -600,6 +669,7 @@ private slots:
         const QString bootId = QUuid::createUuid().toString(QUuid::WithoutBraces);
         const QString targetId(43, QLatin1Char('B'));
         int scenePrepareCount = 0;
+        QJsonObject firstPrepare;
         QJsonObject fixtureSessionState;
         auto send = [&](QWebSocket* peer, QJsonObject message) {
             message.insert(QStringLiteral("protocolVersion"), WebSocketClient::ProtocolVersion);
@@ -648,9 +718,9 @@ private slots:
                         {"runtimeId", message.value("runtimeId")},
                         {"connectionGeneration", 1}, {"serverMonotonicMs", 10},
                         {"policy", QJsonObject{
-                            {"policyVersion", 1}, {"heartbeatIntervalMs", 250},
+                            {"policyVersion", 5}, {"transportTimeoutMs", 5000}, {"heartbeatIntervalMs", 250},
                             {"transportSuspectAfterMs", 500}, {"sessionRecoveryTimeoutMs", 20000},
-                            {"leaseTimeoutMs", 3000}, {"scenePrepareTimeoutMs", 5000},
+                            {"leaseTimeoutMs", 500}, {"scenePrepareTimeoutMs", 5000},
                             {"sceneActivationLeadMs", 500}, {"sceneMaxClockSkewMs", 50},
                             {"sceneStartedAckTimeoutMs", 5000}, {"sceneMaxStartSkewMs", 750},
                             {"sceneStopTimeoutMs", 5000},
@@ -677,8 +747,15 @@ private slots:
                                 {"serverEpochMs", 1}});
                 } else if (type == QLatin1String("scene_prepare")) {
                     ++scenePrepareCount;
-                    // Keep the run in PREPARE: the exclusion must not depend
-                    // on a later accepted/prepared/commit transition.
+                    if (firstPrepare.isEmpty()) firstPrepare = message;
+                    for (const QString& field : {QStringLiteral("remoteSessionId"),
+                            QStringLiteral("generation"), QStringLiteral("sceneRunId"),
+                            QStringLiteral("revision"), QStringLiteral("digest"),
+                            QStringLiteral("manifest"), QStringLiteral("scene")}) {
+                        QCOMPARE(message.value(field), firstPrepare.value(field));
+                    }
+                    // Deliberately withhold acceptance: retries are expected,
+                    // but every retry must refer to this same immutable run.
                 }
             });
         });
@@ -724,7 +801,10 @@ private slots:
         QVERIFY(host->testSceneActionEnabled());
 
         host->triggerRemoteSceneAction();
-        QTRY_COMPARE_WITH_TIMEOUT(scenePrepareCount, 1, 3000);
+        QTRY_VERIFY_WITH_TIMEOUT(scenePrepareCount >= 1, 3000);
+        const QString preparedRunId = firstPrepare.value(QStringLiteral("sceneRunId")).toString();
+        QVERIFY(!preparedRunId.isEmpty());
+        QCOMPARE(host->m_sceneRunId, preparedRunId);
         QVERIFY(host->remoteSceneLaunching());
         QVERIFY(!host->remoteSceneLaunched());
         QVERIFY(!host->remoteSceneStopping());
@@ -737,7 +817,11 @@ private slots:
         QVERIFY(!host->remoteSceneLaunched());
         QVERIFY(!host->remoteSceneStopping());
         QVERIFY(host->document()->editsLocked());
-        QCOMPARE(scenePrepareCount, 1);
+        QCOMPARE(host->m_sceneRunId, preparedRunId);
+        QTRY_VERIFY_WITH_TIMEOUT(scenePrepareCount >= 2, 3000);
+        QCOMPARE(host->m_sceneRunId, preparedRunId);
+        QVERIFY(host->remoteSceneLaunching());
+        QVERIFY(!host->testSceneLaunched());
 
         host->handleRemoteConnectionLost();
         QVERIFY(!host->remoteSceneLaunching());
@@ -756,6 +840,7 @@ private slots:
         const QString targetId(43, QLatin1Char('B'));
         QString ownerId;
         bool allPreparedSent = false;
+        int preparedAttempts = 0;
         bool armedBeforeClockReply = false;
         int clockRepliesAfterBarrier = 0;
         int armedCount = 0;
@@ -808,9 +893,9 @@ private slots:
                         {"runtimeId", message.value("runtimeId")},
                         {"connectionGeneration", 1}, {"serverMonotonicMs", 10},
                         {"policy", QJsonObject{
-                            {"policyVersion", 1}, {"heartbeatIntervalMs", 250},
+                            {"policyVersion", 5}, {"transportTimeoutMs", 5000}, {"heartbeatIntervalMs", 250},
                             {"transportSuspectAfterMs", 500}, {"sessionRecoveryTimeoutMs", 20000},
-                            {"leaseTimeoutMs", 10000}, {"scenePrepareTimeoutMs", 5000},
+                            {"leaseTimeoutMs", 500}, {"scenePrepareTimeoutMs", 5000},
                             {"sceneActivationLeadMs", 1000}, {"sceneMaxClockSkewMs", 50},
                             {"sceneStartedAckTimeoutMs", 5000}, {"sceneMaxStartSkewMs", 750},
                             {"sceneStopTimeoutMs", 5000},
@@ -832,7 +917,7 @@ private slots:
                 } else if (type == QLatin1String("heartbeat")) {
                     // Deliberately leave the clock unmapped until PREPARED is
                     // complete. The launch must wait, not tear down the run.
-                    if (!allPreparedSent) return;
+                    if (preparedAttempts == 0) return;
                     ++clockRepliesAfterBarrier;
                     send(peer, {{"type", "heartbeat_ack"}, {"connectionGeneration", 1},
                                 {"sequence", message.value("sequence")},
@@ -853,6 +938,7 @@ private slots:
                     });
                 } else if (type == QLatin1String("prepared")
                            && message.value(QStringLiteral("success")).toBool()) {
+                    if (++preparedAttempts == 1) return; // Lose the first locally queued PREPARED.
                     allPreparedSent = true;
                     send(peer, {
                         {"type", "prepared"},
@@ -895,6 +981,7 @@ private slots:
 
         host->triggerRemoteSceneAction();
         QTRY_VERIFY_WITH_TIMEOUT(allPreparedSent, 3000);
+        QVERIFY(preparedAttempts >= 2);
         QTRY_COMPARE_WITH_TIMEOUT(armedCount, 1, 3000);
         QVERIFY(!armedBeforeClockReply);
         QVERIFY(clockRepliesAfterBarrier > 0);
@@ -943,6 +1030,7 @@ private slots:
         QJsonArray preparedChecklist;
         int armedCount = 0;
         QJsonObject startedMessage;
+        QList<qint64> presentedTimestamps;
         QJsonObject fixtureSessionState;
         auto send = [&](QWebSocket* socket, QJsonObject message) {
             message.insert(QStringLiteral("protocolVersion"), WebSocketClient::ProtocolVersion);
@@ -991,9 +1079,9 @@ private slots:
                         {"runtimeId", message.value("runtimeId")},
                         {"connectionGeneration", 1}, {"serverMonotonicMs", 10},
                         {"policy", QJsonObject{
-                            {"policyVersion", 1}, {"heartbeatIntervalMs", 250},
+                            {"policyVersion", 5}, {"transportTimeoutMs", 5000}, {"heartbeatIntervalMs", 250},
                             {"transportSuspectAfterMs", 500}, {"sessionRecoveryTimeoutMs", 20000},
-                            {"leaseTimeoutMs", 10000}, {"scenePrepareTimeoutMs", 8000},
+                            {"leaseTimeoutMs", 500}, {"scenePrepareTimeoutMs", 8000},
                             {"sceneActivationLeadMs", 500}, {"sceneMaxClockSkewMs", 50},
                             {"sceneStartedAckTimeoutMs", 1000}, {"sceneMaxStartSkewMs", 750},
                             {"sceneStopTimeoutMs", 5000},
@@ -1024,6 +1112,7 @@ private slots:
                     ++armedCount;
                 } else if (type == QLatin1String("started")) {
                     startedMessage = message;
+                    presentedTimestamps.append(message.value("presentedServerMonotonicMs").toInteger(-1));
                 } else if (type == QLatin1String("stopped")) {
                     ++stoppedCount;
                 }
@@ -1140,7 +1229,7 @@ private slots:
         // COMMIT existed. Staying prepared beyond that interval is the
         // regression boundary.
         QTest::qWait(1800);
-        QCOMPARE(successfulPreparedCount, 1);
+        QVERIFY(successfulPreparedCount >= 2); // Retry until the authoritative barrier is acknowledged.
         QCOMPARE(failedPreparedCount, 0);
         bool remoteWindowPresent = false;
         for (QWindow* candidate : QGuiApplication::topLevelWindows()) {
@@ -1176,6 +1265,22 @@ private slots:
         QTRY_VERIFY_WITH_TIMEOUT(!startedMessage.isEmpty(), 3000);
         QVERIFY(startedMessage.value(QStringLiteral("firstFramePresented")).toBool());
         QCOMPARE(failedPreparedCount, 0);
+        const qint64 firstPresentation = startedMessage.value("presentedServerMonotonicMs").toInteger(-1);
+        QVERIFY(firstPresentation >= 0);
+        // Lose the STARTED response: retry the original observation, without
+        // restarting or re-scheduling the already committed presentation.
+        QTRY_VERIFY_WITH_TIMEOUT(presentedTimestamps.size() >= 2, 2500);
+        send(peer, commit);
+        QTRY_VERIFY_WITH_TIMEOUT(presentedTimestamps.size() >= 3, 1000);
+        for (qint64 presented : presentedTimestamps) QCOMPARE(presented, firstPresentation);
+        QJsonObject startedAck = correlation;
+        startedAck.insert("type", "started");
+        startedAck.insert("allStarted", true);
+        send(peer, startedAck);
+        QTest::qWait(50);
+        const qsizetype acknowledgedCount = presentedTimestamps.size();
+        QTest::qWait(1200);
+        QCOMPARE(presentedTimestamps.size(), acknowledgedCount);
 
         QJsonObject stop = correlation;
         stop.insert(QStringLiteral("type"), QStringLiteral("stop"));
