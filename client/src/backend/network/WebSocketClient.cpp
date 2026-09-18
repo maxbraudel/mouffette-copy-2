@@ -550,8 +550,7 @@ bool WebSocketClient::isTransportConnected() const {
 bool WebSocketClient::hasUnexpiredLease() const {
     return m_leaseTimeoutMs > 0 && m_hasEstablishedLease && !m_leaseExpired
         && m_lastServerContactContinuousMs >= 0
-        && leaseElapsedMs() < (m_sessionRecoveryTimeoutMs > 0
-            ? m_sessionRecoveryTimeoutMs : m_leaseTimeoutMs);
+        && leaseElapsedMs() < sessionProofBudgetMs();
 }
 
 qint64 WebSocketClient::leaseRemainingMs() const {
@@ -559,8 +558,7 @@ qint64 WebSocketClient::leaseRemainingMs() const {
         || m_lastServerContactContinuousMs < 0) {
         return 0;
     }
-    return std::max<qint64>(0, static_cast<qint64>(m_sessionRecoveryTimeoutMs > 0
-                                      ? m_sessionRecoveryTimeoutMs : m_leaseTimeoutMs)
+    return std::max<qint64>(0, sessionProofBudgetMs()
                                   - leaseElapsedMs());
 }
 
@@ -1280,6 +1278,13 @@ qint64 WebSocketClient::sessionRecoveryRemainingMs(const QString& remoteSessionI
     return now >= 0 ? std::max<qint64>(0, it->localDeadlineMs - now) : 0;
 }
 
+bool WebSocketClient::isSessionRecovering(const QString& remoteSessionId) const
+{
+    const auto it = m_sessionDeadlines.constFind(remoteSessionId);
+    return it != m_sessionDeadlines.cend() && !it->expired
+        && it->interruptionDeadlineMs >= 0 && sessionRecoveryRemainingMs(remoteSessionId) > 0;
+}
+
 bool WebSocketClient::canIssueSessionCommands(const QString& remoteSessionId) const
 {
     if (!isConnected() || m_endpointDraining || m_degraded || !hasUnexpiredLease()
@@ -1329,6 +1334,31 @@ bool WebSocketClient::acknowledgeSessionState(const QJsonObject& envelope)
     });
 }
 
+qint64 WebSocketClient::sessionProofBudgetMs() const
+{
+    // Policy 4 measures recovery from interruption detection. A normal proof
+    // also covers the two missed heartbeat intervals needed to detect silence.
+    return std::max(1, m_sessionRecoveryTimeoutMs > 0
+        ? m_sessionRecoveryTimeoutMs : m_leaseTimeoutMs)
+        + (m_serverPolicy.value(QStringLiteral("policyVersion")).toInt() >= 4
+            ? m_transportSuspectAfterMs : 0);
+}
+
+void WebSocketClient::beginSessionRecovery(qint64 detectedAtMs)
+{
+    if (m_endpointDraining || !m_hasEstablishedLease || m_leaseExpired) return;
+    for (auto it = m_sessionDeadlines.begin(); it != m_sessionDeadlines.end(); ++it) {
+        if (it->expired) continue;
+        const auto binding = remoteSessionCoordinator()->byId(it.key());
+        if (binding.phase != QLatin1String("Active") && binding.phase != QLatin1String("Grace")) continue;
+        const qint64 deadline = std::min(it->localDeadlineMs,
+            detectedAtMs + m_sessionRecoveryTimeoutMs);
+        it->interruptionDeadlineMs = it->interruptionDeadlineMs < 0
+            ? deadline : std::min(it->interruptionDeadlineMs, deadline);
+        it->localDeadlineMs = std::min(it->localDeadlineMs, it->interruptionDeadlineMs);
+    }
+}
+
 void WebSocketClient::updateSessionDeadline(const QJsonObject& envelope)
 {
     const QString id = envelope.value(QStringLiteral("remoteSessionId")).toString();
@@ -1350,16 +1380,32 @@ void WebSocketClient::updateSessionDeadline(const QJsonObject& envelope)
     }
     const qint64 estimatedServerNow = m_serverClockAnchorMs + now - m_localClockAnchorMs;
     const qint64 remaining = std::clamp<qint64>(deadline - estimatedServerNow, 0,
-        std::max(1, m_sessionRecoveryTimeoutMs));
+        sessionProofBudgetMs());
     const qint64 localDeadline = now + remaining;
-    // A replay, reauthentication or clock re-estimate cannot extend the same
-    // proof. Only a later absolute server deadline renews this session.
-    if (tracked.localDeadlineMs < 0 || deadline > tracked.serverDeadlineMs) {
-        tracked.localDeadlineMs = localDeadline;
-        tracked.serverDeadlineMs = deadline;
-    } else {
-        tracked.localDeadlineMs = std::min(tracked.localDeadlineMs, localDeadline);
+    const bool recovering = envelope.value(QStringLiteral("degraded")).toBool()
+        || phase == QLatin1String("Grace")
+        || envelope.value(QStringLiteral("state")).toString() == QLatin1String("Degraded");
+    if (recovering) {
+        tracked.interruptionDeadlineMs = tracked.interruptionDeadlineMs < 0
+            ? localDeadline : std::min(tracked.interruptionDeadlineMs, localDeadline);
+    } else if (phase == QLatin1String("Active")
+               && envelope.value(QStringLiteral("commandReady")).toBool()) {
+        // Only the authoritative two-party applied-state barrier completes
+        // recovery. A welcome or an unacknowledged RESUME cannot reset it.
+        tracked.interruptionDeadlineMs = -1;
     }
+    // Preserve the mapping of the largest observed proof independently of the
+    // interruption cap. Finishing recovery may restore that SAME normal proof;
+    // it must not keep the shorter interruption deadline by accident.
+    if (tracked.proofDeadlineMs < 0 || deadline > tracked.serverDeadlineMs) {
+        tracked.proofDeadlineMs = localDeadline;
+        tracked.serverDeadlineMs = deadline;
+    } else if (deadline == tracked.serverDeadlineMs) {
+        tracked.proofDeadlineMs = std::min(tracked.proofDeadlineMs, localDeadline);
+    }
+    tracked.localDeadlineMs = std::min(localDeadline, tracked.proofDeadlineMs);
+    if (tracked.interruptionDeadlineMs >= 0)
+        tracked.localDeadlineMs = std::min(tracked.localDeadlineMs, tracked.interruptionDeadlineMs);
 }
 
 void WebSocketClient::checkSessionRecoveryDeadlines()
@@ -1761,6 +1807,15 @@ void WebSocketClient::onConnected() {
 }
 
 void WebSocketClient::onDisconnected() {
+    const qint64 now = suspendInclusiveNowMs();
+    const qint64 detectedAt = m_lastServerContactContinuousMs >= 0
+        ? std::min(now, m_lastServerContactContinuousMs + m_transportSuspectAfterMs) : now;
+    beginSessionRecovery(detectedAt);
+    checkSessionRecoveryDeadlines();
+    if (!m_endpointDraining && !m_degraded) {
+        m_degraded = true;
+        emit transportHealthChanged(true);
+    }
     clearControlRequests();
     m_deviceSnapshotRetryTimer.stop();
     qDebug() << "Control transport disconnected";
@@ -1865,6 +1920,7 @@ void WebSocketClient::checkLeaseHealth() {
     if (!m_authenticated || m_leaseTimeoutMs <= 0 || !m_hasEstablishedLease || m_leaseExpired) return;
     const qint64 elapsed = leaseElapsedMs();
     if (elapsed >= m_leaseTimeoutMs) {
+        beginSessionRecovery(m_lastServerContactContinuousMs + m_transportSuspectAfterMs);
         if (!m_degraded) {
             m_degraded = true;
             emit transportHealthChanged(true);
@@ -1944,7 +2000,7 @@ bool WebSocketClient::validateServerPolicy(const QJsonObject& policy,
     static constexpr Rule rules[] = {
         {"policyVersion", 1, 1000000},
         {"heartbeatIntervalMs", 250, 5000},
-        {"leaseTimeoutMs", 1000, 30000},
+        {"leaseTimeoutMs", 500, 30000},
         {"transportSuspectAfterMs", 250, 30000},
         {"sessionRecoveryTimeoutMs", 1000, 300000},
         {"scenePrepareTimeoutMs", 1000, 120000},
@@ -1970,9 +2026,14 @@ bool WebSocketClient::validateServerPolicy(const QJsonObject& policy,
         }
         values.insert(QString::fromLatin1(rule.name), value);
     }
-    if (values.value("sessionRecoveryTimeoutMs") < values.value("leaseTimeoutMs")
-        || values.value("transportSuspectAfterMs") >= values.value("leaseTimeoutMs")
-        || values.value("leaseTimeoutMs") < values.value("heartbeatIntervalMs") * 4
+    const bool interruptionPolicy = values.value("policyVersion") >= 4;
+    const bool invalidTiming = interruptionPolicy
+        ? (values.value("leaseTimeoutMs") != values.value("heartbeatIntervalMs") * 2
+           || values.value("transportSuspectAfterMs") != values.value("leaseTimeoutMs"))
+        : (values.value("sessionRecoveryTimeoutMs") < values.value("leaseTimeoutMs")
+           || values.value("transportSuspectAfterMs") >= values.value("leaseTimeoutMs")
+           || values.value("leaseTimeoutMs") < values.value("heartbeatIntervalMs") * 4);
+    if (invalidTiming
         || values.value("sceneMaxClockSkewMs") >= values.value("sceneActivationLeadMs")
         || values.value("sceneMaxClockSkewMs") * 2
             > values.value("sceneMaxStartSkewMs")

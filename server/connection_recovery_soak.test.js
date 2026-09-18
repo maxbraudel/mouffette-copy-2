@@ -30,7 +30,7 @@ function protocolSoak() {
     const server = new MouffetteServer({ port: 0, monotonicNow: () => now,
         epochNow: () => wallOffset + now, protocolLogger: () => {},
         metrics: new ProtocolMetrics({ logger: () => {}, maximumOnceKeys: 64 }) });
-    server.remoteSessions = new RemoteSessionRegistry({ leaseTimeoutMs: 5000,
+    server.remoteSessions = new RemoteSessionRegistry({ leaseTimeoutMs: 4500, recoveryTimeoutMs: 3000,
         openTimeoutMs: 5000, tombstoneTtlMs: 10000, openRequestTtlMs: 10000,
         maximumTombstones: 32, maximumOpenRequests: 32, maximumSessions: 16,
         monotonicNow: () => now, epochNow: () => wallOffset + now,
@@ -178,15 +178,15 @@ function protocolSoak() {
         const mode = iteration % 5;
         if (mode <= 2) {
             const both = mode === 1;
-            const deadline = server.remoteSessions.validUntil(session);
             detach('A');
             if (both) detach('B');
+            const deadline = server.remoteSessions.validUntil(session);
             const duration = durations[(Math.floor(iteration / 5) + random(9)) % durations.length];
             elapse(duration);
-            assert.equal(deadline, session.createdAt + 5000);
+            assert.equal(deadline, session.createdAt + 3000);
             const order = both && random(2) ? ['B', 'A'] : both ? ['A', 'B'] : ['A'];
             for (const id of order) attach(id);
-            if (duration < 5000) {
+            if (duration < 3000) {
                 if (run) assert.equal(run.phase, SCENE_PHASES.LIVE);
                 // Both sides deliberately retain their pre-loss observation.
                 for (const id of order) {
@@ -225,14 +225,20 @@ function protocolSoak() {
             settle(other);
             assert.equal(session.phase, 'Active', 'one cleanup leaves the independent controller intact');
         } else {
-            // Exact suspect threshold, then recovery on the same live transport.
-            now += 1500;
+            // Exact detection threshold fences the silent socket; recover on a new one.
+            now += 750;
+            send('A', 'heartbeat', { sequence: ++serial });
+            send('C', 'heartbeat', { sequence: ++serial });
+            now += 750;
             send('A', 'heartbeat', { sequence: ++serial });
             send('C', 'heartbeat', { sequence: ++serial });
             server.sweepRemoteSessionLeases(now);
             assert.equal(session.degradedEndpoints.has('B'), true);
             assert.equal(server.remoteSessions.commandReady(session), false);
-            send('B', 'heartbeat', { sequence: ++serial });
+            attach('B');
+            send('B', 'remote_session_resume', { requestId: `silent-${iteration}`,
+                remoteSessionId: session.remoteSessionId, generation: session.generation,
+                resumeToken: session.resumeToken });
             acknowledge(session);
         }
         settle(session);

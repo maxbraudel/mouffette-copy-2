@@ -8,6 +8,8 @@ class RemoteSessionRegistry {
     constructor(options = {}) {
         this.leaseTimeoutMs = Number.isSafeInteger(options.leaseTimeoutMs)
             && options.leaseTimeoutMs > 0 ? options.leaseTimeoutMs : 5000;
+        this.recoveryTimeoutMs = Number.isSafeInteger(options.recoveryTimeoutMs)
+            && options.recoveryTimeoutMs > 0 ? options.recoveryTimeoutMs : this.leaseTimeoutMs;
         this.tombstoneTtlMs = Number.isSafeInteger(options.tombstoneTtlMs)
             && options.tombstoneTtlMs > 0 ? options.tombstoneTtlMs : 5 * 60 * 1000;
         this.openTimeoutMs = Number.isSafeInteger(options.openTimeoutMs)
@@ -193,17 +195,20 @@ class RemoteSessionRegistry {
     }
 
     validUntil(session) {
-        return Math.min(...[session.ownerEndpointId, session.targetEndpointId]
-            .map(id => (session.lastContact.get(id) ?? session.createdAt) + this.leaseTimeoutMs));
+        return Math.min(session.graceDeadlineAt ?? Infinity,
+            ...[session.ownerEndpointId, session.targetEndpointId]
+                .map(id => (session.lastContact.get(id) ?? session.createdAt) + this.leaseTimeoutMs));
     }
 
     acknowledgeState(remoteSessionId, endpointId, connectionGeneration, generation, revision) {
         const session = this.get(remoteSessionId) || this.getTombstone(remoteSessionId);
         if (!session || !this.#role(session, endpointId)
+            || (!TERMINAL_PHASES.has(session.phase) && this.#leaseExpired(session, this.now()))
             || generation !== session.generation || revision !== session.stateRevision) return false;
         session.appliedStateByEndpoint.set(endpointId, { connectionGeneration, generation, revision });
         if (endpointId === session.ownerEndpointId) session.ownerKnownGeneration = generation;
         else session.targetKnownGeneration = generation;
+        this.#finishRecoveryIfReady(session);
         return true;
     }
 
@@ -332,6 +337,7 @@ class RemoteSessionRegistry {
         session.lastContact.set(endpointId, now);
         const recovered = session.degradedEndpoints.delete(endpointId);
         if (recovered) ++session.stateRevision;
+        this.#finishRecoveryIfReady(session);
         session.updatedAt = now;
         return { ok: true, session, healthChanged: recovered, degraded: false };
     }
@@ -347,11 +353,13 @@ class RemoteSessionRegistry {
                 const known = session.degradedEndpoints.has(endpointId);
                 if (degraded && !known) {
                     session.degradedEndpoints.add(endpointId);
+                    this.#startRecovery(session, lastContact + threshold, now);
                     ++session.stateRevision;
                     transitions.push({ session, endpointId, degraded: true });
-                } else if (!degraded && known) {
+                } else if (!degraded && known && !session.graceEndpoints.has(endpointId)) {
                     session.degradedEndpoints.delete(endpointId);
                     ++session.stateRevision;
+                    this.#finishRecoveryIfReady(session);
                     transitions.push({ session, endpointId, degraded: false });
                 }
             }
@@ -376,7 +384,7 @@ class RemoteSessionRegistry {
             session.phase = 'Grace';
             session.graceEndpoints.add(endpointId);
             session.degradedEndpoints.add(endpointId);
-            this.#refreshGraceDeadline(session, now);
+            this.#startRecovery(session, now, now);
             session.updatedAt = now;
             changed.push(session);
         }
@@ -429,11 +437,9 @@ class RemoteSessionRegistry {
         session.degradedEndpoints.delete(endpointId);
         if (session.graceEndpoints.size === 0) {
             session.phase = 'Active';
-            session.graceDeadlineAt = null;
-            session.graceDeadlineEpochMs = null;
-        } else {
-            this.#refreshGraceDeadline(session, now);
         }
+        // Retain the interruption deadline until both participants have applied
+        // this generation. Authentication and RESUME alone never buy more time.
         session.generation += 1;
         session.requiresAppliedAck = true;
         ++session.stateRevision;
@@ -636,22 +642,20 @@ class RemoteSessionRegistry {
     }
 
     #leaseExpired(session, now) {
-        return [session.ownerEndpointId, session.targetEndpointId].some(endpointId => {
-            const lastContact = session.lastContact.get(endpointId) ?? session.createdAt;
-            return now >= lastContact + this.leaseTimeoutMs;
-        });
+        return now >= this.validUntil(session);
     }
 
-    #refreshGraceDeadline(session, now = this.now()) {
-        let deadline = null;
-        for (const endpointId of session.graceEndpoints) {
-            const lastContact = session.lastContact.get(endpointId) ?? session.createdAt;
-            const deviceDeadline = lastContact + this.leaseTimeoutMs;
-            deadline = deadline === null ? deviceDeadline : Math.min(deadline, deviceDeadline);
-        }
+    #startRecovery(session, detectedAt, now) {
+        const deadline = Math.min(this.validUntil(session), detectedAt + this.recoveryTimeoutMs);
+        if (session.graceDeadlineAt !== null && deadline >= session.graceDeadlineAt) return;
         session.graceDeadlineAt = deadline;
-        session.graceDeadlineEpochMs = deadline === null ? null
-            : this.epochNow() + Math.max(0, deadline - now);
+        session.graceDeadlineEpochMs = this.epochNow() + Math.max(0, deadline - now);
+    }
+
+    #finishRecoveryIfReady(session) {
+        if (!this.commandReady(session)) return;
+        session.graceDeadlineAt = null;
+        session.graceDeadlineEpochMs = null;
     }
 
     #isCommittedCleanup(result) {

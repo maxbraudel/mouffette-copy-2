@@ -294,7 +294,7 @@ function messages(socket, type) {
 }
 
 // A new process using the same installation key cannot displace a healthy
-// runtime at 2,999 ms. At the exact 3,000 ms boundary the old runtime and all
+// runtime before the transport detection threshold. After expiration the old runtime and all
 // its sessions are terminal, the ghost transport is evicted, and the new
 // runtime is admitted without treating the transition as a resume.
 {
@@ -312,7 +312,7 @@ function messages(socket, type) {
     earlyOld.runtimeId = oldRuntimeId;
     earlyOld.lastHeartbeatAt = base;
     earlyServer.handleAuthResponse(
-        'candidate-early', earlyCandidate.response, base + 2_999);
+        'candidate-early', earlyCandidate.response, base + earlyServer.config.leaseTimeoutMs - 1);
     assert.equal(earlyCandidate.client.authenticated, false);
     assert.equal(messages(earlyCandidate.ws, 'error').at(-1).code,
         'endpoint_already_connected');
@@ -409,9 +409,9 @@ function messages(socket, type) {
     const ghostSocket = addAuthenticatedClient(server, 'ghost-connection', 'ghost-device');
     const ghost = server.clients.get('ghost-connection');
     ghost.lastHeartbeatAt = 50_000;
-    assert.equal(server.sweepExpiredClientTransports(52_999), 0);
+    assert.equal(server.sweepExpiredClientTransports(50_000 + server.config.leaseTimeoutMs - 1), 0);
     assert.equal(server.clients.get('ghost-connection'), ghost);
-    assert.equal(server.sweepExpiredClientTransports(53_000), 1);
+    assert.equal(server.sweepExpiredClientTransports(50_000 + server.config.leaseTimeoutMs), 1);
     assert.equal(server.clients.has('ghost-connection'), false);
     assert.equal(ghostSocket.readyState, WebSocket.CLOSED);
 }
@@ -431,26 +431,26 @@ function messages(socket, type) {
     addAuthenticatedClient(server, 'clock-target', 'B');
     const session = server.remoteSessions.open(binding()).session;
     server.handleRemoteSessionDeparture(server.clients.get('clock-owner'));
-    assert.equal(session.graceDeadlineAt, 15_000);
-    assert.equal(session.graceDeadlineEpochMs, 1_005_000);
+    assert.equal(session.graceDeadlineAt, 13_000);
+    assert.equal(session.graceDeadlineEpochMs, 1_003_000);
 
     epoch += 24 * 60 * 60 * 1_000;
-    monotonic = 14_999;
+    monotonic = 12_999;
     server.sweepRemoteSessionLeases();
     assert.equal(session.phase, 'Grace',
         'a forward wall-clock jump must not expire the lease early');
-    assert.equal(session.graceDeadlineEpochMs, 1_005_000,
+    assert.equal(session.graceDeadlineEpochMs, 1_003_000,
         'the originally advertised wall deadline is not pushed');
 
     epoch -= 48 * 60 * 60 * 1_000;
-    monotonic = 15_000;
+    monotonic = 13_000;
     server.sweepRemoteSessionLeases();
     assert.equal(session.phase, 'CleanupPending',
         'the exact monotonic boundary stays terminal after a wall-clock rollback');
 }
 
 // OPEN permits healthy targets before the 1,500 ms suspicion threshold;
-// at 3,000 ms a silent transport is fenced before any new session exists.
+// at 1,500 ms a silent transport is fenced before any new session exists.
 {
     const createOpenServer = () => {
         let monotonic = 10_000;
@@ -484,7 +484,7 @@ function messages(socket, type) {
     assert.equal(messages(early.target.ws, 'remote_session_offer').length, 1);
 
     const boundary = createOpenServer();
-    boundary.setMonotonic(13_000);
+    boundary.setMonotonic(11_500);
     boundary.server.handleRemoteSessionOpen('open-owner', {
         targetEndpointId: 'open-B', connectionGeneration: 1,
         requestId: 'open-at-boundary',
@@ -703,6 +703,9 @@ function messages(socket, type) {
     }, clock);
     assert.equal(targetResume.ok, true);
     assert.equal(opened.session.phase, 'Active');
+    assert.equal(opened.session.graceDeadlineAt, 24_000, 'RESUME alone does not complete recovery');
+    for (const id of ['A', 'B']) registry.acknowledgeState(opened.session.remoteSessionId,
+        id, 2, 3, opened.session.stateRevision);
     assert.equal(opened.session.graceDeadlineAt, null);
     assert.equal(opened.session.generation, 3);
     assert.equal(registry.touch(opened.session.remoteSessionId, 'A', 1, clock).error,
@@ -973,7 +976,7 @@ function messages(socket, type) {
     clock = 92_000;
     assert.equal(registry.touch(opened.session.remoteSessionId, 'A', 1, clock).ok, true);
     registry.markDisconnected('A', clock);
-    assert.equal(opened.session.graceDeadlineAt, 95_000);
+    assert.equal(opened.session.graceDeadlineAt, 93_000, 'one deadline includes the silent peer');
     clock = 93_000;
     const expired = registry.tick(clock);
     assert.equal(expired.length, 1,

@@ -108,6 +108,8 @@ private slots:
     void pendingRequestsRecover_data();
     void pendingRequestsRecover();
     void synchronizationTimeoutKeepsRetrying();
+    void degradedSessionPresentation_data();
+    void degradedSessionPresentation();
     void recovery_data();
     void recovery();
     void duplicateOpenAndMetadataRefresh();
@@ -430,6 +432,66 @@ void RemoteSessionIntegrationTest::synchronizationTimeoutKeepsRetrying()
     connection.disconnect();
 }
 
+void RemoteSessionIntegrationTest::degradedSessionPresentation_data()
+{
+    QTest::addColumn<bool>("recover");
+    QTest::newRow("returns-before-deadline") << true;
+    QTest::newRow("expires-after-deadline") << false;
+}
+
+void RemoteSessionIntegrationTest::degradedSessionPresentation()
+{
+    QFETCH(bool, recover);
+    QTemporaryDir directory;
+    const auto previousProfile = RuntimeProfile::context();
+    const auto restore = qScopeGuard([&] { RuntimeProfile::configure(previousProfile); });
+    RuntimeProfileContext profile;
+    profile.rootPath = directory.filePath("observer");
+    profile.persistent = false;
+    RuntimeProfile::configure(profile);
+    ApplicationRuntime observer(profile);
+    observer.getProjectManager()->stopAutomaticTimersForTesting();
+    auto* connection = observer.findChild<ConnectionManager*>();
+    auto* owner = observer.getWebSocketClient();
+    WebSocketClient target(directory.filePath("target"), false);
+    configure(target, QStringLiteral("retained-target"));
+    connection->connectToServer(m_url);
+    target.connectToServer(m_url);
+    QTRY_COMPARE_WITH_TIMEOUT(observer.displayClients().size(), 1, 4000);
+    observer.activateClient(target.endpointId());
+    QTRY_VERIFY_WITH_TIMEOUT(observer.activeProjectExists(), 4000);
+    const QString id = owner->remoteSessionCoordinator()->outgoingForPeer(target.endpointId()).remoteSessionId;
+    QTRY_VERIFY_WITH_TIMEOUT(owner->canIssueSessionCommands(id) && target.canIssueSessionCommands(id), 3000);
+    auto* canvas = observer.getActiveCanvas();
+    QVERIFY(canvas);
+    command({{"action", "drop"}, {"endpoints", QJsonArray{target.endpointId()}}});
+    QTRY_VERIFY_WITH_TIMEOUT(!target.isConnected(), 1000);
+    QTRY_COMPARE_WITH_TIMEOUT(observer.remoteStatusText(), QStringLiteral("DEGRADED"), 1000);
+    QCOMPARE(observer.displayClients().size(), 1);
+    QCOMPARE(observer.displayClients().first().availabilityBadgeText(), QStringLiteral("Degraded"));
+    QVERIFY(observer.activeProjectExists());
+    QCOMPARE(observer.getActiveCanvas(), canvas);
+    QVERIFY(!observer.isRemoteOverlayActionsEnabled());
+    QTest::qWait(1000);
+    QVERIFY(owner->sessionRecoveryRemainingMs(id) > 0);
+    QCOMPARE(observer.remoteStatusText(), QStringLiteral("DEGRADED"));
+    if (recover) {
+        target.connectToServer(m_url);
+        QTRY_VERIFY_WITH_TIMEOUT(owner->canIssueSessionCommands(id) && target.canIssueSessionCommands(id), 2000);
+        QTRY_COMPARE_WITH_TIMEOUT(observer.remoteStatusText(), QStringLiteral("CONNECTED"), 1000);
+        QCOMPARE(owner->remoteSessionCoordinator()->outgoingForPeer(target.endpointId()).remoteSessionId, id);
+    } else {
+        QTRY_VERIFY_WITH_TIMEOUT(owner->sessionRecoveryRemainingMs(id) == 0, 3000);
+        QTRY_COMPARE_WITH_TIMEOUT(observer.remoteStatusText(), QStringLiteral("DISCONNECTED"), 1000);
+        QCOMPARE(observer.displayClients().size(), 1);
+        QCOMPARE(observer.displayClients().first().availabilityBadgeText(), QStringLiteral("Disconnected"));
+        QVERIFY(observer.activeProjectExists());
+        QCOMPARE(observer.getActiveCanvas(), canvas);
+    }
+    target.disconnect();
+    observer.handleApplicationAboutToQuit();
+}
+
 void RemoteSessionIntegrationTest::recovery_data()
 {
     QTest::addColumn<int>("gapMs");
@@ -437,7 +499,7 @@ void RemoteSessionIntegrationTest::recovery_data()
     QTest::addColumn<bool>("reverseOrder");
     QTest::addColumn<int>("lostReply");
     QTest::newRow("two-seconds") << 2000 << false << false << 0;
-    QTest::newRow("four-seconds-past-transport-timeout") << 4000 << false << false << 0;
+    QTest::newRow("four-seconds-terminal") << 4000 << false << false << 0;
     QTest::newRow("six-seconds-terminal") << 6000 << false << false << 0;
     QTest::newRow("both-owner-first") << 100 << true << false << 0;
     QTest::newRow("both-target-first") << 100 << true << true << 0;
@@ -479,7 +541,7 @@ void RemoteSessionIntegrationTest::recovery()
     if (dropBoth) QTRY_VERIFY_WITH_TIMEOUT(!target.isConnected(), 1000);
     QVERIFY(!owner.canIssueSessionCommands(id));
     QTest::qWait(gapMs);
-    if (gapMs >= 5000) {
+    if (gapMs >= 3000) {
         QVERIFY(!expired.isEmpty());
         QVERIFY(!owner.canIssueSessionCommands(id));
     }
@@ -490,7 +552,7 @@ void RemoteSessionIntegrationTest::recovery()
     owner.connectToServer(m_url);
     if (!reverseOrder && dropBoth) target.connectToServer(m_url);
     QTRY_VERIFY_WITH_TIMEOUT(owner.isConnected() && target.isConnected(), 3000);
-    if (gapMs >= 5000) {
+    if (gapMs >= 3000) {
         QTest::qWait(500);
         QVERIFY(!owner.canIssueSessionCommands(id));
         QCOMPARE(opened.count(), 1); // no implicit new OPEN or scene launch

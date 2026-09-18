@@ -176,9 +176,12 @@ QString ClientInfo::getIdentityDisplayText() const {
 
 QString ClientInfo::availabilityBadgeText() const
 {
-    // Network presence always wins over stale session state. A durable project
-    // remains selectable while its target is disconnected.
+    // Offline presence cannot keep a stale Connected badge. The presentation
+    // merger may explicitly retain Degraded for a session still in recovery.
     if (!m_isOnline) {
+        if (m_availabilityStatus.compare(QStringLiteral("Degraded"), Qt::CaseInsensitive) == 0
+            || m_availabilityStatus.compare(QStringLiteral("Grace"), Qt::CaseInsensitive) == 0)
+            return QStringLiteral("Degraded");
         return m_availabilityStatus.compare(
                    QStringLiteral("Unreachable"), Qt::CaseInsensitive) == 0
             ? QStringLiteral("Unreachable")
@@ -198,11 +201,11 @@ QString ClientInfo::availabilityBadgeText() const
             || value.compare(QStringLiteral("active"), Qt::CaseInsensitive) == 0) {
             return QStringLiteral("Connected");
         }
-        if (value.compare(QStringLiteral("degraded"), Qt::CaseInsensitive) == 0) {
+        if (value.compare(QStringLiteral("degraded"), Qt::CaseInsensitive) == 0
+            || value.compare(QStringLiteral("grace"), Qt::CaseInsensitive) == 0) {
             return QStringLiteral("Degraded");
         }
-        if (value.compare(QStringLiteral("reconnecting"), Qt::CaseInsensitive) == 0
-            || value.compare(QStringLiteral("grace"), Qt::CaseInsensitive) == 0) {
+        if (value.compare(QStringLiteral("reconnecting"), Qt::CaseInsensitive) == 0) {
             return QStringLiteral("Disconnected");
         }
         if (value.compare(QStringLiteral("disconnecting"), Qt::CaseInsensitive) == 0

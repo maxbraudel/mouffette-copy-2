@@ -44,7 +44,7 @@ function fixture() {
 }
 const ofType = (client, type) => client.ws.messages.filter(message => message.type === type);
 
-// A lost transport at 3 s retains the live scene and the original 5 s lease.
+// Two missed heartbeat intervals start one 3 s recovery period for the Live session.
 // A lost resume result is replayable; the peer can recover its older observation.
 {
     const f = fixture(); const a = f.add('A'); const b = f.add('B'); const session = f.open();
@@ -52,18 +52,19 @@ const ofType = (client, type) => client.ws.messages.filter(message => message.ty
         generation: 1, sceneRunId: 'live-run', revision: 1, digest: 'digest',
         manifest: [], scene: {}, ownerEndpointId: 'A', targetEndpointId: 'B' }).run;
     run.phase = SCENE_PHASES.LIVE;
-    f.advance(3500); f.send('B', 'heartbeat', { sequence: 1 });
-    f.advance(4000); f.server.sweepRemoteSessionLeases();
+    f.advance(2000); f.send('B', 'heartbeat', { sequence: 1 });
+    f.advance(2500); f.send('B', 'heartbeat', { sequence: 2 }); f.server.sweepRemoteSessionLeases();
     assert.equal(a.ws.readyState, 3);
     assert.equal(session.phase, 'Grace');
     const presence = f.server.presenceEntries().find(entry => entry.endpointId === 'A');
-    assert.equal(presence.status, 'Disconnected');
+    assert.equal(presence.status, 'Degraded');
     assert.equal(presence.canAcceptSession, false);
     assert.equal(presence.reason, 'transport_lost');
     assert.equal(run.phase, SCENE_PHASES.LIVE);
-    assert.equal(f.server.remoteSessions.validUntil(session), 6000);
-    f.advance(5500); f.send('B', 'heartbeat', { sequence: 2 });
-    f.advance(5999); const rebound = f.add('A', 2);
+    assert.equal(f.server.remoteSessions.validUntil(session), 5500);
+    f.advance(3500); f.send('B', 'heartbeat', { sequence: 2 });
+    f.advance(4500); f.send('B', 'heartbeat', { sequence: 3 });
+    f.advance(5499); const rebound = f.add('A', 2);
     const resume = { requestId: 'resume-A', remoteSessionId: session.remoteSessionId,
         generation: 1, resumeToken: session.resumeToken };
     f.send('A', 'remote_session_resume', resume);
@@ -76,25 +77,31 @@ const ofType = (client, type) => client.ws.messages.filter(message => message.ty
     f.send('A', 'remote_session_state_ack', { remoteSessionId: session.remoteSessionId,
         generation: 2, stateRevision: session.stateRevision });
     assert.equal(session.ownerKnownGeneration, 2);
+    f.send('B', 'remote_session_state_ack', { remoteSessionId: session.remoteSessionId,
+        generation: 2, stateRevision: session.stateRevision });
     f.server.handleRemoteSessionDeparture(b);
     f.add('B', 2);
     f.send('B', 'remote_session_resume', { ...resume, requestId: 'resume-B' });
     assert.equal(session.generation, 3, 'the dropped gen2 frame cannot strand B');
     assert.equal(session.phase, 'Active');
+    for (const id of ['A', 'B']) f.send(id, 'remote_session_state_ack', {
+        remoteSessionId: session.remoteSessionId, generation: 3, stateRevision: session.stateRevision });
     f.send('B', 'heartbeat', { sequence: 3 });
     const lease = ofType(f.server.clients.get('B'), 'heartbeat_ack').at(-1).sessionStates[0];
-    assert.equal(lease.validUntilServerMonotonicMs, 10999);
-    assert.equal(lease.serverMonotonicMs, 5999);
+    assert.equal(lease.validUntilServerMonotonicMs, 9999);
+    assert.equal(lease.serverMonotonicMs, 5499);
 }
 
 // The deadline is not restarted by departure, reconnect, or the healthy peer.
 {
     const f = fixture(); f.add('A'); const b = f.add('B'); const session = f.open();
-    f.advance(3999); f.send('B', 'heartbeat', { sequence: 1 });
-    f.advance(4000); f.server.sweepRemoteSessionLeases();
-    f.advance(5999); f.send('B', 'heartbeat', { sequence: 2 });
+    f.advance(2000); f.send('B', 'heartbeat', { sequence: 1 });
+    f.advance(2500); f.send('B', 'heartbeat', { sequence: 2 }); f.server.sweepRemoteSessionLeases();
+    f.advance(3500); f.send('B', 'heartbeat', { sequence: 2 });
+    f.advance(4500); f.send('B', 'heartbeat', { sequence: 3 });
+    f.advance(5499); f.send('B', 'heartbeat', { sequence: 4 });
     assert.equal(session.phase, 'Grace');
-    f.advance(6000); f.server.sweepRemoteSessionLeases();
+    f.advance(5500); f.server.sweepRemoteSessionLeases();
     assert.equal(f.server.remoteSessions.sessions.has(session.remoteSessionId), false);
     assert.equal(f.server.remoteSessions.cleanupJobs.has(session.remoteSessionId), true);
     assert.equal(ofType(b, 'remote_session_closed').at(-1).cleanupState, 'pending');
@@ -205,6 +212,73 @@ const ofType = (client, type) => client.ws.messages.filter(message => message.ty
     f.send('A', 'stopped', { remoteSessionId: session.remoteSessionId,
         generation: 1, sceneRunId: run.sceneRunId, digest: run.digest, success: true });
     assert.equal(ofType(f.server.clients.get('A'), 'stopped').at(-1).replay, true);
+}
+
+// One fixed recovery period starts at the first interruption. Returning only
+// one party or losing the final applied-state ACK cannot renew that period.
+{
+    let now = 1000;
+    let epoch = 1700000000000;
+    const registry = new RemoteSessionRegistry({ leaseTimeoutMs: 4500, recoveryTimeoutMs: 3000,
+        monotonicNow: () => now, epochNow: () => epoch });
+    const session = registry.open({ ownerEndpointId: 'A', targetEndpointId: 'B',
+        ownerRuntimeId: 'a', targetRuntimeId: 'b' }).session;
+    now = 1100;
+    registry.markDisconnected('A');
+    assert.equal(registry.validUntil(session), 4100);
+    now = 2100;
+    registry.markDisconnected('B');
+    registry.markDisconnected('A'); // duplicate loss, no new budget
+    assert.equal(registry.validUntil(session), 4100);
+    epoch -= 86400000;
+    now = 3100;
+    assert.ok(registry.resume({ remoteSessionId: session.remoteSessionId, endpointId: 'B',
+        runtimeId: 'b', resumeToken: session.resumeToken, generation: 1,
+        connectionGeneration: 7, requestId: 'B-resume' }).ok);
+    assert.equal(registry.validUntil(session), 4100);
+    now = 4099;
+    assert.ok(registry.resume({ remoteSessionId: session.remoteSessionId, endpointId: 'A',
+        runtimeId: 'a', resumeToken: session.resumeToken, generation: 1,
+        connectionGeneration: 9, requestId: 'A-resume' }).ok);
+    assert.ok(registry.acknowledgeState(session.remoteSessionId, 'A', 9,
+        session.generation, session.stateRevision));
+    assert.equal(registry.commandReady(session), false);
+    assert.equal(registry.validUntil(session), 4100);
+    now = 4100;
+    assert.equal(registry.acknowledgeState(session.remoteSessionId, 'B', 7,
+        session.generation, session.stateRevision), false, 'an ACK at the boundary is too late');
+    assert.equal(registry.tick().length, 1);
+    assert.equal(registry.tick().length, 0, 'expiry is emitted only once');
+    assert.equal(session.phase, 'Terminating');
+}
+
+// A fully acknowledged recovery completes the interruption. Only a subsequent
+// independent loss gets a new period. Sleep cannot postpone silent detection.
+{
+    let now = 1000;
+    const registry = new RemoteSessionRegistry({ leaseTimeoutMs: 4500, recoveryTimeoutMs: 3000,
+        now: () => now });
+    const session = registry.open({ ownerEndpointId: 'A', targetEndpointId: 'B',
+        ownerRuntimeId: 'a', targetRuntimeId: 'b' }).session;
+    now = 1100;
+    registry.markDisconnected('A');
+    now = 2000;
+    registry.touch(session.remoteSessionId, 'B', 1);
+    assert.ok(registry.resume({ remoteSessionId: session.remoteSessionId, endpointId: 'A',
+        runtimeId: 'a', resumeToken: session.resumeToken, generation: 1,
+        connectionGeneration: 2, requestId: 'resume' }).ok);
+    for (const [id, generation] of [['A', 2], ['B', 1]])
+        registry.acknowledgeState(session.remoteSessionId, id, generation,
+            session.generation, session.stateRevision);
+    assert.ok(registry.commandReady(session));
+    assert.equal(session.graceDeadlineAt, null);
+    now = 2100;
+    registry.markDisconnected('A');
+    assert.equal(registry.validUntil(session), 5100);
+    now = 10000; // loop suspended: detection belongs to the missed heartbeat, not wake-up
+    registry.markDegraded(now, 1500);
+    assert.equal(registry.validUntil(session), 5100);
+    assert.equal(registry.tick().length, 1);
 }
 
 console.log('connection recovery v7 tests passed');

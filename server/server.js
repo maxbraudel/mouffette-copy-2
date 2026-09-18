@@ -351,7 +351,9 @@ class MouffetteServer {
         this.uploadCleanupInterval = null;
         this.leaseSweepInterval = null;
         this.remoteSessions = new RemoteSessionRegistry({
-            leaseTimeoutMs: this.config.sessionRecoveryTimeoutMs - this.clockUncertaintyMs,
+            leaseTimeoutMs: this.config.leaseTimeoutMs + this.config.sessionRecoveryTimeoutMs
+                - this.clockUncertaintyMs,
+            recoveryTimeoutMs: this.config.sessionRecoveryTimeoutMs - this.clockUncertaintyMs,
             openTimeoutMs: this.config.remoteSessionOpenTimeoutMs - this.clockUncertaintyMs,
             openRequestTtlMs: this.config.remoteSessionOpenRequestTtlMs,
             tombstoneTtlMs: this.config.remoteSessionTombstoneTtlMs,
@@ -1658,7 +1660,7 @@ class MouffetteServer {
     expireRemoteSessionsForClient(client, now = this.monotonicNow()) {
         if (!client || !client.endpointId) return 0;
         // A transport timeout fences that socket, not its session. The session
-        // retains the original absolute recovery deadline, never a fresh grace.
+        // retains the fixed interruption deadline, never a fresh recovery period.
         return this.handleRemoteSessionDeparture(client, now) ? 1 : 0;
     }
 
@@ -1804,7 +1806,7 @@ class MouffetteServer {
                 policyVersion: this.config.policyVersion,
                 heartbeatIntervalMs: this.config.heartbeatIntervalMs,
                 leaseTimeoutMs: this.config.leaseTimeoutMs,
-                transportSuspectAfterMs: this.config.remoteSessionDegradedAfterMs,
+                transportSuspectAfterMs: this.config.leaseTimeoutMs,
                 sessionRecoveryTimeoutMs: this.config.sessionRecoveryTimeoutMs,
                 remoteSessionOpenTimeoutMs: this.config.remoteSessionOpenTimeoutMs,
                 scenePrepareTimeoutMs: this.config.scenePrepareTimeoutMs,
@@ -1869,10 +1871,7 @@ class MouffetteServer {
             if (contact.ok && contact.healthChanged) {
                 const payload = this.remoteSessionPayload(session,
                     'remote_session_lease_state');
-                payload.state = session.phase === 'Grace' ? 'Grace'
-                    : session.degradedEndpoints.size > 0 ? 'Degraded' : 'Active';
                 payload.degradedEndpointId = client.endpointId;
-                payload.degraded = session.degradedEndpoints.size > 0;
                 this.sendToEndpoint(session.ownerEndpointId, payload);
                 this.sendToEndpoint(session.targetEndpointId, payload);
             }
@@ -1934,12 +1933,6 @@ class MouffetteServer {
                 'Target client is offline', 'target_offline', message,
                 message.targetEndpointId);
         }
-        if (Number.isFinite(target.lastHeartbeatMonotonicAt)
-            && commandNow - target.lastHeartbeatMonotonicAt >= this.config.remoteSessionDegradedAfterMs) {
-            return this.sendRemoteSessionError(ownerId, 'Target transport is recovering',
-                'target_reconnecting', message, target.endpointId);
-        }
-
         if (!this.isValidOpaqueId(message.requestId)) {
             return this.sendRemoteSessionError(ownerId,
                 'A request identifier is required', 'invalid_request_id', message,
@@ -2644,8 +2637,8 @@ class MouffetteServer {
             targetConnectionGeneration,
             phase,
             state: phase === 'Grace' ? 'Grace'
-                : session.degradedEndpoints.size > 0 ? 'Degraded' : phase,
-            degraded: session.degradedEndpoints.size > 0,
+                : session.graceDeadlineAt !== null || session.degradedEndpoints.size > 0 ? 'Degraded' : phase,
+            degraded: session.graceDeadlineAt !== null || session.degradedEndpoints.size > 0,
             commandReady: this.remoteSessions.commandReady(session),
             ownerEndpointId: session.ownerEndpointId,
             targetEndpointId: session.targetEndpointId,
@@ -2948,14 +2941,10 @@ class MouffetteServer {
             }
         }
         this.lastLeaseSweepAt = now;
-        const degradedAfterMs = this.config.remoteSessionDegradedAfterMs;
-        for (const transition of this.remoteSessions.markDegraded(now, degradedAfterMs)) {
+        for (const transition of this.remoteSessions.markDegraded(now, this.config.leaseTimeoutMs)) {
             const payload = this.remoteSessionPayload(
                 transition.session, 'remote_session_lease_state');
-            payload.state = transition.session.phase === 'Grace' ? 'Grace'
-                : transition.session.degradedEndpoints.size > 0 ? 'Degraded' : 'Active';
             payload.degradedEndpointId = transition.endpointId;
-            payload.degraded = transition.session.degradedEndpoints.size > 0;
             this.sendToEndpoint(transition.session.ownerEndpointId, payload);
             this.sendToEndpoint(transition.session.targetEndpointId, payload);
         }
@@ -3302,7 +3291,6 @@ class MouffetteServer {
             }
             const usable = entry.client && entry.client.ws?.readyState === WebSocket.OPEN
                 && age < this.config.leaseTimeoutMs && !entry.disabled;
-            const suspect = usable && age >= this.config.remoteSessionDegradedAfterMs;
             const recovering = !entry.disabled && !usable
                 && this.remoteSessions.sessionsForEndpoint(entry.endpointId)
                     .some(session => !TERMINAL_PHASES.has(session.phase)
@@ -3313,11 +3301,10 @@ class MouffetteServer {
                 runtimeId: entry.runtimeId,
                 endpointId: entry.endpointId, machineName: entry.machineName,
                 platform: entry.platform, lastSeenAt: entry.lastSeenAt,
-                status: usable ? (suspect ? 'Degraded' : 'Available')
-                    : 'Disconnected',
-                canAcceptSession: !!usable && !suspect,
-                reason: entry.disabled ? 'disabled' : (suspect ? 'transport_suspect'
-                    : usable ? 'enabled' : recovering ? 'transport_lost' : 'offline'),
+                status: usable ? 'Available' : recovering ? 'Degraded' : 'Disconnected',
+                canAcceptSession: !!usable,
+                reason: entry.disabled ? 'disabled'
+                    : usable ? 'enabled' : recovering ? 'transport_lost' : 'offline',
             });
         }
         result.sort((a, b) => a.endpointId.localeCompare(b.endpointId));

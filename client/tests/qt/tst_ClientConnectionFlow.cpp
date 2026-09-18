@@ -2270,7 +2270,7 @@ private slots:
         QVERIFY(runtime.getActiveCanvas());
         QVERIFY(!runtime.isRemoteClientConnected());
         QVERIFY(!runtime.isRemoteOverlayActionsEnabled());
-        QCOMPARE(runtime.remoteStatusText(), QStringLiteral("CONNECTING"));
+        QCOMPARE(runtime.remoteStatusText(), QStringLiteral("DEGRADED"));
         QCOMPARE(runtime.remoteVolumePercent(), -1);
         QCOMPARE(server.openCommands.size(), 1);
         QCOMPARE(runtime.getWorkspaceManager()->remoteSessionState(
@@ -2294,7 +2294,7 @@ private slots:
                  WorkspaceManager::RemoteSessionState::Grace);
         QVERIFY(!runtime.isRemoteClientConnected());
         QVERIFY(!runtime.isRemoteOverlayActionsEnabled());
-        QCOMPARE(runtime.remoteStatusText(), QStringLiteral("DISCONNECTED"));
+        QCOMPARE(runtime.remoteStatusText(), QStringLiteral("DEGRADED"));
         QCOMPARE(runtime.remoteVolumePercent(), -1);
         QCOMPARE(server.openCommands.size(), 1);
 

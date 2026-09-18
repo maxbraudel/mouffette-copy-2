@@ -83,6 +83,7 @@ private slots:
     void uploadChannelReadyRequiresExactEnvelope_data();
     void uploadChannelReadyRequiresExactEnvelope();
     void protocolUploadWireSchemaAndActiveGate();
+    void suspendInclusiveTransportBoundaryRejectsLateContact_data();
     void suspendInclusiveTransportBoundaryRejectsLateContact();
 };
 
@@ -659,8 +660,18 @@ void ConnectionManagerTest::signedHandshakeAndHeartbeat() {
     client.disconnect();
 }
 
+void ConnectionManagerTest::suspendInclusiveTransportBoundaryRejectsLateContact_data()
+{
+    QTest::addColumn<QString>("scenario");
+    for (const QString& scenario : {QStringLiteral("legacy-transport"), QStringLiteral("transport"),
+                                   QStringLiteral("recovered-proof"), QStringLiteral("late-proof")})
+        QTest::newRow(qPrintable(scenario)) << scenario;
+}
+
 void ConnectionManagerTest::suspendInclusiveTransportBoundaryRejectsLateContact()
 {
+    QFETCH(QString, scenario);
+    const bool newPolicy = scenario != QLatin1String("legacy-transport");
     QTemporaryDir identityDirectory;
     QVERIFY(identityDirectory.isValid());
     QWebSocketServer server(QStringLiteral("continuous-lease-clock-test"),
@@ -689,8 +700,8 @@ void ConnectionManagerTest::suspendInclusiveTransportBoundaryRejectsLateContact(
                 return;
             }
             const QJsonObject policy{
-                {"policyVersion", 1}, {"heartbeatIntervalMs", 750},
-                {"transportSuspectAfterMs", 1500}, {"sessionRecoveryTimeoutMs", 3000}, {"leaseTimeoutMs", 3000}, {"scenePrepareTimeoutMs", 15000},
+                {"policyVersion", newPolicy ? 4 : 1}, {"heartbeatIntervalMs", 750},
+                {"transportSuspectAfterMs", 1500}, {"sessionRecoveryTimeoutMs", 3000}, {"leaseTimeoutMs", newPolicy ? 1500 : 3000}, {"scenePrepareTimeoutMs", 15000},
                 {"sceneActivationLeadMs", 4000}, {"sceneMaxClockSkewMs", 50},
                 {"sceneStartedAckTimeoutMs", 5000}, {"sceneMaxStartSkewMs", 750},
                 {"sceneStopTimeoutMs", 5000},
@@ -727,9 +738,73 @@ void ConnectionManagerTest::suspendInclusiveTransportBoundaryRejectsLateContact(
                                .arg(server.serverPort()));
     QTRY_COMPARE_WITH_TIMEOUT(connectedSpy.count(), 1, 2000);
     QVERIFY(client.hasUnexpiredLease());
-    QCOMPARE(client.leaseRemainingMs(), qint64(3000));
+    if (scenario.endsWith(QLatin1String("proof"))) {
+        const QString sessionId = QStringLiteral("deadline-session");
+        QSignalSpy opened(&client, &WebSocketClient::remoteSessionOpened);
+        QSignalSpy states(&client, &WebSocketClient::remoteSessionLeaseStateChanged);
+        QSignalSpy expired(&client, &WebSocketClient::remoteSessionRecoveryExpired);
+        QJsonObject state{
+            {"type", "remote_session_opened"}, {"resumeToken", "retained-proof"}, {"protocolVersion", 7},
+            {"serverBootId", bootId}, {"connectionGeneration", 1},
+            {"remoteSessionId", sessionId}, {"generation", 1}, {"stateRevision", 1},
+            {"ownerEndpointId", DeviceIdentityStore::endpointIdForInstallation(client.installationId(), "instance-2")},
+            {"targetEndpointId", client.endpointId()}, {"ownerConnectionGeneration", 1},
+            {"targetConnectionGeneration", 1}, {"phase", "Active"}, {"state", "Active"},
+            {"commandReady", true}, {"validUntilServerMonotonicMs", 4501}
+        };
+        const auto sendState = [&] {
+            state.insert("messageId", QUuid::createUuid().toString(QUuid::WithoutBraces));
+            peer->sendTextMessage(QString::fromUtf8(QJsonDocument(state).toJson(QJsonDocument::Compact)));
+        };
+        sendState();
+        QTRY_COMPARE(opened.count(), 1);
+        QCOMPARE(client.sessionRecoveryRemainingMs(sessionId), qint64(4500));
+        continuousNowMs = 10100;
+        state.insert("type", "remote_session_lease_state");
+        state.insert("phase", "Grace"); state.insert("state", "Grace");
+        state.insert("stateRevision", 2); state.insert("commandReady", false);
+        state.insert("validUntilServerMonotonicMs", 3101);
+        sendState();
+        QTRY_COMPARE(states.count(), 1);
+        QCOMPARE(client.sessionRecoveryRemainingMs(sessionId), qint64(3000));
+        for (const qint64 at : {11000, 12000}) {
+            continuousNowMs = at;
+            const int count = states.count();
+            sendState();
+            QTRY_COMPARE(states.count(), count + 1);
+            QCOMPARE(client.sessionRecoveryRemainingMs(sessionId), 13100 - at);
+        }
+        const bool recover = scenario == QLatin1String("recovered-proof");
+        continuousNowMs = recover ? 13099 : 13100;
+        state.insert("type", "remote_session_resumed");
+        state.insert("phase", "Active"); state.insert("state", "Active");
+        state.insert("generation", 2); state.insert("ownerConnectionGeneration", 2);
+        state.insert("stateRevision", 3); state.insert("commandReady", true);
+        // The other peer's unchanged normal proof is sufficient after recovery.
+        state.insert("validUntilServerMonotonicMs", 4501);
+        sendState();
+        if (recover) {
+            QTRY_VERIFY(client.canIssueSessionCommands(sessionId));
+            QCOMPARE(client.sessionRecoveryRemainingMs(sessionId), qint64(1401));
+            continuousNowMs = 13100;
+            state.insert("type", "remote_session_lease_state");
+            const int count = states.count();
+            sendState();
+            QTRY_COMPARE(states.count(), count + 1);
+            QCOMPARE(expired.count(), 0);
+            QVERIFY(client.canIssueSessionCommands(sessionId));
+        } else {
+            QTRY_COMPARE(expired.count(), 1);
+            QVERIFY(!client.canIssueSessionCommands(sessionId));
+            QCOMPARE(client.sessionRecoveryRemainingMs(sessionId), qint64(0));
+        }
+        client.disconnect();
+        return;
+    }
+    const qint64 budget = newPolicy ? 4500 : 3000;
+    QCOMPARE(client.leaseRemainingMs(), budget);
 
-    continuousNowMs += 2999;
+    continuousNowMs += budget - 1;
     QVERIFY(client.hasUnexpiredLease());
     QCOMPARE(client.leaseRemainingMs(), qint64(1));
 

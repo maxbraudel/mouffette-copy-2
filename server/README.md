@@ -64,16 +64,25 @@ An owner opens `remote_session_open` with `targetEndpointId` and a stable
 same endpoint. An existing scene, another controller, or local UI activity does
 not make the endpoint unavailable for another session.
 
-The v7 welcome policy separates three clocks:
+The v7 welcome uses timing policy version 4:
 
-- `heartbeatIntervalMs`: 750 ms; `transportSuspectAfterMs`: 1,500 ms.
-- `leaseTimeoutMs`: 3,000 ms, retained as the **transport** timeout field. A lost
-  transport is fenced and replaced while the session remains in Grace.
-- `sessionRecoveryTimeoutMs`: **5,000 ms total since the last pertinent contact**
-  (configured with `MOUFFETTE_REMOTE_SESSION_RECOVERY_TIMEOUT_MS=5000`)
-  from either party, using the earlier deadline. This is not an extra five
-  seconds after detecting a disconnect. `remoteSessionOpenTimeoutMs` is 5,000 ms;
-  authentication allows 10,000 ms but never extends an existing session budget.
+- `heartbeatIntervalMs`: 750 ms. Two missed intervals detect silent loss;
+  `transportSuspectAfterMs` and `leaseTimeoutMs` both equal 1,500 ms (derived).
+  The suspect socket is fenced immediately and replacement attempts may start.
+- `sessionRecoveryTimeoutMs`: **3,000 ms after interruption detection**
+  (`MOUFFETTE_REMOTE_SESSION_RECOVERY_TIMEOUT_MS=3000`). Socket closure detects
+  immediately; silence is detected at the second missed heartbeat, even if the
+  event loop wakes later. There is one fixed deadline for the whole session.
+  Reauthentication, one returning participant and retries never extend it.
+  Both participants must resume and apply the new state before it expires.
+- While retained, the session is **Degraded** (internal phase Grace). Expiration
+  makes it terminal/Disconnected; Disable or explicit CLOSE bypass recovery.
+  Already Live scenes continue within this period; no scene is auto-restarted.
+- New session opening allows 5,000 ms; authentication allows 10,000 ms. These
+  operation timeouts never extend a retained session or stop background retries.
+
+The old independent lease/degradation environment keys are removed. Deploy both
+clients and server together; old clients reject the new timing policy clearly.
 
 Each nonterminal session state carries `generation`, `stateRevision`,
 `serverMonotonicMs`, and `validUntilServerMonotonicMs`. Heartbeat acknowledgements
@@ -241,7 +250,8 @@ gaps, stale control/upload fencing and bounded transport history.
 `transport_retirement_callbacks.test.js` exercises an old socket error followed
 by authentication/resume and delayed close/error events; obsolete callbacks may
 not affect the replacement session, presence or transport index.
-`connection_recovery_v6.test.js` covers the 3/5-second boundaries, lost RESUME
+`connection_recovery_v6.test.js` covers the fixed 3-second recovery deadline,
+partial recovery without renewal, exact late-ACK rejection, lost RESUME
 results, applied-ACK readiness, terminal replay suppression, disable races,
 independent incoming sessions, bounded obligations and STOP acknowledgements
 after logical closure. `upload_transport.integration.test.js` exercises real

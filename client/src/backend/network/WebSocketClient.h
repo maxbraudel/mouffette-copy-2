@@ -128,6 +128,7 @@ public:
     bool reconcileRemoteSessions();
     bool canIssueSessionCommands(const QString& remoteSessionId) const;
     qint64 sessionRecoveryRemainingMs(const QString& remoteSessionId) const;
+    bool isSessionRecovering(const QString& remoteSessionId) const;
     // Withdraws this endpoint from discovery and atomically asks the server
     // to terminate all of its RemoteSessions before the socket is closed.
     bool beginEndpointDisable(const QString& requestId = {});
@@ -319,11 +320,15 @@ private:
     bool acknowledgeSessionState(const QJsonObject& envelope);
     void updateSessionDeadline(const QJsonObject& envelope);
     void checkSessionRecoveryDeadlines();
+    void beginSessionRecovery(qint64 detectedAtMs);
+    qint64 sessionProofBudgetMs() const;
     void retryExpiredSessionClose(const QString& remoteSessionId, quint64 generation);
     void refreshSessionProofs(const QJsonObject& heartbeat);
     struct SessionDeadline {
         qint64 localDeadlineMs = -1;
         qint64 serverDeadlineMs = -1;
+        qint64 proofDeadlineMs = -1;
+        qint64 interruptionDeadlineMs = -1;
         bool expired = false;
     };
     QHash<QString, QJsonObject> m_assetRemovalObligations;

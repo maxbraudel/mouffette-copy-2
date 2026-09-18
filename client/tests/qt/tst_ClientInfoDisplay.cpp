@@ -25,7 +25,8 @@ void ClientInfoDisplayTest::normalizesEveryPublicAvailabilityBadge_data()
     QTest::newRow("available") << QStringLiteral("Available") << QStringLiteral("Available");
     QTest::newRow("connecting") << QStringLiteral("opening") << QStringLiteral("Connecting");
     QTest::newRow("connected") << QStringLiteral("active") << QStringLiteral("Connected");
-    QTest::newRow("legacy-grace") << QStringLiteral("grace") << QStringLiteral("Disconnected");
+    QTest::newRow("grace") << QStringLiteral("grace") << QStringLiteral("Degraded");
+    QTest::newRow("degraded") << QStringLiteral("Degraded") << QStringLiteral("Degraded");
     QTest::newRow("legacy-reconnecting") << QStringLiteral("Reconnecting") << QStringLiteral("Disconnected");
     QTest::newRow("disconnecting") << QStringLiteral("cleanup_pending") << QStringLiteral("Disconnecting");
     QTest::newRow("disconnected") << QStringLiteral("Disconnected") << QStringLiteral("Disconnected");
@@ -54,6 +55,10 @@ void ClientInfoDisplayTest::disconnectedPresenceOverridesStaleSessionState()
     QCOMPARE(client.availabilityBadgeText(), QStringLiteral("Disconnected"));
     QVERIFY(client.getProjectDeadlineText(1'000).isEmpty());
     QVERIFY(client.getDisplayText().endsWith(QStringLiteral("— Disconnected")));
+    client.setAvailabilityStatus(QStringLiteral("Degraded"));
+    QCOMPARE(client.availabilityBadgeText(), QStringLiteral("Degraded"));
+    client.setAvailabilityStatus(QStringLiteral("Disconnected"));
+    QCOMPARE(client.availabilityBadgeText(), QStringLiteral("Disconnected"));
 }
 
 void ClientInfoDisplayTest::formatsProjectDeadlines()

@@ -17,7 +17,6 @@ fs.writeFileSync(envFile, [
     'MOUFFETTE_SERVER_HOST=127.0.0.1',
     'MOUFFETTE_SERVER_PORT=9090',
     'MOUFFETTE_PEER_HEARTBEAT_INTERVAL_MS=750',
-    'MOUFFETTE_PEER_LEASE_TIMEOUT_MS=3000',
     'MOUFFETTE_SCENE_PREPARE_TIMEOUT_MS=15000',
     'MOUFFETTE_SCENE_ACTIVATION_LEAD_MS=4000',
     'MOUFFETTE_SCENE_MAX_CLOCK_SKEW_MS=50',
@@ -40,9 +39,10 @@ assert.equal(config.remoteSessionTeardownRetryInitialMs, 500);
 assert.equal(config.remoteSessionTeardownRetryMaxMs, 5000);
 assert.equal(config.remoteSessionOpenRequestTtlMs, 300000);
 assert.equal(config.remoteSessionTombstoneTtlMs, 300000);
-assert.equal(config.sessionRecoveryTimeoutMs, 5000);
+assert.equal(config.sessionRecoveryTimeoutMs, 3000);
+assert.equal(config.leaseTimeoutMs, 1500);
 assert.equal(config.remoteSessionOpenTimeoutMs, 5000);
-assert.equal(config.policyVersion, 3);
+assert.equal(config.policyVersion, 4);
 assert.ok(config.warnings.some((warning) => warning.includes('UNKNOWN_KEY')));
 
 process.env.MOUFFETTE_MISSPELLED_OPTION = 'true';
@@ -53,7 +53,6 @@ delete process.env.MOUFFETTE_MISSPELLED_OPTION;
 
 fs.writeFileSync(envFile, [
     'MOUFFETTE_PEER_HEARTBEAT_INTERVAL_MS=750',
-    'MOUFFETTE_PEER_LEASE_TIMEOUT_MS=3000',
 ].join('\n'));
 const defaultActivationLeadConfig = loadServerConfig({ envFile });
 assert.equal(defaultActivationLeadConfig.sceneActivationLeadMs, 500,
@@ -62,14 +61,16 @@ assert.equal(defaultActivationLeadConfig.sceneActivationLeadMs, 500,
 fs.writeFileSync(envFile, 'MOUFFETTE_REMOTE_SESSION_RECOVERY_TIMEOUT_MS=6500\n');
 assert.equal(loadServerConfig({ envFile }).sessionRecoveryTimeoutMs, 6500);
 fs.writeFileSync(envFile, 'MOUFFETTE_REMOTE_SESSION_RECOVERY_TIMEOUT_MS=3000\n');
-assert.throws(() => loadServerConfig({ envFile }), /must exceed the transport lease timeout/);
+assert.equal(loadServerConfig({ envFile }).sessionRecoveryTimeoutMs, 3000);
 
 fs.writeFileSync(envFile, 'MOUFFETTE_PEER_HEARTBEAT_INTERVAL_MS=1000\nMOUFFETTE_PEER_LEASE_TIMEOUT_MS=3000\n');
-assert.throws(() => loadServerConfig({ envFile }), /at least 4x/);
+assert.equal(loadServerConfig({ envFile }).leaseTimeoutMs, 2000);
+assert.ok(loadServerConfig({ envFile }).warnings.some(w => w.includes('MOUFFETTE_PEER_LEASE_TIMEOUT_MS')));
+fs.writeFileSync(envFile, 'MOUFFETTE_REMOTE_SESSION_RECOVERY_TIMEOUT_MS=0\n');
+assert.throws(() => loadServerConfig({ envFile }), /must be in/);
 
 fs.writeFileSync(envFile, [
     'MOUFFETTE_PEER_HEARTBEAT_INTERVAL_MS=750',
-    'MOUFFETTE_PEER_LEASE_TIMEOUT_MS=3000',
     'MOUFFETTE_REMOTE_SESSION_TEARDOWN_RETRY_INITIAL_MS=1000',
     'MOUFFETTE_REMOTE_SESSION_TEARDOWN_RETRY_MAX_MS=500',
 ].join('\n'));
@@ -78,7 +79,6 @@ assert.throws(() => loadServerConfig({ envFile }),
 
 fs.writeFileSync(envFile, [
     'MOUFFETTE_PEER_HEARTBEAT_INTERVAL_MS=750',
-    'MOUFFETTE_PEER_LEASE_TIMEOUT_MS=3000',
     'MOUFFETTE_REMOTE_SESSION_OPEN_REQUEST_TTL_MS=6000',
     'MOUFFETTE_REMOTE_SESSION_TOMBSTONE_TTL_MS=5000',
 ].join('\n'));
@@ -90,7 +90,6 @@ assert.throws(() => loadServerConfig({ envFile }), (error) => {
 
 fs.writeFileSync(envFile, [
     'MOUFFETTE_PEER_HEARTBEAT_INTERVAL_MS=750',
-    'MOUFFETTE_PEER_LEASE_TIMEOUT_MS=3000',
     'MOUFFETTE_SCENE_MAX_CLOCK_SKEW_MS=250',
     'MOUFFETTE_SCENE_MAX_START_SKEW_MS=400',
 ].join('\n'));

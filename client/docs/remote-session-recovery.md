@@ -50,8 +50,9 @@ internal phases. Retry action (idle, scheduled, running, suspended or blocked),
 cause and next attempt are separate diagnostics shown in tooltips. Available
 means an admissible peer without a usable session; desired work alone never
 becomes Connecting. A local server outage leaves remote presence unconfirmed,
-shown as Unreachable. Grace remains a session phase and never authorizes new
-commands. Legacy Reconnecting observations are normalized to Disconnected on
+shown as Unreachable when no session is retained. A retained session is shown as
+Degraded throughout recovery, including TCP/authentication/RESUME attempts. Grace
+is its internal phase and never authorizes new commands. Legacy Reconnecting observations are normalized to Disconnected on
 input; neither the new server nor the new client emits that status.
 
 ConnectionManager owns server connection attempts. SessionRecoveryController
@@ -106,13 +107,27 @@ The server advertises these policy values in the signed connection's welcome:
 | Policy | Default | Configuration in `server/.env` |
 | --- | ---: | --- |
 | Heartbeat interval | 750 ms | `MOUFFETTE_PEER_HEARTBEAT_INTERVAL_MS` |
-| Degraded threshold | 1,500 ms | `MOUFFETTE_REMOTE_SESSION_DEGRADED_AFTER_MS` |
-| Replace silent transport | 3,000 ms | `MOUFFETTE_PEER_LEASE_TIMEOUT_MS` |
-| Total session recovery budget | 5,000 ms | `MOUFFETTE_REMOTE_SESSION_RECOVERY_TIMEOUT_MS` |
+| Detect silence and replace transport | 1,500 ms | Derived: two heartbeat intervals |
+| Recovery after interruption detection | 3,000 ms | `MOUFFETTE_REMOTE_SESSION_RECOVERY_TIMEOUT_MS` |
 | New session opening deadline | 5,000 ms | `MOUFFETTE_REMOTE_SESSION_OPEN_TIMEOUT_MS` |
 
-Five seconds is a total budget from the last relevant proof of life, not a fresh
-interval per retry, authentication or RESUME. The server distributes each
+Policy version 4 (still protocol v7) starts a **single three-second recovery
+period at interruption detection**: immediately on an unexpected socket close,
+or after two missed heartbeat intervals for silent loss. At defaults, silent
+loss therefore expires no later than 4.5 seconds after the last relevant proof;
+an explicit socket loss expires three seconds after its detection. The old
+`MOUFFETTE_PEER_LEASE_TIMEOUT_MS` and `MOUFFETTE_REMOTE_SESSION_DEGRADED_AFTER_MS`
+knobs are removed; old configuration entries generate an unknown-key warning.
+Deploy server and clients together: older clients reject the new timing policy.
+
+During that period the session is Degraded and its identity and Live scene are
+retained. Successful resumption **and both applied-state acknowledgements**
+restore Connected. At the deadline the session is Disconnected and terminal,
+even if a server connection attempt is still running. Disable and explicit
+session CLOSE bypass recovery. Repeated departures, retry, authentication and
+one participant returning cannot renew the fixed deadline. Each healthy
+recovery completes the period; a later independent outage starts a new one.
+The server distributes each
 session's absolute monotonic deadline and revision during normal operation and
 in heartbeat acknowledgements. A healthy participant cannot renew an absent
 participant's proof. Clients map server deadlines conservatively to their local
@@ -223,8 +238,13 @@ results and the remaining general graphical test failures.
 `server/connection_recovery_v6.test.js` exercises deterministic deadlines,
 simultaneous recovery, state acknowledgements, replay, admission and cleanup.
 `RemoteSessionIntegration` starts the real Node relay and uses actual Qt clients;
-Node and `npm ci` in `server` are required. It covers 2/4/6-second disruptions,
-peer ordering, lost replies/ACKs and duplicate OPEN. The cache/upload and renderer
+Node and `npm ci` in `server` are required. It covers recovery after a 2-second
+socket interruption, terminal expiration after 4/6 seconds, peer ordering,
+lost replies/ACKs and duplicate OPEN. Real runtime/relay cases also verify
+Degraded in the list and Canvas header, unchanged project/Canvas during the
+period, Connected after recovery, and Disconnected after expiration.
+Injected-clock cases cover exact deadlines, sleep, repeated loss, one-sided
+return, a missing final state ACK, and recovery using an unchanged normal proof. The cache/upload and renderer
 suites check delayed resource release, cancelled writers, durable offsets and
 local expiration. CI installs Node and runs protocol plus native suites on macOS
 and Windows.

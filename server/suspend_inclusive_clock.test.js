@@ -34,15 +34,15 @@ for (let index = 0; index < 500; ++index) {
     assert.ok(observed <= continuous - realAnchor + 10);
 }
 
-// The injected policy guard expires sessions before any 5-second real-time
+// The injected policy guard expires sessions before the detection plus 3-second recovery
 // budget could be extended by the Linux counter's centisecond quantization.
 const server = new MouffetteServer({ port: 0, monotonicNow: clock,
     protocolLogger: () => {}, metricLogger: () => {} });
-assert.equal(server.remoteSessions.leaseTimeoutMs, 4990);
+assert.equal(server.remoteSessions.leaseTimeoutMs, 4490);
 const session = server.remoteSessions.open({ ownerEndpointId: 'A', targetEndpointId: 'B',
     ownerRuntimeId: 'a', targetRuntimeId: 'b', ownerConnectionGeneration: 1,
     targetConnectionGeneration: 1 }).session;
-continuous += 5000;
+continuous += 4500;
 server.sweepRemoteSessionLeases();
 assert.equal(server.remoteSessions.sessions.has(session.remoteSessionId), false);
 

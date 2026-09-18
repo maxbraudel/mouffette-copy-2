@@ -119,17 +119,31 @@ bool isCommandReadyBinding(
         && bindingConnectionGeneration == client->connectionGeneration();
 }
 
+bool hasRetainedSession(const WebSocketClient* client, const RemoteSessionCoordinator::Binding& binding)
+{
+    return client && !binding.remoteSessionId.isEmpty()
+        && (binding.phase == QLatin1String("Active") || binding.phase == QLatin1String("Grace"))
+        && client->sessionRecoveryRemainingMs(binding.remoteSessionId) > 0;
+}
+
 QString sessionBadge(const WebSocketClient* client, const RemoteSessionCoordinator::Binding& binding)
 {
     if (isCommandReadyBinding(client, binding)) return QStringLiteral("Connected");
     if (binding.phase == QLatin1String("Terminating") || binding.phase == QLatin1String("CleanupPending"))
         return QStringLiteral("Disconnecting");
+    if (hasRetainedSession(client, binding)
+        && (!client->isTransportAuthenticated() || binding.degraded
+            || binding.phase == QLatin1String("Grace")
+            || client->isSessionRecovering(binding.remoteSessionId)
+            || client->sessionRecoveryInProgress(binding.remoteSessionId)))
+        return QStringLiteral("Degraded");
+    if (!binding.remoteSessionId.isEmpty() && client
+        && client->sessionRecoveryRemainingMs(binding.remoteSessionId) <= 0)
+        return QStringLiteral("Disconnected");
     if (!client || !client->isTransportAuthenticated()) return QStringLiteral("Unreachable");
-    if (binding.phase == QLatin1String("Opening") || client->sessionRecoveryInProgress(binding.remoteSessionId))
+    if (binding.phase == QLatin1String("Opening")
+        || (binding.phase == QLatin1String("Active") && !binding.commandReady))
         return QStringLiteral("Connecting");
-    if (binding.degraded) return QStringLiteral("Degraded");
-    if (binding.phase == QLatin1String("Active") && !binding.commandReady)
-        return QStringLiteral("Connecting"); // applying/acknowledging authoritative state
     return QStringLiteral("Disconnected");
 }
 
@@ -231,16 +245,18 @@ QString ApplicationRuntime::clientConnectionDetail(const QString& endpoint) cons
 
 void ApplicationRuntime::setRemoteConnectionStatus(const QString& status, bool propagateLoss) {
     QString up = status.toUpper();
-    if (!m_activeWorkspaceEndpointId.isEmpty() && m_connectionManager && !m_connectionManager->isReady()) {
-        const auto local = m_connectionManager->state();
-        up = local == ConnectionManager::State::Degraded ? QStringLiteral("DEGRADED")
-            : local == ConnectionManager::State::Disconnecting ? QStringLiteral("DISCONNECTING")
-            : QStringLiteral("UNREACHABLE");
-    }
-    m_remoteStatusText = up;
     const auto binding = m_webSocketClient
         ? m_webSocketClient->remoteSessionCoordinator()->outgoingForPeer(m_activeWorkspaceEndpointId)
         : RemoteSessionCoordinator::Binding();
+    if (!m_activeWorkspaceEndpointId.isEmpty() && m_connectionManager && !m_connectionManager->isReady()) {
+        const auto local = m_connectionManager->state();
+        up = isUserDisconnected() ? QStringLiteral("DISCONNECTED")
+            : local == ConnectionManager::State::Disconnecting ? QStringLiteral("DISCONNECTING")
+            : hasRetainedSession(m_webSocketClient, binding) || local == ConnectionManager::State::Degraded ? QStringLiteral("DEGRADED")
+            : !binding.remoteSessionId.isEmpty() ? QStringLiteral("DISCONNECTED")
+            : QStringLiteral("UNREACHABLE");
+    }
+    m_remoteStatusText = up;
     m_remoteClientConnected = isCommandReadyBinding(m_webSocketClient, binding)
         && m_connectionManager && m_connectionManager->isReady()
         && !isUserDisconnected() && !isConnectionDraining()
@@ -582,7 +598,16 @@ ApplicationRuntime::ApplicationRuntime(const RuntimeProfileContext& runtimeProfi
             });
         }
         connect(m_webSocketClient, &WebSocketClient::transportHealthChanged,
-                m_sceneActivityModel, &SceneActivityModel::setAllDegraded);
+                this, [this](bool degraded) {
+            if (degraded) {
+                m_sceneActivityModel->setAllDegraded(true);
+                return;
+            }
+            // Authentication alone does not recover a retained scene's session.
+            for (const auto& binding : m_webSocketClient->remoteSessionCoordinator()->all())
+                m_sceneActivityModel->setSessionDegraded(binding.remoteSessionId,
+                    !isCommandReadyBinding(m_webSocketClient, binding));
+        });
         connect(m_webSocketClient, &WebSocketClient::remoteSessionLeaseStateChanged,
                 this, [this](const QJsonObject& envelope) {
             handleRemoteSessionLeaseState(envelope);
@@ -593,7 +618,8 @@ ApplicationRuntime::ApplicationRuntime(const RuntimeProfileContext& runtimeProfi
             if (phase.compare(QStringLiteral("Grace"), Qt::CaseInsensitive) == 0) {
                 m_sceneActivityModel->setSessionDegraded(sessionId, true);
             } else if (phase.compare(QStringLiteral("Active"), Qt::CaseInsensitive) == 0) {
-                m_sceneActivityModel->setSessionDegraded(sessionId, false);
+                m_sceneActivityModel->setSessionDegraded(sessionId,
+                    !m_webSocketClient->canIssueSessionCommands(sessionId));
             } else if (phase.compare(QStringLiteral("Terminating"), Qt::CaseInsensitive) == 0
                        || phase.compare(QStringLiteral("CleanupPending"), Qt::CaseInsensitive) == 0
                        || phase.compare(QStringLiteral("Closed"), Qt::CaseInsensitive) == 0) {
@@ -752,8 +778,8 @@ ApplicationRuntime::ApplicationRuntime(const RuntimeProfileContext& runtimeProfi
             setRemoteConnectionStatus(QStringLiteral("UNREACHABLE"), false);
             if (m_navigationManager) m_navigationManager->revealCanvas();
         } else if (selectedHasProject) {
-            updateRemoteClientAvailability(
-                selectedTarget, QStringLiteral("Unreachable"));
+            const auto binding = m_webSocketClient->remoteSessionCoordinator()->outgoingForPeer(selectedTarget);
+            updateRemoteClientAvailability(selectedTarget, sessionBadge(m_webSocketClient, binding));
             setRemoteConnectionStatus(QStringLiteral("UNREACHABLE"), false);
             if (m_navigationManager) m_navigationManager->revealCanvas();
         }
@@ -1138,22 +1164,21 @@ QList<ClientInfo> ApplicationRuntime::buildDisplayClientList(const QList<ClientI
         client.setProjectDeleteAtMs(entry.projectDeleteAtMs);
         client.setProjectMediaReleaseAtMs(
             m_projectManager->projectMediaReleaseAtMs(entry.endpointId));
+        const RemoteSessionCoordinator* coordinator = m_webSocketClient
+            ? m_webSocketClient->remoteSessionCoordinator() : nullptr;
+        const RemoteSessionCoordinator::Binding binding = coordinator
+            ? coordinator->outgoingForPeer(entry.endpointId)
+            : RemoteSessionCoordinator::Binding();
+        const bool retained = hasRetainedSession(m_webSocketClient, binding);
         if (!entry.online) {
-            const QString status = m_webSocketClient
-                    && m_webSocketClient->isConnected()
-                ? QStringLiteral("Disconnected")
-                : QStringLiteral("Unreachable");
+            const QString status = retained && !isUserDisconnected()
+                ? QStringLiteral("Degraded")
+                : isUserDisconnected() || !binding.remoteSessionId.isEmpty()
+                    || (m_webSocketClient && m_webSocketClient->isConnected())
+                    ? QStringLiteral("Disconnected") : QStringLiteral("Unreachable");
             client.setStatus(status);
             client.setAvailabilityStatus(status);
         } else {
-            // Discovery answers only the presence question. Session badges
-            // are projected here from the authenticated binding plus local
-            // intent, so a stale status copied into ClientInfo can never win.
-            const RemoteSessionCoordinator* coordinator = m_webSocketClient
-                ? m_webSocketClient->remoteSessionCoordinator() : nullptr;
-            const RemoteSessionCoordinator::Binding binding = coordinator
-                ? coordinator->outgoingForPeer(entry.endpointId)
-                : RemoteSessionCoordinator::Binding();
             const bool closePending = hasPendingOutgoingSessionClose(
                 entry.endpointId)
                 || hasCancelledInitialOpenForTarget(entry.endpointId)
@@ -1170,11 +1195,11 @@ QList<ClientInfo> ApplicationRuntime::buildDisplayClientList(const QList<ClientI
             if (!localDiscoveryUsable) {
                 const auto localState = m_connectionManager
                     ? m_connectionManager->state() : ConnectionManager::State::Disconnected;
-                status = localState == ConnectionManager::State::Degraded
-                    ? QStringLiteral("Degraded")
-                    : localState == ConnectionManager::State::Disconnecting
-                        ? QStringLiteral("Disconnecting")
-                        : QStringLiteral("Unreachable");
+                status = isUserDisconnected() ? QStringLiteral("Disconnected")
+                    : localState == ConnectionManager::State::Disconnecting ? QStringLiteral("Disconnecting")
+                    : retained || localState == ConnectionManager::State::Degraded ? QStringLiteral("Degraded")
+                    : !binding.remoteSessionId.isEmpty() ? QStringLiteral("Disconnected")
+                    : QStringLiteral("Unreachable");
             } else if (!client.canAcceptSession()) {
                 // Preserve server degradation/recovery even if a retained
                 // session still has an older command-ready observation.
@@ -2681,7 +2706,7 @@ void ApplicationRuntime::handleRemoteSessionLeaseState(const QJsonObject& envelo
     if (phase == QLatin1String("Grace") || state == QLatin1String("Grace")
         || state == QLatin1String("Degraded")
         || envelope.value(QStringLiteral("degraded")).toBool()) {
-        status = QStringLiteral("Disconnected");
+        status = QStringLiteral("Degraded");
     } else if (phase == QLatin1String("Active") && state == QLatin1String("Active")) {
         status = QStringLiteral("Connected");
     } else if (phase == QLatin1String("Terminating")
@@ -2940,8 +2965,10 @@ void ApplicationRuntime::armIncomingSessionOrphanWatchdog()
     if (!coordinator) return;
     const QString localEndpointId = m_webSocketClient->endpointId();
     QSet<QString> incoming;
+    // Versioned sessions already have a suspend-inclusive deadline owned by
+    // WebSocketClient. Only legacy unversioned bindings use this fallback.
     for (const RemoteSessionCoordinator::Binding& binding : coordinator->all()) {
-        if (binding.targetEndpointId == localEndpointId
+        if (binding.stateRevision == 0 && binding.targetEndpointId == localEndpointId
             && binding.ownerEndpointId != localEndpointId
             && !binding.remoteSessionId.isEmpty()
             && binding.phase != QLatin1String("Closed")) {

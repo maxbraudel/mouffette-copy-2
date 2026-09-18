@@ -2,6 +2,8 @@
 #include "backend/runtime/ApplicationRuntime.h"
 #include "backend/domain/workspace/WorkspaceManager.h"
 #include "shared/rendering/ICanvasHost.h"
+#include "backend/network/WebSocketClient.h"
+#include "backend/network/RemoteSessionCoordinator.h"
 #include <QDebug>
 
 QList<ClientInfo> ClientListBuilder::buildDisplayClientList(
@@ -76,5 +78,24 @@ QList<ClientInfo> ClientListBuilder::buildDisplayClientList(
         }
     }
 
+    // Match the main merger when only retained workspace data is available.
+    if (auto* transport = mainWindow->getWebSocketClient()) {
+        for (ClientInfo& info : result) {
+            const auto binding = transport->remoteSessionCoordinator()->outgoingForPeer(info.endpointId());
+            const bool retained = (binding.phase == QLatin1String("Active")
+                || binding.phase == QLatin1String("Grace"))
+                && transport->sessionRecoveryRemainingMs(binding.remoteSessionId) > 0;
+            if (retained && !mainWindow->isUserDisconnected()
+                && (!localDiscoveryUsable || !transport->canIssueSessionCommands(binding.remoteSessionId))) {
+                info.setStatus(QStringLiteral("Degraded"));
+                info.setAvailabilityStatus(QStringLiteral("Degraded"));
+            } else if (!localDiscoveryUsable || !info.isOnline()) {
+                const QString status = mainWindow->isUserDisconnected() || !binding.remoteSessionId.isEmpty()
+                    || transport->isConnected() ? QStringLiteral("Disconnected") : QStringLiteral("Unreachable");
+                info.setStatus(status);
+                info.setAvailabilityStatus(status);
+            }
+        }
+    }
     return result;
 }
