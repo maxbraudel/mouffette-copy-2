@@ -3970,7 +3970,9 @@ private slots:
         QVERIFY(media);
         if (media->isText()) media->setFitToTextEnabled(false);
         media->setBaseSize({240, 140});
-        media->setPosition({300, 240});
+        // Keep the resize corner inside the canvas after the 50/50 timeline split.
+        media->setPosition((QPointF(root->width() * 0.4, 80)
+            - QPointF(host->controller()->panX(), host->controller()->panY())) / cameraScale);
         session.setSettingsVisible(true);
         QQuickItem* delegate = nullptr;
         QTRY_VERIFY((delegate = findQuickItemWithProperty(
