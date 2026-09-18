@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Controls
+import QtQuick.Shapes
 import QtQuick.Window
 import Mouffette.App
 
@@ -72,11 +73,6 @@ FocusScope {
         zoomAround(factor, timeMs,
             headX >= 0 && headX <= trackViewport.width ? headX : trackViewport.width / 2)
     }
-    function zoomAtPointer(factor, x) {
-        var anchorX = x === undefined ? trackInput.mouseX : x
-        var timeMs = (trackViewport.contentX + anchorX - 12) / pixelsPerMs
-        zoomAround(factor, timeMs, anchorX)
-    }
     function handleWheel(wheel) {
         if (!timeline || activeDrag) { wheel.accepted = true; return }
         var precise = wheel.pixelDelta.x !== 0 || wheel.pixelDelta.y !== 0
@@ -86,7 +82,8 @@ FocusScope {
             var delta = wheel.inverted ? -dy : dy
             var trackpad = precise || wheel.phase !== Qt.NoScrollPhase
                 || (wheel.device && wheel.device.type === PointerDevice.TouchPad)
-            zoomAtPointer(trackpad ? Math.exp(-delta * 0.003) : Math.pow(1.0015, -delta * 5), wheel.x)
+            if (delta !== 0)
+                zoom(trackpad ? Math.exp(-delta * 0.003) : Math.pow(1.0015, -delta * 5))
         } else {
             // Either swipe axis scrolls time; the dominant axis avoids doubling diagonals.
             scrollTo(trackViewport.contentX - (Math.abs(dx) > Math.abs(dy) ? dx : dy) * (precise ? 1 : 3))
@@ -429,7 +426,6 @@ FocusScope {
                         height: Math.max(12, clipTrack.height - 22)
                         radius: 3
                         color: Theme.overlayText
-                        border.color: Theme.overlayDisabledText
                         opacity: root.timeline ? root.timeline.otherKeyframeOpacity : 0.3
                     }
                 }
@@ -558,7 +554,25 @@ FocusScope {
                 x: 12 + (root.timeline ? root.timeline.positionMs : 0) * root.pixelsPerMs
                 width: 1; height: timeContent.height
                 color: Theme.accent
-                Rectangle { width: 8; height: 8; x: -3.5; rotation: 45; color: Theme.accent }
+                Shape {
+                    id: playheadCap
+                    objectName: "timelinePlayheadCap"
+                    x: (parent.width - width) / 2
+                    anchors.top: parent.top
+                    width: 12; height: 14
+                    preferredRendererType: Shape.CurveRenderer
+                    antialiasing: true
+                    ShapePath {
+                        strokeWidth: -1
+                        fillColor: Theme.accent
+                        startX: 0; startY: 0
+                        PathLine { x: playheadCap.width; y: 0 }
+                        PathLine { x: playheadCap.width; y: playheadCap.height - 5 }
+                        PathLine { x: playheadCap.width / 2; y: playheadCap.height }
+                        PathLine { x: 0; y: playheadCap.height - 5 }
+                        PathLine { x: 0; y: 0 }
+                    }
+                }
             }
             Item {
                 id: stopMarker
@@ -632,11 +646,11 @@ FocusScope {
     }
     TimelineZoomShortcut {
         sequences: ["+", "=", "Ctrl++", "Ctrl+=", "Meta++", "Meta+="]
-        onActivated: root.zoomAtPointer(0.5)
+        onActivated: root.zoom(0.5)
     }
     TimelineZoomShortcut {
         sequences: ["-", "Ctrl+-", "Meta+-"]
-        onActivated: root.zoomAtPointer(2)
+        onActivated: root.zoom(2)
     }
     TimelineShortcut { sequence: "Left"; autoRepeat: true; onActivated: root.timeline.stepSlots(-1) }
     TimelineShortcut { sequence: "Right"; autoRepeat: true; onActivated: root.timeline.stepSlots(1) }

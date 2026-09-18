@@ -91,7 +91,7 @@ private slots:
         QCOMPARE(f.host->serializeProjectState(), saved);
     }
 
-    void zoomAnchorsButtonsToHeadAndWheelAndShortcutsToPointer()
+    void zoomAnchorsButtonsWheelAndShortcutsToHead()
     {
         TimelineFixture f;
         QVERIFY(f.initialize());
@@ -118,17 +118,17 @@ private slots:
         for (auto modifier : {Qt::ControlModifier, Qt::MetaModifier}) {
             for (bool pixels : {false, true}) {
                 for (bool natural : {false, true}) {
-                    const qreal anchor = f.timeAt(cursorX);
+                    const qreal anchorX = 12 + f.timeline.positionMs() * f.scale() - f.scroll();
                     const qreal scale = f.scale();
                     const int direction = natural ? -1 : 1;
                     f.wheel(cursor, pixels ? QPoint(0, direction * 24) : QPoint(),
                         {0, direction * 120}, modifier, natural);
                     QVERIFY(f.scale() > scale);
-                    QVERIFY(qAbs(f.timeAt(cursorX) - anchor) < 1e-6);
+                    QVERIFY(qAbs(f.timeAt(anchorX) - f.timeline.positionMs()) < 1e-6);
                     f.wheel(cursor, pixels ? QPoint(0, -direction * 24) : QPoint(),
                         {0, -direction * 120}, modifier, natural);
                     QVERIFY(qAbs(f.scale() - scale) < 1e-6);
-                    QVERIFY(qAbs(f.timeAt(cursorX) - anchor) < 1e-6);
+                    QVERIFY(qAbs(f.timeAt(anchorX) - f.timeline.positionMs()) < 1e-6);
                 }
             }
         }
@@ -136,14 +136,14 @@ private slots:
         QVERIFY(QTest::qWaitForWindowActive(&f.view));
         root->forceActiveFocus();
         QTest::mouseMove(&f.view, cursor);
-        const qreal anchor = f.timeAt(cursorX);
+        const qreal anchorX = 12 + f.timeline.positionMs() * f.scale() - f.scroll();
         const qreal scale = f.scale();
         QTest::keyClick(&f.view, Qt::Key_Equal, Qt::ControlModifier);
         QTRY_VERIFY(f.scale() > scale);
-        QVERIFY(qAbs(f.timeAt(cursorX) - anchor) < 1e-6);
+        QVERIFY(qAbs(f.timeAt(anchorX) - f.timeline.positionMs()) < 1e-6);
         QTest::keyClick(&f.view, Qt::Key_Minus, Qt::ControlModifier);
         QTRY_VERIFY(qAbs(f.scale() - scale) < 1e-6);
-        QVERIFY(qAbs(f.timeAt(cursorX) - anchor) < 1e-6);
+        QVERIFY(qAbs(f.timeAt(anchorX) - f.timeline.positionMs()) < 1e-6);
     }
 
     void backgroundMediaStayCenteredVisibleAndCannotCollide()
