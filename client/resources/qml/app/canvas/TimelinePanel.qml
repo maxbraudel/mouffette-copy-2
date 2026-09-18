@@ -13,7 +13,7 @@ FocusScope {
     property real viewDurationMs: timeline ? Math.min(maximumMs, timeline.initialViewDurationMs) : 15000
     readonly property real pixelsPerMs: Math.max(1, trackViewport.width - 24) / Math.max(1, viewDurationMs)
     readonly property real rulerHeight: timeline ? timeline.rulerHeightPx : 28
-    readonly property real clipHeight: timeline && timeline.primaryIsVideo ? timeline.clipTrackHeightPx : 0
+    readonly property real clipHeight: timeline ? timeline.clipTrackHeightPx : 64
     readonly property real keyHeight: Math.max(30, trackViewport.height - rulerHeight - clipHeight - 16)
     readonly property real slotMs: 1000 / (timeline ? timeline.slotsPerSecond : 30)
     // Visual grouping only: authoring always retains the project slot size.
@@ -59,11 +59,39 @@ FocusScope {
         return clampTime(result.timeMs)
     }
     function endDrag() { activeDrag = null; snapGuideMs = -1; snapGuideLabel = "" }
-    function zoom(factor) {
-        var center = (trackViewport.contentX + trackViewport.width / 2 - 12) / pixelsPerMs
+    function scrollTo(x) {
+        trackViewport.contentX = Math.max(0, Math.min(trackViewport.contentWidth - trackViewport.width, x))
+    }
+    function zoomAround(factor, timeMs, anchorX) {
         viewDurationMs = Math.max(100, Math.min(maximumMs, viewDurationMs * factor))
-        trackViewport.contentX = Math.max(0, Math.min(trackViewport.contentWidth - trackViewport.width,
-            center * pixelsPerMs + 12 - trackViewport.width / 2))
+        scrollTo(timeMs * pixelsPerMs + 12 - anchorX)
+    }
+    function zoom(factor) {
+        var timeMs = timeline ? timeline.positionMs : 0
+        var headX = timeMs * pixelsPerMs + 12 - trackViewport.contentX
+        zoomAround(factor, timeMs,
+            headX >= 0 && headX <= trackViewport.width ? headX : trackViewport.width / 2)
+    }
+    function zoomAtPointer(factor, x) {
+        var anchorX = x === undefined ? trackInput.mouseX : x
+        var timeMs = (trackViewport.contentX + anchorX - 12) / pixelsPerMs
+        zoomAround(factor, timeMs, anchorX)
+    }
+    function handleWheel(wheel) {
+        if (!timeline || activeDrag) { wheel.accepted = true; return }
+        var precise = wheel.pixelDelta.x !== 0 || wheel.pixelDelta.y !== 0
+        var dx = precise ? wheel.pixelDelta.x : wheel.angleDelta.x / 8
+        var dy = precise ? wheel.pixelDelta.y : wheel.angleDelta.y / 8
+        if ((wheel.modifiers & (Qt.ControlModifier | Qt.MetaModifier)) !== 0) {
+            var delta = wheel.inverted ? -dy : dy
+            var trackpad = precise || wheel.phase !== Qt.NoScrollPhase
+                || (wheel.device && wheel.device.type === PointerDevice.TouchPad)
+            zoomAtPointer(trackpad ? Math.exp(-delta * 0.003) : Math.pow(1.0015, -delta * 5), wheel.x)
+        } else {
+            // Either swipe axis scrolls time; the dominant axis avoids doubling diagonals.
+            scrollTo(trackViewport.contentX - (Math.abs(dx) > Math.abs(dy) ? dx : dy) * (precise ? 1 : 3))
+        }
+        wheel.accepted = true
     }
     function followHead() {
         if (!timeline || (!timeline.playing && !timeline.remoteActive)) return
@@ -106,6 +134,13 @@ FocusScope {
             color: button.down ? Theme.overlayPressed : button.hovered ? Theme.overlayHover : "transparent"
             border.color: button.enabled ? Theme.overlayBorder : "transparent"
         }
+    }
+    component KeyframeDiamond: Rectangle {
+        width: root.timeline ? root.timeline.keyframeSizePx : 10
+        height: width
+        rotation: 45
+        color: Theme.overlayText
+        border.color: Theme.overlayBackground
     }
     Flickable {
         id: transportViewport
@@ -165,8 +200,8 @@ FocusScope {
                     + root.formatTime(root.timeline ? root.timeline.effectiveEndMs : root.maximumMs)
                 color: Theme.overlayDisabledText; font.pixelSize: 12; verticalAlignment: Text.AlignVCenter
             }
-            TimelineButton { text: "−"; Accessible.name: "Zoom out timeline"; onClicked: root.zoom(2) }
-            TimelineButton { text: "+"; Accessible.name: "Zoom in timeline"; onClicked: root.zoom(0.5) }
+            TimelineButton { objectName: "timelineZoomOut"; text: "−"; Accessible.name: "Zoom out timeline"; onClicked: root.zoom(2) }
+            TimelineButton { objectName: "timelineZoomIn"; text: "+"; Accessible.name: "Zoom in timeline"; onClicked: root.zoom(0.5) }
             TimelineButton { text: "Fit duration"; onClicked: { root.viewDurationMs = root.maximumMs; trackViewport.contentX = 0 } }
             TimelineButton {
                 objectName: "timelinePlaceStop"
@@ -260,7 +295,7 @@ FocusScope {
         contentWidth: Math.max(width, root.maximumMs * root.pixelsPerMs + 24)
         contentHeight: height
         boundsBehavior: Flickable.StopAtBounds
-        interactive: !root.activeDrag
+        interactive: false
         ScrollBar.horizontal: ScrollBar { policy: ScrollBar.AlwaysOn }
         Item {
             id: timeContent
@@ -271,6 +306,7 @@ FocusScope {
                 id: scrubber
                 anchors.fill: parent
                 acceptedButtons: Qt.LeftButton
+                preventStealing: true
                 enabled: !!root.timeline && !root.timeline.remoteActive
                 onPressed: mouse => {
                     root.focusTrack()
@@ -313,14 +349,11 @@ FocusScope {
                 Text { x: trackViewport.contentX + 6; y: 2; text: "KEYFRAMES"; font.pixelSize: 9; color: Theme.overlayDisabledText }
                 Repeater {
                     model: root.timeline ? root.timeline.otherKeyframes : []
-                    Rectangle {
+                    KeyframeDiamond {
                         required property var modelData
                         objectName: "otherMediaKeyframe"
                         x: 12 + modelData.timeMs * root.pixelsPerMs - width / 2
-                        y: Math.max(15, keyTrack.height - height - 5)
-                        width: root.timeline ? root.timeline.keyframeSizePx : 10; height: width
-                        rotation: 45
-                        color: Theme.overlayText
+                        y: (keyTrack.height - height) / 2
                         opacity: root.timeline ? root.timeline.otherKeyframeOpacity : 0.3
                     }
                 }
@@ -336,14 +369,13 @@ FocusScope {
                         readonly property real shownMs: dragging ? previewMs : modelData.timeMs
                         function refreshPreview() { previewMs = root.snapTime(rawMs, modelData.id, 0) }
                         x: 12 + shownMs * root.pixelsPerMs - width / 2
-                        y: Math.max(13, (keyTrack.height - 28) / 2)
+                        y: (keyTrack.height - height) / 2
+                        z: dragging ? 2 : 1
                         width: 24; height: 24
-                        Rectangle {
+                        KeyframeDiamond {
+                            objectName: "timelineKeyframeDiamond"
                             anchors.centerIn: parent
-                            width: root.timeline ? root.timeline.keyframeSizePx : 10; height: width
-                            rotation: 45
                             color: root.timeline && root.timeline.selectedKeyframeId === keyItem.modelData.id ? Theme.accent : Theme.overlayText
-                            border.color: Theme.overlayBackground
                         }
                         MouseArea {
                             anchors.fill: parent
@@ -383,10 +415,24 @@ FocusScope {
                 objectName: "timelineClipTrack"
                 y: keyTrack.y + keyTrack.height
                 width: parent.width; height: root.clipHeight
-                visible: root.clipHeight > 0
                 Rectangle { anchors.fill: parent; color: Theme.overlaySelected; opacity: 0.45 }
                 Rectangle { width: parent.width; height: 1; color: Theme.overlayBorder }
                 Text { x: trackViewport.contentX + 6; y: 2; text: "VIDEO CLIPS"; font.pixelSize: 9; color: Theme.overlayDisabledText }
+                Repeater {
+                    model: root.timeline ? root.timeline.otherClips : []
+                    Rectangle {
+                        required property var modelData
+                        objectName: "otherMediaVideoClip"
+                        x: 12 + modelData.startMs * root.pixelsPerMs
+                        y: 17
+                        width: Math.max(2, modelData.durationMs * root.pixelsPerMs)
+                        height: Math.max(12, clipTrack.height - 22)
+                        radius: 3
+                        color: Theme.overlayText
+                        border.color: Theme.overlayDisabledText
+                        opacity: root.timeline ? root.timeline.otherKeyframeOpacity : 0.3
+                    }
+                }
                 Repeater {
                     model: root.timeline ? root.timeline.clips : []
                     Rectangle {
@@ -442,6 +488,7 @@ FocusScope {
                         }
                         x: 12 + shownStart * root.pixelsPerMs
                         y: 17
+                        z: dragging ? 3 : root.timeline && root.timeline.selectedClipId === modelData.id ? 2 : 1
                         width: Math.max(2, (shownEnd - shownStart) * root.pixelsPerMs)
                         height: Math.max(12, clipTrack.height - 22)
                         radius: 3
@@ -557,6 +604,15 @@ FocusScope {
             }
         }
     }
+    MouseArea {
+        id: trackInput
+        anchors.fill: trackViewport
+        acceptedButtons: Qt.NoButton
+        cursorShape: undefined
+        hoverEnabled: true
+        scrollGestureEnabled: true
+        onWheel: wheel => root.handleWheel(wheel)
+    }
     Text {
         anchors.right: parent.right; anchors.bottom: parent.bottom; anchors.margins: 4
         text: root.timeline ? root.timeline.errorText : ""
@@ -568,6 +624,19 @@ FocusScope {
         enabled: root.activeFocus && !root.textInputFocused && root.editable
         context: Qt.WindowShortcut
         autoRepeat: false
+    }
+    component TimelineZoomShortcut: Shortcut {
+        enabled: !!root.timeline && !root.textInputFocused && (root.activeFocus || trackInput.containsMouse)
+        context: Qt.WindowShortcut
+        autoRepeat: true
+    }
+    TimelineZoomShortcut {
+        sequences: ["+", "=", "Ctrl++", "Ctrl+=", "Meta++", "Meta+="]
+        onActivated: root.zoomAtPointer(0.5)
+    }
+    TimelineZoomShortcut {
+        sequences: ["-", "Ctrl+-", "Meta+-"]
+        onActivated: root.zoomAtPointer(2)
     }
     TimelineShortcut { sequence: "Left"; autoRepeat: true; onActivated: root.timeline.stepSlots(-1) }
     TimelineShortcut { sequence: "Right"; autoRepeat: true; onActivated: root.timeline.stepSlots(1) }

@@ -146,6 +146,19 @@ QVariantList TimelineController::clips() const
     }
     return rows;
 }
+QVariantList TimelineController::otherClips() const
+{
+    QVariantList rows;
+    if (m_document) for (auto* media : m_document->media()) {
+        if (media == primary() || !media->isVideo()) continue;
+        for (const auto& clip : media->timelineTrack().clips)
+            rows.append(QVariantMap{{QStringLiteral("id"), clip.id},
+                {QStringLiteral("mediaId"), media->mediaId()},
+                {QStringLiteral("startMs"), grid().timeMs(clip.startSlot)},
+                {QStringLiteral("durationMs"), grid().timeMs(clip.durationSlots)}});
+    }
+    return rows;
+}
 bool TimelineController::hasKeyframeAtPosition() const
 {
     if (auto* media = primary()) for (const auto& key : media->timelineTrack().keyframes)
@@ -194,11 +207,13 @@ void TimelineController::refresh()
         if (std::none_of(track.clips.cbegin(), track.clips.cend(),
                         [this](const auto& clip) { return clip.id == m_clipId; })) m_clipId.clear();
     }
-    const auto keys = keyframes(), others = otherKeyframes(), segments = clips();
-    if (keys != m_publishedKeys || others != m_publishedOtherKeys || segments != m_publishedClips) {
+    const auto keys = keyframes(), others = otherKeyframes(), segments = clips(), otherSegments = otherClips();
+    if (keys != m_publishedKeys || others != m_publishedOtherKeys || segments != m_publishedClips
+        || otherSegments != m_publishedOtherClips) {
         m_publishedKeys = keys;
         m_publishedOtherKeys = others;
         m_publishedClips = segments;
+        m_publishedOtherClips = otherSegments;
         emit tracksChanged();
     }
     emit changed();

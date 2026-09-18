@@ -16,10 +16,213 @@
 #include "frontend/rendering/canvas/QuickCanvasController.h"
 #include "frontend/rendering/canvas/QuickCanvasHost.h"
 
+namespace {
+QList<QQuickItem*> timelineItems(QQuickItem* root, const QString& name)
+{
+    QList<QQuickItem*> items;
+    if (root->objectName() == name) items.append(root);
+    for (auto* child : root->childItems()) items.append(timelineItems(child, name));
+    return items;
+}
+
+struct TimelineFixture {
+    std::unique_ptr<QuickCanvasHost> host{QuickCanvasHost::create()};
+    TimelineController timeline;
+    QQuickView view;
+    bool initialize()
+    {
+        if (!host) return false;
+        host->setProjectEditingEnabled(true);
+        timeline.setHost(host.get());
+        view.setResizeMode(QQuickView::SizeRootObjectToView);
+        view.resize(1100, 240);
+        view.setInitialProperties({{"session", QVariantMap{{"timeline", QVariant::fromValue<QObject*>(&timeline)}}}});
+        view.setSource(QUrl("qrc:/qt/qml/Mouffette/App/resources/qml/app/canvas/TimelinePanel.qml"));
+        if (view.status() != QQuickView::Ready) return false;
+        view.show();
+        return QTest::qWaitForWindowExposed(&view);
+    }
+    QQuickItem* item(const QString& name) const { return timelineItems(view.rootObject(), name).value(0); }
+    qreal scroll() const { return item("timelineTracks")->property("contentX").toReal(); }
+    qreal scale() const { return view.rootObject()->property("pixelsPerMs").toReal(); }
+    qreal timeAt(qreal x) const { return (scroll() + x - 12) / scale(); }
+    void wheel(const QPoint& point, const QPoint& pixels, const QPoint& angles,
+               Qt::KeyboardModifiers modifiers = Qt::NoModifier, bool inverted = false)
+    {
+        QWheelEvent event(point, view.mapToGlobal(point), pixels, angles, Qt::NoButton,
+            modifiers, Qt::NoScrollPhase, inverted);
+        QCoreApplication::sendEvent(&view, &event);
+    }
+};
+}
+
 class TimelineControllerTest final : public QObject
 {
     Q_OBJECT
 private slots:
+    void rulerDragScrubsAndBothWheelAxesScroll()
+    {
+        TimelineFixture f;
+        QVERIFY(f.initialize());
+        auto* tracks = f.item("timelineTracks");
+        tracks->setProperty("contentX", 500.0);
+        const auto saved = f.host->serializeProjectState();
+        const QPoint from = tracks->mapToScene({220, 10}).toPoint();
+        const QPoint to = from + QPoint(260, 0);
+        QTest::mousePress(&f.view, Qt::LeftButton, Qt::NoModifier, from);
+        QTest::mouseMove(&f.view, to, 20);
+        QTest::mouseRelease(&f.view, Qt::LeftButton, Qt::NoModifier, to);
+        QCOMPARE(f.scroll(), 500.0);
+        QCOMPARE(f.timeline.positionMs(), f.timeline.gridTime(f.timeAt(480)));
+        const auto position = f.timeline.positionMs();
+        const auto scale = f.scale();
+        f.wheel(to, {}, {0, -120});
+        QCOMPARE(f.scroll(), 545.0);
+        f.wheel(to, {-40, 0}, {});
+        QCOMPARE(f.scroll(), 585.0);
+        f.wheel(to, {0, -40}, {});
+        QCOMPARE(f.scroll(), 625.0);
+        f.wheel(to, {40, 0}, {});
+        f.wheel(to, {0, 40}, {});
+        f.wheel(to, {}, {0, 120});
+        QCOMPARE(f.scroll(), 500.0);
+        QCOMPARE(f.timeline.positionMs(), position);
+        QCOMPARE(f.scale(), scale);
+        QCOMPARE(f.host->serializeProjectState(), saved);
+    }
+
+    void zoomAnchorsButtonsToHeadAndWheelAndShortcutsToPointer()
+    {
+        TimelineFixture f;
+        QVERIFY(f.initialize());
+        auto* root = f.view.rootObject();
+        auto* tracks = f.item("timelineTracks");
+        tracks->setProperty("contentX", 350.0);
+        f.timeline.seek(10000);
+        const qreal headX = 12 + f.timeline.positionMs() * f.scale() - f.scroll();
+        const auto click = [&](const QString& name) {
+            auto* button = f.item(name);
+            QTest::mouseClick(&f.view, Qt::LeftButton, Qt::NoModifier,
+                button->mapToScene({button->width()/2, button->height()/2}).toPoint());
+        };
+        click("timelineZoomIn");
+        QVERIFY(qAbs(f.timeAt(headX) - f.timeline.positionMs()) < 1e-6);
+        click("timelineZoomOut");
+        QVERIFY(qAbs(f.timeAt(headX) - f.timeline.positionMs()) < 1e-6);
+        // A head outside the viewport must be brought back into view by the buttons.
+        f.timeline.seek(90000);
+        click("timelineZoomIn");
+        QVERIFY(qAbs(f.timeAt(tracks->width()/2) - f.timeline.positionMs()) < 1e-6);
+        const qreal cursorX = qRound(tracks->width() * 0.7);
+        const QPoint cursor = tracks->mapToScene({cursorX, 12}).toPoint();
+        for (auto modifier : {Qt::ControlModifier, Qt::MetaModifier}) {
+            for (bool pixels : {false, true}) {
+                for (bool natural : {false, true}) {
+                    const qreal anchor = f.timeAt(cursorX);
+                    const qreal scale = f.scale();
+                    const int direction = natural ? -1 : 1;
+                    f.wheel(cursor, pixels ? QPoint(0, direction * 24) : QPoint(),
+                        {0, direction * 120}, modifier, natural);
+                    QVERIFY(f.scale() > scale);
+                    QVERIFY(qAbs(f.timeAt(cursorX) - anchor) < 1e-6);
+                    f.wheel(cursor, pixels ? QPoint(0, -direction * 24) : QPoint(),
+                        {0, -direction * 120}, modifier, natural);
+                    QVERIFY(qAbs(f.scale() - scale) < 1e-6);
+                    QVERIFY(qAbs(f.timeAt(cursorX) - anchor) < 1e-6);
+                }
+            }
+        }
+        f.view.requestActivate();
+        QVERIFY(QTest::qWaitForWindowActive(&f.view));
+        root->forceActiveFocus();
+        QTest::mouseMove(&f.view, cursor);
+        const qreal anchor = f.timeAt(cursorX);
+        const qreal scale = f.scale();
+        QTest::keyClick(&f.view, Qt::Key_Equal, Qt::ControlModifier);
+        QTRY_VERIFY(f.scale() > scale);
+        QVERIFY(qAbs(f.timeAt(cursorX) - anchor) < 1e-6);
+        QTest::keyClick(&f.view, Qt::Key_Minus, Qt::ControlModifier);
+        QTRY_VERIFY(qAbs(f.scale() - scale) < 1e-6);
+        QVERIFY(qAbs(f.timeAt(cursorX) - anchor) < 1e-6);
+    }
+
+    void backgroundMediaStayCenteredVisibleAndCannotCollide()
+    {
+        auto& residency = MediaResidencyManager::instance();
+        residency.setMemorySnapshotForTesting({8ULL << 30, 6ULL << 30, 512ULL << 20, false, 0});
+        const auto resetMemory = qScopeGuard([&] { residency.clearMemorySnapshotForTesting(); });
+        TimelineFixture f;
+        QVERIFY(f.initialize());
+        auto* doc = f.host->document();
+        auto* primary = doc->addPreparedFile(QString::fromUtf8(TEST_VIDEO_FILE), {160,90}, true, {});
+        auto* other = doc->addPreparedFile(QString::fromUtf8(TEST_VIDEO_FILE), {160,90}, true, {});
+        QVERIFY(primary && other);
+        QTRY_VERIFY(primary->residencyReady() && other->residencyReady()
+                    && primary->sourceDurationMs() > 5000 && other->sourceDurationMs() > 5000);
+        SceneTimeline::MediaTrack track;
+        track.clipsInitialized = true;
+        track.clips = {{"moving", 0, 0, 30}, {"stationary", 60, 30, 30}};
+        track.keyframes = {{"primary-key", 30, primary->authorElementState()}};
+        primary->setTimelineTrack(track);
+        track.clips = {{"background", 120, 0, 30}};
+        track.keyframes = {{"background-key", 60, other->authorElementState()}};
+        other->setTimelineTrack(track);
+        doc->select(primary->mediaId());
+        QCOMPARE(f.timeline.otherClips().size(), 1);
+        auto* keyTrack = f.item("timelineKeyframeTrack");
+        auto* foreground = f.item("timelineKeyframeDiamond");
+        auto* background = f.item("otherMediaKeyframe");
+        QVERIFY(foreground && background);
+        QCOMPARE(foreground->size(), background->size());
+        QCOMPARE(foreground->rotation(), background->rotation());
+        const auto keyCenter = keyTrack->mapToScene({0, keyTrack->height()/2}).y();
+        QCOMPARE(foreground->mapToScene({foreground->width()/2, foreground->height()/2}).y(), keyCenter);
+        QCOMPARE(background->mapToScene({background->width()/2, background->height()/2}).y(), keyCenter);
+        QVERIFY(background->opacity() < foreground->opacity());
+        auto* ghost = f.item("otherMediaVideoClip");
+        QVERIFY(ghost);
+        QVERIFY(ghost->childItems().isEmpty()); // No text, handles or pointer handlers.
+        const auto saved = f.host->serializeProjectState();
+        const QPoint ghostCenter = ghost->mapToScene({ghost->width()/2, ghost->height()/2}).toPoint();
+        QTest::mousePress(&f.view, Qt::LeftButton, Qt::NoModifier, ghostCenter);
+        QTest::mouseMove(&f.view, ghostCenter + QPoint(50, 0), 20);
+        QTest::mouseRelease(&f.view, Qt::LeftButton, Qt::NoModifier, ghostCenter + QPoint(50, 0));
+        QVERIFY(f.timeline.selectedClipId().isEmpty());
+        QCOMPARE(doc->primarySelectedMediaId(), primary->mediaId());
+        QCOMPARE(f.host->serializeProjectState(), saved);
+
+        const auto clips = timelineItems(f.view.rootObject(), "timelineVideoClip");
+        QCOMPARE(clips.size(), 2);
+        auto* moving = clips.first();
+        auto* stationary = clips.last();
+        const QPoint from = moving->mapToScene({moving->width()/2, moving->height()/2}).toPoint();
+        QTest::mousePress(&f.view, Qt::LeftButton, Qt::NoModifier, from);
+        QTest::mouseMove(&f.view, from + QPoint(qRound(2000 * f.scale()), 0), 20);
+        QVERIFY(moving->z() > stationary->z());
+        QVERIFY(moving->z() > ghost->z());
+        QCOMPARE(f.host->serializeProjectState(), saved);
+        const QPoint to = from + QPoint(qRound(4000 * f.scale()), 0);
+        QTest::mouseMove(&f.view, to, 20);
+        QTest::mouseRelease(&f.view, Qt::LeftButton, Qt::NoModifier, to);
+        QCOMPARE(other->timelineTrack().toJson(), track.toJson());
+        QCOMPARE(primary->timelineTrack().clips.size(), 2);
+        QCOMPARE(primary->timelineTrack().clips.last().startSlot, 120);
+
+        const qreal clipHeight = f.item("timelineClipTrack")->height();
+        doc->clearSelection();
+        QVERIFY(f.item("timelineClipTrack")->isVisible());
+        QCOMPARE(f.item("timelineClipTrack")->height(), clipHeight);
+        QCOMPARE(f.timeline.otherClips().size(), 3);
+        QCOMPARE(timelineItems(f.view.rootObject(), "otherMediaVideoClip").size(), 3);
+        auto* text = doc->addText({}, "Static media");
+        doc->select(text->mediaId());
+        QVERIFY(f.item("timelineClipTrack")->isVisible());
+        QCOMPARE(f.item("timelineClipTrack")->height(), clipHeight);
+        QCOMPARE(f.timeline.otherClips().size(), 3);
+        doc->removeMedia(other->mediaId());
+        QCOMPARE(timelineItems(f.view.rootObject(), "otherMediaVideoClip").size(), 2);
+    }
+
     void previewNeverSavesAndCaptureCommitsOnlyTheDraft()
     {
         std::unique_ptr<QuickCanvasHost> host(QuickCanvasHost::create());
@@ -342,6 +545,8 @@ private slots:
         QVERIFY2(view.status() == QQuickView::Ready, qPrintable(view.errors().isEmpty() ? QString() : view.errors().first().toString()));
         view.show();
         QVERIFY(QTest::qWaitForWindowExposed(&view));
+        view.requestActivate();
+        QVERIFY(QTest::qWaitForWindowActive(&view));
         timeline.seek(1337);
         auto* capture = view.rootObject()->findChild<QQuickItem*>(QStringLiteral("timelinePlaceKeyframe"));
         QVERIFY(capture);

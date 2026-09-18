@@ -32,6 +32,7 @@ class TimelineController final : public QObject
     Q_PROPERTY(QVariantList keyframes READ keyframes NOTIFY tracksChanged)
     Q_PROPERTY(QVariantList otherKeyframes READ otherKeyframes NOTIFY tracksChanged)
     Q_PROPERTY(QVariantList clips READ clips NOTIFY tracksChanged)
+    Q_PROPERTY(QVariantList otherClips READ otherClips NOTIFY tracksChanged)
     Q_PROPERTY(QString selectedKeyframeId READ selectedKeyframeId NOTIFY changed)
     Q_PROPERTY(QString selectedClipId READ selectedClipId NOTIFY changed)
     Q_PROPERTY(bool canCapture READ canCapture NOTIFY transportChanged)
@@ -68,6 +69,7 @@ public:
     QVariantList keyframes() const;
     QVariantList otherKeyframes() const;
     QVariantList clips() const;
+    QVariantList otherClips() const;
     QString selectedKeyframeId() const { return m_keyframeId; }
     QString selectedClipId() const { return m_clipId; }
     bool canCapture() const;
@@ -127,4 +129,5 @@ private:
     QVariantList m_publishedKeys;
     QVariantList m_publishedOtherKeys;
     QVariantList m_publishedClips;
+    QVariantList m_publishedOtherClips;
 };

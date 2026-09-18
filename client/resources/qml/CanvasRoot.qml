@@ -519,12 +519,8 @@ Rectangle {
     }
 
     function isZoomModifier(modifiers) {
-        // Qt maps the physical macOS Control key to MetaModifier (Command is
-        // ControlModifier). This gesture deliberately uses Control, not Command.
-        if (Qt.platform.os === "osx") {
-            return (modifiers & Qt.MetaModifier) !== 0
-        }
-        return (modifiers & Qt.ControlModifier) !== 0
+        // On macOS Qt maps Command to ControlModifier and Control to MetaModifier.
+        return (modifiers & (Qt.ControlModifier | Qt.MetaModifier)) !== 0
     }
 
     function wheelDeltaY(wheel) {
@@ -1669,10 +1665,15 @@ Rectangle {
                         return
                     }
 
+                    var dx = root.wheelDeltaX(event)
                     var dy = root.wheelDeltaY(event)
-                    if (dy !== 0.0) {
-                        var factor = Math.pow(root.wheelZoomBase, dy * root.wheelZoomSensitivity)
-                        root.applyZoomAt(event.x, event.y, factor)
+                    if (root.isZoomModifier(event.modifiers)) {
+                        if (event.inverted) dy = -dy
+                        if (dy !== 0.0)
+                            root.applyZoomAt(event.x, event.y,
+                                Math.pow(root.wheelZoomBase, dy * root.wheelZoomSensitivity))
+                    } else if (dx !== 0.0 || dy !== 0.0) {
+                        root.panBy(dx * 3, dy * 3)
                     }
 
                     event.accepted = true

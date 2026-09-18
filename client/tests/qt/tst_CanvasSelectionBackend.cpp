@@ -1340,13 +1340,16 @@ private slots:
         QTest::addColumn<int>("direction");
         QTest::addColumn<bool>("naturalScrolling");
         QTest::addColumn<bool>("pixelDeltas");
+        QTest::addColumn<bool>("trackpadInput");
+        QTest::addColumn<Qt::KeyboardModifiers>("zoomModifiers");
         for (int direction : {-1, 1})
             for (bool natural : {false, true})
                 for (bool pixels : {false, true})
-                    QTest::newRow(qPrintable(QString("%1-%2-%3")
-                        .arg(direction > 0 ? "up" : "down")
-                        .arg(natural ? "natural" : "standard")
-                        .arg(pixels ? "pixels" : "angles"))) << direction << natural << pixels;
+                    for (bool trackpad : {false, true})
+                        for (auto modifier : {Qt::ControlModifier, Qt::MetaModifier})
+                            QTest::newRow(qPrintable(QString("%1-%2-%3-%4-%5")
+                                .arg(direction).arg(natural).arg(pixels).arg(trackpad).arg(int(modifier))))
+                                << direction << natural << pixels << trackpad << Qt::KeyboardModifiers(modifier);
     }
 
     void trackpadControlScrollZoomsAtCursor()
@@ -1354,19 +1357,17 @@ private slots:
         QFETCH(int, direction);
         QFETCH(bool, naturalScrolling);
         QFETCH(bool, pixelDeltas);
+        QFETCH(bool, trackpadInput);
+        QFETCH(Qt::KeyboardModifiers, zoomModifiers);
         QPointingDevice trackpad("test trackpad", 0xCAFE,
-            QInputDevice::DeviceType::TouchPad, QPointingDevice::PointerType::Finger,
+            trackpadInput ? QInputDevice::DeviceType::TouchPad : QInputDevice::DeviceType::Mouse,
+            trackpadInput ? QPointingDevice::PointerType::Finger : QPointingDevice::PointerType::Generic,
             QInputDevice::Capability::Position | QInputDevice::Capability::PixelScroll, 2, 0);
         Fixture fixture;
         QVERIFY(fixture.initialize());
         fixture.view.show();
         QVERIFY(QTest::qWaitForWindowExposed(&fixture.view));
         fixture.view.requestActivate();
-#ifdef Q_OS_MACOS
-        constexpr Qt::KeyboardModifier control = Qt::MetaModifier;
-#else
-        constexpr Qt::KeyboardModifier control = Qt::ControlModifier;
-#endif
         QVERIFY(QTest::qWaitForWindowActive(&fixture.view));
         fixture.document.setCameraView({120, -50}, 1000);
         const QPointF cursor(fixture.view.width() * .7, fixture.view.height() * .3);
@@ -1380,7 +1381,8 @@ private slots:
             const int sign = fingerDirection * (naturalScrolling ? -1 : 1);
             QWheelEvent event(cursor, fixture.view.mapToGlobal(cursor.toPoint()),
                 pixelDeltas ? QPoint(0, sign * 24) : QPoint(), QPoint(0, sign * 120),
-                Qt::NoButton, control, phase, naturalScrolling, Qt::MouseEventNotSynthesized, &trackpad);
+                Qt::NoButton, zoomModifiers, trackpadInput ? phase : Qt::NoScrollPhase,
+                naturalScrolling, Qt::MouseEventNotSynthesized, &trackpad);
             QCoreApplication::sendEvent(&fixture.view, &event);
         };
         scroll(direction, Qt::ScrollBegin);
@@ -1397,7 +1399,7 @@ private slots:
         // vertical angle delta and inadvertently zoom.
         QSignalSpy changes(&fixture.document, &CanvasDocument::cameraChanged);
         QWheelEvent horizontal(cursor, fixture.view.mapToGlobal(cursor.toPoint()), {30,0}, {120,120},
-            Qt::NoButton, control, Qt::ScrollBegin, false, Qt::MouseEventNotSynthesized, &trackpad);
+            Qt::NoButton, zoomModifiers, Qt::ScrollBegin, false, Qt::MouseEventNotSynthesized, &trackpad);
         QCoreApplication::sendEvent(&fixture.view, &horizontal);
         scroll(0, Qt::ScrollEnd);
         QCOMPARE(changes.count(), 0);
@@ -1435,9 +1437,9 @@ private slots:
                 end ? Qt::ScrollEnd : Qt::ScrollBegin, false, Qt::MouseEventNotSynthesized, &trackpad);
             QCoreApplication::sendEvent(&fixture.view, &event);
         };
-        auto wheel = [&] {
+        auto wheel = [&](Qt::KeyboardModifiers modifiers = Qt::NoModifier) {
             QWheelEvent event(cursor, fixture.view.mapToGlobal(cursor.toPoint()), {}, {0,120},
-                Qt::NoButton, Qt::NoModifier, Qt::NoScrollPhase, false, Qt::MouseEventNotSynthesized, &mouse);
+                Qt::NoButton, modifiers, Qt::NoScrollPhase, false, Qt::MouseEventNotSynthesized, &mouse);
             QCoreApplication::sendEvent(&fixture.view, &event);
         };
         native(Qt::BeginNativeGesture);
@@ -1459,16 +1461,12 @@ private slots:
         QCOMPARE(fixture.document.cameraSquareSceneSize(), span);
         QVERIFY(QLineF(fixture.document.cameraCenter(),
                       center - QPointF(30,-20) / scale).length() < 1e-8);
-#ifdef Q_OS_MACOS
-        // The physical Command key must not substitute for Control.
-        const QPointF beforeCommand = fixture.document.cameraCenter();
-        scroll(Qt::ControlModifier);
-        scroll(Qt::ControlModifier, true);
+        const QPointF beforeWheel = fixture.document.cameraCenter();
+        wheel();
         QCOMPARE(fixture.document.cameraSquareSceneSize(), span);
         QVERIFY(QLineF(fixture.document.cameraCenter(),
-                      beforeCommand - QPointF(30,-20) / scale).length() < 1e-8);
-#endif
-        wheel();
+                      beforeWheel - QPointF(0,45) / scale).length() < 1e-8);
+        wheel(control);
         QVERIFY(fixture.controller.viewScale() > scale);
     }
 
@@ -1497,7 +1495,7 @@ private slots:
             / fixture.controller.viewScale();
         const qreal oldSpan = fixture.document.cameraSquareSceneSize();
         QWheelEvent zoom(cursor, fixture.view.mapToGlobal(cursor.toPoint()), {}, {0,120},
-                         Qt::NoButton, Qt::NoModifier, Qt::NoScrollPhase, false);
+                         Qt::NoButton, Qt::ControlModifier, Qt::NoScrollPhase, false);
         QCoreApplication::sendEvent(&fixture.view, &zoom);
         QVERIFY(fixture.document.cameraSquareSceneSize() < oldSpan);
         const QPointF after = (cursor - QPointF(fixture.controller.panX(), fixture.controller.panY()))
