@@ -63,6 +63,13 @@ mouffette_patch_darwin([=[            // Finish loading even if not all bytes su
         }]=] [=[        }
         // Complete metadata-only requests as well as data requests.
         [loadingRequest finishLoading];]=])
+
+# Use Qt's existing asynchronous selection-group loader on macOS too. It is
+# available since macOS 12; the synchronous accessor is deprecated since 15.
+mouffette_patch_darwin([=[#if defined(Q_OS_VISIONOS)
+            [asset loadMediaSelectionGroupForMediaCharacteristic:AVMediaCharacteristicLegible]=]
+    [=[#if defined(Q_OS_VISIONOS) || defined(Q_OS_MACOS)
+            [asset loadMediaSelectionGroupForMediaCharacteristic:AVMediaCharacteristicLegible]=])
 file(WRITE "${_player}" "${_source}")
 
 # All sources in this pinned directory belong to the macOS plugin.

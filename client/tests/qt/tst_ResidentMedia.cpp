@@ -1,7 +1,10 @@
 #include "backend/media/MediaDecoder.h"
 #include "backend/media/ResidentVideoPlayer.h"
 
+#include <QAudioBuffer>
+#include <QAudioBufferOutput>
 #include <QAudioOutput>
+#include <QBuffer>
 #include <QElapsedTimer>
 #include <QFile>
 #include <QSignalSpy>
@@ -21,7 +24,7 @@ namespace {
 // Generate a bounded, reproducible MP4 with delayed video frames and an AAC
 // tail. Tests need neither the repository's large sample nor an ffmpeg CLI.
 bool writeVideo(const QString& path, bool rotated = false, bool variableRate = false,
-                int videoDelayFrames = 0, int audioFrames = 23) {
+                int videoDelayFrames = 0, int audioFrames = 23, int audioTrimSamples = 0) {
     AVFormatContext* format = nullptr;
     AVCodecContext* video = nullptr;
     AVCodecContext* audio = nullptr;
@@ -120,7 +123,7 @@ bool writeVideo(const QString& path, bool rotated = false, bool variableRate = f
         auto* samples = reinterpret_cast<float*>(frame->data[0]);
         for (int j = 0; j < frame->nb_samples; ++j)
             samples[j] = 0.1f * std::sin((i * frame->nb_samples + j) * 440.0 * 6.283185307179586 / 48000.0);
-        frame->pts = i * frame->nb_samples;
+        frame->pts = i * frame->nb_samples - audioTrimSamples;
         if (!encode(audio, as, frame)) return false;
     }
     ok = encode(audio, as, nullptr) && av_write_trailer(format) >= 0;
@@ -716,6 +719,39 @@ private slots:
         QTRY_VERIFY2_WITH_TIMEOUT(player.position() > 50, qPrintable(player.errorString()), 3000);
         QTRY_COMPARE_WITH_TIMEOUT(player.mediaStatus(), QMediaPlayer::EndOfMedia, 5000);
         QCOMPARE(player.error(), QMediaPlayer::NoError);
+    }
+
+    void aacPrimingKeepsAudioTimestampsAcrossReload() {
+        QTemporaryDir directory;
+        const QString path = directory.filePath("trimmed-audio.mp4");
+        // Trim part of an AAC frame, in addition to the encoder's whole-frame
+        // delay. FFmpeg must advance its timestamp along with the samples.
+        QVERIFY(writeVideo(path, false, false, 0, 23, 512));
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::ReadOnly));
+        const QByteArray bytes = file.readAll();
+        file.close();
+        QVERIFY(QFile::remove(path));
+
+        for (int load = 0; load < 2; ++load) {
+            QBuffer source;
+            source.setData(bytes);
+            QVERIFY(source.open(QIODevice::ReadOnly));
+            QAudioBufferOutput audio;
+            QMediaPlayer player;
+            player.setAudioBufferOutput(&audio);
+            QSignalSpy buffers(&audio, &QAudioBufferOutput::audioBufferReceived);
+            player.setSourceDevice(&source, QUrl(QStringLiteral("resident:///video.mp4")));
+            player.play();
+            QTRY_VERIFY2_WITH_TIMEOUT(!buffers.isEmpty(), qPrintable(player.errorString()), 5000);
+            const auto first = qvariant_cast<QAudioBuffer>(buffers.first().first());
+            QVERIFY(first.isValid());
+            QCOMPARE(first.startTime(), qint64(0));
+            QTRY_COMPARE_WITH_TIMEOUT(player.mediaStatus(), QMediaPlayer::EndOfMedia, 5000);
+            QCOMPARE(player.error(), QMediaPlayer::NoError);
+            // Destruction joins the decoder before the memory source goes away;
+            // the next iteration reopens the same bytes with a fresh decoder.
+        }
     }
 
     void audioSeekAndClearReleaseTheResidentAsset() {

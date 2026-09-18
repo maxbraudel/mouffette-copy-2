@@ -25,6 +25,7 @@
 #include <QTemporaryDir>
 #include <QThreadPool>
 #include <QTimer>
+#include <QVideoSink>
 #include <QtConcurrent/QtConcurrentRun>
 #include <QtTest>
 #include <limits>
@@ -413,17 +414,28 @@ private slots:
         QCOMPARE(availability.count(), 0);
     }
 
+    void suspendedDocumentReleasesOnlyItsOwnMediaLeases_data()
+    {
+        QTest::addColumn<bool>("video");
+        QTest::newRow("image") << false;
+        QTest::newRow("video") << true;
+    }
+
     void suspendedDocumentReleasesOnlyItsOwnMediaLeases()
     {
+        QFETCH(bool, video);
         QTemporaryDir directory;
-        const QString path = directory.filePath(QStringLiteral("shared-image.png"));
+        const QString path = video ? QString::fromUtf8(TEST_VIDEO_FILE)
+                                   : directory.filePath(QStringLiteral("shared-image.png"));
         QImage image(128, 64, QImage::Format_RGBA8888);
         image.fill(Qt::cyan);
-        QVERIFY(image.save(path));
+        if (!video) QVERIFY(image.save(path));
+        const auto geometry = MediaDecoder::inspectGeometry(path);
+        QVERIFY2(geometry.accepted(), qPrintable(geometry.error));
         CanvasDocument sleeping;
         CanvasDocument active;
-        auto* first = sleeping.addPreparedFile(path, image.size(), false, {20, 30});
-        auto* second = active.addPreparedFile(path, image.size(), false, {40, 50});
+        auto* first = sleeping.addPreparedFile(path, geometry.displaySize, video, {20, 30});
+        auto* second = active.addPreparedFile(path, geometry.displaySize, video, {40, 50});
         QVERIFY(first && second);
         QTRY_VERIFY(first->residencyReady() && second->residencyReady());
         auto& manager = MediaResidencyManager::instance();
@@ -431,7 +443,12 @@ private slots:
         std::weak_ptr<const ResidentMediaAsset> asset = manager.asset(first->residencyOwnerId());
         auto* source = qobject_cast<RemoteVideoFrameSource*>(
             first->toModelMap().value(QStringLiteral("residentFrameSource")).value<QObject*>());
-        QVERIFY(source && source->hasFrame());
+        QVERIFY(source);
+        const auto hasFrame = [&] {
+            return video ? first->videoSink() && first->videoSink()->videoFrame().isValid()
+                         : source->hasFrame();
+        };
+        QTRY_VERIFY(hasFrame());
         const QJsonObject saved = sleeping.serializeProjectState();
         QSignalSpy edits(&sleeping, &CanvasDocument::documentChanged);
 
@@ -440,7 +457,7 @@ private slots:
         QVERIFY(first->residencySuspended());
         QVERIFY(!first->residencyReady());
         QCOMPARE(first->residencyState(), QStringLiteral("suspended"));
-        QVERIFY(!source->hasFrame());
+        QVERIFY(!hasFrame());
         QVERIFY(!manager.asset(first->residencyOwnerId()));
         QVERIFY(second->residencyReady());
         QVERIFY(!asset.expired());
@@ -451,8 +468,13 @@ private slots:
         QTRY_VERIFY(asset.expired()); // Pending decoder callbacks can now finish releasing pixels.
         sleeping.setMediaResidencySuspended(false);
         QTRY_VERIFY(first->residencyReady());
-        QVERIFY(source->hasFrame());
+        QTRY_VERIFY(hasFrame());
         QVERIFY(!second->residencyReady());
+        if (video) {
+            first->player()->play();
+            QTRY_VERIFY(first->player()->position() > 50);
+            first->player()->stop();
+        }
         QCOMPARE(sleeping.serializeProjectState(), saved);
     }
 

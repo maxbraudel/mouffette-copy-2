@@ -14,6 +14,13 @@ function(mouffette_patch_ffmpeg relative old_text new_text)
     file(WRITE "${_file}" "${_text}")
 endfunction()
 
+# FFmpeg needs the packet timebase to adjust audio PTS/duration when trimming
+# encoder priming or trailing samples. Without it, partially trimmed AAC frames
+# keep the old timestamp and emit "Could not update timestamps for skipped samples".
+mouffette_patch_ffmpeg(playbackengine/qffmpegcodeccontext.cpp
+    "ret = avcodec_open2(context.get(), decoder->get(), opts);"
+    "context->pkt_timebase = stream->time_base;\n    ret = avcodec_open2(context.get(), decoder->get(), opts);")
+
 # Migrate previously patched build trees before matching the complete patch.
 # Otherwise its original av_seek_frame line would receive a second nested patch.
 set(_previous_seek_restore "err = av_seek_frame(m_context, index, dts == AV_NOPTS_VALUE ? cursor : dts, AVSEEK_FLAG_BACKWARD);")

@@ -142,12 +142,22 @@ Native package scripts include directly linked FFmpeg runtimes and dependencies,
 and verify the streaming FFmpeg Qt plugin. On macOS and Windows, that plugin is
 built from pinned Qt 6.11.2 sources, including when Qt only ships AVFoundation.
 Its seek fixes account for reordered timestamps and variable frame durations.
+It also supplies the stream packet timebase to FFmpeg so AAC priming/trailing
+sample trimming adjusts audio timestamps correctly, including after rehydration.
 It uses Qt's bounded video/audio queues (3 video frames plus one frame of
 lookahead / 9 audio buffers in this version); codec reference surfaces, textures
 and compressed packet queues add
 platform-dependent overhead. The unrelated legacy QWindowCapture implementation
 uses a removed macOS API and is unavailable in this private plugin; Mouffette
 does not expose window capture. The supported native Darwin plugin remains bundled.
+It uses Qt's asynchronous media-selection-group loader on macOS, avoiding the
+deprecated synchronous AVFoundation accessor.
+
+The FFmpeg `Protocol name not provided` message is informational: the synthetic
+`resident:///video.mp4` URL is only a format hint for the in-memory `QIODevice`,
+not a file or network protocol. The following `Input #0` block is a metadata dump.
+These can recur when residency validation and canvas playback open fresh players;
+they do not indicate a failure to release the previous resident asset.
 
 `ResidentMedia` tests generate small real MP4 fixtures for full decoding, delayed
 frames, audio, timestamps, corruption and memory-only playback. `MediaResidencyManager`
