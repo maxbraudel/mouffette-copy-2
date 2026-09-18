@@ -9,9 +9,33 @@
 #include <QHash>
 #include <QString>
 #include <QStringList>
+#include <QRegularExpression>
 #include <algorithm>
 
 namespace {
+QString uploadFailureDetail(const QString& reason)
+{
+    const QString detail = reason.trimmed();
+    if (detail.isEmpty()) return QStringLiteral("The remote computer rejected the upload. Please try again.");
+    static const QRegularExpression internalCode(QStringLiteral("^[a-zA-Z][a-zA-Z0-9]*_[a-zA-Z0-9_]+$"));
+    if (!internalCode.match(detail).hasMatch()) return detail;
+    if (detail == QLatin1String("remote_session_unavailable")
+        || detail == QLatin1String("unknown_remote_session")
+        || detail == QLatin1String("lease_expired")
+        || detail == QLatin1String("session_terminal"))
+        return QStringLiteral("The remote session is no longer available. Reconnect to the remote computer and try again.");
+    if (detail == QLatin1String("remote_session_reconnecting")
+        || detail == QLatin1String("session_requires_resume")
+        || detail == QLatin1String("remote_session_not_active"))
+        return QStringLiteral("The remote connection is recovering. Please wait before retrying the upload.");
+    if (detail == QLatin1String("session_cleanup_pending")
+        || detail == QLatin1String("cleanup_not_committed"))
+        return QStringLiteral("The remote computer is still cleaning up the previous session. Please wait before retrying.");
+    if (detail == QLatin1String("target_offline") || detail == QLatin1String("target_unavailable"))
+        return QStringLiteral("The remote computer is offline. Check its connection and try again.");
+    return QStringLiteral("The upload could not be completed. Please try again once the remote connection is ready.");
+}
+
 void publishTerminalUploadNotification(const QString& uploadId,
                                        NotificationSeverity severity,
                                        const QString& message,
@@ -138,9 +162,7 @@ void UploadSignalConnector::connectAllSignals(
             mainWindow->clearUploadTracking(*session);
         }
 
-        const QString detail = reason.trimmed().isEmpty()
-            ? QStringLiteral("Remote client rejected the upload")
-            : reason.trimmed();
+        const QString detail = uploadFailureDetail(reason);
         publishTerminalUploadNotification(
             uploadId, NotificationSeverity::Error,
             QStringLiteral("Upload failed: %1").arg(detail),

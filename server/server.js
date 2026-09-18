@@ -2457,7 +2457,11 @@ class MouffetteServer {
                 this.metrics.incrementOnce('remote_session_cleanup_error_total',
                     `${message.remoteSessionId}:${message.teardownId}`);
                 this.updateCleanupPendingMetric(message.remoteSessionId);
-                this.sendRemoteSessionClosedToParties(acknowledged.session);
+                // A reported cleanup failure is progress state, not a rejected
+                // command. Replaying CLOSED/error on every negative ACK makes
+                // receivers retry immediately, bypassing the cleanup backoff.
+                if (!acknowledged.replay) this.sendRemoteSessionClosedToParties(acknowledged.session);
+                return;
             }
             return this.sendRemoteSessionError(
                 clientId, acknowledged.error, acknowledged.error, message);

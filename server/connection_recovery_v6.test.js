@@ -44,6 +44,34 @@ function fixture() {
 }
 const ofType = (client, type) => client.ws.messages.filter(message => message.type === type);
 
+// A receiver reporting a failed cleanup must not enter an ACK/CLOSED/error
+// feedback loop. Repeated failures preserve the revision and scheduled retry.
+{
+    const f = fixture(); const a = f.add('A'); const b = f.add('B'); const session = f.open();
+    f.send('A', 'remote_session_close', { remoteSessionId: session.remoteSessionId,
+        generation: session.generation, requestId: 'close-cleanup-failure' });
+    const failure = { remoteSessionId: session.remoteSessionId, generation: session.generation,
+        teardownId: session.teardownId, result: 'cleanup_error', sceneStopped: true,
+        uploadsAborted: true, cacheQuarantined: false, errorCode: 'quarantine_failed' };
+    f.send('B', 'remote_session_teardown_ack', failure);
+    const revision = session.stateRevision;
+    const closedCount = ofType(a, 'remote_session_closed').length;
+    const retryAt = session.cleanupNextRetryAt;
+    for (let replay = 0; replay < 100; ++replay)
+        f.send('B', 'remote_session_teardown_ack', failure);
+    assert.equal(session.stateRevision, revision);
+    assert.equal(session.cleanupNextRetryAt, retryAt);
+    assert.equal(ofType(a, 'remote_session_closed').length, closedCount);
+    assert.equal(ofType(b, 'error').length, 0, 'reported failures are not rejected commands');
+    assert.equal(session.phase, 'CleanupPending');
+    assert.equal(f.server.retryPendingRemoteSessionTeardowns(retryAt - 1), 0);
+    f.advance(retryAt);
+    assert.equal(f.server.retryPendingRemoteSessionTeardowns(), 1);
+    f.send('B', 'remote_session_teardown_ack', { ...failure, ...cleanup });
+    assert.equal(ofType(b, 'remote_session_closed').at(-1).cleanupState, 'confirmed');
+    assert.equal(f.server.remoteSessions.incomingForTarget('B').length, 0);
+}
+
 // Two missed heartbeat intervals start one 3 s recovery period for the Live session.
 // A lost resume result is replayable; the peer can recover its older observation.
 {

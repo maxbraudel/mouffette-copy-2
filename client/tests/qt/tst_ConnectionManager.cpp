@@ -245,6 +245,7 @@ void ConnectionManagerTest::unavailableServerErrorsRemainRetryable()
     QVERIFY(fatal.isEmpty());
     QVERIFY(manager.connectionEnabled());
     QCOMPARE(manager.state(), ConnectionManager::State::Disconnected);
+    QCOMPARE(manager.getConnectionStatus(), QStringLiteral("Disconnected"));
     manager.disconnect();
 }
 

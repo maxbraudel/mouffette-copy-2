@@ -38,6 +38,7 @@
 #include "backend/managers/network/ClientListBuilder.h"
 #include "backend/network/RemoteSessionCoordinator.h"
 #include "backend/network/WebSocketClient.h"
+#include "backend/network/UploadManager.h"
 #include "backend/security/DeviceIdentityStore.h"
 #include "frontend/qml/ApplicationController.h"
 #include "frontend/qml/QmlRuntime.h"
@@ -315,6 +316,8 @@ public:
     quint64 connectionGeneration = 1;
     int heartbeatIntervalMs = 1'000;
     int leaseTimeoutMs = 10'000;
+    int policyVersion = 1;
+    int sessionRecoveryTimeoutMs = -1;
     bool acknowledgeHeartbeats = true;
     int acceptedConnections = 0;
     QList<QJsonObject> openCommands;
@@ -411,10 +414,10 @@ private:
                      const QJsonObject& authentication)
     {
         const QJsonObject policy{
-            {QStringLiteral("policyVersion"), 1},
+            {QStringLiteral("policyVersion"), policyVersion},
             {QStringLiteral("heartbeatIntervalMs"), heartbeatIntervalMs},
-            {QStringLiteral("transportSuspectAfterMs"), qMax(250, leaseTimeoutMs / 2)},
-            {QStringLiteral("sessionRecoveryTimeoutMs"), leaseTimeoutMs},
+            {QStringLiteral("transportSuspectAfterMs"), policyVersion >= 4 ? leaseTimeoutMs : qMax(250, leaseTimeoutMs / 2)},
+            {QStringLiteral("sessionRecoveryTimeoutMs"), sessionRecoveryTimeoutMs > 0 ? sessionRecoveryTimeoutMs : leaseTimeoutMs},
             {QStringLiteral("leaseTimeoutMs"), leaseTimeoutMs},
             {QStringLiteral("scenePrepareTimeoutMs"), 15'000},
             {QStringLiteral("sceneActivationLeadMs"), 4'000},
@@ -453,6 +456,211 @@ class ClientConnectionFlowTest final : public QObject
     Q_OBJECT
 
 private slots:
+    void serverRecoveryBadgeSurvivesRetriesAndExpires_data()
+    {
+        QTest::addColumn<bool>("abortSocket");
+        QTest::newRow("closed-websocket") << false;
+        QTest::newRow("abrupt-network-loss") << true;
+    }
+
+    void serverRecoveryBadgeSurvivesRetriesAndExpires()
+    {
+        QFETCH(bool, abortSocket);
+        QTemporaryDir root;
+        WebSocketClient client(root.path(), false);
+        ConnectionManager connections(&client);
+        RemoteSessionTestServer server(client.endpointId());
+        server.policyVersion = 4;
+        server.heartbeatIntervalMs = 750;
+        server.leaseTimeoutMs = 1'500;
+        server.sessionRecoveryTimeoutMs = 3'000;
+        QVERIFY(server.listen());
+        const QString url = server.url();
+        connect(&client, &WebSocketClient::connected, &connections, [&] {
+            client.registrationConfirmed(ClientInfo());
+            client.reconciliationCompleted();
+        });
+        connections.connectToServer(url);
+        QTRY_VERIFY_WITH_TIMEOUT(connections.isReady(), 2'000);
+        QSignalSpy statuses(&connections, &ConnectionManager::statusChanged);
+        server.server.close();
+        if (abortSocket) server.peer->abort();
+        else server.closePeer();
+        QTRY_VERIFY_WITH_TIMEOUT(!client.isConnected(), 1'000);
+        QCOMPARE(connections.getConnectionStatus(), QStringLiteral("Degraded"));
+        QVERIFY(!connections.isReady());
+        QTest::qWait(300);
+        QCOMPARE(connections.getConnectionStatus(), QStringLiteral("Degraded"));
+        for (const auto& status : statuses)
+            QCOMPARE(status.first().toString(), QStringLiteral("Degraded"));
+        // Repeated failed connection attempts cannot renew the grace period.
+        QTRY_VERIFY_WITH_TIMEOUT(connections.getConnectionStatus() != QLatin1String("Degraded"), 3'500);
+        QVERIFY(!statuses.isEmpty());
+        QTRY_VERIFY_WITH_TIMEOUT(statuses.last().first().toString() != QLatin1String("Degraded"), 500);
+        connections.disconnect();
+        QCOMPARE(connections.getConnectionStatus(), QStringLiteral("Disconnected"));
+    }
+
+    void lateSocketLossDoesNotRestartExpiredRecovery()
+    {
+        QTemporaryDir root;
+        qint64 now = 1'000;
+        WebSocketClient client(root.path(), false, nullptr, [&] { return now; });
+        ConnectionManager connections(&client, nullptr, [&] { return now; });
+        RemoteSessionTestServer server(client.endpointId());
+        server.policyVersion = 4;
+        server.heartbeatIntervalMs = 750;
+        server.leaseTimeoutMs = 1'500;
+        server.sessionRecoveryTimeoutMs = 3'000;
+        QVERIFY(server.listen());
+        connect(&client, &WebSocketClient::connected, &connections, [&] {
+            client.registrationConfirmed(ClientInfo());
+            client.reconciliationCompleted();
+        });
+        connections.connectToServer(server.url());
+        QTRY_VERIFY_WITH_TIMEOUT(connections.isReady(), 2'000);
+        QSignalSpy statuses(&connections, &ConnectionManager::statusChanged);
+        // Simulate sleep past both silence detection and the recovery window.
+        now += 4'500;
+        server.server.close();
+        server.peer->abort();
+        QTRY_VERIFY_WITH_TIMEOUT(!client.isConnected(), 1'000);
+        QVERIFY(!connections.isReady());
+        QVERIFY(connections.getConnectionStatus() != QLatin1String("Degraded"));
+        QVERIFY(!statuses.contains({QStringLiteral("Degraded")}));
+        connections.disconnect();
+    }
+
+    void serverRecoveryBadgeClearsOnRecoveryAndExplicitDisable()
+    {
+        QTemporaryDir root;
+        WebSocketClient client(root.path(), false);
+        ConnectionManager connections(&client);
+        RemoteSessionTestServer server(client.endpointId());
+        server.policyVersion = 4;
+        server.heartbeatIntervalMs = 750;
+        server.leaseTimeoutMs = 1'500;
+        server.sessionRecoveryTimeoutMs = 3'000;
+        QVERIFY(server.listen());
+        connect(&client, &WebSocketClient::connected, &connections, [&] {
+            client.registrationConfirmed(ClientInfo());
+            client.reconciliationCompleted();
+        });
+        connections.connectToServer(server.url());
+        QTRY_VERIFY_WITH_TIMEOUT(connections.isReady(), 2'000);
+        QSignalSpy statuses(&connections, &ConnectionManager::statusChanged);
+        ++server.connectionGeneration;
+        server.closePeer();
+        QTRY_VERIFY_WITH_TIMEOUT(server.acceptedConnections >= 2 && connections.isReady(), 2'000);
+        QCOMPARE(connections.getConnectionStatus(), QStringLiteral("Connected"));
+        QVERIFY(statuses.contains({QStringLiteral("Degraded")}));
+        for (const auto& status : statuses)
+            QVERIFY(status.first().toString() == QLatin1String("Degraded")
+                || status.first().toString() == QLatin1String("Connected"));
+        server.server.close();
+        server.closePeer();
+        QTRY_VERIFY_WITH_TIMEOUT(!client.isConnected(), 1'000);
+        QCOMPARE(connections.getConnectionStatus(), QStringLiteral("Degraded"));
+        connections.setConnectionEnabled(false);
+        QCOMPARE(connections.getConnectionStatus(), QStringLiteral("Disconnecting"));
+        connections.completeDisconnect(connections.transitionId());
+        QCOMPARE(connections.getConnectionStatus(), QStringLiteral("Disconnected"));
+    }
+
+    void repeatedRemoteErrorsHaveReadableDeduplicatedToasts()
+    {
+        QTemporaryDir root;
+        RuntimeProfileContext context;
+        context.rootPath = root.path();
+        context.persistent = false;
+        RuntimeProfile::configure(context);
+        ApplicationRuntime runtime(context);
+        QSignalSpy toasts(runtime.getNotificationCenter(), &NotificationCenter::toastRequested);
+        const QStringList codes{QStringLiteral("cleanup_not_committed"),
+            QStringLiteral("target_offline"), QStringLiteral("resume_required"),
+            QStringLiteral("unknown_remote_session"), QStringLiteral("new_internal_error")};
+        for (const QString& code : codes) {
+            for (int i = 0; i < 100; ++i) {
+                runtime.getWebSocketClient()->remoteSessionError(QJsonObject{
+                    {"code", code}, {"message", code}, {"requestId", ""},
+                    {"remoteSessionId", "repeated-error-session"},
+                    {"messageId", QUuid::createUuid().toString(QUuid::WithoutBraces)}});
+            }
+        }
+        QCOMPARE(toasts.size(), codes.size());
+        runtime.connectUploadSignals();
+        for (int i = 0; i < 100; ++i)
+            runtime.getUploadManager()->uploadRejected(QStringLiteral("repeated-upload"),
+                QStringLiteral("remote_session_unavailable"));
+        QCOMPARE(toasts.size(), codes.size() + 1);
+        for (const auto& toast : toasts) {
+            QVERIFY(toast.first().toString().contains(QLatin1Char(' ')));
+            QVERIFY(!toast.first().toString().contains(QLatin1Char('_')));
+        }
+        runtime.getUploadManager()->uploadRejected(QStringLiteral("readable-upload"),
+            QStringLiteral("Not enough disk space"));
+        QCOMPARE(toasts.last().first().toString(), QStringLiteral("Upload failed: Not enough disk space"));
+        runtime.handleApplicationAboutToQuit();
+    }
+
+    void failedIncomingCleanupDoesNotLoopOnServerEchoes()
+    {
+        QTemporaryDir root;
+        RuntimeProfileContext context;
+        context.rootPath = root.path();
+        context.persistent = false;
+        RuntimeProfile::configure(context);
+        ApplicationRuntime runtime(context);
+        auto* client = runtime.getWebSocketClient();
+        RemoteSessionTestServer server(client->endpointId());
+        QVERIFY(server.listen());
+        runtime.findChild<ConnectionManager*>()->connectToServer(server.url());
+        QTRY_VERIFY_WITH_TIMEOUT(client->isConnected(), 2'000);
+        const QString owner = fixtureEndpoint(QLatin1Char('K'));
+        const QString sessionId = QStringLiteral("failed-incoming-cleanup");
+        const QString teardownId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+        QVERIFY(server.sendIncomingOpened(sessionId, QStringLiteral("failed-cleanup-open"), owner));
+        QTRY_COMPARE(client->remoteSessionCoordinator()->byId(sessionId).phase, QStringLiteral("Active"));
+        auto* cache = runtime.getUploadManager()->remoteCacheStore();
+        QVERIFY(cache->ensureSession({owner, sessionId, 1}));
+        // A real filesystem failure, independent of renderer or platform locks.
+        const QString quarantine = QDir(cache->rootPath()).filePath(QStringLiteral(".quarantine"));
+        QVERIFY(QDir().rmdir(quarantine));
+        QFile blocker(quarantine);
+        QVERIFY(blocker.open(QIODevice::WriteOnly));
+        blocker.close();
+        QJsonObject terminal{{"type", "remote_session_terminating"},
+            {"remoteSessionId", sessionId}, {"generation", 1},
+            {"ownerConnectionGeneration", 1}, {"targetConnectionGeneration", 1},
+            {"phase", "CleanupPending"}, {"ownerEndpointId", owner},
+            {"targetEndpointId", client->endpointId()}, {"teardownId", teardownId}};
+        QVERIFY(client->remoteSessionCoordinator()->upsert(terminal, client->connectionGeneration()));
+        QSignalSpy toasts(runtime.getNotificationCenter(), &NotificationCenter::toastRequested);
+        client->remoteSessionTerminating(terminal);
+        QTRY_VERIFY_WITH_TIMEOUT(!server.teardownAcknowledgements.isEmpty(), 2'000);
+        QCOMPARE(server.teardownAcknowledgements.last().value("result").toString(), QStringLiteral("cleanup_error"));
+        const int ackCount = server.teardownAcknowledgements.size();
+        const int toastCount = toasts.size();
+        QVERIFY(toastCount > 0);
+        for (int i = 0; i < 100; ++i) {
+            client->remoteSessionTerminating(terminal);
+            client->remoteSessionError(QJsonObject{{"code", "cleanup_not_committed"},
+                {"message", "cleanup_not_committed"}, {"remoteSessionId", sessionId},
+                {"messageId", QUuid::createUuid().toString(QUuid::WithoutBraces)}});
+        }
+        QTest::qWait(100);
+        QCOMPARE(server.teardownAcknowledgements.size(), ackCount);
+        QCOMPARE(toasts.size(), toastCount);
+        QVERIFY(QFile::remove(quarantine));
+        // The server's later, scheduled retry can still finish the same tuple.
+        QTRY_VERIFY_WITH_TIMEOUT(([&] {
+            client->remoteSessionTerminating(terminal);
+            return server.teardownAcknowledgements.last().value("result") == QLatin1String("committed");
+        })(), 5'000);
+        QCOMPARE(toasts.size(), toastCount);
+        runtime.handleApplicationAboutToQuit();
+    }
+
     void clientListRetainsOnlyProjectsWhenDiscoveryIsUnavailable()
     {
         QTemporaryDir root;

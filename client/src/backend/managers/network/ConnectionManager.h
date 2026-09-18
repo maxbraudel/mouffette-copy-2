@@ -141,11 +141,14 @@ private:
     void suspendAttempts();
     void refreshAuthenticatedState();
     void observeStability(bool healthy);
+    bool recoveryDisplayActive() const;
     
     WebSocketClient* m_wsClient;
     RetryScheduler::Clock m_clock;
     RetryScheduler m_retries;
     QTimer m_syncTimeoutTimer;
+    QTimer m_recoveryDisplayTimer;
+    qint64 m_recoveryDisplayDeadlineMs = -1;
     RetryAction m_retryAction = RetryAction::Idle;
     QString m_lastError;
     void setRetryAction(RetryAction action);

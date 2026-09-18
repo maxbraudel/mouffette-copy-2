@@ -579,10 +579,14 @@ class RemoteSessionRegistry {
             return { ok: false, error: 'invalid_teardown_ack' };
         }
         if (!this.#isCommittedCleanup(result)) {
+            const errorCode = result && typeof result.errorCode === 'string'
+                ? result.errorCode.slice(0, 128) : 'cleanup_error';
+            if (session.phase === 'CleanupPending' && session.cleanupError === errorCode) {
+                return { ok: false, replay: true, error: 'cleanup_not_committed', session };
+            }
             session.phase = 'CleanupPending';
             ++session.stateRevision;
-            session.cleanupError = result && typeof result.errorCode === 'string'
-                ? result.errorCode.slice(0, 128) : 'cleanup_error';
+            session.cleanupError = errorCode;
             session.updatedAt = now;
             return { ok: false, error: 'cleanup_not_committed', session };
         }

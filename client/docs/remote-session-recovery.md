@@ -44,9 +44,13 @@ abort a newly authenticating socket.
 
 ## State, action and retry configuration
 
-The network badge is Disconnected between attempts and Connecting during TCP,
-authentication and synchronization. Authenticating and Synchronizing remain
-internal phases. Retry action (idle, scheduled, running, suspended or blocked),
+After an established connection is interrupted, the network badge stays Degraded
+for the server's recovery window (3 seconds by default), including TCP,
+authentication and synchronization retries. Failed attempts do not restart that
+window. Successful synchronization clears it; intentional Disable bypasses it.
+Outside recovery the badge is Disconnected between attempts and Connecting
+during TCP, authentication and synchronization. Commands still require the
+authenticated, synchronized internal state. Retry action (idle, scheduled, running, suspended or blocked),
 cause and next attempt are separate diagnostics shown in tooltips. Available
 means an admissible peer without a usable session; desired work alone never
 becomes Connecting. A local server outage leaves remote presence unconfirmed,
@@ -220,6 +224,15 @@ Logical session termination, resource release, durable quarantine and physical
 deletion are distinct. STOP and teardown acknowledgements belong to their own
 transactions, so logical termination does not invalidate required cleanup.
 Old cleanup obligations do not block unrelated session scopes.
+
+A negative teardown acknowledgement records CleanupPending without rejecting
+the acknowledgement as another command. Repeated identical failures preserve
+the state revision and retry deadline; scheduled server retries own the next
+attempt. Clients also enforce a minimum retry delay against immediate echoes
+from older servers. One correlated notification describes each failed cleanup;
+the diagnostic log retains its exact cause. Protocol error identifiers are
+translated into readable session/upload notifications and replayed errors do
+not create additional toasts.
 
 Incoming chunk writes and fsync run on a serialized worker queue. Only persisted
 bytes advance progress; a cancelled generation's late completion cannot emit an

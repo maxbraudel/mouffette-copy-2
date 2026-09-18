@@ -2726,6 +2726,12 @@ void ApplicationRuntime::startNextPendingRendererTeardown(
         if (!requested) continue;
         auto pending = m_pendingRendererTeardowns.find(remoteSessionId);
 
+        // A CLOSED/cleanup_error echo is not a new cleanup opportunity. Keep
+        // failures bounded even when talking to an older server that echoes
+        // every negative ACK immediately.
+        if (pending != m_pendingRendererTeardowns.end()
+            && pending->nextRetryAtMs > MouffetteClock::nowMs()) continue;
+
         // Mark before calling into the controller so even a future synchronous
         // implementation of the acceptance path cannot race its settlement.
         m_activeRendererTeardownSessionId = remoteSessionId;
@@ -2985,6 +2991,10 @@ void ApplicationRuntime::handleRemoteRendererTeardownSettled(
         // scheduling, but it is not an idempotent terminal result. Keep the
         // exact transaction queued and never place it in the replay table.
         pending->rendererTeardownStarted = false;
+        pending->nextRetryAtMs = MouffetteClock::nowMs()
+            + AppConfig::instance().deferredCleanupRetryMs();
+        qWarning() << "remote_session_cleanup_failed" << remoteSessionId
+                   << "teardown" << teardown.teardownId << "cause" << ack.errorCode;
         if (m_webSocketClient && m_webSocketClient->isConnected()) {
             m_webSocketClient->acknowledgeRemoteSessionTeardown(
                 remoteSessionId, ack.teardownId, ack.sceneStopped,
@@ -3209,6 +3219,13 @@ void ApplicationRuntime::handleRemoteSessionError(const QJsonObject& envelope) {
     const QString requestId = envelope.value(QStringLiteral("requestId")).toString();
     const QString envelopeSessionId =
         envelope.value(QStringLiteral("remoteSessionId")).toString();
+    if (code == QLatin1String("cleanup_not_committed")
+        && (m_pendingRendererTeardowns.contains(envelopeSessionId)
+            || m_pendingTeardownAcks.contains(envelopeSessionId))) {
+        // The local cleanup path already publishes one descriptive, correlated
+        // notification. Older servers echo our own failure as a raw error.
+        return;
+    }
     const auto publishError = [this, &envelope]() {
         if (!m_toastSystem) return;
         NotificationRequest notification;
@@ -3217,8 +3234,30 @@ void ApplicationRuntime::handleRemoteSessionError(const QJsonObject& envelope) {
         notification.message = envelope.value(QStringLiteral("message"))
             .toString(QStringLiteral(
                 "The remote session command was rejected."));
-        notification.correlationId =
-            envelope.value(QStringLiteral("messageId")).toString();
+        const QString code = envelope.value(QStringLiteral("code")).toString();
+        if (notification.message.trimmed().isEmpty() || notification.message == code
+            || QRegularExpression(QStringLiteral("^[a-z][a-z0-9_]*$")).match(notification.message).hasMatch()) {
+            if (code == QLatin1String("cleanup_not_committed") || code == QLatin1String("session_cleanup_pending"))
+                notification.message = QStringLiteral("The previous remote session is still being cleaned up. Please wait before trying again.");
+            else if (code == QLatin1String("target_offline") || code == QLatin1String("target_unavailable"))
+                notification.message = QStringLiteral("The remote computer is unavailable. Check its connection and try again.");
+            else if (code == QLatin1String("remote_session_reconnecting") || code == QLatin1String("target_reconnecting")
+                     || code == QLatin1String("resume_required") || code == QLatin1String("session_requires_resume"))
+                notification.message = QStringLiteral("The remote connection is recovering. Please wait before trying again.");
+            else if (code == QLatin1String("lease_expired") || code == QLatin1String("session_terminal")
+                     || code == QLatin1String("unknown_remote_session"))
+                notification.message = QStringLiteral("The remote session has ended. Reconnect to the remote computer and try again.");
+            else
+                notification.message = QStringLiteral("The remote session could not complete the request. Please reconnect and try again.");
+        }
+        notification.remoteSessionId = envelope.value(QStringLiteral("remoteSessionId")).toString();
+        QString identity = envelope.value(QStringLiteral("requestId")).toString();
+        if (identity.isEmpty() || code == QLatin1String("cleanup_not_committed"))
+            identity = notification.remoteSessionId;
+        if (!identity.isEmpty() && !code.isEmpty()) {
+            notification.correlationId = QStringLiteral("remote-session-error:%1:%2").arg(identity, code);
+            notification.terminal = true;
+        }
         m_toastSystem->publishNotification(notification);
     };
 

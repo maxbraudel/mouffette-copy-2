@@ -409,6 +409,7 @@ private:
         QString teardownId;
         quint64 generation = 0;
         bool rendererTeardownStarted = false;
+        qint64 nextRetryAtMs = -1;
     };
     QHash<QString, PendingRendererTeardown> m_pendingRendererTeardowns;
     QSet<QString> m_readerTeardownPendingSessionIds;
