@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Window
 import Mouffette.App
+import "../.." as Canvas
 import "../canvas"
 import "../components"
 
@@ -8,6 +9,7 @@ AppPanel {
     id: root
     required property var controller
     readonly property var session: controller.activeWorkspace
+    color: Theme.canvasBackground
 
     Loader {
         id: canvasLoader
@@ -15,9 +17,17 @@ AppPanel {
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.top: parent.top
-        anchors.bottom: timelinePanel.top
+        anchors.leftMargin: root.border.width
+        anchors.rightMargin: root.border.width
+        anchors.topMargin: root.border.width
+        anchors.bottom: canvasTimelineSeparator.top
         active: root.session !== null && root.session !== undefined
-        source: Qt.resolvedUrl("../../CanvasRoot.qml")
+        sourceComponent: Canvas.CanvasRoot {
+            // The page owns the shared background and rounded frame.
+            color: "transparent"
+            border.width: 0
+            radius: 0
+        }
         onLoaded: {
             item.shortcutScope = item
             if (root.session) item.sessionViewModel = root.session
@@ -30,7 +40,7 @@ AppPanel {
     }
 
     AppSpinner {
-        anchors.centerIn: parent
+        anchors.centerIn: canvasLoader
         visible: (!root.session && root.controller.remoteBusy)
             || (root.session && root.session.loading)
         running: visible
@@ -74,10 +84,20 @@ AppPanel {
         objectName: "mediaListPanel"
         maximumHeight: Math.max(0, canvasLoader.height - 32)
         anchors.right: parent.right
-        anchors.bottom: timelinePanel.top
+        anchors.bottom: canvasLoader.bottom
         anchors.margins: 16
         z: 100000
         session: root.session
+    }
+
+    Rectangle {
+        id: canvasTimelineSeparator
+        anchors.left: timelinePanel.left
+        anchors.right: timelinePanel.right
+        anchors.bottom: timelinePanel.top
+        height: visible ? 1 : 0
+        visible: timelinePanel.visible
+        color: Theme.border
     }
 
     TimelinePanel {
@@ -85,7 +105,9 @@ AppPanel {
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.bottom: parent.bottom
-        height: visible ? Math.min(implicitHeight, Math.max(120, root.height * 0.55)) : 0
+        anchors.margins: root.border.width
+        height: visible ? Math.min(implicitHeight, Math.max(120, Math.floor(root.height * 0.55))) : 0
+        bottomCornerRadius: Math.max(0, root.radius - root.border.width)
         visible: !!root.session && root.session.hasProject
         session: root.session
     }

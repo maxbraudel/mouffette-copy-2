@@ -9,6 +9,7 @@ FocusScope {
     id: root
     objectName: "sceneTimeline"
     required property var session
+    property real bottomCornerRadius: 0
     readonly property var timeline: session ? session.timeline : null
     readonly property bool editable: !!timeline && timeline.editable
     readonly property real maximumMs: timeline ? timeline.maxDurationMs : 180000
@@ -110,7 +111,12 @@ FocusScope {
         target: root.timeline
         function onTransportChanged() { root.followHead() }
     }
-    Rectangle { anchors.fill: parent; color: Theme.overlayBackground; border.color: Theme.overlayBorder }
+    Rectangle {
+        anchors.fill: parent
+        color: Theme.overlayBackground
+        bottomLeftRadius: root.bottomCornerRadius
+        bottomRightRadius: root.bottomCornerRadius
+    }
 
     component TimelineButton: AppButton {
         focusPolicy: Qt.NoFocus
@@ -262,11 +268,18 @@ FocusScope {
             }
         }
     }
+    Rectangle {
+        id: transportSeparator
+        anchors.left: parent.left; anchors.right: parent.right
+        anchors.top: transportViewport.bottom; anchors.topMargin: 8
+        height: 1
+        color: Theme.border
+    }
     Flickable {
         id: actionViewport
         objectName: "timelineEditBar"
         anchors.left: parent.left; anchors.right: parent.right
-        anchors.top: transportViewport.bottom
+        anchors.top: transportSeparator.bottom
         anchors.leftMargin: 8; anchors.rightMargin: 8; anchors.topMargin: 8
         height: Theme.controlHeight + (contentWidth > width ? 8 : 0)
         clip: true
@@ -365,11 +378,18 @@ FocusScope {
             wheel.accepted = true
         }
     }
+    Rectangle {
+        id: tracksSeparator
+        anchors.left: parent.left; anchors.right: parent.right
+        anchors.top: actionViewport.bottom; anchors.topMargin: 8
+        height: 1
+        color: Theme.border
+    }
     Flickable {
         id: trackViewport
         objectName: "timelineTracks"
         anchors.left: parent.left; anchors.right: parent.right
-        anchors.top: actionViewport.bottom; anchors.topMargin: 8; anchors.bottom: parent.bottom
+        anchors.top: tracksSeparator.bottom; anchors.bottom: parent.bottom
         clip: true
         contentWidth: Math.max(width, root.maximumMs * root.pixelsPerMs + 24)
         contentHeight: height
