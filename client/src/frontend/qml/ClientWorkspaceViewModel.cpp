@@ -338,6 +338,11 @@ QString ClientWorkspaceViewModel::uploadUnavailableReason() const
 {
     if (!hasProject()) return QStringLiteral("Create a project first");
     if (!m_canvas) return QStringLiteral("Canvas is unavailable");
+    const UploadState state = uploadState();
+    // Cancellation remains available during upload, even if the last local
+    // media was removed after the transfer started.
+    if (m_uploadAction && (state == UploadState::Ready || state == UploadState::Uploaded
+                          || state == UploadState::Uploading)) return {};
     if (m_canvas->enumerateMediaItems().isEmpty()) {
         return QStringLiteral("Add media to the project first");
     }
@@ -346,7 +351,7 @@ QString ClientWorkspaceViewModel::uploadUnavailableReason() const
     if (m_canvas->remoteSceneLaunching()) return QStringLiteral("The remote scene is starting. Please wait");
     if (m_canvas->remoteSceneStopping()) return QStringLiteral("The remote scene is stopping. Please wait");
     if (m_canvas->remoteSceneLaunched()) return QStringLiteral("Stop the remote scene first");
-    switch (uploadState()) {
+    switch (state) {
     case UploadState::Preparing:
         return m_uploadManager->outgoingState() == UploadManager::OutgoingState::Suspended
             ? QStringLiteral("The upload is paused while the remote computer reconnects")

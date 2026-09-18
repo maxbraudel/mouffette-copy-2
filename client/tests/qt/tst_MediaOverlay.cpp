@@ -25,11 +25,13 @@
 #include "frontend/qml/ApplicationController.h"
 #include "frontend/qml/MediaSettingsViewModel.h"
 #include "frontend/qml/TimelineController.h"
+#include "frontend/ui/notifications/ToastNotificationSystem.h"
 #include "backend/domain/canvas/CanvasDocument.h"
 #include "backend/domain/media/CanvasMedia.h"
 #include "backend/media/MediaResidencyManager.h"
 #include "backend/files/FileManager.h"
 #include "backend/network/UploadManager.h"
+#include "backend/runtime/RuntimeProfile.h"
 
 class MediaOverlayTest final : public QObject
 {
@@ -64,6 +66,7 @@ private slots:
     void mediaActionPalette();
     void mediaRowsAndProgress();
     void uploadActionLocksBeforeDispatchAndRecovers();
+    void unavailableActionsStayClickableAndExplainWhy();
     void toolbarToolsAndGlobalMemoryUsage();
     void scenePlaybackUnloadsEditorOverlays_data();
     void scenePlaybackUnloadsEditorOverlays();
@@ -760,8 +763,8 @@ void MediaOverlayTest::mediaPanelVisibilityAnchorInteractionAndScroll()
     QVERIFY(QTest::qWaitForWindowActive(&window));
     harness->setSize(window.size());
     QCoreApplication::processEvents();
-    QVERIFY(!panel->isVisible());
-    QVERIFY(!list->isVisible());
+    QVERIFY(panel->isVisible());
+    QCOMPARE(list->height(), 0.0);
 
     QVariantList rows;
     rows.append(QVariantMap{{QStringLiteral("rowKey"), QStringLiteral("media-0")},
@@ -858,7 +861,7 @@ void MediaOverlayTest::mediaCountTracksRealCanvasInsertions()
     harness->setSize(window.size());
     QCoreApplication::processEvents();
     QCOMPARE(session.mediaCount(), 0);
-    QVERIFY(!panel->isVisible());
+    QVERIFY(panel->isVisible());
     QVERIFY(host->document()->addText(QPointF(100, 100)));
     QCOMPARE(session.mediaCount(), 1);
     QVERIFY(countChanged.count() >= 1);
@@ -1149,7 +1152,89 @@ void MediaOverlayTest::mediaRowsAndProgress()
     QTRY_COMPARE(panel->width(), 300.0);
     photo->setUploadNotUploaded();
     host->document()->clear();
-    QTRY_VERIFY(!panel->isVisible());
+    QTRY_VERIFY(panel->isVisible());
+    QTRY_COMPARE(panel->height(), panel->property("actionAreaHeight").toReal());
+}
+
+void MediaOverlayTest::unavailableActionsStayClickableAndExplainWhy()
+{
+    QTemporaryDir temporary;
+    QVERIFY(temporary.isValid());
+    const auto previousProfile = RuntimeProfile::context();
+    auto profile = previousProfile;
+    profile.rootPath = temporary.path();
+    RuntimeProfile::configure(profile);
+    const auto restoreProfile = qScopeGuard([&] { RuntimeProfile::configure(previousProfile); });
+    ToastNotificationSystem notifications;
+    auto* previousNotifications = ToastNotificationSystem::instance();
+    ToastNotificationSystem::setInstance(&notifications);
+    const auto restoreNotifications = qScopeGuard([&] {
+        ToastNotificationSystem::setInstance(previousNotifications);
+    });
+    QSignalSpy toasts(notifications.notificationCenter(), &NotificationCenter::toastRequested);
+    FileManager files;
+    UploadManager uploads(&files, nullptr, temporary.filePath("Uploads"));
+    QString error;
+    std::unique_ptr<QuickCanvasHost> host(QuickCanvasHost::create(&error));
+    QVERIFY2(host, qPrintable(error));
+    host->setProjectEditingEnabled(true);
+    bool projectExists = true;
+    int uploadCalls = 0;
+    ClientWorkspaceViewModel session("toast-workspace", host.get(), [&] { ++uploadCalls; },
+        &uploads, [] { return false; }, [] { return true; }, [&] { return projectExists; });
+    QQmlEngine engine;
+    QQuickWindow window;
+    window.resize(640, 480);
+    std::unique_ptr<QQuickItem> harness(createRealMediaPanelHarness(engine, window, &session, &error));
+    QVERIFY2(harness, qPrintable(error));
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    harness->setSize(window.size());
+    auto* upload = findVisualItem(harness.get(), "uploadAction");
+    auto* remote = findVisualItem(harness.get(), "remoteSceneAction");
+    QVERIFY(upload && remote);
+    const auto clickUnavailable = [&](QQuickItem* button, const QString& expected) {
+        QVERIFY(button->isVisible());
+        QVERIFY(button->isEnabled());
+        QVERIFY(!button->property("dimmed").toBool());
+        const auto count = toasts.count();
+        QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier,
+            button->mapToScene({button->width() / 2, button->height() / 2}).toPoint());
+        QCOMPARE(toasts.count(), count + 1);
+        QCOMPARE(toasts.last().at(0).toString(), expected);
+        QCOMPARE(uploadCalls, 0);
+        QVERIFY(!session.actionPending());
+        QVERIFY(!host->remoteSceneLaunching());
+        QVERIFY(!host->remoteSceneLaunched());
+    };
+
+    // Empty projects retain the action buttons and explain the missing media.
+    clickUnavailable(upload, "Add media to the project first");
+    clickUnavailable(remote, "Add media to the project first");
+    QVERIFY(host->document()->addText({100, 100}, "Scene content"));
+    clickUnavailable(upload, "Launch a remote session first");
+    clickUnavailable(remote, "No target screens available");
+    host->setScreens({ScreenInfo(0, 800, 600, 0, 0, true)});
+    clickUnavailable(remote, "Launch a remote session first");
+    host->setOverlayActionsEnabled(true);
+    clickUnavailable(remote, "The server is disconnected. Wait for the connection to be restored");
+    host->timelinePlay();
+    QVERIFY(host->testSceneLaunched());
+    clickUnavailable(remote, "Pause the local preview before launching a remote scene");
+    host->timelinePause();
+
+    // The clickable UI does not bypass duplicate or queued-action guards.
+    session.triggerUploadAction();
+    QVERIFY(session.actionPending());
+    QVERIFY(upload->isEnabled() && remote->isEnabled());
+    session.triggerUploadAction();
+    QCOMPARE(toasts.last().at(0).toString(), "An action is already being processed. Please wait");
+    session.toggleRemoteScene();
+    QCOMPARE(toasts.last().at(0).toString(), "An action is already being processed. Please wait");
+    projectExists = false;
+    QTRY_VERIFY(!session.actionPending());
+    QCOMPARE(uploadCalls, 0);
+    QCOMPARE(toasts.last().at(0).toString(), "Create a project first");
 }
 
 void MediaOverlayTest::uploadActionLocksBeforeDispatchAndRecovers()

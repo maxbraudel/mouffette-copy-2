@@ -64,8 +64,8 @@ Rectangle {
     radius: 3
     color: interactive && panel.timeline && panel.timeline.selectedClipId === modelData.id
         ? Theme.controlSelectionBackground : interactive ? Theme.overlayHover : Theme.overlayPressed
-    border.width: interactive ? 1 : 0
-    border.color: Theme.overlayText
+    border.width: 1
+    border.color: interactive ? Theme.overlayText : Theme.overlayBorder
     clip: true
     readonly property real shownSourceIn: modelData.sourceInMs
         + (dragging && editEdge < 0 ? shownStart - initialStart : 0)

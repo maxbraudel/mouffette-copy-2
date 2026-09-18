@@ -597,7 +597,7 @@ FocusScope {
                         timeContent: timelineContent
                         trackHeight: clipTrack.height
                         interactive: false
-                        opacity: Math.min(1, (root.timeline ? root.timeline.otherKeyframeOpacity : 0.3) + 0.1)
+                        opacity: Math.min(1, (root.timeline ? root.timeline.otherKeyframeOpacity : 0.3) + 0.25)
                     }
                 }
                 Repeater {
