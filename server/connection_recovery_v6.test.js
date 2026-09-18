@@ -56,6 +56,10 @@ const ofType = (client, type) => client.ws.messages.filter(message => message.ty
     f.advance(4000); f.server.sweepRemoteSessionLeases();
     assert.equal(a.ws.readyState, 3);
     assert.equal(session.phase, 'Grace');
+    const presence = f.server.presenceEntries().find(entry => entry.endpointId === 'A');
+    assert.equal(presence.status, 'Disconnected');
+    assert.equal(presence.canAcceptSession, false);
+    assert.equal(presence.reason, 'transport_lost');
     assert.equal(run.phase, SCENE_PHASES.LIVE);
     assert.equal(f.server.remoteSessions.validUntil(session), 6000);
     f.advance(5500); f.send('B', 'heartbeat', { sequence: 2 });

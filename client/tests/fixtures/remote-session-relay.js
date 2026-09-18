@@ -7,6 +7,7 @@ const { MouffetteServer } = require('../../../server/server');
 const relay = new MouffetteServer({ port: Number(process.argv[2] || 0), host: "127.0.0.1", protocolLogger: () => {}, metricLogger: () => {} });
 const dropped = new Map();
 const droppedIncoming = new Map();
+const rawDrops = new Map();
 const suppressedProofs = new Set();
 const dropAfterProgress = new Set();
 const send = relay.sendToEndpoint.bind(relay);
@@ -42,6 +43,23 @@ relay.handleMessage = (clientId, payload, ...args) => {
     return receive(clientId, payload, ...args);
 };
 relay.start();
+// Includes direct ws.send paths such as registration and upload token replies.
+relay.wss.on('connection', socket => {
+    const rawSend = socket.send.bind(socket);
+    socket.send = (data, ...args) => {
+        let payload;
+        try { payload = JSON.parse(data.toString()); } catch { return rawSend(data, ...args); }
+        const client = [...relay.clients.values()].find(candidate => candidate.ws === socket);
+        const key = `${client?.endpointId}:${payload.type}`;
+        const count = rawDrops.get(key) || 0;
+        if (count > 0) {
+            rawDrops.set(key, count - 1);
+            process.stdout.write(`TEST_DROPPED ${key}\n`);
+            return;
+        }
+        return rawSend(data, ...args);
+    };
+});
 relay.wss.once('listening', () => {
     process.stdout.write(`TEST_READY ${relay.wss.address().port}\n`);
 });
@@ -53,6 +71,8 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
                 if (client.endpointId === endpoint) client.ws.terminate();
             }
         }
+    } else if (command.action === 'dropRawFrame') {
+        rawDrops.set(`${command.endpoint}:${command.type}`, command.count || 1);
     } else if (command.action === 'dropFrame') {
         dropped.set(`${command.endpoint}:${command.type}`, command.count || 1);
     } else if (command.action === 'dropIncoming') {

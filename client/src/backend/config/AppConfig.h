@@ -29,6 +29,14 @@ public:
         ProjectHiddenRetentionMs,
         IncomingSessionOrphanTimeoutMs,
         UploadIdleTimeoutMs,
+        ConnectionSyncTimeoutMs,
+        SessionRetryBaseMs,
+        SessionRetryMaxMs,
+        ControlRequestRetryMs,
+        UploadChannelRetryBaseMs,
+        UploadChannelRetryMaxMs,
+        UploadChannelAttemptTimeoutMs,
+        DeferredCleanupRetryMaxMs,
         ConnectionAttemptTimeoutMs,
         ReconnectFastStepMs,
         ReconnectFastMaxMs,
@@ -144,6 +152,14 @@ public:
     qint64 projectHiddenRetentionMs() const { return m_projectHiddenRetentionMs; }
     qint64 incomingSessionOrphanTimeoutMs() const { return m_incomingSessionOrphanTimeoutMs; }
     int uploadIdleTimeoutMs() const { return m_uploadIdleTimeoutMs; }
+    int connectionSyncTimeoutMs() const { return m_connectionSyncTimeoutMs; }
+    int sessionRetryBaseMs() const { return m_sessionRetryBaseMs; }
+    int sessionRetryMaxMs() const { return m_sessionRetryMaxMs; }
+    int controlRequestRetryMs() const { return m_controlRequestRetryMs; }
+    int uploadChannelRetryBaseMs() const { return m_uploadChannelRetryBaseMs; }
+    int uploadChannelRetryMaxMs() const { return m_uploadChannelRetryMaxMs; }
+    int uploadChannelAttemptTimeoutMs() const { return m_uploadChannelAttemptTimeoutMs; }
+    int deferredCleanupRetryMaxMs() const { return m_deferredCleanupRetryMaxMs; }
     int connectionAttemptTimeoutMs() const { return m_connectionAttemptTimeoutMs; }
     int reconnectStableResetMs() const { return m_reconnectStableResetMs; }
     int reconnectFastStepMs() const { return m_reconnectFastStepMs; }
@@ -220,12 +236,20 @@ private:
     qint64 m_projectHiddenRetentionMs = 300000;
     qint64 m_incomingSessionOrphanTimeoutMs = 3000;
     int m_uploadIdleTimeoutMs = 45000;
+    int m_connectionSyncTimeoutMs = 10000;
+    int m_sessionRetryBaseMs = 1000;
+    int m_sessionRetryMaxMs = 5000;
+    int m_controlRequestRetryMs = 1000;
+    int m_uploadChannelRetryBaseMs = 1000;
+    int m_uploadChannelRetryMaxMs = 5000;
+    int m_uploadChannelAttemptTimeoutMs = 10000;
+    int m_deferredCleanupRetryMaxMs = 30000;
     int m_connectionAttemptTimeoutMs = 10000;
     int m_reconnectStableResetMs = 30000;
     int m_reconnectFastStepMs = 250;
     int m_reconnectFastMaxMs = 750;
     int m_reconnectBaseMs = 1000;
-    int m_reconnectMaxMs = 30000;
+    int m_reconnectMaxMs = 5000;
     int m_reconnectJitterPercent = 20;
     int m_leaseHealthCheckIntervalMs = 100;
     int m_sessionDeadlinePollIntervalMs = 250;

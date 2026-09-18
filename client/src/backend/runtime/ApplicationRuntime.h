@@ -1,6 +1,8 @@
 #ifndef APPLICATIONRUNTIME_H
 #define APPLICATIONRUNTIME_H
 
+#include "backend/network/SessionRecoveryController.h"
+
 #include <QHash>
 #include <QList>
 #include <QObject>
@@ -138,6 +140,9 @@ public:
         m_uploadWorkspaceByUploadId.remove(uploadId);
     }
 
+    QString localConnectionDetail() const;
+    QString clientConnectionDetail(const QString& endpoint) const;
+    QString remoteConnectionDetail() const { return clientConnectionDetail(m_activeWorkspaceEndpointId); }
     QString localStatusText() const { return m_localStatusText; }
     QString remoteStatusText() const { return m_remoteStatusText; }
     QString remoteDisplayName() const;
@@ -351,12 +356,9 @@ private:
     QSet<QString> m_restoredProjectIds;
     QHash<QString, QString> m_remoteSessionOpenTargetByRequestId;
     QSet<QString> m_automaticRemoteSessionOpenRequestIds;
-    QHash<QString, qint64> m_remoteSessionRetryAtMs;
-    QHash<QString, int> m_remoteSessionRetryAttempts;
-    QHash<QString, qint64> m_pendingOpenRetryAtMs;
-    QHash<QString, int> m_pendingOpenRetryAttempts;
     // Validation/permanent failures require a new explicit selection. Ordinary
     // peer/transport loss must not block activity-driven foreground recovery.
+    SessionRecoveryController m_sessionRecovery;
     QSet<QString> m_remoteSessionAutoOpenBlockedTargets;
     QSet<QString> m_remoteSessionOpenPendingTargets;
     QSet<QString> m_remoteSessionOpenSuppressedTargets;

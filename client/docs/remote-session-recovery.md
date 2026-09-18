@@ -19,16 +19,18 @@ the latest intent wins. URL changes go through the same transition. Completion
 callbacks carry a transition ID and cannot complete a newer connection cycle.
 
 The supervised states are Disconnected, Connecting, Authenticating,
-Synchronizing, Connected, Degraded, Reconnecting, Disconnecting, Failed and
+Synchronizing, Connected, Degraded, Disconnecting, Failed and
 CleanupPending (receiver recovery has not finished). Authentication alone does
 not mean Connected: endpoint registration, authoritative inventory reconciliation
 and receiver readiness must finish. Session command readiness remains separate.
 
 While network intent is enabled, an unavailable server is retried indefinitely,
-including after all sessions expire. Background delays grow through 1, 2, 4, 8,
-16 and 30 seconds, with 20% jitter (24–36 seconds at the plateau). There is no
+including after all sessions expire. Background nominal delays grow through 1, 2,
+4 and 5 seconds, with 20% jitter bounded by a hard five-second maximum (4–5 seconds
+at the plateau). There is no
 attempt limit or outage-duration limit. Their counters reset only after
-30 seconds of stable connection. DNS failures, refused connections, timeouts,
+30 continuous seconds in fully ready, healthy Connected state. Authentication,
+synchronization and degradation do not count as stability. DNS failures, refused connections, timeouts,
 network loss and TLS handshake failures remain retryable; certificate validation
 is never bypassed. A repaired server is authenticated and synchronized on the
 next successful attempt without another Enable click. Intentional Disable stops
@@ -39,6 +41,63 @@ Each connection/authentication attempt allows 10 seconds independently of the
 remaining session recovery budget. Expiration revokes the old session, not the
 new TCP/authentication attempt or network intent. A stale transport timer cannot
 abort a newly authenticating socket.
+
+## State, action and retry configuration
+
+The network badge is Disconnected between attempts and Connecting during TCP,
+authentication and synchronization. Authenticating and Synchronizing remain
+internal phases. Retry action (idle, scheduled, running, suspended or blocked),
+cause and next attempt are separate diagnostics shown in tooltips. Available
+means an admissible peer without a usable session; desired work alone never
+becomes Connecting. A local server outage leaves remote presence unconfirmed,
+shown as Unreachable. Grace remains a session phase and never authorizes new
+commands. Legacy Reconnecting observations are normalized to Disconnected on
+input; neither the new server nor the new client emits that status.
+
+ConnectionManager owns server connection attempts. SessionRecoveryController
+owns the next attempt after a definitive transient OPEN failure, by endpoint.
+Authenticated presence edges expedite it without resetting its failure history.
+Selection/activity/ready/cleanup events also reconcile intent; no recurring
+foreground polling timer runs. WebSocketClient separately retransmits unresolved
+idempotent requests with the same request ID. Registration, OPEN, RESUME,
+reconciliation, CLOSE and endpoint disable finish only on correlated results.
+RESUME is bounded by its original session deadline. CLOSE remains tracked through
+logical teardown until the final authoritative close. A new authenticated
+transport cancels old delivery timers; inventory and retained runtime intent own
+recovery. PLAY and COMMIT are never put in this retry queue.
+
+RetryPolicy supplies bounded delays and injectable randomness; RetryScheduler
+uses an injectable suspend-inclusive clock and a single-shot timer for the next
+operation. Replaced/cancelled keys cannot run obsolete callbacks. The upload
+channel has its own backoff and a combined token/connection/authentication timeout;
+losing it can resume an existing transfer from durable offsets on the control
+channel. Receiver cleanup and residual staging cleanup retry independently of
+network enablement and do not require a new connection.
+
+All client keys below start with `MOUFFETTE_`; durations are milliseconds:
+
+| Key | Default | Meaning |
+| --- | ---: | --- |
+| `RECONNECT_BASE_MS` / `RECONNECT_MAX_MS` | 1000 / 5000 | Ordinary server retry waits |
+| `RECONNECT_FAST_STEP_MS` / `RECONNECT_FAST_MAX_MS` | 250 / 750 | Recovery-window waits; first retry random 0–250 |
+| `RECONNECT_JITTER_PERCENT` | 20 | Shared network retry randomization; maxima remain hard caps |
+| `RECONNECT_STABLE_RESET_MS` | 30000 | Healthy ready interval before resetting connection failures |
+| `CONNECTION_ATTEMPT_TIMEOUT_MS` | 10000 | TCP and authentication attempt deadline |
+| `CONNECTION_SYNC_TIMEOUT_MS` | 10000 | Initial registration/inventory deadline; local cleanup excluded |
+| `SESSION_RETRY_BASE_MS` / `SESSION_RETRY_MAX_MS` | 1000 / 5000 | New OPEN after a definitive transient failure |
+| `CONTROL_REQUEST_RETRY_MS` | 1000 | Pending idempotent control-request retransmission |
+| `UPLOAD_CHANNEL_RETRY_BASE_MS` / `UPLOAD_CHANNEL_RETRY_MAX_MS` | 1000 / 5000 | Optional transfer-channel retry waits |
+| `UPLOAD_CHANNEL_ATTEMPT_TIMEOUT_MS` | 10000 | Token plus upload-channel establishment deadline |
+| `DEFERRED_CLEANUP_RETRY_MS` / `DEFERRED_CLEANUP_RETRY_MAX_MS` | 1000 / 30000 | Local cleanup retry waits |
+
+A five-second retry wait is not a five-second end-to-end recovery guarantee: an
+attempt has its own timeout. These settings do not alter the server-advertised
+session recovery deadline. Configuration is read at startup. Rebuild when editing
+the embedded `client/.env`, or restart with `--env-file /path/client.env` (also
+`MOUFFETTE_ENV_FILE`) to use an external file. Process variables and CLI options
+can override individual values, subject to the existing production override.
+Maximum/base ordering and numeric bounds are validated; invalid settings fail
+explicitly rather than creating a busy retry loop.
 
 ## Transport health and session deadlines
 

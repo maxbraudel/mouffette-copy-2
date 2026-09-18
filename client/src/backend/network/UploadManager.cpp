@@ -1,3 +1,4 @@
+#include "backend/network/RetryPolicy.h"
 #include "backend/network/SceneRunCoordinator.h"
 #include <QtConcurrent/QtConcurrentRun>
 #include <QFutureWatcher>
@@ -311,6 +312,8 @@ UploadManager::UploadManager(FileManager* fileManager,
     });
 
     m_remoteCacheStore = new RemoteCacheStore(remoteCacheRoot, this);
+    m_remoteCacheStore->setCleanupRetryPolicy({AppConfig::instance().deferredCleanupRetryMs(),
+        AppConfig::instance().deferredCleanupRetryMaxMs(), AppConfig::instance().reconnectJitterPercent()});
     QString cacheError;
     m_remoteCacheReady = m_remoteCacheStore->initialize(&cacheError);
     QString logicalCleanupError;
@@ -365,26 +368,14 @@ UploadManager::UploadManager(FileManager* fileManager,
         emit receiverAdvertisementReadinessChanged(receiverReadyForAdvertisement(), m_receiverCleanupError);
         emit incomingFileReadersChanged();
     });
-    m_receiverCleanupRetryTimer.setSingleShot(true);
-    m_receiverCleanupRetryTimer.setInterval(AppConfig::instance().deferredCleanupRetryMs());
-    connect(&m_receiverCleanupRetryTimer, &QTimer::timeout, this, [this]() {
-        if (!receiverReadyForAdvertisement() && !m_terminalIncomingCleanupAwaitingRenderer
-            && !m_remoteCacheStore->teardownPending() && incomingFileReadersSettled())
-            retryReceiverAdvertisementCleanup();
-        if (!receiverReadyForAdvertisement()) {
-            m_receiverCleanupRetryTimer.setInterval(qMin(30000, m_receiverCleanupRetryTimer.interval() * 2));
-            m_receiverCleanupRetryTimer.start();
-        }
-    });
     connect(this, &UploadManager::receiverAdvertisementReadinessChanged, this,
             [this](bool ready, const QString&) {
-        if (ready) m_receiverCleanupRetryTimer.stop();
-        else if (!m_receiverCleanupRetryTimer.isActive()) {
-            m_receiverCleanupRetryTimer.setInterval(AppConfig::instance().deferredCleanupRetryMs());
-            m_receiverCleanupRetryTimer.start();
-        }
+        if (ready) {
+            m_receiverCleanupRetries.cancelAll();
+            m_receiverCleanupAttempt = 0;
+        } else scheduleReceiverCleanup();
     });
-    if (!receiverReadyForAdvertisement()) m_receiverCleanupRetryTimer.start();
+    if (!receiverReadyForAdvertisement()) scheduleReceiverCleanup();
     cleanupOrphanedIncomingCache();
 
     m_uploadScheduler = new UploadScheduler(
@@ -3590,6 +3581,11 @@ bool UploadManager::discardIncomingUpload(const QString& uploadId,
             rememberRejectedUpload || m_deferredIncomingDiscards.value(uploadId));
         return false;
     }
+    if (incoming->remoteSessionId.isEmpty() && m_stagingCleanupAttempts.size() >= 4096
+        && !m_stagingCleanupAttempts.contains(incoming->senderId + QLatin1Char('/') + uploadId)) {
+        qWarning() << "Staging cleanup capacity exhausted; retaining incoming obligation" << uploadId;
+        return false;
+    }
     const QString senderId = incoming->senderId;
     const QString remoteSessionId = incoming->remoteSessionId;
     const quint64 generation = incoming->generation;
@@ -3676,15 +3672,43 @@ bool UploadManager::discardIncomingUpload(const QString& uploadId,
     }
     if (!cleanupSucceeded && remoteSessionId.isEmpty()
         && !senderId.isEmpty() && !uploadId.isEmpty()) {
-        QTimer::singleShot(AppConfig::instance().deferredCleanupRetryMs(),
-                           this, [this, senderId, uploadId]() {
-            if (!removeResidualIncomingStaging(senderId, uploadId)) {
-                qWarning() << "UploadManager: deferred partial-upload cleanup still failed"
-                           << "uploadId" << uploadId.left(16);
-            }
-        });
+        scheduleStagingCleanup(senderId, uploadId);
     }
     return cleanupSucceeded;
+}
+
+void UploadManager::scheduleReceiverCleanup()
+{
+    const QString key = QStringLiteral("receiver");
+    if (receiverReadyForAdvertisement() || m_receiverCleanupRetries.contains(key)) return;
+    const auto& config = AppConfig::instance();
+    const int delay = RetryPolicy{config.deferredCleanupRetryMs(), config.deferredCleanupRetryMaxMs(),
+                                 config.reconnectJitterPercent()}.delay(m_receiverCleanupAttempt);
+    m_receiverCleanupAttempt = RetryPolicy::increment(m_receiverCleanupAttempt);
+    m_receiverCleanupRetries.schedule(key, delay, [this] {
+        if (!receiverReadyForAdvertisement() && !m_terminalIncomingCleanupAwaitingRenderer
+            && !m_remoteCacheStore->teardownPending() && incomingFileReadersSettled())
+            retryReceiverAdvertisementCleanup();
+        scheduleReceiverCleanup();
+    });
+}
+
+void UploadManager::scheduleStagingCleanup(const QString& senderId, const QString& uploadId)
+{
+    const QString key = senderId + QLatin1Char('/') + uploadId;
+    if (m_stagingCleanupRetries.contains(key)) return;
+    const auto& config = AppConfig::instance();
+    const int attempt = m_stagingCleanupAttempts.value(key);
+    m_stagingCleanupAttempts.insert(key, RetryPolicy::increment(attempt));
+    const int delay = RetryPolicy{config.deferredCleanupRetryMs(), config.deferredCleanupRetryMaxMs(),
+                                 config.reconnectJitterPercent()}.delay(attempt);
+    m_stagingCleanupRetries.schedule(key, delay, [this, senderId, uploadId, key] {
+        if (removeResidualIncomingStaging(senderId, uploadId)) m_stagingCleanupAttempts.remove(key);
+        else {
+            qWarning() << "staging_cleanup_retry" << "uploadId" << uploadId << "attempt" << m_stagingCleanupAttempts.value(key);
+            scheduleStagingCleanup(senderId, uploadId);
+        }
+    });
 }
 
 bool UploadManager::removeResidualIncomingStaging(const QString& senderId,

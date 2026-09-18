@@ -1,21 +1,30 @@
 #include "backend/managers/network/ConnectionManager.h"
 #include "backend/config/AppConfig.h"
 #include "backend/network/WebSocketClient.h"
-#include <QRandomGenerator>
+#include "backend/network/RemoteSessionCoordinator.h"
+#include "backend/network/RetryPolicy.h"
 #include "backend/domain/models/ClientInfo.h"
 #include <QDebug>
 #include <algorithm>
 
-ConnectionManager::ConnectionManager(WebSocketClient* wsClient, QObject* parent)
+ConnectionManager::ConnectionManager(WebSocketClient* wsClient, QObject* parent, RetryScheduler::Clock clock)
     : QObject(parent),
       m_wsClient(wsClient),
-      m_reconnectTimer(new QTimer(this)),
+      m_clock(std::move(clock)),
+      m_retries(this, m_clock),
       m_attemptTimeoutTimer(new QTimer(this)),
       m_serverUrl()
 {
     Q_ASSERT(m_wsClient);
     
-    m_reconnectTimer->setSingleShot(true);
+    m_syncTimeoutTimer.setSingleShot(true);
+    connect(&m_syncTimeoutTimer, &QTimer::timeout, this, [this] {
+        if (m_state != State::Synchronizing || !m_desiredEnabled || m_draining) return;
+        m_lastError = QStringLiteral("Initial synchronization timed out");
+        qWarning() << "connection_sync_timeout" << "transition" << m_transitionId;
+        m_wsClient->abortConnectionAttempt();
+        scheduleReconnect();
+    });
     m_attemptTimeoutTimer->setSingleShot(true);
     m_attemptTimeoutTimer->setInterval(
         AppConfig::instance().connectionAttemptTimeoutMs());
@@ -33,7 +42,9 @@ ConnectionManager::ConnectionManager(WebSocketClient* wsClient, QObject* parent)
             this, &ConnectionManager::onLeaseExpired);
     connect(m_wsClient, &WebSocketClient::transportHealthChanged,
             this, &ConnectionManager::onTransportHealthChanged);
-    connect(m_reconnectTimer, &QTimer::timeout, this, &ConnectionManager::attemptReconnect);
+    connect(m_wsClient, &WebSocketClient::heartbeatSampleReceived, this, [this] {
+        observeStability(m_state == State::Connected);
+    });
     connect(m_attemptTimeoutTimer, &QTimer::timeout,
             this, &ConnectionManager::onAttemptTimedOut);
     
@@ -67,10 +78,12 @@ void ConnectionManager::connectToServer(const QString& serverUrl)
 
 void ConnectionManager::suspendAttempts()
 {
-    m_reconnectTimer->stop();
+    m_retries.cancel(QStringLiteral("connect"));
     m_attemptTimeoutTimer->stop();
     m_attemptInProgress = false;
-    m_stableConnection.invalidate();
+    m_syncTimeoutTimer.stop();
+    m_stableConnection.reset();
+    setRetryAction(RetryAction::Idle);
 }
 
 void ConnectionManager::setConnectionEnabled(bool enabled)
@@ -90,7 +103,7 @@ void ConnectionManager::setConnectionEnabled(bool enabled)
     }
     if (m_draining) return; // The latest intent is replayed after the old drain.
     if (m_wsClient->isConnected() || m_attemptInProgress
-        || m_reconnectTimer->isActive()) return;
+        || m_retries.contains(QStringLiteral("connect"))) return;
     m_fatalFailure = false;
     beginAttempt();
 }
@@ -158,7 +171,35 @@ void ConnectionManager::refreshAuthenticatedState()
 
 bool ConnectionManager::isConnected() const
 {
-    return m_wsClient && m_wsClient->isConnected();
+    return isTransportAuthenticated();
+}
+
+bool ConnectionManager::isTransportAuthenticated() const
+{
+    return m_wsClient && m_wsClient->isTransportAuthenticated();
+}
+
+QString ConnectionManager::connectionDetail() const
+{
+    QStringList details;
+    if (m_state == State::Authenticating) details << QStringLiteral("Authenticating with server");
+    else if (m_state == State::Synchronizing) details << QStringLiteral("Synchronizing registration and sessions");
+    else if (m_state == State::Connecting) details << QStringLiteral("Establishing server connection");
+    else if (m_state == State::CleanupPending) details << QStringLiteral("Waiting for local resource cleanup");
+    else if (m_draining) details << (m_desiredEnabled
+        ? QStringLiteral("Finishing disconnect; Enable is queued") : QStringLiteral("Finishing disconnect"));
+    else if (!m_desiredEnabled) details << QStringLiteral("Network disabled");
+    if (!m_lastError.isEmpty()) details << m_lastError;
+    if (nextAttemptAtMs() >= 0) details << QStringLiteral("Next attempt in %1 s")
+        .arg(qMax<qint64>(0, nextAttemptAtMs() - m_clock()) / 1000.0, 0, 'f', 1);
+    if (m_retryAction == RetryAction::Blocked) details << QStringLiteral("Automatic attempts blocked; corrective action required");
+    return details.join(QStringLiteral("\n"));
+}
+
+void ConnectionManager::setRetryAction(RetryAction action)
+{
+    m_retryAction = action;
+    emit retryStateChanged();
 }
 
 void ConnectionManager::setServerUrl(const QString& url)
@@ -172,11 +213,10 @@ QString ConnectionManager::getConnectionStatus() const
     case State::Disconnected: return QStringLiteral("Disconnected");
     case State::Disconnecting: return QStringLiteral("Disconnecting");
     case State::Connecting: return QStringLiteral("Connecting");
-    case State::Authenticating: return QStringLiteral("Authenticating");
-    case State::Synchronizing: return QStringLiteral("Synchronizing");
+    case State::Authenticating: return QStringLiteral("Connecting");
+    case State::Synchronizing: return QStringLiteral("Connecting");
     case State::Connected: return QStringLiteral("Connected");
     case State::Degraded: return QStringLiteral("Degraded");
-    case State::Reconnecting: return QStringLiteral("Reconnecting");
     case State::CleanupPending: return QStringLiteral("Cleanup pending");
     case State::Failed: return QStringLiteral("Failed");
     }
@@ -189,8 +229,7 @@ void ConnectionManager::onConnected()
     qDebug() << "ConnectionManager: Connected successfully";
     m_attemptInProgress = false;
     m_attemptTimeoutTimer->stop();
-    m_stableConnection.start();
-    m_reconnectTimer->stop();
+    m_retries.cancel(QStringLiteral("connect"));
     
     refreshAuthenticatedState();
     if (m_desiredEnabled && !m_draining) emit connected();
@@ -202,12 +241,6 @@ void ConnectionManager::onDisconnected()
     m_attemptInProgress = false;
     m_attemptTimeoutTimer->stop();
     
-    if (m_stableConnection.isValid()
-        && m_stableConnection.elapsed() >= AppConfig::instance().reconnectStableResetMs()) {
-        m_fastRetryAttempt = 0;
-        m_backgroundRetryAttempt = 0;
-    }
-    m_stableConnection.invalidate();
     // A disconnected observer may synchronously finish the drain and queue
     // the latest Enable. That transition already owns the next attempt.
     const bool wasDraining = m_draining;
@@ -227,6 +260,8 @@ void ConnectionManager::onConnectionError(const QString& error)
     if (m_fatalFailure || !m_desiredEnabled || m_draining) return;
     qWarning() << "ConnectionManager: Connection error:" << error;
     
+    m_lastError = error;
+    emit retryStateChanged();
     emit connectionError(error);
     // Socket errors normally lead to disconnected(); cover errors raised after
     // the socket has already reached UnconnectedState without owning a second
@@ -243,7 +278,10 @@ void ConnectionManager::onFatalError(const QString& error)
 {
     if (!m_desiredEnabled || m_draining) return;
     m_fatalFailure = true;
-    m_reconnectTimer->stop();
+    m_lastError = error;
+    setRetryAction(RetryAction::Blocked);
+    m_syncTimeoutTimer.stop();
+    m_retries.cancel(QStringLiteral("connect"));
     m_attemptTimeoutTimer->stop();
     m_attemptInProgress = false;
     qCritical() << "ConnectionManager: Fatal transport error:" << error;
@@ -258,7 +296,7 @@ void ConnectionManager::onLeaseExpired(const QString& serverBootId,
     m_wasWithinLease = false;
     emit leaseExpired(serverBootId, connectionGeneration);
     if (m_desiredEnabled && !m_draining && !m_fatalFailure && !m_wsClient->isConnected()) {
-        m_reconnectTimer->stop();
+        m_retries.cancel(QStringLiteral("connect"));
         scheduleReconnect();
     }
 }
@@ -272,46 +310,48 @@ void ConnectionManager::onTransportHealthChanged(bool degraded)
 void ConnectionManager::scheduleReconnect()
 {
     if (!m_desiredEnabled || m_draining || m_fatalFailure
-        || m_reconnectTimer->isActive() || m_attemptInProgress) {
+        || m_retries.contains(QStringLiteral("connect")) || m_attemptInProgress) {
         return; // Already scheduled
     }
     
-    const bool withinLease = m_wsClient->hasUnexpiredLease();
+    bool withinLease = false;
+    if (m_wsClient->hasUnexpiredLease()) {
+        for (const auto& binding : m_wsClient->remoteSessionCoordinator()->all()) {
+            if ((binding.phase == QLatin1String("Active") || binding.phase == QLatin1String("Grace"))
+                && m_wsClient->sessionRecoveryRemainingMs(binding.remoteSessionId) > 0) {
+                withinLease = true;
+                break;
+            }
+        }
+    }
     if (withinLease != m_wasWithinLease) {
         if (withinLease) m_fastRetryAttempt = 0;
-        else m_backgroundRetryAttempt = 0;
         m_wasWithinLease = withinLease;
     }
-    const int attempt = withinLease ? m_fastRetryAttempt++ : m_backgroundRetryAttempt++;
+    int& counter = withinLease ? m_fastRetryAttempt : m_backgroundRetryAttempt;
+    const int attempt = counter;
+    counter = RetryPolicy::increment(counter);
     const int delay = retryDelayForAttempt(attempt, withinLease);
     
     qDebug() << "ConnectionManager: Scheduling reconnect attempt" << (attempt + 1)
              << "in" << delay << "ms";
     
-    setState(State::Reconnecting);
-    m_reconnectTimer->start(delay);
+    setState(State::Disconnected);
+    const quint64 cycle = m_transitionId;
+    m_retries.schedule(QStringLiteral("connect"), delay, [this, cycle] {
+        if (cycle == m_transitionId) attemptReconnect();
+    });
+    setRetryAction(RetryAction::Scheduled);
 }
 
 int ConnectionManager::retryDelayForAttempt(int attempt, bool withinLease)
 {
-    attempt = std::max(0, attempt);
-    const AppConfig& config = AppConfig::instance();
-    if (withinLease) {
-        const qint64 base = qMin<qint64>(
-            static_cast<qint64>(attempt) * config.reconnectFastStepMs(),
-            config.reconnectFastMaxMs());
-        return static_cast<int>(base);
-    }
-    const int exponent = std::min(attempt, 20);
-    const qint64 capped = qMin<qint64>(
-        static_cast<qint64>(config.reconnectBaseMs()) << exponent,
-        config.reconnectMaxMs());
-    const qint64 spread = capped * config.reconnectJitterPercent() / 100;
-    if (spread <= 0) return static_cast<int>(capped);
-    const qint64 minimum = qMax<qint64>(1, capped - spread);
-    const quint64 width = static_cast<quint64>(capped + spread - minimum + 1);
-    return static_cast<int>(minimum
-        + static_cast<qint64>(QRandomGenerator::global()->generate64() % width));
+    const auto& config = AppConfig::instance();
+    const RetryPolicy policy = withinLease
+        ? RetryPolicy{config.reconnectFastStepMs(), config.reconnectFastMaxMs(),
+                      config.reconnectJitterPercent(), RetryPolicy::Growth::Linear, true}
+        : RetryPolicy{config.reconnectBaseMs(), config.reconnectMaxMs(), config.reconnectJitterPercent()};
+    return policy.delay(attempt);
 }
 
 void ConnectionManager::attemptReconnect()
@@ -329,10 +369,11 @@ void ConnectionManager::beginAttempt()
     if (!m_desiredEnabled || m_draining || m_fatalFailure
         || m_serverUrl.isEmpty() || m_attemptInProgress
         || m_wsClient->isConnected()) return;
-    m_reconnectTimer->stop();
+    m_retries.cancel(QStringLiteral("connect"));
     m_registrationReady = false;
     m_reconciliationReady = false;
     m_degraded = false;
+    setRetryAction(RetryAction::Running);
     setState(State::Connecting);
     m_attemptInProgress = true;
     qDebug() << "ConnectionManager: Attempting connection to" << m_serverUrl;
@@ -357,10 +398,35 @@ void ConnectionManager::onAttemptTimedOut()
     scheduleReconnect();
 }
 
+void ConnectionManager::observeStability(bool healthy)
+{
+    const qint64 observationGap = m_wsClient->serverPolicy()
+        .value(QStringLiteral("transportSuspectAfterMs")).toInteger(1500);
+    // A long sleep or blocked event loop is not evidence of a healthy interval.
+    if (m_stableConnection.transition(healthy, m_clock(),
+            AppConfig::instance().reconnectStableResetMs(), observationGap)) {
+        m_fastRetryAttempt = 0;
+        m_backgroundRetryAttempt = 0;
+        emit retryStateChanged();
+    }
+}
+
 void ConnectionManager::setState(State state)
 {
     if (m_state == state) return;
+    observeStability(state == State::Connected);
+    if (state == State::Connected) {
+        m_lastError.clear();
+        setRetryAction(RetryAction::Idle);
+    }
+    if (state == State::Synchronizing) {
+        if (!m_syncTimeoutTimer.isActive()) m_syncTimeoutTimer.start(AppConfig::instance().connectionSyncTimeoutMs());
+    } else m_syncTimeoutTimer.stop();
+    if (state == State::CleanupPending) setRetryAction(RetryAction::Suspended);
+    if (state == State::Connecting || state == State::Authenticating || state == State::Synchronizing)
+        setRetryAction(RetryAction::Running);
     m_state = state;
+    emit retryStateChanged();
     emit stateChanged(state);
     emit statusChanged(getConnectionStatus());
 }

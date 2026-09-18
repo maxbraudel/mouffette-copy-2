@@ -496,9 +496,6 @@ RemoteCacheStore::RemoteCacheStore(QString rootPath, QObject* parent,
 {
     m_history = history ? std::move(history) : std::make_shared<RemoteCacheHistory>();
     m_transactionPool.setMaxThreadCount(1);
-    m_cleanupSweepTimer.setSingleShot(true);
-    m_cleanupSweepTimer.setInterval(1000);
-    connect(&m_cleanupSweepTimer, &QTimer::timeout, this, &RemoteCacheStore::requestCleanupSweep);
 }
 
 RemoteCacheStore::~RemoteCacheStore() = default;
@@ -764,8 +761,8 @@ bool RemoteCacheStore::initialize(QString* errorCode)
         return false;
     }
     collectExpiredHistory();
-    if (!m_backgroundTransaction && m_history->size() > 0 && !m_cleanupSweepTimer.isActive())
-        m_cleanupSweepTimer.start(60000);
+    if (!m_backgroundTransaction && m_history->size() > 0 && !m_cleanupRetries.contains(QStringLiteral("history")))
+        m_cleanupRetries.schedule(QStringLiteral("history"), 60000, [this] { requestCleanupSweep(); });
     return true;
 }
 
@@ -1731,9 +1728,9 @@ RemoteCacheStore::CommitResult RemoteCacheStore::requestTeardown(
             if (stored && loadJsonObject(tombstonePath(scope), &record, &ignored))
                 schedulePhysicalCleanup(*stored, record.value(QStringLiteral("quarantineEntry")).toString());
         } else {
-            const int attempt = qMin(6, m_transactionFailures.value(key));
-            m_transactionFailures[key] = attempt + 1;
-            m_transactionRetryAt[key] = MouffetteClock::nowMs() + qMin(30000, 500 << attempt);
+            const int attempt = m_transactionFailures.value(key);
+            m_transactionFailures[key] = RetryPolicy::increment(attempt);
+            m_transactionRetryAt[key] = MouffetteClock::nowMs() + m_cleanupRetryPolicy.delay(attempt);
         }
         qInfo().noquote() << QJsonDocument(QJsonObject{
             {QStringLiteral("event"), QStringLiteral("cache_quarantine_completed")},
@@ -2768,7 +2765,9 @@ void RemoteCacheStore::collectExpiredHistory()
 
 void RemoteCacheStore::requestCleanupSweep()
 {
-    if (m_backgroundTransaction || m_cleanupSweepPending || m_recoveryPending) return;
+    if (m_backgroundTransaction || m_cleanupSweepPending) return;
+    if (m_recoveryPending) { scheduleCleanupSweep(); return; }
+    m_cleanupRetries.cancelAll();
     m_cleanupSweepPending = true;
     using CleanupBatch = QPair<QList<QPair<Tombstone, QString>>, QStringList>;
     auto* watcher = new QFutureWatcher<CleanupBatch>(this);
@@ -2779,7 +2778,7 @@ void RemoteCacheStore::requestCleanupSweep()
         for (const auto& job : batch.first) schedulePhysicalCleanup(job.first, job.second);
         for (const auto& entry : batch.second) scheduleOrphanCleanup(entry);
         if (batch.first.isEmpty() && batch.second.isEmpty() && m_history->size() > 0)
-            m_cleanupSweepTimer.start(60000);
+            m_cleanupRetries.schedule(QStringLiteral("history"), 60000, [this] { requestCleanupSweep(); });
     });
     watcher->setFuture(QtConcurrent::run(&m_transactionPool, [root = m_rootPath, history = m_history]() {
         RemoteCacheStore disk(root);
@@ -2804,7 +2803,7 @@ void RemoteCacheStore::schedulePhysicalCleanup(const Tombstone& tombstoneValue,
         return;
     }
     if (m_scheduledEntries.size() >= 64) {
-        if (!m_cleanupSweepTimer.isActive()) m_cleanupSweepTimer.start();
+        scheduleCleanupSweep();
         return; // durable tombstone retains the obligation for the next sweep
     }
     m_scheduledEntries.insert(quarantineEntry);
@@ -2840,7 +2839,7 @@ void RemoteCacheStore::scheduleOrphanCleanup(const QString& quarantineEntry)
         return;
     }
     if (m_scheduledEntries.size() >= 64) {
-        if (!m_cleanupSweepTimer.isActive()) m_cleanupSweepTimer.start();
+        scheduleCleanupSweep();
         return;
     }
     m_scheduledEntries.insert(quarantineEntry);
@@ -2922,7 +2921,18 @@ void RemoteCacheStore::finishPhysicalCleanup(const DeleteResult& result)
     }
     // A bounded disk sweep supplies subsequent batches and retries failed
     // physical deletions without requiring another connection or restart.
-    m_cleanupSweepTimer.setInterval(result.success ? 1000
-        : qMin(30000, m_cleanupSweepTimer.interval() * 2));
-    if (!m_cleanupSweepTimer.isActive()) m_cleanupSweepTimer.start();
+    scheduleCleanupSweep(!result.success);
+}
+
+void RemoteCacheStore::scheduleCleanupSweep(bool failed)
+{
+    if (m_backgroundTransaction) return;
+    if (!failed) m_physicalCleanupAttempt = 0;
+    const int delay = m_cleanupRetryPolicy.delay(m_physicalCleanupAttempt);
+    if (failed) m_physicalCleanupAttempt = RetryPolicy::increment(m_physicalCleanupAttempt);
+    const QString key = QStringLiteral("sweep");
+    // New work may expedite a history-only sweep, but never creates a second job.
+    const qint64 due = m_cleanupRetries.dueAt(key);
+    if (due < 0 || MouffetteClock::nowMs() + delay < due)
+        m_cleanupRetries.schedule(key, delay, [this] { requestCleanupSweep(); });
 }

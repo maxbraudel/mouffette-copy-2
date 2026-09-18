@@ -1,5 +1,6 @@
 #include "backend/network/WebSocketClient.h"
 #include "backend/config/AppConfig.h"
+#include "backend/network/RetryPolicy.h"
 #include "backend/runtime/SuspendInclusiveClock.h"
 #include "backend/runtime/RuntimeProfile.h"
 #include "backend/network/SceneRunCoordinator.h"
@@ -229,6 +230,8 @@ WebSocketClient::WebSocketClient(const QString& identityFallbackDirectory,
                                  SuspendInclusiveClock suspendInclusiveClock,
                                  int instanceOrdinal)
     : QObject(parent)
+    , m_controlRetries(this, [this] { return suspendInclusiveNowMs(); })
+    , m_uploadRetries(this, [this] { return suspendInclusiveNowMs(); })
     , m_identityStore(std::make_unique<DeviceIdentityStore>(
           identityFallbackDirectory, preferNativeIdentityVault))
     , m_sceneRuns(std::make_unique<SceneRunCoordinator>())
@@ -271,11 +274,11 @@ WebSocketClient::WebSocketClient(const QString& identityFallbackDirectory,
     connect(m_leaseHealthTimer, &QTimer::timeout, this, &WebSocketClient::checkLeaseHealth);
     connect(remoteSessionCoordinator(), &RemoteSessionCoordinator::sessionRemoved,
             this, [this](const QString& sessionId) {
+        completeSessionRequests(sessionId, true, true);
         m_receivedCursorSequenceBySession.remove(sessionId);
         m_publishedDeviceSnapshots.remove(sessionId);
         m_sessionDeadlines.remove(sessionId);
         m_resumeRequestIds.remove(sessionId);
-        m_expiredSessionCloses.remove(sessionId);
     });
 
     const auto profile = RuntimeProfile::context();
@@ -316,12 +319,12 @@ void WebSocketClient::onUploadTextMessageReceived(const QString& message) {
     QJsonDocument doc = QJsonDocument::fromJson(message.toUtf8(), &error);
     if (error.error != QJsonParseError::NoError) {
         qWarning() << "Failed to parse JSON message on upload channel:" << error.errorString();
-        closeUploadChannel();
+        failUploadChannelAttempt(QStringLiteral("Upload channel response rejected"));
         return;
     }
     if (!doc.isObject()) {
         qWarning() << "Rejected non-object message on upload channel";
-        closeUploadChannel();
+        failUploadChannelAttempt(QStringLiteral("Upload channel response rejected"));
         return;
     }
     QJsonObject obj = doc.object();
@@ -342,9 +345,13 @@ void WebSocketClient::onUploadTextMessageReceived(const QString& message) {
             && generation == m_connectionGeneration;
         if (!m_uploadChannelAuthenticated) {
             qWarning() << "Upload channel envelope does not match the authenticated control connection";
-            closeUploadChannel();
+            failUploadChannelAttempt(QStringLiteral("Upload channel response rejected"));
             return;
         }
+        m_uploadRetries.cancel(QStringLiteral("attempt"));
+        m_uploadRetries.schedule(QStringLiteral("stable"), AppConfig::instance().reconnectStableResetMs(), [this] {
+            if (isUploadChannelConnected()) m_uploadRetryAttempt = 0;
+        });
         m_uploadClientId = readyEndpointId;
         qDebug() << "Upload channel authenticated for client:" << m_uploadClientId;
         return;
@@ -354,18 +361,18 @@ void WebSocketClient::onUploadTextMessageReceived(const QString& message) {
         // dedicated socket unauthenticated and let the upload fall back to the
         // already authenticated control connection.
         qWarning() << "Upload channel server did not provide authenticated readiness";
-        closeUploadChannel();
+        failUploadChannelAttempt(QStringLiteral("Upload channel response rejected"));
         return;
     }
     if (type == "error" && !m_uploadChannelAuthenticated) {
         qWarning() << "Upload channel authentication failed:"
                    << obj.value("message").toString();
-        closeUploadChannel();
+        failUploadChannelAttempt(QStringLiteral("Upload channel response rejected"));
         return;
     }
     if (!m_uploadChannelAuthenticated) {
         qWarning() << "Rejected application message on an unauthenticated upload channel";
-        closeUploadChannel();
+        failUploadChannelAttempt(QStringLiteral("Upload channel response rejected"));
         return;
     }
     // Reuse the same message handler for upload progress/finished/all_files_removed
@@ -456,6 +463,7 @@ void WebSocketClient::connectToServer(const QString& serverUrl) {
 }
 
 void WebSocketClient::disconnect() {
+    clearControlRequests();
     m_endpointDraining = true;
     m_pendingServerBootId.clear();
     m_endpointDisableRequestId.clear();
@@ -464,7 +472,6 @@ void WebSocketClient::disconnect() {
         if (m_sceneRuns) m_sceneRuns->clearSessions();
     }
     m_sessionDeadlines.clear();
-    m_expiredSessionCloses.clear();
     m_resumeRequestIds.clear();
     m_reconcileRequestId.clear();
     m_hasEstablishedLease = false;
@@ -500,38 +507,36 @@ void WebSocketClient::onUploadConnected() {
     qDebug() << "Upload channel connected";
 }
 
-void WebSocketClient::onUploadDisconnected() {
-    const bool selectedTransportWasLost = m_uploadSessionActive
-        && m_useUploadSocketForSession;
-    m_uploadChannelAuthenticated = false;
-    m_uploadChannelTokenRequested = false;
-    m_uploadChannelToken.clear();
-    m_uploadClientId.clear();
-    qDebug() << "Upload channel disconnected";
-    if (selectedTransportWasLost) {
-        reportSelectedUploadTransportLost(
-            QStringLiteral("Dedicated upload connection was lost"));
-    } else if (isConnected()) {
-        // Recreate the optional channel in the background. An upload already
-        // pinned to the control socket is deliberately never switched mid-flow.
-        QTimer::singleShot(0, this, [this]() { ensureUploadChannel(); });
-    }
+void WebSocketClient::scheduleUploadChannelRetry(const QString& reason)
+{
+    if (!isConnected() || m_endpointDraining || m_uploadRetries.contains(QStringLiteral("retry"))) return;
+    const auto& config = AppConfig::instance();
+    const int delay = RetryPolicy{config.uploadChannelRetryBaseMs(), config.uploadChannelRetryMaxMs(),
+                                 config.reconnectJitterPercent()}.delay(m_uploadRetryAttempt);
+    m_uploadRetryAttempt = RetryPolicy::increment(m_uploadRetryAttempt);
+    const quint64 transport = m_connectionGeneration;
+    qInfo() << "upload_channel_retry" << "reason" << reason << "delayMs" << delay << "transport" << transport;
+    m_uploadRetries.schedule(QStringLiteral("retry"), delay, [this, transport] {
+        if (transport == m_connectionGeneration && isConnected() && !m_endpointDraining) ensureUploadChannel();
+    });
 }
 
-void WebSocketClient::onUploadError(QAbstractSocket::SocketError error) {
-    m_uploadChannelAuthenticated = false;
-    QString errorString;
-    switch (error) {
-        case QAbstractSocket::ConnectionRefusedError: errorString = "Connection refused"; break;
-        case QAbstractSocket::RemoteHostClosedError: errorString = "Remote host closed connection"; break;
-        case QAbstractSocket::HostNotFoundError: errorString = "Host not found"; break;
-        case QAbstractSocket::SocketTimeoutError: errorString = "Connection timeout"; break;
-        default: errorString = QString("Socket error: %1").arg(error);
-    }
-    qWarning() << "Upload WebSocket error:" << errorString;
-    if (m_uploadSessionActive && m_useUploadSocketForSession) {
-        reportSelectedUploadTransportLost(errorString);
-    }
+void WebSocketClient::failUploadChannelAttempt(const QString& reason)
+{
+    const bool selected = m_uploadSessionActive && m_useUploadSocketForSession;
+    closeUploadChannel();
+    if (selected) reportSelectedUploadTransportLost(reason);
+    scheduleUploadChannelRetry(reason);
+}
+
+void WebSocketClient::onUploadDisconnected()
+{
+    failUploadChannelAttempt(QStringLiteral("Dedicated upload connection was lost"));
+}
+
+void WebSocketClient::onUploadError(QAbstractSocket::SocketError error)
+{
+    failUploadChannelAttempt(QStringLiteral("Upload socket error: %1").arg(error));
 }
 
 bool WebSocketClient::isConnected() const {
@@ -615,6 +620,7 @@ void WebSocketClient::reportSelectedUploadTransportLost(const QString& reason) {
 }
 
 bool WebSocketClient::ensureUploadChannel() {
+    if (m_endpointDraining || m_uploadRetries.contains(QStringLiteral("retry"))) return false;
     if (isUploadChannelConnected()) {
         return true;
     }
@@ -658,7 +664,14 @@ bool WebSocketClient::ensureUploadChannel() {
     if (m_uploadChannelToken.isEmpty()) {
         if (!m_uploadChannelTokenRequested) {
             m_uploadChannelTokenRequested = true;
+            m_uploadTokenRequestId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+            const quint64 transport = m_connectionGeneration;
+            m_uploadRetries.schedule(QStringLiteral("attempt"), AppConfig::instance().uploadChannelAttemptTimeoutMs(), [this, transport] {
+                if (transport == m_connectionGeneration && !isUploadChannelConnected())
+                    failUploadChannelAttempt(QStringLiteral("Upload channel establishment timed out"));
+            });
             QJsonObject request;
+            request["requestId"] = m_uploadTokenRequestId;
             request["type"] = "request_upload_channel";
             sendMessage(request);
         }
@@ -679,6 +692,8 @@ bool WebSocketClient::ensureUploadChannel() {
 }
 
 void WebSocketClient::closeUploadChannel() {
+    m_uploadRetries.cancelAll();
+    m_uploadTokenRequestId.clear();
     m_uploadChannelAuthenticated = false;
     m_uploadChannelTokenRequested = false;
     m_uploadChannelToken.clear();
@@ -741,12 +756,98 @@ void WebSocketClient::registerClient(const QString& machineName, const QString& 
 
 void WebSocketClient::invalidateLocalDeviceSnapshot()
 {
+    completeControlRequest(m_registrationRequestId);
+    m_registrationRequestId.clear();
     m_deviceSnapshotRetryTimer.stop();
     m_registeredTargetSnapshot = {};
     m_registeredDeviceContent = {};
     m_registeredEndpointSnapshot = {};
     m_publishedEndpointSnapshot = {};
     m_publishedDeviceSnapshots.clear();
+}
+
+bool WebSocketClient::sendTrackedControl(const QJsonObject& message)
+{
+    const QString id = message.value(QStringLiteral("requestId")).toString();
+    if (id.isEmpty() || (!m_pendingControl.contains(id) && m_pendingControl.size() >= 4096)) {
+        qWarning() << "Control retry capacity exhausted or request identity missing";
+        return false;
+    }
+    if (!sendControlMessage(message)) return false;
+    m_pendingControl.insert(id, {message, m_connectionGeneration, m_serverBootId});
+    if (!m_controlRetries.contains(id)) scheduleControlRetry(id);
+    return true;
+}
+
+void WebSocketClient::scheduleControlRetry(const QString& id)
+{
+    const auto& config = AppConfig::instance();
+    const int delay = RetryPolicy{config.controlRequestRetryMs(), config.controlRequestRetryMs(),
+                                 config.reconnectJitterPercent(), RetryPolicy::Growth::Fixed}.delay(0);
+    m_controlRetries.schedule(id, delay, [this, id] {
+        auto it = m_pendingControl.find(id);
+        if (it == m_pendingControl.end()) return;
+        const PendingControl pending = it.value();
+        const QString type = pending.message.value(QStringLiteral("type")).toString();
+        const QString session = pending.message.value(QStringLiteral("remoteSessionId")).toString();
+        if (!isConnected() || pending.transport != m_connectionGeneration || pending.boot != m_serverBootId
+            || (m_endpointDraining && type != QLatin1String("endpoint_disable")
+                && type != QLatin1String("remote_session_close"))) {
+            completeControlRequest(id);
+            return;
+        }
+        // Revalidate the session clock before a delayed RESUME, including on wake.
+        if (type == QLatin1String("remote_session_resume") && sessionRecoveryRemainingMs(session) <= 0) {
+            completeControlRequest(id);
+            checkSessionRecoveryDeadlines();
+            return;
+        }
+        qInfo() << "control_retry" << "type" << type << "requestId" << id
+                << "session" << session << "transport" << m_connectionGeneration << "replay" << true;
+        sendControlMessage(pending.message);
+        if (m_pendingControl.contains(id)) scheduleControlRetry(id);
+    });
+}
+
+void WebSocketClient::completeControlRequest(const QString& id)
+{
+    m_pendingControl.remove(id);
+    m_controlRetries.cancel(id);
+}
+
+void WebSocketClient::clearControlRequests()
+{
+    m_pendingControl.clear();
+    m_controlRetries.cancelAll();
+    m_registrationRequestId.clear();
+}
+
+bool WebSocketClient::sessionRecoveryInProgress(const QString& sessionId) const
+{
+    for (const auto& pending : m_pendingControl) {
+        if (pending.message.value(QStringLiteral("remoteSessionId")).toString() == sessionId
+            && pending.message.value(QStringLiteral("type")).toString() == QLatin1String("remote_session_resume")) return true;
+    }
+    return false;
+}
+
+void WebSocketClient::completeSessionRequests(const QString& sessionId, bool terminal, bool final)
+{
+    const auto binding = remoteSessionCoordinator()->byId(sessionId);
+    const quint64 localTransport = binding.ownerEndpointId == m_endpointId
+        ? binding.ownerConnectionGeneration : binding.targetConnectionGeneration;
+    for (const QString& id : m_pendingControl.keys()) {
+        const auto message = m_pendingControl.value(id).message;
+        const QString type = message.value(QStringLiteral("type")).toString();
+        if (message.value(QStringLiteral("remoteSessionId")).toString() == sessionId
+            && (type == QLatin1String("remote_session_close") ? final
+                : (terminal || (type == QLatin1String("remote_session_resume") && localTransport == m_connectionGeneration))))
+            completeControlRequest(id);
+        if (type == QLatin1String("remote_session_open")
+            && binding.ownerEndpointId == m_endpointId
+            && message.value(QStringLiteral("targetEndpointId")).toString() == binding.targetEndpointId
+            && (terminal || binding.phase == QLatin1String("Active"))) completeControlRequest(id);
+    }
 }
 
 void WebSocketClient::publishDeviceSnapshots()
@@ -761,7 +862,11 @@ void WebSocketClient::publishDeviceSnapshots()
     }
     if (m_publishedEndpointGeneration != m_connectionGeneration
         || m_publishedEndpointSnapshot != m_registeredEndpointSnapshot) {
-        if (!sendControlMessage(m_registeredEndpointSnapshot)) return;
+        completeControlRequest(m_registrationRequestId);
+        m_registrationRequestId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+        QJsonObject request = m_registeredEndpointSnapshot;
+        request.insert(QStringLiteral("requestId"), m_registrationRequestId);
+        if (!sendTrackedControl(request)) return;
         m_publishedEndpointGeneration = m_connectionGeneration;
         m_publishedEndpointSnapshot = m_registeredEndpointSnapshot;
     }
@@ -1036,7 +1141,7 @@ bool WebSocketClient::replayRemoteSessionOpen(
         {QStringLiteral("targetEndpointId"), targetEndpointId},
         {QStringLiteral("requestId"), requestId}
     };
-    return sendControlMessage(message);
+    return sendTrackedControl(message);
 }
 
 bool WebSocketClient::acceptRemoteSessionOffer(const QJsonObject& offer)
@@ -1145,7 +1250,7 @@ bool WebSocketClient::resumeRemoteSession(const QString& remoteSessionId)
         {QStringLiteral("generation"), static_cast<double>(binding.generation)},
         {QStringLiteral("resumeToken"), binding.resumeToken}
     };
-    return sendControlMessage(message);
+    return sendTrackedControl(message);
 }
 
 void WebSocketClient::resumeAllRemoteSessions()
@@ -1189,8 +1294,9 @@ bool WebSocketClient::canIssueSessionCommands(const QString& remoteSessionId) co
 bool WebSocketClient::reconcileRemoteSessions()
 {
     if (!isConnected() || m_endpointDraining) return false;
+    if (!m_reconcileRequestId.isEmpty() && m_pendingControl.contains(m_reconcileRequestId)) return true;
     const qint64 now = suspendInclusiveNowMs();
-    if (m_reconcileSentAtMs >= 0 && now - m_reconcileSentAtMs < 1000) return false;
+    if (m_reconcileSentAtMs >= 0 && now - m_reconcileSentAtMs < AppConfig::instance().controlRequestRetryMs()) return false;
     if (m_reconcileRequestId.isEmpty())
         m_reconcileRequestId = QUuid::createUuid().toString(QUuid::WithoutBraces);
     QJsonArray sessions;
@@ -1201,7 +1307,7 @@ bool WebSocketClient::reconcileRemoteSessions()
             {QStringLiteral("stateRevision"), static_cast<double>(binding.stateRevision)}
         });
     }
-    if (!sendControlMessage(QJsonObject{
+    if (!sendTrackedControl(QJsonObject{
         {QStringLiteral("type"), QStringLiteral("remote_session_reconcile")},
         {QStringLiteral("requestId"), m_reconcileRequestId},
         {QStringLiteral("sessions"), sessions}
@@ -1229,7 +1335,6 @@ void WebSocketClient::updateSessionDeadline(const QJsonObject& envelope)
     const QString phase = envelope.value(QStringLiteral("phase")).toString();
     if (phase == QLatin1String("Terminating") || phase == QLatin1String("CleanupPending")
         || phase == QLatin1String("Closed")) {
-        m_expiredSessionCloses.remove(id);
         m_sessionDeadlines.remove(id);
         return;
     }
@@ -1279,26 +1384,8 @@ void WebSocketClient::checkSessionRecoveryDeadlines()
 void WebSocketClient::retryExpiredSessionClose(const QString& id, quint64 generation)
 {
     if (!isConnected() || !hasUnexpiredLease() || generation == 0) return;
-    auto& pending = m_expiredSessionCloses[id];
-    generation = std::max(generation, pending.sessionGeneration);
-    const qint64 now = suspendInclusiveNowMs();
-    if (pending.sessionGeneration != generation) {
-        pending.requestId = QUuid::createUuid().toString(QUuid::WithoutBraces);
-        pending.sessionGeneration = generation;
-        pending.sentAtMs = -1;
-    }
-    if (pending.transportGeneration == m_connectionGeneration && pending.sentAtMs >= 0
-        && now - pending.sentAtMs < 1000) return;
-    if (sendControlMessage(QJsonObject{
-            {QStringLiteral("type"), QStringLiteral("remote_session_close")},
-            {QStringLiteral("requestId"), pending.requestId},
-            {QStringLiteral("remoteSessionId"), id},
-            {QStringLiteral("generation"), static_cast<double>(generation)},
-            {QStringLiteral("reason"), QStringLiteral("session_recovery_expired")}
-        })) {
-        pending.transportGeneration = m_connectionGeneration;
-        pending.sentAtMs = now;
-    }
+    QString requestId;
+    closeRemoteSessionByIdentity(id, generation, &requestId, QStringLiteral("session_recovery_expired"));
 }
 
 void WebSocketClient::refreshSessionProofs(const QJsonObject& heartbeat)
@@ -1346,12 +1433,17 @@ bool WebSocketClient::beginEndpointDisable(const QString& requestId)
     const QString correlation = requestId.isEmpty()
         ? QUuid::createUuid().toString(QUuid::WithoutBraces) : requestId;
     if (!isUploadOpaqueId(correlation)) return false;
-    if (!sendControlMessage(QJsonObject{
+    if (!sendTrackedControl(QJsonObject{
             {QStringLiteral("type"), QStringLiteral("endpoint_disable")},
             {QStringLiteral("requestId"), correlation}
         })) {
         return false;
     }
+    for (const QString& id : m_pendingControl.keys()) {
+        const QString type = m_pendingControl.value(id).message.value(QStringLiteral("type")).toString();
+        if (type != QLatin1String("endpoint_disable") && type != QLatin1String("remote_session_close")) completeControlRequest(id);
+    }
+    closeUploadChannel();
     m_endpointDraining = true;
     m_endpointDisableRequestId = correlation;
     return true;
@@ -1381,6 +1473,16 @@ bool WebSocketClient::closeRemoteSessionByIdentity(
         || generation < 1 || generation > 9007199254740991ULL) {
         return false;
     }
+    for (const QString& id : m_pendingControl.keys()) {
+        const auto pending = m_pendingControl.value(id).message;
+        if (pending.value(QStringLiteral("type")).toString() != QLatin1String("remote_session_close")
+            || pending.value(QStringLiteral("remoteSessionId")).toString() != remoteSessionId) continue;
+        if (pending.value(QStringLiteral("generation")).toInteger() == static_cast<qint64>(generation)) {
+            if (requestId) *requestId = id;
+            return true;
+        }
+        completeControlRequest(id);
+    }
     const QString correlationId =
         QUuid::createUuid().toString(QUuid::WithoutBraces);
     QJsonObject message{
@@ -1390,7 +1492,7 @@ bool WebSocketClient::closeRemoteSessionByIdentity(
         {QStringLiteral("requestId"), correlationId},
         {QStringLiteral("reason"), reason.left(128)}
     };
-    if (!sendControlMessage(message)) return false;
+    if (!sendTrackedControl(message)) return false;
     if (requestId) *requestId = correlationId;
     return true;
 }
@@ -1659,6 +1761,7 @@ void WebSocketClient::onConnected() {
 }
 
 void WebSocketClient::onDisconnected() {
+    clearControlRequests();
     m_deviceSnapshotRetryTimer.stop();
     qDebug() << "Control transport disconnected";
     closeUploadChannel();
@@ -1767,7 +1870,7 @@ void WebSocketClient::checkLeaseHealth() {
             emit transportHealthChanged(true);
         }
         if (isTransportConnected()) {
-            setConnectionStatus("Reconnecting");
+            setConnectionStatus("Disconnected");
             abortConnectionAttempt();
         }
         return;
@@ -1942,6 +2045,7 @@ bool WebSocketClient::handleWelcome(const QJsonObject& message) {
 
     // A new authenticated transport must advertise once, including when a
     // restarted server reuses connection generation 1.
+    clearControlRequests();
     m_publishedEndpointSnapshot = {};
     m_publishedEndpointGeneration = 0;
     m_publishedDeviceSnapshots.clear();
@@ -2036,7 +2140,6 @@ void WebSocketClient::expireLease() {
     emit leaseExpired(m_serverBootId, m_connectionGeneration);
     if (m_sceneRuns) m_sceneRuns->clearSessions();
     m_sessionDeadlines.clear();
-    m_expiredSessionCloses.clear();
     m_resumeRequestIds.clear();
     m_reconcileRequestId.clear();
 }
@@ -2240,6 +2343,7 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
             qWarning() << "RemoteSession command rejected:" << code;
             QJsonObject remoteError = message;
             remoteError.remove(QStringLiteral("identityValid"));
+            completeControlRequest(message.value(QStringLiteral("requestId")).toString());
             emit remoteSessionError(remoteError);
             return;
         }
@@ -2250,6 +2354,8 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
         emit connectionError(err);
     }
     else if (type == "endpoint_snapshot_applied") {
+        const QString requestId = message.value(QStringLiteral("requestId")).toString();
+        if (!requestId.isEmpty() && requestId != m_registrationRequestId) return;
         const QJsonObject clientInfoObj = message["snapshot"].toObject();
         ClientInfo clientInfo = ClientInfo::fromJson(clientInfoObj);
         if (clientInfo.installationId() != m_installationId
@@ -2265,6 +2371,7 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
         }
         qDebug() << "Endpoint snapshot applied for endpoint" << m_endpointId
                  << "runtime" << m_runtimeId;
+        completeControlRequest(m_registrationRequestId);
         emit registrationConfirmed(clientInfo);
         // Keep the optional high-throughput channel ready before the first
         // upload. Failure is harmless; beginUploadSession() pins the control
@@ -2272,6 +2379,9 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
         QTimer::singleShot(0, this, [this]() { ensureUploadChannel(); });
     }
     else if (type == "upload_channel_token") {
+        const QString requestId = message.value(QStringLiteral("requestId")).toString();
+        if (!m_uploadChannelTokenRequested || m_endpointDraining
+            || (!requestId.isEmpty() && requestId != m_uploadTokenRequestId)) return;
         const QString token = message.value("token").toString();
         quint64 tokenGeneration = 0;
         m_uploadChannelTokenRequested = false;
@@ -2286,7 +2396,7 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
             QTimer::singleShot(0, this, [this]() { ensureUploadChannel(); });
         } else {
             m_uploadChannelToken.clear();
-            qWarning() << "Server returned an invalid upload channel token";
+            failUploadChannelAttempt(QStringLiteral("Server returned an invalid upload channel token"));
         }
     }
     else if (type == "client_list") {
@@ -2514,6 +2624,7 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
         const QString sessionId = message.value(QStringLiteral("remoteSessionId")).toString();
         const auto previousBinding = remoteSessionCoordinator()->byId(sessionId);
         if (remoteSessionCoordinator() && remoteSessionCoordinator()->isClosedDuplicate(message)) {
+            completeControlRequest(message.value(QStringLiteral("requestId")).toString());
             acknowledgeSessionState(message);
             return;
         }
@@ -2565,6 +2676,7 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
             return;
         }
         updateSessionDeadline(message);
+        completeSessionRequests(sessionId, type == QLatin1String("remote_session_terminating"));
         if (type == "remote_session_opening") {
             acknowledgeSessionState(message);
             emit messageReceived(message);
@@ -2644,6 +2756,8 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
         if (!m_sceneRuns) return;
         const QString sessionId = message.value(QStringLiteral("remoteSessionId")).toString();
         if (remoteSessionCoordinator()->isClosedDuplicate(message)) {
+            completeControlRequest(message.value(QStringLiteral("requestId")).toString());
+            completeSessionRequests(sessionId, true, true);
             acknowledgeSessionState(message);
             return;
         }
@@ -2657,8 +2771,8 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
                 reconcileRemoteSessions();
                 return;
             }
+            completeSessionRequests(sessionId, true);
             m_sessionDeadlines.remove(sessionId);
-            m_expiredSessionCloses.remove(sessionId);
             emit remoteSessionTerminating(terminal);
             emit remoteSessionLogicallyClosed(message);
             acknowledgeSessionState(message);
@@ -2685,6 +2799,7 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
             || !message.value(QStringLiteral("sessions")).isArray()
             || message.value(QStringLiteral("sessions")).toArray().size() > 4096
             || message.value(QStringLiteral("absentSessionIds")).toArray().size() > 4096) return;
+        completeControlRequest(m_reconcileRequestId);
         m_reconcileRequestId.clear();
         const quint64 failureSerial = m_reconciliationFailureSerial;
         const QJsonArray states = message.value(QStringLiteral("sessions")).toArray();
@@ -2721,7 +2836,8 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
         } else {
             if (m_reconcileRequestId.isEmpty())
                 m_reconcileRequestId = QUuid::createUuid().toString(QUuid::WithoutBraces);
-            QTimer::singleShot(1000, this, &WebSocketClient::reconcileRemoteSessions);
+            m_controlRetries.schedule(QStringLiteral("reconcile-next"), AppConfig::instance().controlRequestRetryMs(),
+                [this] { reconcileRemoteSessions(); });
         }
     }
     else if (type == "endpoint_disable_started") {
@@ -2733,6 +2849,7 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
         if (message.value(QStringLiteral("requestId")).toString() != m_endpointDisableRequestId
             || !readPositiveSafeJsonInteger(message.value(QStringLiteral("connectionGeneration")), &acknowledgedGeneration)
             || acknowledgedGeneration != m_connectionGeneration) return;
+        completeControlRequest(m_endpointDisableRequestId);
         emit endpointDisableAcknowledged(m_endpointDisableRequestId, acknowledgedGeneration);
     }
     else if (type == "scene_prepare" || type == "prepare_progress"

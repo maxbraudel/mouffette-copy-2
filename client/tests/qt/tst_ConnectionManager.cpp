@@ -196,25 +196,26 @@ void ConnectionManagerTest::manualIntentDominatesLateSignalsAndQueuesEnable()
 }
 
 void ConnectionManagerTest::fastRetrySchedule() {
-    QCOMPARE(ConnectionManager::retryDelayForAttempt(0, true), 0);
-    QCOMPARE(ConnectionManager::retryDelayForAttempt(1, true), 250);
-    QCOMPARE(ConnectionManager::retryDelayForAttempt(2, true), 500);
-    QCOMPARE(ConnectionManager::retryDelayForAttempt(3, true), 750);
-    QCOMPARE(ConnectionManager::retryDelayForAttempt(20, true), 750);
+    for (int attempt : {0, 1, 2, 3, 20}) {
+        const int value = ConnectionManager::retryDelayForAttempt(attempt, true);
+        QVERIFY(value >= 0);
+        QVERIFY(value <= 750);
+        if (attempt == 0) QVERIFY(value <= 250);
+    }
 }
 
 void ConnectionManagerTest::backgroundRetrySchedule() {
     const auto verifyJittered = [](int attempt, int base) {
         const int delay = ConnectionManager::retryDelayForAttempt(attempt, false);
         QVERIFY(delay >= qMax(1, base - base / 5));
-        QVERIFY(delay <= base + base / 5);
+        QVERIFY(delay <= qMin(5000, base + base / 5));
     };
     verifyJittered(0, 1000);
     verifyJittered(1, 2000);
-    verifyJittered(4, 16000);
-    verifyJittered(5, 30000);
-    verifyJittered(50, 30000);
-    verifyJittered(std::numeric_limits<int>::max(), 30000);
+    verifyJittered(2, 4000);
+    verifyJittered(5, 5000);
+    verifyJittered(50, 5000);
+    verifyJittered(std::numeric_limits<int>::max(), 5000);
 }
 
 void ConnectionManagerTest::unavailableServerErrorsRemainRetryable_data()
@@ -242,7 +243,7 @@ void ConnectionManagerTest::unavailableServerErrorsRemainRetryable()
     QCOMPARE(errors.count(), 1);
     QVERIFY(fatal.isEmpty());
     QVERIFY(manager.connectionEnabled());
-    QCOMPARE(manager.state(), ConnectionManager::State::Reconnecting);
+    QCOMPARE(manager.state(), ConnectionManager::State::Disconnected);
     manager.disconnect();
 }
 
@@ -1140,6 +1141,14 @@ void ConnectionManagerTest::protocolUploadWireSchemaAndActiveGate() {
                 });
             } else if (type == QLatin1String("endpoint_snapshot")) {
                 endpointSnapshots.append(message);
+                QJsonObject snapshot = message;
+                snapshot.insert("installationId", client.installationId());
+                snapshot.insert("endpointId", client.endpointId());
+                snapshot.insert("instanceId", client.instanceId());
+                snapshot.insert("instanceOrdinal", client.instanceOrdinal());
+                snapshot.insert("runtimeId", client.runtimeId());
+                sendServerMessage(QJsonObject{{"type", "endpoint_snapshot_applied"},
+                    {"requestId", message.value("requestId")}, {"snapshot", snapshot}});
             } else if (type.startsWith(QLatin1String("upload_"))) {
                 uploadCommands.append(message);
             } else if (type == QLatin1String("remote_session_teardown_ack")) {

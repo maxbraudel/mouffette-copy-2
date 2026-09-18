@@ -19,7 +19,6 @@ struct RemoteClientState {
     enum ConnectionStatus {
         Disconnected,
         Connecting,
-        Reconnecting,
         Connected,
         Error
     };
@@ -81,7 +80,6 @@ struct RemoteClientState {
         switch (connectionStatus) {
             case Disconnected: return "DISCONNECTED";
             case Connecting: return "CONNECTING";
-            case Reconnecting: return "RECONNECTING";
             case Connected: return "CONNECTED";
             case Error: return "ERROR";
         }

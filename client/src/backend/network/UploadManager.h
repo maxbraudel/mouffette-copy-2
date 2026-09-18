@@ -1,6 +1,8 @@
 #ifndef UPLOADMANAGER_H
 #define UPLOADMANAGER_H
 
+#include "backend/network/RetryScheduler.h"
+
 #include "backend/network/RemoteCacheStore.h"
 #include "backend/network/UploadScheduler.h"
 #include "backend/runtime/SuspendInclusiveClock.h"
@@ -538,7 +540,12 @@ private:
         QString reason;
     };
     QHash<QString, PendingCacheTeardown> m_terminalCacheTeardowns;
-    QTimer m_receiverCleanupRetryTimer;
+    RetryScheduler m_receiverCleanupRetries;
+    int m_receiverCleanupAttempt = 0;
+    void scheduleReceiverCleanup();
+    RetryScheduler m_stagingCleanupRetries;
+    QHash<QString, int> m_stagingCleanupAttempts;
+    void scheduleStagingCleanup(const QString& senderId, const QString& uploadId);
     QHash<QString, QJsonObject> m_pendingDiskRemovals;
 
     FileManager* m_fileManager = nullptr;

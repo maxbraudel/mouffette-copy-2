@@ -113,6 +113,7 @@ QtObject {
                     width: topBar.stacked ? topBar.width : implicitWidth
                     primaryText: "You"
                     statusText: root.controller.localStatusText
+                    detailProvider: () => root.controller.localConnectionDetail()
                     statusKind: root.controller.localConnectionState
                 }
                 SegmentedStatusCard {
@@ -124,6 +125,7 @@ QtObject {
                     width: topBar.stacked ? topBar.width : implicitWidth
                     primaryText: root.controller.remoteDisplayName
                     statusText: root.controller.remoteStatusText
+                    detailProvider: () => root.controller.remoteConnectionDetail()
                     statusKind: root.controller.remoteConnectionState
                     auxiliaryText: root.controller.remoteVolumeText
                     auxiliaryVisible: root.controller.remoteVolumeVisible

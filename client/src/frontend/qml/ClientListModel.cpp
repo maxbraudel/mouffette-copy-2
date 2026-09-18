@@ -93,7 +93,6 @@ int ClientListModel::badgeKind(const QString& status)
         return 0;
     }
     if (status == QLatin1String("Connecting")
-        || status == QLatin1String("Reconnecting")
         || status == QLatin1String("Degraded")) {
         return 1;
     }

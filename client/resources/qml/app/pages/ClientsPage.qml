@@ -16,6 +16,7 @@ Item {
             Layout.fillWidth: true
             Layout.fillHeight: true
             model: root.controller.clientsModel
+            detailProvider: endpoint => root.controller.clientConnectionDetail(endpoint)
             emptyText: "No clients connected. Make sure other devices are running Mouffette and connected to the same server."
             onActivated: function(identifier) { root.controller.openClient(identifier) }
         }

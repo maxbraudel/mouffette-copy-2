@@ -131,6 +131,8 @@ ClientInfo ClientInfo::fromJson(const QJsonObject& json) {
     client.m_machineName = json["machineName"].toString();
     client.m_platform = json["platform"].toString();
     client.m_status = json.value("status").toString(QStringLiteral("Available"));
+    if (client.m_status.compare(QStringLiteral("Reconnecting"), Qt::CaseInsensitive) == 0)
+        client.m_status = QStringLiteral("Disconnected");
     client.m_volumePercent = json.contains("volumePercent") ? json["volumePercent"].toInt(-1) : -1;
     client.m_fromMemory = false;
     client.m_isOnline = client.m_status != QLatin1String("Disconnected");
@@ -201,7 +203,7 @@ QString ClientInfo::availabilityBadgeText() const
         }
         if (value.compare(QStringLiteral("reconnecting"), Qt::CaseInsensitive) == 0
             || value.compare(QStringLiteral("grace"), Qt::CaseInsensitive) == 0) {
-            return QStringLiteral("Reconnecting");
+            return QStringLiteral("Disconnected");
         }
         if (value.compare(QStringLiteral("disconnecting"), Qt::CaseInsensitive) == 0
             || value.compare(QStringLiteral("terminating"), Qt::CaseInsensitive) == 0

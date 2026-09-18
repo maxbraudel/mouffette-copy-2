@@ -570,10 +570,10 @@ private slots:
         connections->connectToServer(server.url());
         QTRY_COMPARE_WITH_TIMEOUT(ready.count(), 1, 2000);
         QTRY_VERIFY(!server.registrationReply.isEmpty() && !server.reconciliationReply.isEmpty());
-        QCOMPARE(runtime.localStatusText(), QStringLiteral("SYNCHRONIZING"));
+        QCOMPARE(runtime.localStatusText(), QStringLiteral("CONNECTING"));
         QVERIFY(server.send(server.registrationReply));
         QTest::qWait(20);
-        QCOMPARE(runtime.localStatusText(), QStringLiteral("SYNCHRONIZING"));
+        QCOMPARE(runtime.localStatusText(), QStringLiteral("CONNECTING"));
         QVERIFY(server.send(server.reconciliationReply));
         QTRY_COMPARE(runtime.localStatusText(), QStringLiteral("CONNECTED"));
         server.replyRegistration = true;
@@ -1248,7 +1248,7 @@ private slots:
         QVERIFY(!runtime.isRemoteClientConnected());
         QVERIFY(runtime.findWorkspace(targetEndpointId));
         QVERIFY(!runtime.findWorkspace(targetEndpointId)->canvas);
-        QCOMPARE(runtime.remoteStatusText(), QStringLiteral("CONNECTING"));
+        QCOMPARE(runtime.remoteStatusText(), QStringLiteral("DISCONNECTING"));
 
         QVERIFY(server.sendClosed(malformedSessionId, targetEndpointId));
         QTRY_COMPARE_WITH_TIMEOUT(server.openCommands.size(), 2, 1'000);
@@ -1517,14 +1517,14 @@ private slots:
         });
         QTRY_COMPARE_WITH_TIMEOUT(leaseStateSpy.count(), 1, 1'000);
         QVERIFY(!runtime.isRemoteClientConnected());
-        QCOMPARE(runtime.remoteStatusText(), QStringLiteral("AVAILABLE"));
+        QCOMPARE(runtime.remoteStatusText(), QStringLiteral("DISCONNECTING"));
         QVERIFY(runtime.getWorkspaceManager()->remoteSessionState(targetEndpointId)
                 != WorkspaceManager::RemoteSessionState::Active);
         const QList<ClientInfo> afterLateActive = runtime.displayClients();
         QCOMPARE(afterLateActive.size(), 1);
         QCOMPARE(afterLateActive.constFirst().endpointId(), targetEndpointId);
         QCOMPARE(afterLateActive.constFirst().availabilityBadgeText(),
-                 QStringLiteral("Available"));
+                 QStringLiteral("Disconnecting"));
 
         runtime.getProjectManager()->processDeadlines(deleteAt - 1);
         QVERIFY(runtime.getProjectManager()->hasProjectForTarget(targetEndpointId));
@@ -1898,14 +1898,14 @@ private slots:
         QVERIFY(runtime.activeProjectExists());
         QVERIFY(runtime.getActiveCanvas());
         QVERIFY(!runtime.isRemoteClientConnected());
-        QCOMPARE(runtime.remoteStatusText(), QStringLiteral("AVAILABLE"));
+        QCOMPARE(runtime.remoteStatusText(), QStringLiteral("DISCONNECTING"));
 
         // Pointer activity is the automatic reopen intent. Since CLOSE1 is
         // not committed yet it must not emit OPEN2 prematurely.
         ++nowMs;
         runtime.setPointerInsideControlWindow(true);
         QCOMPARE(server.openCommands.size(), 1);
-        QCOMPARE(runtime.remoteStatusText(), QStringLiteral("CONNECTING"));
+        QCOMPARE(runtime.remoteStatusText(), QStringLiteral("DISCONNECTING"));
         QVERIFY(!runtime.isRemoteClientConnected());
         QVERIFY(!runtime.isRemoteOverlayActionsEnabled());
 
@@ -2256,6 +2256,7 @@ private slots:
         QTRY_COMPARE_WITH_TIMEOUT(disconnectedSpy.count(), 1, 2'000);
         QTRY_COMPARE_WITH_TIMEOUT(connectedSpy.count(), 2, 3'000);
         QTRY_COMPARE_WITH_TIMEOUT(server.resumeCommands.size(), 1, 1'000);
+        QTRY_COMPARE_WITH_TIMEOUT(connections->state(), ConnectionManager::State::Connected, 1000);
         QCOMPARE(server.resumeCommands.constFirst()
                      .value(QStringLiteral("remoteSessionId")).toString(),
                  remoteSessionId);
@@ -2269,7 +2270,7 @@ private slots:
         QVERIFY(runtime.getActiveCanvas());
         QVERIFY(!runtime.isRemoteClientConnected());
         QVERIFY(!runtime.isRemoteOverlayActionsEnabled());
-        QCOMPARE(runtime.remoteStatusText(), QStringLiteral("RECONNECTING"));
+        QCOMPARE(runtime.remoteStatusText(), QStringLiteral("CONNECTING"));
         QCOMPARE(runtime.remoteVolumePercent(), -1);
         QCOMPARE(server.openCommands.size(), 1);
         QCOMPARE(runtime.getWorkspaceManager()->remoteSessionState(
@@ -2293,7 +2294,7 @@ private slots:
                  WorkspaceManager::RemoteSessionState::Grace);
         QVERIFY(!runtime.isRemoteClientConnected());
         QVERIFY(!runtime.isRemoteOverlayActionsEnabled());
-        QCOMPARE(runtime.remoteStatusText(), QStringLiteral("RECONNECTING"));
+        QCOMPARE(runtime.remoteStatusText(), QStringLiteral("DISCONNECTED"));
         QCOMPARE(runtime.remoteVolumePercent(), -1);
         QCOMPARE(server.openCommands.size(), 1);
 
@@ -2457,7 +2458,7 @@ private slots:
         // replacement, but OPEN2 must wait for the old boot's terminal result.
         runtime.activateClient(targetEndpointId);
         QCOMPARE(server.openCommands.size(), 1);
-        QCOMPARE(runtime.remoteStatusText(), QStringLiteral("CONNECTING"));
+        QCOMPARE(runtime.remoteStatusText(), QStringLiteral("DISCONNECTING"));
 
         QSignalSpy disconnectedSpy(runtime.getWebSocketClient(),
                                    &WebSocketClient::disconnected);
@@ -2685,6 +2686,8 @@ private slots:
         client.setVolumePercent(-1);
         QVERIFY(server.sendClientList(client));
         QTRY_COMPARE_WITH_TIMEOUT(listSpy.count(), 1, 1'000);
+        QTRY_COMPARE_WITH_TIMEOUT(connections->state(), ConnectionManager::State::Connected, 1000);
+        QTRY_COMPARE_WITH_TIMEOUT(runtime.displayClients().size(), 1, 1000);
         runtime.activateClient(targetEndpointId);
         QTRY_COMPARE_WITH_TIMEOUT(server.openCommands.size(), 1, 1'000);
         QVERIFY(server.sendOpened(
@@ -2791,6 +2794,8 @@ private slots:
         client.setVolumePercent(-1);
         QVERIFY(server.sendClientList(client));
         QTRY_COMPARE_WITH_TIMEOUT(listSpy.count(), 1, 1'000);
+        QTRY_COMPARE_WITH_TIMEOUT(connections->state(), ConnectionManager::State::Connected, 1000);
+        QTRY_COMPARE_WITH_TIMEOUT(runtime.displayClients().size(), 1, 1000);
         runtime.activateClient(targetEndpointId);
         QTRY_COMPARE_WITH_TIMEOUT(server.openCommands.size(), 1, 1'000);
         QVERIFY(server.sendOpened(
@@ -3142,6 +3147,18 @@ private slots:
             targetEndpointId, ScreenInfo(33, 3440, 1440, 0, 0, true), 52));
         QTRY_VERIFY_WITH_TIMEOUT(runtime.activeProjectExists(), 1'000);
 
+        // Local health must update the selected header and command capability
+        // without waiting for another server presence message.
+        QTRY_VERIFY_WITH_TIMEOUT(runtime.isRemoteClientConnected(), 1000);
+        emit runtime.getWebSocketClient()->transportHealthChanged(true);
+        QCOMPARE(runtime.remoteStatusText(), QStringLiteral("DEGRADED"));
+        QVERIFY(!runtime.isRemoteClientConnected());
+        QVERIFY(!runtime.isRemoteOverlayActionsEnabled());
+        emit runtime.getWebSocketClient()->transportHealthChanged(false);
+        QCOMPARE(runtime.remoteStatusText(), QStringLiteral("CONNECTED"));
+        QVERIFY(runtime.isRemoteClientConnected());
+        QCOMPARE(server.openCommands.size(), 1);
+
         // End the wire session while retaining the local Project/canvas.
         QSignalSpy closedSpy(runtime.getWebSocketClient(),
                             &WebSocketClient::remoteSessionClosed);
@@ -3261,7 +3278,7 @@ private slots:
         // replacement intent, but must not emit OPEN until CLOSE converges.
         runtime.activateClient(targetEndpointId);
         QCOMPARE(server.openCommands.size(), 1);
-        QCOMPARE(runtime.remoteStatusText(), QStringLiteral("CONNECTING"));
+        QCOMPARE(runtime.remoteStatusText(), QStringLiteral("DISCONNECTING"));
 
         // Stop contact. The exact session expires and loses command capability;
         // its immutable identity survives for authoritative reconciliation.
@@ -3339,8 +3356,17 @@ private slots:
         workspace->canvas = nullptr;
     }
 
+    void cleanupPendingOpenRetainsIntentUntilAuthenticatedDiscoveryRetry_data()
+    {
+        QTest::addColumn<QString>("transientCode");
+        QTest::newRow("cleanup-pending") << QStringLiteral("session_cleanup_pending");
+        QTest::newRow("target-recovering") << QStringLiteral("target_reconnecting");
+        QTest::newRow("target-unavailable") << QStringLiteral("target_unavailable");
+    }
+
     void cleanupPendingOpenRetainsIntentUntilAuthenticatedDiscoveryRetry()
     {
+        QFETCH(QString, transientCode);
         QTemporaryDir root;
         QVERIFY(root.isValid());
 
@@ -3388,25 +3414,24 @@ private slots:
             {QStringLiteral("type"), QStringLiteral("error")},
             {QStringLiteral("scope"), QStringLiteral("remote_session")},
             {QStringLiteral("code"),
-             QStringLiteral("session_cleanup_pending")},
+             transientCode},
             {QStringLiteral("message"),
              QStringLiteral("The previous session is still being cleaned up")},
             {QStringLiteral("requestId"),
              firstOpen.value(QStringLiteral("requestId"))}
         }));
         QTRY_COMPARE_WITH_TIMEOUT(runtime.remoteStatusText(),
-                                  QStringLiteral("CONNECTING"), 1'000);
+                                  QStringLiteral("AVAILABLE"), 1'000);
         QVERIFY(runtime.getNavigationManager()->isOnScreenView());
         QVERIFY(runtime.getNavigationManager()->isLoading());
         QVERIFY(!runtime.activeProjectExists());
         QCOMPARE(server.openCommands.size(), 1);
         QTRY_COMPARE_WITH_TIMEOUT(
             runtime.displayClients().constFirst().availabilityBadgeText(),
-            QStringLiteral("Connecting"), 1'000);
+            QStringLiteral("Available"), 1'000);
 
-        // Cleanup completion causes an authenticated client-list broadcast in
-        // production. That boundary consumes the retained intent once.
-        QVERIFY(server.sendClientList(client));
+        // No fresh presence event is necessary: the owned retry deadline
+        // consumes the retained intent once, without a perpetual polling timer.
         QTRY_COMPARE_WITH_TIMEOUT(server.openCommands.size(), 2, 3'000);
         QTest::qWait(50);
         QCOMPARE(server.openCommands.size(), 2);

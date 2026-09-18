@@ -1,6 +1,8 @@
 #ifndef WEBSOCKETCLIENT_H
 #define WEBSOCKETCLIENT_H
 
+#include "backend/network/RetryScheduler.h"
+
 #include <QObject>
 #include <QWebSocket>
 #include <QSet>
@@ -41,7 +43,8 @@ public:
     void connectToServer(const QString& serverUrl);
     void disconnect();
     void abortConnectionAttempt();
-    bool isConnected() const;
+    bool isConnected() const; // compatibility alias
+    bool isTransportAuthenticated() const { return isConnected(); }
     bool isTransportConnected() const;
     // Upload channel (secondary socket) management
     bool ensureUploadChannel(); // opens m_uploadSocket if needed (async); returns true if already connected or opening
@@ -294,6 +297,19 @@ private:
     QJsonObject addProtocolEnvelope(const QJsonObject& message) const;
     bool sendRawControlMessage(const QJsonObject& message);
     void publishDeviceSnapshots();
+    bool sendTrackedControl(const QJsonObject& message);
+    void scheduleControlRetry(const QString& requestId);
+    void completeControlRequest(const QString& requestId);
+    void completeSessionRequests(const QString& sessionId, bool terminal = false, bool final = false);
+    void clearControlRequests();
+    struct PendingControl { QJsonObject message; quint64 transport; QString boot; };
+    QHash<QString, PendingControl> m_pendingControl;
+    RetryScheduler m_controlRetries;
+    QString m_registrationRequestId;
+public:
+    void cancelRemoteSessionOpen(const QString& requestId) { completeControlRequest(requestId); }
+    bool sessionRecoveryInProgress(const QString& sessionId) const;
+private:
     void noteServerContact();
     qint64 suspendInclusiveNowMs() const;
     qint64 leaseElapsedMs() const;
@@ -310,14 +326,7 @@ private:
         qint64 serverDeadlineMs = -1;
         bool expired = false;
     };
-    struct ExpiredSessionClose {
-        QString requestId;
-        quint64 sessionGeneration = 0;
-        quint64 transportGeneration = 0;
-        qint64 sentAtMs = -1;
-    };
     QHash<QString, QJsonObject> m_assetRemovalObligations;
-    QHash<QString, ExpiredSessionClose> m_expiredSessionCloses;
     QHash<QString, SessionDeadline> m_sessionDeadlines;
     QHash<QString, QString> m_resumeRequestIds;
     QString m_reconcileRequestId;
@@ -411,6 +420,11 @@ private:
     bool m_uploadTransportLossReported = false;
     bool m_uploadChannelTokenRequested = false;
     bool m_uploadChannelAuthenticated = false;
+    RetryScheduler m_uploadRetries;
+    int m_uploadRetryAttempt = 0;
+    QString m_uploadTokenRequestId;
+    void failUploadChannelAttempt(const QString& reason);
+    void scheduleUploadChannelRetry(const QString& reason);
 };
 
 #endif // WEBSOCKETCLIENT_H

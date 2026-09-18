@@ -9,6 +9,8 @@
 #include <QHash>
 #include <QThreadPool>
 #include <QTimer>
+#include "backend/network/RetryPolicy.h"
+#include "backend/network/RetryScheduler.h"
 
 #include <optional>
 #include <functional>
@@ -226,6 +228,8 @@ public:
     int cleanupPendingCount() const;
     qint64 quarantinedBytesAwaitingDeletion() const;
     bool hasCleanupErrors() const;
+    // Set before initialization; storage remains independent of the app config singleton.
+    void setCleanupRetryPolicy(RetryPolicy policy) { m_cleanupRetryPolicy = policy; }
     // True only when no live receiver namespace or uncommitted teardown intent
     // remains. A valid tombstone makes the logical commit authoritative even
     // when deletion of its inaccessible quarantine is still pending/failed.
@@ -326,7 +330,10 @@ private:
     int m_pendingAssetRemovalCount = 0;
     QList<QPair<Tombstone, QString>> m_collectedPhysicalDeletes;
     QStringList m_collectedOrphanDeletes;
-    QTimer m_cleanupSweepTimer;
+    RetryPolicy m_cleanupRetryPolicy{1000, 30000, 20};
+    RetryScheduler m_cleanupRetries;
+    int m_physicalCleanupAttempt = 0;
+    void scheduleCleanupSweep(bool failed = false);
     std::shared_ptr<RemoteCacheHistory> m_history;
 };
 

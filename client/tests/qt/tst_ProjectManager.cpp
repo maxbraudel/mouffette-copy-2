@@ -97,7 +97,7 @@ private slots:
         entries = manager.mergeDiscoveredClients({first, second}, 102);
         QCOMPARE(entries.size(), 2);
         QVERIFY(entries.first().hasProject);
-        QCOMPARE(entries.first().client.availabilityBadgeText(), status);
+        QCOMPARE(entries.first().client.availabilityBadgeText(), status == QLatin1String("Reconnecting") ? QStringLiteral("Disconnected") : status);
         QCOMPARE(entries.first().client.getScreens().size(), screens.size());
         QCOMPARE(entries.first().client.getVolumePercent(), 63);
 

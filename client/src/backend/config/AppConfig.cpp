@@ -24,18 +24,26 @@ struct SettingSpec {
     bool boolean;
 };
 
-constexpr std::array<SettingSpec, 66> kSpecs{{
+constexpr std::array<SettingSpec, 74> kSpecs{{
     {Key::ServerUrl, "MOUFFETTE_SERVER_URL", "server-url", "serverUrl", "ws://localhost:8080", false},
     {Key::RemoteSessionHiddenTimeoutMs, "MOUFFETTE_REMOTE_SESSION_HIDDEN_TIMEOUT_MS", "remote-session-hidden-timeout-ms", nullptr, "60000", false},
     {Key::ProjectMediaHiddenTimeoutMs, "MOUFFETTE_PROJECT_MEDIA_HIDDEN_TIMEOUT_MS", "project-media-hidden-timeout-ms", nullptr, "60000", false},
     {Key::ProjectHiddenRetentionMs, "MOUFFETTE_PROJECT_HIDDEN_RETENTION_MS", "project-hidden-retention-ms", nullptr, "300000", false},
     {Key::IncomingSessionOrphanTimeoutMs, "MOUFFETTE_INCOMING_SESSION_ORPHAN_TIMEOUT_MS", "incoming-session-orphan-timeout-ms", nullptr, "3000", false},
     {Key::UploadIdleTimeoutMs, "MOUFFETTE_UPLOAD_IDLE_TIMEOUT_MS", "upload-idle-timeout-ms", nullptr, "45000", false},
+    {Key::ConnectionSyncTimeoutMs, "MOUFFETTE_CONNECTION_SYNC_TIMEOUT_MS", "connection-sync-timeout-ms", nullptr, "10000", false},
+    {Key::SessionRetryBaseMs, "MOUFFETTE_SESSION_RETRY_BASE_MS", "session-retry-base-ms", nullptr, "1000", false},
+    {Key::SessionRetryMaxMs, "MOUFFETTE_SESSION_RETRY_MAX_MS", "session-retry-max-ms", nullptr, "5000", false},
+    {Key::ControlRequestRetryMs, "MOUFFETTE_CONTROL_REQUEST_RETRY_MS", "control-request-retry-ms", nullptr, "1000", false},
+    {Key::UploadChannelRetryBaseMs, "MOUFFETTE_UPLOAD_CHANNEL_RETRY_BASE_MS", "upload-channel-retry-base-ms", nullptr, "1000", false},
+    {Key::UploadChannelRetryMaxMs, "MOUFFETTE_UPLOAD_CHANNEL_RETRY_MAX_MS", "upload-channel-retry-max-ms", nullptr, "5000", false},
+    {Key::UploadChannelAttemptTimeoutMs, "MOUFFETTE_UPLOAD_CHANNEL_ATTEMPT_TIMEOUT_MS", "upload-channel-attempt-timeout-ms", nullptr, "10000", false},
+    {Key::DeferredCleanupRetryMaxMs, "MOUFFETTE_DEFERRED_CLEANUP_RETRY_MAX_MS", "deferred-cleanup-retry-max-ms", nullptr, "30000", false},
     {Key::ConnectionAttemptTimeoutMs, "MOUFFETTE_CONNECTION_ATTEMPT_TIMEOUT_MS", "connection-attempt-timeout-ms", nullptr, "10000", false},
     {Key::ReconnectFastStepMs, "MOUFFETTE_RECONNECT_FAST_STEP_MS", "reconnect-fast-step-ms", nullptr, "250", false},
     {Key::ReconnectFastMaxMs, "MOUFFETTE_RECONNECT_FAST_MAX_MS", "reconnect-fast-max-ms", nullptr, "750", false},
     {Key::ReconnectBaseMs, "MOUFFETTE_RECONNECT_BASE_MS", "reconnect-base-ms", nullptr, "1000", false},
-    {Key::ReconnectMaxMs, "MOUFFETTE_RECONNECT_MAX_MS", "reconnect-max-ms", nullptr, "30000", false},
+    {Key::ReconnectMaxMs, "MOUFFETTE_RECONNECT_MAX_MS", "reconnect-max-ms", nullptr, "5000", false},
     {Key::ReconnectStableResetMs, "MOUFFETTE_RECONNECT_STABLE_RESET_MS", "reconnect-stable-reset-ms", nullptr, "30000", false},
     {Key::ReconnectJitterPercent, "MOUFFETTE_RECONNECT_JITTER_PERCENT", "reconnect-jitter-percent", nullptr, "20", false},
     {Key::LeaseHealthCheckIntervalMs, "MOUFFETTE_LEASE_HEALTH_CHECK_INTERVAL_MS", "lease-health-check-interval-ms", nullptr, "100", false},
@@ -378,12 +386,20 @@ void AppConfig::resetToCompiledDefaults() {
     m_projectHiddenRetentionMs = 300000;
     m_incomingSessionOrphanTimeoutMs = 3000;
     m_uploadIdleTimeoutMs = 45000;
+    m_connectionSyncTimeoutMs = 10000;
+    m_sessionRetryBaseMs = 1000;
+    m_sessionRetryMaxMs = 5000;
+    m_controlRequestRetryMs = 1000;
+    m_uploadChannelRetryBaseMs = 1000;
+    m_uploadChannelRetryMaxMs = 5000;
+    m_uploadChannelAttemptTimeoutMs = 10000;
+    m_deferredCleanupRetryMaxMs = 30000;
     m_connectionAttemptTimeoutMs = 10000;
     m_reconnectStableResetMs = 30000;
     m_reconnectFastStepMs = 250;
     m_reconnectFastMaxMs = 750;
     m_reconnectBaseMs = 1000;
-    m_reconnectMaxMs = 30000;
+    m_reconnectMaxMs = 5000;
     m_reconnectJitterPercent = 20;
     m_leaseHealthCheckIntervalMs = 100;
     m_sessionDeadlinePollIntervalMs = 250;
@@ -642,6 +658,14 @@ bool AppConfig::load(const LoadOptions& options, QString* errorMessage) {
                          &candidate.m_mediaRamReservePercent)
         || !parseIntSetting(Key::MediaRamReserveMinMiB, 0, 2147483647,
                             &candidate.m_mediaRamReserveMinMiB)
+        || !parseIntSetting(Key::ConnectionSyncTimeoutMs, 1000, 120000, &candidate.m_connectionSyncTimeoutMs)
+        || !parseIntSetting(Key::SessionRetryBaseMs, 50, 120000, &candidate.m_sessionRetryBaseMs)
+        || !parseIntSetting(Key::SessionRetryMaxMs, 50, 600000, &candidate.m_sessionRetryMaxMs)
+        || !parseIntSetting(Key::ControlRequestRetryMs, 50, 60000, &candidate.m_controlRequestRetryMs)
+        || !parseIntSetting(Key::UploadChannelRetryBaseMs, 50, 120000, &candidate.m_uploadChannelRetryBaseMs)
+        || !parseIntSetting(Key::UploadChannelRetryMaxMs, 50, 600000, &candidate.m_uploadChannelRetryMaxMs)
+        || !parseIntSetting(Key::UploadChannelAttemptTimeoutMs, 1000, 120000, &candidate.m_uploadChannelAttemptTimeoutMs)
+        || !parseIntSetting(Key::DeferredCleanupRetryMaxMs, 100, 600000, &candidate.m_deferredCleanupRetryMaxMs)
         || !parseIntSetting(Key::ConnectionAttemptTimeoutMs, 250, 120000,
                          &candidate.m_connectionAttemptTimeoutMs)
         || !parseIntSetting(Key::ReconnectFastStepMs, 10, 10000,
@@ -740,7 +764,10 @@ bool AppConfig::load(const LoadOptions& options, QString* errorMessage) {
                             &candidate.m_toastAnimationDurationMs)) {
         return false;
     }
-    if (candidate.m_reconnectFastMaxMs < candidate.m_reconnectFastStepMs
+    if (candidate.m_sessionRetryMaxMs < candidate.m_sessionRetryBaseMs
+        || candidate.m_uploadChannelRetryMaxMs < candidate.m_uploadChannelRetryBaseMs
+        || candidate.m_deferredCleanupRetryMaxMs < candidate.m_deferredCleanupRetryMs
+        || candidate.m_reconnectFastMaxMs < candidate.m_reconnectFastStepMs
         || candidate.m_reconnectMaxMs < candidate.m_reconnectBaseMs) {
         return setError(errorMessage,
                         QStringLiteral("Reconnect maximum delays must be greater than or equal to their base delays"));

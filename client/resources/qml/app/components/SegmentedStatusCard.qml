@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Controls
 import QtQuick.Effects
 import Mouffette.App
 
@@ -9,6 +10,22 @@ Item {
         Connected,
         Warning,
         Error
+    }
+
+    property var detailProvider: null
+    property string currentDetail: ""
+    HoverHandler {
+        id: detailHover
+        onHoveredChanged: if (hovered && root.detailProvider) root.currentDetail = root.detailProvider()
+    }
+    ToolTip.visible: detailHover.hovered && currentDetail.length > 0
+    ToolTip.text: currentDetail
+    ToolTip.delay: 400
+    Timer {
+        interval: 500
+        running: detailHover.hovered && root.detailProvider !== null
+        repeat: true
+        onTriggered: root.currentDetail = root.detailProvider()
     }
 
     property string primaryText: ""

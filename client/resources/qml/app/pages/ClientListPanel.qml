@@ -6,6 +6,7 @@ import "../components"
 AppPanel {
     id: root
 
+    property var detailProvider: null
     property var model: null
     property bool sceneMode: false
     property string emptyText: ""
@@ -50,6 +51,17 @@ AppPanel {
             height: twoLineLayout ? 66 : 48
             enabled: canActivate
             hoverEnabled: true
+            property string connectionDetail: ""
+            onHoveredChanged: if (hovered && root.detailProvider) connectionDetail = root.detailProvider(rowIdentifier)
+            ToolTip.visible: hovered && connectionDetail.length > 0
+            ToolTip.text: connectionDetail
+            ToolTip.delay: 400
+            Timer {
+                interval: 500
+                running: row.hovered && root.detailProvider !== null
+                repeat: true
+                onTriggered: row.connectionDetail = root.detailProvider(row.rowIdentifier)
+            }
             padding: 0
 
             background: Rectangle {

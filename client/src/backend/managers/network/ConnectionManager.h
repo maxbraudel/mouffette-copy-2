@@ -4,6 +4,8 @@
 #include <QObject>
 #include <QTimer>
 #include <QString>
+#include "backend/network/RetryScheduler.h"
+#include "backend/network/RetryPolicy.h"
 #include "backend/runtime/SuspendInclusiveClock.h"
 
 class WebSocketClient;
@@ -25,7 +27,7 @@ class ConnectionManager : public QObject {
 
 public:
     enum class State { Disconnected, Disconnecting, Connecting, Authenticating, Synchronizing,
-                       Connected, Degraded, Reconnecting, CleanupPending, Failed };
+                       Connected, Degraded, CleanupPending, Failed };
     Q_ENUM(State)
     State state() const { return m_state; }
     bool connectionEnabled() const { return m_desiredEnabled; }
@@ -40,7 +42,8 @@ public:
      * @param wsClient The WebSocketClient instance to manage
      * @param parent Parent QObject for memory management
      */
-    explicit ConnectionManager(WebSocketClient* wsClient, QObject* parent = nullptr);
+    explicit ConnectionManager(WebSocketClient* wsClient, QObject* parent = nullptr,
+        RetryScheduler::Clock clock = [] { return MouffetteClock::nowMs(); });
     ~ConnectionManager() override = default;
 
     /**
@@ -58,7 +61,13 @@ public:
      * @brief Check if currently connected to the server
      * @return true if connected, false otherwise
      */
-    bool isConnected() const;
+    bool isConnected() const; // compatibility: authenticated transport
+    bool isTransportAuthenticated() const;
+    bool isReady() const { return m_state == State::Connected; }
+    RetryAction retryAction() const { return m_retryAction; }
+    int retryAttemptCount() const { return m_wasWithinLease ? m_fastRetryAttempt : m_backgroundRetryAttempt; }
+    qint64 nextAttemptAtMs() const { return m_retries.dueAt(QStringLiteral("connect")); }
+    QString connectionDetail() const;
     
     /**
      * @brief Get the current server URL
@@ -74,7 +83,7 @@ public:
     
     /**
      * @brief Get the current connection status string
-     * @return Status string (e.g., "Connected", "Disconnected", "Reconnecting...")
+     * @return Status string (e.g., "Connected", "Disconnected", "Connecting")
      */
     QString getConnectionStatus() const;
 
@@ -82,6 +91,7 @@ public:
     static int retryDelayForAttempt(int attempt, bool withinLease);
 
 signals:
+    void retryStateChanged();
     void stateChanged(ConnectionManager::State state);
     void connectionEnabledChanged(bool enabled);
     void disconnectRequested(quint64 transitionId);
@@ -130,9 +140,15 @@ private:
     void setState(State state);
     void suspendAttempts();
     void refreshAuthenticatedState();
+    void observeStability(bool healthy);
     
     WebSocketClient* m_wsClient;
-    QTimer* m_reconnectTimer;
+    RetryScheduler::Clock m_clock;
+    RetryScheduler m_retries;
+    QTimer m_syncTimeoutTimer;
+    RetryAction m_retryAction = RetryAction::Idle;
+    QString m_lastError;
+    void setRetryAction(RetryAction action);
     QTimer* m_attemptTimeoutTimer;
     QString m_serverUrl;
     State m_state = State::Disconnected;
@@ -143,7 +159,7 @@ private:
     bool m_reconciliationReady = false;
     bool m_degraded = false;
     quint64 m_transitionId = 0;
-    MouffetteClock::ElapsedTimer m_stableConnection;
+    StableConnectionWindow m_stableConnection;
     int m_fastRetryAttempt = 0;
     int m_backgroundRetryAttempt = 0;
     bool m_wasWithinLease = false;

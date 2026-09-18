@@ -95,6 +95,9 @@ public:
 
     bool connectionEnabled() const;
     QString localStatusText() const;
+    Q_INVOKABLE QString localConnectionDetail() const;
+    Q_INVOKABLE QString remoteConnectionDetail() const;
+    Q_INVOKABLE QString clientConnectionDetail(const QString& endpoint) const;
     ConnectionState localConnectionState() const;
     QString remoteDisplayName() const;
     QString remoteStatusText() const;

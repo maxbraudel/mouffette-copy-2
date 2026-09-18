@@ -313,6 +313,7 @@ void RemoteCacheStoreTest::physicalCleanupRetriesWithoutReconnect()
     QTemporaryDir temporary;
     QVERIFY(temporary.isValid());
     RemoteCacheStore store(QDir(temporary.path()).filePath(QStringLiteral("Uploads")));
+    store.setCleanupRetryPolicy({150, 300, 0});
     QVERIFY(store.initialize());
     QVERIFY(store.ensureSession(scope()));
     const QString asset = store.assetPath(scope(), kAsset, RemoteCacheStore::AssetArea::Validated);
@@ -330,8 +331,15 @@ void RemoteCacheStoreTest::physicalCleanupRetriesWithoutReconnect()
     });
     QSignalSpy failures(&store, &RemoteCacheStore::physicalCleanupFailed);
     QSignalSpy successes(&store, &RemoteCacheStore::physicalCleanupCompleted);
+    QElapsedTimer clock;
+    clock.start();
+    QList<qint64> failureTimes;
+    connect(&store, &RemoteCacheStore::physicalCleanupFailed, &store,
+            [&] { failureTimes.append(clock.elapsed()); });
     QCOMPARE(store.requestTeardown(scope(), kTeardown).outcome, RemoteCacheStore::CommitOutcome::Pending);
-    QTRY_COMPARE_WITH_TIMEOUT(failures.size(), 1, 5000);
+    QTRY_VERIFY_WITH_TIMEOUT(failures.size() >= 3, 5000);
+    QVERIFY(failureTimes.at(1) - failureTimes.at(0) >= 149);
+    QVERIFY(failureTimes.at(2) - failureTimes.at(1) >= 299);
     QVERIFY(store.teardownResult(scope(), kTeardown).acknowledgementSafe());
     QVERIFY(store.receiverAdvertisementSafe());
     QVERIFY(QFile::remove(obstruction));

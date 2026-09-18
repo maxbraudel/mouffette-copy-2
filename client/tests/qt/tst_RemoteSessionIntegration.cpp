@@ -105,6 +105,9 @@ class RemoteSessionIntegrationTest final : public QObject {
 private slots:
     void init();
     void cleanup();
+    void pendingRequestsRecover_data();
+    void pendingRequestsRecover();
+    void synchronizationTimeoutKeepsRetrying();
     void recovery_data();
     void recovery();
     void duplicateOpenAndMetadataRefresh();
@@ -252,13 +255,13 @@ void RemoteSessionIntegrationTest::reconnectsAutomaticallyAfterProlongedServerOu
         // connections; the production attempt/error scheduling is unchanged.
         QVERIFY(QMetaObject::invokeMethod(&manager, "attemptReconnect", Qt::DirectConnection));
         QTRY_VERIFY_WITH_TIMEOUT(errors.count() > failures, 2000);
-        QCOMPARE(manager.state(), ConnectionManager::State::Reconnecting);
+        QCOMPARE(manager.state(), ConnectionManager::State::Disconnected);
         QVERIFY(manager.connectionEnabled());
     }
     startRelay(port);
     // No Enable, connectToServer or forced retry after the server returns.
-    // Wait for the actual capped timer (30 seconds, plus up to 20% jitter).
-    QTRY_COMPARE_WITH_TIMEOUT(manager.state(), ConnectionManager::State::Connected, 40000);
+    // Wait for the actual hard-capped five-second timer.
+    QTRY_COMPARE_WITH_TIMEOUT(manager.state(), ConnectionManager::State::Connected, 8000);
     QCOMPARE(authenticated.count(), 2);
     QCOMPARE(restarted.count(), 1);
     QVERIFY(client.serverBootId() != originalBootId);
@@ -315,6 +318,118 @@ void RemoteSessionIntegrationTest::configure(WebSocketClient& peer, const QStrin
     });
 }
 
+void RemoteSessionIntegrationTest::pendingRequestsRecover_data()
+{
+    QTest::addColumn<QString>("operation");
+    QTest::addColumn<bool>("loseResponse");
+    for (const QString& operation : {QStringLiteral("registration"), QStringLiteral("reconciliation"),
+                                    QStringLiteral("open"), QStringLiteral("close"), QStringLiteral("disable"), QStringLiteral("upload")}) {
+        QTest::newRow(qPrintable(operation + "-request")) << operation << false;
+        QTest::newRow(qPrintable(operation + "-response")) << operation << true;
+    }
+}
+
+void RemoteSessionIntegrationTest::pendingRequestsRecover()
+{
+    QFETCH(QString, operation);
+    QFETCH(bool, loseResponse);
+    const AppConfig previousConfig = AppConfig::instance();
+    const auto restoreConfig = qScopeGuard([&] { AppConfig::instance() = previousConfig; });
+    AppConfig::LoadOptions options;
+    options.defaultEnvFilePath.clear();
+    options.processEnvironment.insert("MOUFFETTE_UPLOAD_CHANNEL_ATTEMPT_TIMEOUT_MS", "1000");
+    options.processEnvironment.insert("MOUFFETTE_UPLOAD_CHANNEL_RETRY_BASE_MS", "100");
+    options.processEnvironment.insert("MOUFFETTE_UPLOAD_CHANNEL_RETRY_MAX_MS", "200");
+    QString configurationError;
+    QVERIFY2(AppConfig::instance().load(options, &configurationError), qPrintable(configurationError));
+    QTemporaryDir identities;
+    WebSocketClient owner(identities.filePath("owner"), false);
+    WebSocketClient target(identities.filePath("target"), false);
+    ConnectionManager connection(&owner);
+    configure(owner, QStringLiteral("retry-owner"));
+    configure(target, QStringLiteral("retry-target"));
+    QSignalSpy states(&connection, &ConnectionManager::statusChanged);
+    QSignalSpy opened(&owner, &WebSocketClient::remoteSessionOpened);
+    QSignalSpy closed(&owner, &WebSocketClient::remoteSessionClosed);
+    QSignalSpy disabled(&owner, &WebSocketClient::endpointDisableAcknowledged);
+    QSignalSpy targetRegistered(&target, &WebSocketClient::registrationConfirmed);
+    const QMap<QString, QPair<QString, QString>> types{
+        {"registration", {"endpoint_snapshot", "endpoint_snapshot_applied"}},
+        {"reconciliation", {"remote_session_reconcile", "remote_session_reconciled"}},
+        {"open", {"remote_session_open", "remote_session_opened"}},
+        {"close", {"remote_session_close", "remote_session_closed"}},
+        {"disable", {"endpoint_disable", "endpoint_disable_started"}},
+        {"upload", {"request_upload_channel", "upload_channel_token"}}
+    };
+    const QString type = loseResponse ? types.value(operation).second : types.value(operation).first;
+    command({{"action", loseResponse ? "dropRawFrame" : "dropIncoming"},
+             {"endpoint", owner.endpointId()}, {"type", type}, {"count", operation == "upload" ? 3 : 1}});
+    QElapsedTimer attemptClock;
+    attemptClock.start();
+    connection.connectToServer(m_url);
+    target.connectToServer(m_url);
+    QTRY_COMPARE_WITH_TIMEOUT(connection.state(), ConnectionManager::State::Connected, 4000);
+    QTRY_VERIFY_WITH_TIMEOUT(!targetRegistered.isEmpty(), 4000);
+    if (operation == "open" || operation == "close") {
+        QString request;
+        QVERIFY(owner.openRemoteSession(target.endpointId(), &request));
+        QTRY_VERIFY_WITH_TIMEOUT(!opened.isEmpty(), 4000);
+        const QString id = opened.first().first().toJsonObject().value("remoteSessionId").toString();
+        QTRY_VERIFY_WITH_TIMEOUT(owner.canIssueSessionCommands(id), 3000);
+        if (operation == "close") {
+            QVERIFY(owner.closeRemoteSession(id));
+            QTRY_VERIFY_WITH_TIMEOUT(!closed.isEmpty(), 4000);
+            QVERIFY(!owner.canIssueSessionCommands(id));
+        }
+    } else if (operation == "upload") {
+        QTRY_VERIFY_WITH_TIMEOUT(owner.isUploadChannelConnected(), 6000);
+        QVERIFY(attemptClock.elapsed() >= 3000); // each lost token waits for its attempt deadline
+        QCOMPARE(m_output.count("TEST_DROPPED " + owner.endpointId().toUtf8() + ':' + type.toUtf8()), 3);
+        QVERIFY(connection.isReady());
+    } else if (operation == "disable") {
+        QVERIFY(owner.beginEndpointDisable());
+        QTRY_VERIFY_WITH_TIMEOUT(!disabled.isEmpty(), 3000);
+    }
+    QTRY_VERIFY_WITH_TIMEOUT(m_output.contains("TEST_DROPPED " + owner.endpointId().toUtf8() + ':' + type.toUtf8()), 3000);
+    for (const auto& state : states) {
+        QVERIFY(state.first().toString() != QStringLiteral("Reconnecting"));
+        QVERIFY(state.first().toString() != QStringLiteral("Authenticating"));
+        QVERIFY(state.first().toString() != QStringLiteral("Synchronizing"));
+    }
+    connection.disconnect();
+    target.disconnect();
+}
+
+void RemoteSessionIntegrationTest::synchronizationTimeoutKeepsRetrying()
+{
+    const AppConfig previous = AppConfig::instance();
+    const auto restore = qScopeGuard([&] { AppConfig::instance() = previous; });
+    AppConfig::LoadOptions options;
+    options.defaultEnvFilePath.clear();
+    options.processEnvironment.insert("MOUFFETTE_CONNECTION_SYNC_TIMEOUT_MS", "1000");
+    QString error;
+    QVERIFY2(AppConfig::instance().load(options, &error), qPrintable(error));
+    QTemporaryDir identity;
+    WebSocketClient client(identity.path(), false);
+    ConnectionManager connection(&client);
+    configure(client, "sync-timeout");
+    QSignalSpy connected(&client, &WebSocketClient::connected);
+    command({{"action", "dropRawFrame"}, {"endpoint", client.endpointId()},
+             {"type", "endpoint_snapshot_applied"}, {"count", 100}});
+    connection.connectToServer(m_url);
+    QTRY_COMPARE_WITH_TIMEOUT(connected.count(), 1, 3000);
+    QTRY_COMPARE_WITH_TIMEOUT(connection.state(), ConnectionManager::State::Synchronizing, 1000);
+    QCOMPARE(connection.getConnectionStatus(), QStringLiteral("Connecting"));
+    QTRY_COMPARE_WITH_TIMEOUT(connection.state(), ConnectionManager::State::Disconnected, 2000);
+    QCOMPARE(connection.retryAction(), RetryAction::Scheduled);
+    QVERIFY(connection.connectionDetail().contains("synchronization"));
+    command({{"action", "dropRawFrame"}, {"endpoint", client.endpointId()},
+             {"type", "endpoint_snapshot_applied"}, {"count", -1}});
+    QTRY_VERIFY_WITH_TIMEOUT(connection.isReady(), 4000);
+    QCOMPARE(connected.count(), 2);
+    connection.disconnect();
+}
+
 void RemoteSessionIntegrationTest::recovery_data()
 {
     QTest::addColumn<int>("gapMs");
@@ -328,6 +443,8 @@ void RemoteSessionIntegrationTest::recovery_data()
     QTest::newRow("both-target-first") << 100 << true << true << 0;
     QTest::newRow("lost-resume-owner") << 100 << true << false << 1;
     QTest::newRow("lost-resume-target") << 100 << true << false << 2;
+    QTest::newRow("lost-resume-request-owner") << 100 << true << false << 3;
+    QTest::newRow("lost-resume-request-target") << 100 << true << true << 4;
 }
 
 void RemoteSessionIntegrationTest::recovery()
@@ -366,9 +483,9 @@ void RemoteSessionIntegrationTest::recovery()
         QVERIFY(!expired.isEmpty());
         QVERIFY(!owner.canIssueSessionCommands(id));
     }
-    if (lostReply) command({{"action", "dropFrame"},
-        {"endpoint", lostReply == 1 ? owner.endpointId() : target.endpointId()},
-        {"type", "remote_session_resumed"}});
+    if (lostReply) command({{"action", lostReply <= 2 ? "dropFrame" : "dropIncoming"},
+        {"endpoint", (lostReply == 1 || lostReply == 3) ? owner.endpointId() : target.endpointId()},
+        {"type", lostReply <= 2 ? "remote_session_resumed" : "remote_session_resume"}});
     if (reverseOrder && dropBoth) target.connectToServer(m_url);
     owner.connectToServer(m_url);
     if (!reverseOrder && dropBoth) target.connectToServer(m_url);

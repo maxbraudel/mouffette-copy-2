@@ -785,6 +785,11 @@ if(BUILD_TESTING)
     target_link_libraries(tst_ScreenCoordinateMapping PRIVATE Qt6::Core Qt6::Test)
     add_test(NAME ScreenCoordinateMapping COMMAND tst_ScreenCoordinateMapping)
 
+    add_executable(tst_RetryPolicy tests/qt/tst_RetryPolicy.cpp src/backend/config/AppConfig.cpp src/backend/runtime/RuntimeProfile.cpp)
+    target_include_directories(tst_RetryPolicy PRIVATE src)
+    target_link_libraries(tst_RetryPolicy PRIVATE Qt6::Network Qt6::Test)
+    add_test(NAME RetryPolicy COMMAND tst_RetryPolicy)
+
     add_executable(tst_AppConfig
         tests/qt/tst_AppConfig.cpp
         src/backend/config/AppConfig.cpp

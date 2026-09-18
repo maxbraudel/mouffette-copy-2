@@ -644,7 +644,7 @@ class MouffetteServer {
         }
     }
 
-    issueUploadChannelToken(clientId) {
+    issueUploadChannelToken(clientId, requestId) {
         const client = this.clients.get(clientId);
         if (!client || !client.endpointId || !client.ws
             || client.ws.readyState !== WebSocket.OPEN) {
@@ -663,6 +663,7 @@ class MouffetteServer {
         this.uploadChannelTokens.set(token, { client, expiresAt });
         client.ws.send(JSON.stringify({
             type: 'upload_channel_token',
+            ...(this.isValidOpaqueId(requestId) ? { requestId } : {}),
             protocolVersion: this.protocolVersion,
             serverBootId: this.serverBootId,
             messageId: uuidv4(),
@@ -1536,7 +1537,7 @@ class MouffetteServer {
                 this.sendClientList(clientId);
                 break;
             case 'request_upload_channel':
-                if (!this.issueUploadChannelToken(clientId)) {
+                if (!this.issueUploadChannelToken(clientId, message.requestId)) {
                     this.sendError(clientId, 'Upload channel requires a registered control connection');
                 }
                 break;
@@ -3313,7 +3314,7 @@ class MouffetteServer {
                 endpointId: entry.endpointId, machineName: entry.machineName,
                 platform: entry.platform, lastSeenAt: entry.lastSeenAt,
                 status: usable ? (suspect ? 'Degraded' : 'Available')
-                    : (recovering ? 'Reconnecting' : 'Disconnected'),
+                    : 'Disconnected',
                 canAcceptSession: !!usable && !suspect,
                 reason: entry.disabled ? 'disabled' : (suspect ? 'transport_suspect'
                     : usable ? 'enabled' : recovering ? 'transport_lost' : 'offline'),

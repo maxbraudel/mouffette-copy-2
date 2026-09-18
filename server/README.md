@@ -129,8 +129,8 @@ well as incoming sessions. Re-enable authenticates a new transport.
 Discovery remains presence-only. `client_list` includes an increasing `revision`,
 an observation timestamp, and each endpoint's `installationId`, `endpointId`,
 `instanceId`, `instanceOrdinal`, `runtimeId`, `status`, `lastSeenAt`,
-`canAcceptSession` and `reason`. States distinguish Available, Degraded,
-Reconnecting and Disconnected; disabled endpoints report Disconnected with reason
+`canAcceptSession` and `reason`. States distinguish Available, Degraded
+and Disconnected; disabled endpoints report Disconnected with reason
 `disabled`. Recent unavailable endpoints are retained for up to five minutes in
 a bounded 4,096-entry presence cache. Pair cleanup and scene ownership remain
 private and do not label an endpoint Busy. Offline entries retain the entire

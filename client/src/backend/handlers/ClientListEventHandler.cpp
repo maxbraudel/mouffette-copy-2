@@ -117,7 +117,7 @@ void ClientListEventHandler::onClientListReceived(const QList<ClientInfo>& clien
                     // Presence lists are advisory while a server-authenticated
                     // RemoteSession binding exists. A missing discovery entry
                     // must therefore be a no-op: lease events alone own the
-                    // Connected/Reconnecting state and command gating.
+                    // session state and command gating.
                     return;
                 }
                 activeWorkspace->lastClientInfo.setOnline(false);

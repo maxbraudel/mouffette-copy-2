@@ -66,6 +66,10 @@ bool ApplicationController::connectionEnabled() const
     return m_runtime && !m_runtime->isUserDisconnected();
 }
 
+QString ApplicationController::localConnectionDetail() const { return m_runtime ? m_runtime->localConnectionDetail() : QString(); }
+QString ApplicationController::remoteConnectionDetail() const { return m_runtime ? m_runtime->remoteConnectionDetail() : QString(); }
+QString ApplicationController::clientConnectionDetail(const QString& endpoint) const { return m_runtime ? m_runtime->clientConnectionDetail(endpoint) : QString(); }
+
 QString ApplicationController::localStatusText() const
 {
     return m_runtime ? m_runtime->localStatusText()
