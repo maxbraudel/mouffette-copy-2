@@ -1876,6 +1876,56 @@ private slots:
         QCOMPARE(fixture.controller.selectedMediaItem(), second);
     }
 
+    void emptyCanvasClearsSelectionOutsideClip_data()
+    {
+        QTest::addColumn<qreal>("positionMs");
+        QTest::addColumn<bool>("clipActive");
+        QTest::newRow("before-clip") << qreal(0) << false;
+        QTest::newRow("during-clip") << qreal(1500) << true;
+        QTest::newRow("after-clip") << qreal(3000) << false;
+    }
+
+    void emptyCanvasClearsSelectionOutsideClip()
+    {
+        QFETCH(qreal, positionMs);
+        QFETCH(bool, clipActive);
+        Fixture fixture;
+        QVERIFY(fixture.initialize());
+        auto* media = fixture.document.addText({200, 200}, QStringLiteral("Timed media"));
+        QVERIFY(media);
+        auto track = media->timelineTrack();
+        const auto slotsPerSecond = fixture.document.timelineSettings().slotsPerSecond;
+        track.clips = {{SceneTimeline::newId(), slotsPerSecond, std::nullopt, slotsPerSecond}};
+        track.clipsInitialized = true;
+        media->setTimelineTrack(track);
+        fixture.document.setTimelinePosition(1500);
+        fixture.document.select(media->mediaId());
+        QVERIFY(media->clipActive());
+        fixture.document.setTimelinePosition(positionMs);
+        QCOMPARE(media->clipActive(), clipActive);
+        QVERIFY(media->selected());
+        QTRY_COMPARE(fixture.controller.selectionChromeModel().size(), clipActive ? 1 : 0);
+
+        fixture.view.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&fixture.view));
+        QSignalSpy cleared(fixture.view.rootObject(), SIGNAL(clearSelectionRequested()));
+        QSignalSpy selectionChanged(&fixture.document, &CanvasDocument::selectionChanged);
+        QTest::mouseClick(&fixture.view, Qt::LeftButton, Qt::NoModifier, {850, 600});
+        QCOMPARE(cleared.size(), 1);
+        QCOMPARE(selectionChanged.size(), 1);
+        QVERIFY(fixture.document.selectedMediaIds().isEmpty());
+        QVERIFY(fixture.document.primarySelectedMediaId().isEmpty());
+        QVERIFY(!media->selected());
+
+        // An already empty selection does not dispatch another clear request.
+        QTest::mouseClick(&fixture.view, Qt::LeftButton, Qt::NoModifier, {850, 600});
+        QCOMPARE(cleared.size(), 1);
+        fixture.document.setTimelinePosition(1500);
+        QVERIFY(media->clipActive());
+        QVERIFY(!media->selected());
+        QTRY_VERIFY(fixture.controller.selectionChromeModel().isEmpty());
+    }
+
     void textChangesAndLateDeletedIdsAreSafe()
     {
         Fixture fixture;

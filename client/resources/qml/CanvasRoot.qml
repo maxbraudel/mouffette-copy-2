@@ -1444,8 +1444,10 @@ Rectangle {
                         // The same exact press decision drives deselection. A
                         // second TapHandler using hover state can disagree at
                         // handle edges and clear selection during resize.
+                        // Selection persists even when an inactive clip has no
+                        // visible selection chrome at the current playhead.
                         if (ownerKind === "canvas" && !root.textToolActive
-                                && root.selectionChromeModel.length > 0)
+                                && root.primarySelectedMediaId !== "")
                             root.clearSelectionRequested()
                     } else {
                         inputLayer.inputCoordinator.endPrimaryGesture()
