@@ -632,9 +632,25 @@ FocusScope {
                         }
                         Rectangle { width: parent.width; height: 1; color: Theme.overlayBorder }
                         Text {
-                            x: root.visibleStartX + 6; y: 2
+                            objectName: "timelineClipTrackLabel"
+                            x: root.visibleStartX + 6
+                            anchors.verticalCenter: parent.verticalCenter
                             text: "TRACK " + (clipTrack.trackIndex + 1)
                             font.pixelSize: 9; color: Theme.overlayDisabledText
+                            // Show the background label only when it is fully readable.
+                            visible: {
+                                var clips = root.timeline ? root.timeline.clips : []
+                                for (var i = 0; i < clips.length; ++i) {
+                                    var row = clips[i]
+                                    var drag = root.activeDrag && root.activeDrag.isClipDrag
+                                        && root.activeDrag.modelData.id === row.id ? root.activeDrag : null
+                                    if ((drag ? drag.shownTrack : row.trackIndex) !== clipTrack.trackIndex) continue
+                                    var left = 12 + (drag ? drag.shownStart : row.startMs) * root.pixelsPerMs
+                                    var right = 12 + (drag ? drag.shownEnd : row.startMs + row.durationMs) * root.pixelsPerMs
+                                    if (left < x + implicitWidth && right > x) return false
+                                }
+                                return true
+                            }
                         }
                         MouseArea {
                             anchors.fill: parent

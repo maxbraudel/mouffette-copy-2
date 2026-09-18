@@ -428,6 +428,179 @@ private slots:
         QVERIFY(f.item("otherMediaClip") == nullptr);
     }
 
+    void clipSelectionAlwaysFollowsTheDocument()
+    {
+        TimelineFixture f; QVERIFY(f.initialize());
+        auto* doc = f.host->document();
+        auto* first = doc->addText({}, "First");
+        auto* second = doc->addText({}, "Second");
+        doc->select(first->mediaId());
+        auto* model = f.timeline.clipModel();
+        QSignalSpy resets(model, &QAbstractItemModel::modelReset);
+        QSignalSpy removals(model, &QAbstractItemModel::rowsRemoved);
+        const auto delegates = timelineItems(f.view.rootObject(), "timelineClip");
+        QCOMPARE(delegates.size(), 2);
+        const auto selectionMatches = [&] {
+            const auto* primary = doc->primarySelectedMedia();
+            if (f.timeline.selectedClipId() != (primary ? primary->timelineTrack().clip.id : QString())) return false;
+            for (auto* item : timelineItems(f.view.rootObject(), "timelineClip")) {
+                const auto row = item->property("modelData").toMap();
+                const auto* media = doc->mediaById(row.value("mediaId").toString());
+                if (row.value("selected").toBool() != media->selected()
+                    || item->property("selected").toBool() != media->selected()
+                    || item->z() != (media->selected() ? 2 : 1)) return false;
+            }
+            return f.item("timelineCopy")->isEnabled() == bool(primary)
+                && f.item("timelineDelete")->isEnabled() == bool(primary);
+        };
+        QVERIFY(selectionMatches());
+        f.timeline.clearSelection();
+        QVERIFY(doc->selectedMediaIds().isEmpty());
+        QVERIFY(selectionMatches());
+        // Reselecting the same instance must restore commands and highlighting together.
+        doc->select(first->mediaId());
+        QVERIFY(selectionMatches());
+        doc->select(second->mediaId(), true);
+        QVERIFY(selectionMatches());
+        f.timeline.selectClip(first->timelineTrack().clip.id);
+        QCOMPARE(doc->selectedMediaIds().size(), 2);
+        QCOMPARE(doc->primarySelectedMedia(), first);
+        QVERIFY(selectionMatches());
+        f.timeline.placeKeyframe();
+        QVERIFY(!f.timeline.selectedKeyframeId().isEmpty());
+        QVERIFY(selectionMatches());
+        f.timeline.copySelected();
+        auto clipboard = [] {
+            return QJsonDocument::fromJson(QGuiApplication::clipboard()->mimeData()->data(
+                "application/x-mouffette-timeline-v6")).object();
+        };
+        QCOMPARE(clipboard().value("kind").toString(), QString("keyframe"));
+        f.timeline.selectClip(first->timelineTrack().clip.id);
+        QVERIFY(f.timeline.selectedKeyframeId().isEmpty());
+        QVERIFY(selectionMatches());
+        f.timeline.copySelected();
+        QCOMPARE(clipboard().value("kind").toString(), QString("clip"));
+        QCOMPARE(clipboard().value("mediaId").toString(), first->mediaId());
+        f.timeline.setActiveTrackIndex(2);
+        QVERIFY(doc->selectedMediaIds().isEmpty());
+        QCOMPARE(f.timeline.activeTrackIndex(), 2);
+        QVERIFY(selectionMatches());
+        doc->select(first->mediaId());
+        auto* ruler = f.item("timelineTracks");
+        QTest::mouseClick(&f.view, Qt::LeftButton, Qt::NoModifier, ruler->mapToScene({200, 10}).toPoint());
+        QVERIFY(doc->selectedMediaIds().isEmpty());
+        QVERIFY(selectionMatches());
+        doc->select(first->mediaId());
+        doc->clearSelection();
+        QVERIFY(selectionMatches());
+        QCOMPARE(resets.count(), 0);
+        QCOMPARE(removals.count(), 0);
+        QCOMPARE(timelineItems(f.view.rootObject(), "timelineClip"), delegates);
+        // Replacing a clip on the same instance cannot leave a stale selected ID.
+        doc->select(first->mediaId());
+        auto track = first->timelineTrack();
+        track.clip.id = SceneTimeline::newId();
+        first->setTimelineTrack(track);
+        QVERIFY(selectionMatches());
+        QCOMPARE(f.timeline.selectedClipId(), track.clip.id);
+        f.timeline.selectClip(second->timelineTrack().clip.id);
+        const auto removedId = second->mediaId();
+        f.timeline.deleteSelected();
+        QVERIFY(!doc->mediaById(removedId));
+        QVERIFY(doc->selectedMediaIds().isEmpty());
+        QVERIFY(f.timeline.selectedClipId().isEmpty());
+        QVERIFY(!f.item("timelineDelete")->isEnabled());
+    }
+
+    void clipLabelsStayVisibleAndFillTrackHeight_data()
+    {
+        QTest::addColumn<int>("startMs");
+        QTest::addColumn<int>("endMs");
+        QTest::addColumn<int>("viewStartMs");
+        QTest::addColumn<QString>("placement");
+        QTest::newRow("long-clip-middle") << 0 << 90000 << 30000 << "center";
+        QTest::newRow("left-of-center") << 0 << 5000 << 0 << "right";
+        QTest::newRow("right-of-center") << 9000 << 14000 << 0 << "left";
+        QTest::newRow("left-edge-offscreen") << 0 << 34000 << 30000 << "right";
+        QTest::newRow("right-edge-offscreen") << 40000 << 60000 << 30000 << "left";
+        QTest::newRow("short-clip") << 5000 << 5500 << 0 << "fill";
+        QTest::newRow("long-title") << 0 << 90000 << 30000 << "fill";
+        QTest::newRow("offscreen") << 0 << 1000 << 30000 << "hidden";
+    }
+
+    void clipLabelsStayVisibleAndFillTrackHeight()
+    {
+        QFETCH(int, startMs); QFETCH(int, endMs); QFETCH(int, viewStartMs); QFETCH(QString, placement);
+        TimelineFixture f; QVERIFY(f.initialize());
+        const bool longTitle = QByteArray(QTest::currentDataTag()) == "long-title";
+        const QString name = longTitle ? QString(500, 'W') : QString("Clip title");
+        auto* media = f.host->document()->addText({}, name);
+        const auto grid = f.host->document()->timelineSettings();
+        auto track = media->timelineTrack();
+        track.clip.startSlot = grid.nearestSlot(startMs);
+        track.clip.durationSlots = grid.nearestSlot(endMs) - track.clip.startSlot;
+        media->setTimelineTrack(track);
+        if (longTitle) {
+            f.view.resize(320, 240);
+            QTRY_COMPARE(f.view.rootObject()->width(), 320.0);
+        }
+        f.view.rootObject()->setProperty("viewDurationMs", 15000.0);
+        f.item("timelineTracks")->setProperty("contentX", viewStartMs * f.scale());
+        auto* clip = f.item("timelineClip");
+        auto* label = f.item("timelineClipLabel");
+        auto* title = f.item("timelineClipTitle");
+        auto* duration = f.item("timelineClipDuration");
+        QVERIFY(clip && label && title && duration);
+        const qreal trackHeight = f.view.rootObject()->property("clipHeight").toReal();
+        QCOMPARE(clip->y(), 5.0);
+        QCOMPARE(clip->height(), trackHeight - 10);
+        QCOMPARE(label->height(), clip->height());
+        QCOMPARE(f.item("timelineClipTrackLabel")->isVisible(), startMs > viewStartMs || endMs <= viewStartMs);
+        QCOMPARE(title->property("text").toString(), media->displayName());
+        QCOMPARE(duration->property("text").toString(), "  ·  " + QTime(0, 0).addMSecs(endMs - startMs).toString("mm:ss.zzz"));
+        if (placement == "hidden") {
+            QCOMPARE(label->width(), 0.0);
+            QVERIFY(!label->isVisible());
+            return;
+        }
+        QTRY_VERIFY(label->width() > 0);
+        QVERIFY(label->x() >= 8);
+        QVERIFY(label->x() + label->width() <= clip->width() - 8 + 0.01);
+        QVERIFY(label->mapToScene({0, 0}).x() >= 8);
+        QVERIFY(label->mapToScene({label->width(), 0}).x() <= f.view.width() - 8 + 0.01);
+        if (placement == "center") {
+            QTRY_VERIFY(qAbs(label->mapToScene({label->width()/2, 0}).x() - f.view.width()/2.0) < 0.01);
+            // Follow both horizontal scrolling and resizing/zooming without touching the clip.
+            f.item("timelineTracks")->setProperty("contentX", 35000 * f.scale());
+            f.view.resize(680, 240);
+            QTRY_COMPARE(f.view.rootObject()->width(), 680.0);
+            f.view.rootObject()->setProperty("viewDurationMs", 10000.0);
+            QTRY_VERIFY(qAbs(label->mapToScene({label->width()/2, 0}).x() - 340) < 0.01);
+        } else if (placement == "right") {
+            QTRY_VERIFY(qAbs(label->x() + label->width() - (clip->width() - 8)) < 0.01);
+        } else if (placement == "left") {
+            QCOMPARE(label->x(), 8.0);
+        } else if (longTitle) {
+            QTRY_COMPARE(label->width(), f.view.width() - 16.0);
+            QCOMPARE(duration->width(), duration->implicitWidth());
+            QVERIFY(title->width() < title->implicitWidth());
+        } else {
+            QCOMPARE(label->width(), clip->width() - 16);
+        }
+        const auto screenshot = qEnvironmentVariable("MOUFFETTE_TIMELINE_SCREENSHOT");
+        if (!screenshot.isEmpty()) {
+            QTest::qWait(100);
+            QVERIFY(f.view.grabWindow().save(screenshot + QTest::currentDataTag() + ".png"));
+        }
+        // During trimming the displayed duration follows the preview immediately.
+        clip->setProperty("previewStart", qreal(startMs));
+        clip->setProperty("previewEnd", qreal(startMs + 2000));
+        clip->setProperty("dragging", true);
+        QCOMPARE(duration->property("text").toString(), QString("  ·  00:02.000"));
+        clip->setProperty("dragging", false);
+        QCOMPARE(duration->property("text").toString(), "  ·  " + QTime(0, 0).addMSecs(endMs - startMs).toString("mm:ss.zzz"));
+    }
+
     void staticClipsControlPresenceWithoutChangingKeyframes()
     {
         TimelineFixture f; QVERIFY(f.initialize());

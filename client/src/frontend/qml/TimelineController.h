@@ -77,7 +77,7 @@ public:
     int trackCount() const;
     int activeTrackIndex() const;
     QString selectedKeyframeId() const { return m_keyframeId; }
-    QString selectedClipId() const { return m_clipId; }
+    QString selectedClipId() const;
     bool canCapture() const;
     bool canSplit() const;
     bool canPaste() const;
@@ -130,7 +130,6 @@ private:
     QPointer<CanvasDocument> m_document;
     QString m_primaryId;
     QString m_keyframeId;
-    QString m_clipId;
     QString m_error;
     QVariantList m_publishedKeys;
     QVariantList m_publishedOtherKeys;

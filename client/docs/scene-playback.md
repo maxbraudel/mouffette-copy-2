@@ -105,8 +105,11 @@ not fit, the entire row scrolls together. Its side padding belongs to the scroll
 overflow adds neither a scrollbar nor extra height.
 The default panel height is 240 px. A fixed 32 px keyframe band remains above
 48 px clip tracks. The ruler and keys remain fixed vertically while the clips
-scroll. Every clip displays its media name and supports temporal and vertical
-dragging with edge auto-scroll. Clip rows retain their identities when selection
+scroll. Clips fill their track with a 5 px top and bottom inset. The media name
+and duration follow the visible timeline center, staying inside the clip and
+clamping to the closest edge when it cannot reach the center. Long names elide
+before the duration. Clips support temporal and vertical dragging with edge
+auto-scroll. Clip rows retain their identities when selection
 changes. The horizontal scrollbar overlays content without reserving a gutter.
 Vertical wheel motion over clips scrolls tracks; horizontal motion or Shift+wheel
 scrolls time. Ctrl/Cmd+wheel zooms.
@@ -116,8 +119,12 @@ releasing it immediately restores ordinary grid alignment. The ruler groups grid
 lines when zoomed out; it never changes the actual slot size. Left/right arrows
 move one slot when the timeline has focus; the transport displays the current slot.
 Clip extensions shade their silent holds. Other media keys are decorative.
-All clips are selectable and editable; only the primary instance
-exposes editable keyframes. Canvas group copy/delete remain available. Clipboard and delete commands are routed by focus between text,
+All clips are selectable and editable. `CanvasDocument` owns instance selection;
+clip highlighting, stacking and the primary clip ID are projections of that same
+selection. Clearing selection from the timeline also clears it in the canvas.
+Only the primary instance exposes editable keyframes; a selected keyframe takes
+priority for timeline copy/delete without deselecting its instance.
+Canvas group copy/delete remain available. Clipboard and delete commands are routed by focus between text,
 canvas and timeline. A canvas paste between projects requires matching cadence;
 an animation is never silently reinterpreted on a different grid.
 
