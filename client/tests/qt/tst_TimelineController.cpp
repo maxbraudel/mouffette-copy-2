@@ -6,6 +6,7 @@
 #include <QQuickItem>
 #include <QQuickStyle>
 #include <QQuickView>
+#include <QStyleHints>
 #include <QTemporaryDir>
 #include <QImage>
 #include <QtTest>
@@ -769,6 +770,101 @@ private slots:
         QVERIFY(!ids.isEmpty());
     }
 
+    void keyframeSeparatorStaysAboveScrollableTracks()
+    {
+        TimelineFixture f; QVERIFY(f.initialize());
+        for (int i = 0; i < 8; ++i) QVERIFY(f.host->document()->addText({}, QString::number(i)));
+        auto* separator = f.item("timelineKeyframeSeparator");
+        auto* keys = f.item("timelineKeyframeTrack");
+        auto* clips = f.item("timelineClipViewport");
+        auto* headers = f.item("timelineClipHeaders");
+        QVERIFY(separator && keys && clips && headers);
+        const auto position = separator->mapToScene({0, 0});
+        QCOMPARE(position.x(), 0.0);
+        QCOMPARE(position.y(), keys->mapToScene({0, keys->height()}).y());
+        QCOMPARE(separator->width(), f.view.width());
+        QCOMPARE(clips->mapToScene({0, 0}).y(), position.y() + separator->height());
+        QCOMPARE(headers->mapToScene({0, 0}).y(), position.y() + separator->height());
+        for (qreal offset : {13.0, 120.0, clips->property("contentHeight").toReal() - clips->height()}) {
+            clips->setProperty("contentY", offset);
+            f.item("timelineTracks")->setProperty("contentX", offset);
+            QTest::qWait(30);
+            QCOMPARE(separator->mapToScene({0, 0}), position);
+            const auto frame = f.view.grabWindow();
+            QVERIFY(!frame.isNull());
+            const qreal scale = frame.width() / qreal(f.view.width());
+            for (qreal x : {20.0, f.view.width() / 2.0, f.view.width() - 20.0})
+                QCOMPARE(frame.pixelColor(qFloor(x * scale), qFloor((position.y() + 0.5) * scale)),
+                    separator->property("color").value<QColor>());
+        }
+    }
+
+    void clipPressAtViewportEdgeRequiresDrag_data()
+    {
+        QTest::addColumn<QString>("viewportEdge");
+        QTest::addColumn<int>("editEdge");
+        QTest::newRow("move-top") << "top" << 0;
+        QTest::newRow("move-bottom") << "bottom" << 0;
+        QTest::newRow("move-left") << "left" << 0;
+        QTest::newRow("move-right") << "right" << 0;
+        QTest::newRow("trim-start-top") << "top" << -1;
+        QTest::newRow("trim-start-bottom") << "bottom" << -1;
+        QTest::newRow("trim-end-top") << "top" << 1;
+        QTest::newRow("trim-end-bottom") << "bottom" << 1;
+    }
+
+    void clipPressAtViewportEdgeRequiresDrag()
+    {
+        QFETCH(QString, viewportEdge); QFETCH(int, editEdge);
+        TimelineFixture f; QVERIFY(f.initialize());
+        auto* doc = f.host->document();
+        auto* media = doc->addText({}, "Click near viewport edge");
+        auto track = media->timelineTrack();
+        track.trackIndex = 3;
+        track.clip.startSlot = 300;
+        track.clip.durationSlots = 300;
+        media->setTimelineTrack(track);
+        auto* last = doc->addText({}, "Keep lower tracks scrollable");
+        auto lastTrack = last->timelineTrack();
+        lastTrack.trackIndex = 8;
+        last->setTimelineTrack(lastTrack);
+        doc->clearSelection();
+        auto* clip = f.item("timelineClip");
+        auto* viewport = f.item("timelineClipViewport");
+        auto* tracks = f.item("timelineTracks");
+        QVERIFY(clip && viewport && tracks);
+        QCOMPARE(clip->property("modelData").toMap().value("id").toString(), track.clip.id);
+        const qreal localX = editEdge < 0 ? 4 : editEdge > 0 ? clip->width() - 4 : clip->width()/2;
+        const qreal pointerX = viewportEdge == "left" ? 10
+            : viewportEdge == "right" ? tracks->width() - 10 : tracks->width()/2;
+        const qreal pointerY = viewportEdge == "top" ? 10
+            : viewportEdge == "bottom" ? viewport->height() - 18 : viewport->height()/2;
+        tracks->setProperty("contentX", clip->x() + localX - pointerX);
+        viewport->setProperty("contentY", clip->y() + clip->height()/2 - pointerY);
+        const qreal scrollX = f.scroll();
+        const qreal scrollY = viewport->property("contentY").toReal();
+        const auto press = clip->mapToScene({localX, clip->height()/2}).toPoint();
+        const auto saved = media->timelineTrack().toJson();
+        QTest::mouseMove(&f.view, press);
+        QTest::mousePress(&f.view, Qt::LeftButton, Qt::NoModifier, press);
+        QCOMPARE(f.timeline.selectedClipId(), track.clip.id);
+        QTest::qWait(120); // Several auto-scroll timer ticks with a stationary pointer.
+        QVERIFY(!clip->property("dragging").toBool());
+        QCOMPARE(f.scroll(), scrollX);
+        QCOMPARE(viewport->property("contentY").toReal(), scrollY);
+        const auto jitter = press + QPoint(qMax(1, QGuiApplication::styleHints()->startDragDistance()/2), 0);
+        QTest::mouseMove(&f.view, jitter, 20);
+        QTest::keyPress(&f.view, Qt::Key_Shift);
+        QTest::qWait(120);
+        QVERIFY(!clip->property("dragging").toBool());
+        QCOMPARE(f.scroll(), scrollX);
+        QCOMPARE(viewport->property("contentY").toReal(), scrollY);
+        QTest::keyRelease(&f.view, Qt::Key_Shift);
+        QTest::mouseRelease(&f.view, Qt::LeftButton, Qt::NoModifier, jitter);
+        QCOMPARE(media->timelineTrack().toJson(), saved);
+        QCOMPARE(doc->media().size(), 2);
+    }
+
     void trackHeadersMeasureAllNamesAndFollowVerticalScroll()
     {
         TimelineFixture f; QVERIFY(f.initialize());
@@ -874,8 +970,9 @@ private slots:
         const auto leftEdge = tracks->mapToScene({10, f.timeline.rulerHeightPx() + 32.0 + 24}).toPoint();
         QVERIFY(leftEdge.x() > 22); // The panel edge is outside the temporal viewport.
         QTest::mousePress(&f.view, Qt::LeftButton, Qt::NoModifier, from);
-        QVERIFY(clip->property("dragging").toBool());
+        QVERIFY(!clip->property("dragging").toBool());
         QTest::mouseMove(&f.view, leftEdge, 20);
+        QVERIFY(clip->property("dragging").toBool());
         QTRY_VERIFY(f.scroll() < 400);
         QCOMPARE(headers->x(), 0.0);
         const qreal scrolled = f.scroll();

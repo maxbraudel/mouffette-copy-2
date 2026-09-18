@@ -16,6 +16,8 @@ Rectangle {
     property int previewTrack: 0
     property real pressContentX: 0
     property real pressContentY: 0
+    property real pressPanelX: 0
+    property real pressPanelY: 0
     property real pointerPanelX: 0
     property real pointerPanelY: 0
     readonly property int shownTrack: dragging ? previewTrack : modelData.trackIndex
@@ -60,16 +62,24 @@ Rectangle {
         var point = area.mapToItem(timeContent, mouse.x, mouse.y)
         pressContentX = point.x; pressContentY = point.y
         var panelPoint = area.mapToItem(panel, mouse.x, mouse.y)
+        pressPanelX = panelPoint.x; pressPanelY = panelPoint.y
         pointerPanelX = panelPoint.x; pointerPanelY = panelPoint.y
-        dragging = true; panel.activeDrag = clipItem
     }
     function updateEdit(mouse, area) {
         panel.shiftHeld = !!(mouse.modifiers & Qt.ShiftModifier)
         var point = area.mapToItem(panel, mouse.x, mouse.y)
         pointerPanelX = point.x; pointerPanelY = point.y
+        if (!dragging) {
+            // Measure intent in fixed panel coordinates, independently of scrolling.
+            var dx = Math.abs(pointerPanelX - pressPanelX)
+            var dy = editEdge === 0 ? Math.abs(pointerPanelY - pressPanelY) : 0
+            if (Math.max(dx, dy) < Qt.styleHints.startDragDistance) return
+            dragging = true; panel.activeDrag = clipItem
+        }
         refreshFromPointer()
     }
     function finishEdit() {
+        if (!dragging) return
         var id = modelData.id; var start = panel.clampTime(previewStart); var end = panel.clampTime(previewEnd); var edge = editEdge; var track = previewTrack
         dragging = false; panel.endDrag()
         if (start === initialStart && end === initialEnd && track === initialTrack) return
@@ -151,7 +161,6 @@ Rectangle {
         anchors.fill: parent
         enabled: clipItem.interactive && panel.editable
         cursorShape: Qt.SizeAllCursor
-        property real pressX: 0
         onPressed: mouse => clipItem.beginEdit(0, mouse, clipMove)
         onPositionChanged: mouse => { if (pressed) clipItem.updateEdit(mouse, clipMove) }
         onReleased: clipItem.finishEdit()
@@ -168,7 +177,6 @@ Rectangle {
             visible: clipItem.interactive
             enabled: clipItem.interactive && panel.editable
             cursorShape: Qt.SizeHorCursor
-            property real pressX: 0
             Rectangle { anchors.centerIn: parent; width: 2; height: Math.min(20, parent.height - 6); color: Theme.overlayText }
             onPressed: mouse => clipItem.beginEdit(modelData, mouse, trimHandle)
             onPositionChanged: mouse => { if (pressed) clipItem.updateEdit(mouse, trimHandle) }

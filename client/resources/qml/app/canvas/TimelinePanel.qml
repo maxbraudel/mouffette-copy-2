@@ -108,7 +108,7 @@ FocusScope {
                 || (wheel.device && wheel.device.type === PointerDevice.TouchPad)
             if (delta !== 0)
                 zoom(trackpad ? Math.exp(-delta * 0.003) : Math.pow(1.0015, -delta * 5))
-        } else if (wheel.y >= root.rulerHeight + root.keyHeight) {
+        } else if (wheel.y >= root.rulerHeight + root.keyHeight + keyframeSeparator.height) {
             if ((wheel.modifiers & Qt.ShiftModifier) !== 0)
                 scrollTo(trackViewport.contentX - (dx || dy) * (precise ? 1 : 3))
             else {
@@ -475,6 +475,16 @@ FocusScope {
         textFormat: Text.PlainText
         verticalAlignment: Text.AlignVCenter
     }
+    Rectangle {
+        id: keyframeSeparator
+        objectName: "timelineKeyframeSeparator"
+        anchors.left: parent.left; anchors.right: parent.right
+        anchors.top: tracksSeparator.bottom
+        anchors.topMargin: root.rulerHeight + root.keyHeight
+        height: 1
+        z: 1
+        color: Theme.overlayBorder
+    }
     Item {
         id: trackHeaders
         objectName: "timelineTrackHeaders"
@@ -498,7 +508,7 @@ FocusScope {
         Item {
             id: clipHeaders
             objectName: "timelineClipHeaders"
-            y: root.rulerHeight + root.keyHeight
+            y: root.rulerHeight + root.keyHeight + keyframeSeparator.height
             width: parent.width; height: Math.max(0, parent.height - y)
             clip: true
             Repeater {
@@ -510,7 +520,7 @@ FocusScope {
                     y: trackIndex * root.clipHeight - clipViewport.contentY
                     width: clipHeaders.width; height: root.clipHeight
                     visible: trackIndex < root.trackNames.length
-                    Rectangle { width: parent.width; height: 1; color: Theme.overlayBorder }
+                    Rectangle { visible: parent.trackIndex > 0; width: parent.width; height: 1; color: Theme.overlayBorder }
                     TrackName {
                         objectName: "timelineClipTrackLabel"
                         height: parent.height
@@ -669,7 +679,7 @@ FocusScope {
             Flickable {
                 id: clipViewport
                 objectName: "timelineClipViewport"
-                y: keyTrack.y + keyTrack.height
+                y: keyTrack.y + keyTrack.height + keyframeSeparator.height
                 width: parent.width; height: Math.max(0, parent.height - y)
                 contentWidth: width
                 contentHeight: Math.max(height, (root.timeline ? root.timeline.trackCount : 1) * root.clipHeight)
@@ -695,7 +705,7 @@ FocusScope {
                         y: trackIndex * root.clipHeight
                         width: clipViewport.width; height: root.clipHeight
                         visible: trackIndex < (root.timeline ? root.timeline.trackCount : 1)
-                        Rectangle { width: parent.width; height: 1; color: Theme.overlayBorder }
+                        Rectangle { visible: clipTrack.trackIndex > 0; width: parent.width; height: 1; color: Theme.overlayBorder }
                         MouseArea {
                             anchors.fill: parent
                             enabled: root.editable
