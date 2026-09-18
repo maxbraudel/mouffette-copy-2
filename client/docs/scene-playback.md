@@ -7,7 +7,7 @@ clock independently of video position notifications.
 
 ## State and evaluation
 
-`SceneTimeline` defines element states, keyframes, source video clips and scene
+`SceneTimeline` defines element states, keyframes, shared presence clips and scene
 timing. Its pure C++ evaluator is shared by `QuickCanvasHost` and
 `RemoteSceneController`. Document authoring state, the uncaptured element draft,
 the evaluated presentation and the transport/player state are separate. Seeking
@@ -30,26 +30,44 @@ state as the new static state. Keys at an occupied instant replace that key.
 
 ## Clips and transport
 
-Clips refer to source intervals without producing new files. They play at normal
-speed and native video cadence. Source offsets also use the project grid, not native
-video frame numbers. Source length rounds up once: 250 ms at 30 slots/s occupies
-8 slots (266⅔ ms), ending with 16⅔ ms of silent frozen video. Only a fragment
-reaching the actual source end contains this compensation. Splitting cannot add
-more compensation; extension cannot exceed the last slot covering the source.
-A move preserves occupied duration and stays within project bounds. Pasting starts
-at the head and truncates at the project end. Insertion, movement and extension
-overwrite only the arrival interval, retaining correctly offset source fragments.
-Trimming shorter or deleting leaves a gap. Keys and clips remain independent.
+Every image, text and video has a track of non-overlapping `Clip` intervals.
+A newly created image or text receives one clip from zero to the scene maximum,
+regardless of the head or Stop. A new video uses its source duration, rounded up
+to the grid and capped at the scene maximum. `clipsInitialized` prevents deleted
+clips from being regenerated when a file is restored or its residency changes.
+Import metadata supplies the video duration before full decoding, so a loading
+skeleton has the same clip presence as the eventual content, even while waiting
+for memory admission.
 
-Before the first clip, show its source entry image. In a gap or after the last
-clip, hold the preceding exit image. An empty track shows source time zero.
-Audio is audible only while the timeline advances inside an active clip, subject
-to evaluated mute and volume. Pausing and seeking silence the device without
-altering saved audio properties.
+Clips define half-open presence intervals `[startSlot, endSlot)`. Outside all clips,
+including an empty track, the element is absent from both renderers and from
+canvas picking, selection chrome and overlays. It remains selectable in the media
+list and editable in the inspector/timeline. Runtime `clipActive` is separate from
+intrinsic visibility/opacity and is never captured in a key or saved in the project.
+
+All clips use the same editing operations and QML component. Movement preserves
+duration and stays within scene bounds. Insertion, movement and extension overwrite
+only the arrival interval, keeping source-correct fragments on either side.
+Shortening or deletion leaves a gap. Keys retain their absolute scene positions.
+Static insertion fills the gap from the head to the next clip or scene maximum;
+it is disabled at an occupied head. Video insertion adds the full source from the
+head, truncated at the scene end. Clipboard clips remain scoped to their project
+and media; paste truncates at the scene end.
+
+`sourceStartSlot` is null for static clips and a signed grid offset for video.
+Video plays at its native cadence and normal speed. Extending a trimmed clip first
+recovers available source frames; beyond the source it holds the first/last image
+silently. Cuts can produce entirely frozen fragments. Diagonal hatching shows both
+held regions and updates during resize, including the final partial source slot:
+250 ms at 30 slots/s occupies 8 slots, with 16⅔ ms of silent frozen video.
+Only the source image freezes; independent keyframe animation continues.
+Audio is audible only while advancing inside the real source portion of an active
+clip, subject to evaluated mute/volume. Pausing, gaps and holds silence the device
+without modifying saved audio properties.
 
 `TimelineVideoPlayback` translates the evaluated source sample into asynchronous
 `ResidentVideoPlayer` seeks and normal playback. Pending seeks coalesce, stale
-responses are ignored and the last valid image remains visible. Contiguous source
+responses are ignored and the last valid image remains visible within an active clip. Contiguous source
 cuts do not cause another seek. Both renderers use the same synchronization policy.
 
 Play resumes at the head; at or past the effective end it restarts at zero. Pause
@@ -79,7 +97,7 @@ Shift temporarily snaps against all keys and clip boundaries;
 releasing it immediately restores ordinary grid alignment. The ruler groups grid
 lines when zoomed out; it never changes the actual slot size. Left/right arrows
 move one slot when the timeline has focus; the transport displays the current slot.
-Clip tails show their silent compensation. Other media keys are decorative.
+Clip extensions show their silent holds with diagonal hatching. Other media keys are decorative.
 Only the explicitly selected primary media is editable; canvas group copy/delete
 remain available. Clipboard and delete commands are routed by focus between text,
 canvas and timeline. A canvas paste between projects requires matching cadence;
@@ -87,7 +105,8 @@ an animation is never silently reinterpreted on a different grid.
 
 Remote launch preserves preparation, first-image verification, a synchronized
 activation barrier and an immutable revision. Every media is prepared, including
-media initially outside screens. Screen intersections follow evaluated geometry.
+media initially outside screens or clips. Initially absent videos prepare their
+first source frame without displaying it. Screen intersections follow evaluated geometry.
 Periodic snapshots carry only the continuous timeline time (including fractional
 milliseconds and the position within a slot), never presentation
 properties, and cannot overwrite animated states. Display loss hides the affected
@@ -102,9 +121,10 @@ captured in each new project (default 180000 ms), together with cadence
 (`MOUFFETTE_TIMELINE_SLOTS_PER_SECOND`, integer 1–240, default 30); visual settings apply globally.
 The initial viewport spans 15000 ms and is independent of playback cadence.
 
-Project component version 6 replaces versions 1–5 through the explicit bootstrap
-reset transition. Other profile components are preserved. Render schema 4 and
-wire protocol 9 require a coordinated client/server rollout. Legacy automation,
+Project component version 7 migrates version 6 at bootstrap, preserving projects,
+keys and video clips and adding full-scene clips to existing images/text. Versions
+1–5 retain their explicit reset policy. Other profile components are preserved.
+Render schema 5 and wire protocol 10 require a coordinated client/server rollout. Legacy automation,
 video ranges and older render payloads are rejected, not converted. Timeline
 validation applies on both client and server, including time bounds, strict
 property schemas, source intervals and existing payload size limits.

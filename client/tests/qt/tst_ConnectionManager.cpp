@@ -326,7 +326,7 @@ void ConnectionManagerTest::signedHandshakeAndHeartbeat() {
         latestConnection = connection;
         QJsonObject challenge{
             {"type", "auth_challenge"},
-            {"protocolVersion", 9},
+            {"protocolVersion", 10},
             {"serverBootId", bootId},
             {"messageId", QUuid::createUuid().toString(QUuid::WithoutBraces)},
             {"nonce", nonce},
@@ -341,7 +341,7 @@ void ConnectionManagerTest::signedHandshakeAndHeartbeat() {
             const QString type = message.value("type").toString();
             if (type == QStringLiteral("auth_response")) {
                 const int connectionGeneration = ++authenticationCount;
-                QCOMPARE(message.value("protocolVersion").toInt(), 9);
+                QCOMPARE(message.value("protocolVersion").toInt(), 10);
                 QCOMPARE(message.value("serverBootId").toString(), bootId);
                 const QByteArray publicDer = QByteArray::fromBase64(
                     message.value("publicKey").toString().toLatin1(),
@@ -356,7 +356,7 @@ void ConnectionManagerTest::signedHandshakeAndHeartbeat() {
                 QCOMPARE(message.value("instanceOrdinal").toInt(), 2);
                 const QString endpointId = DeviceIdentityStore::endpointIdForInstallation(
                     installationId, message.value("instanceId").toString());
-                const QByteArray signedPayload = QStringLiteral("mouffette-v9\n%1\n%2\n%3\n%4\n%5")
+                const QByteArray signedPayload = QStringLiteral("mouffette-v10\n%1\n%2\n%3\n%4\n%5")
                     .arg(bootId, nonce, message.value("runtimeId").toString(),
                          message.value("instanceId").toString())
                     .arg(message.value("instanceOrdinal").toInt()).toUtf8();
@@ -390,7 +390,7 @@ void ConnectionManagerTest::signedHandshakeAndHeartbeat() {
                 };
                 QJsonObject welcome{
                     {"type", "welcome"},
-                    {"protocolVersion", 9},
+                    {"protocolVersion", 10},
                     {"serverBootId", bootId},
                     {"messageId", QUuid::createUuid().toString(QUuid::WithoutBraces)},
                     {"connectionId", QUuid::createUuid().toString(QUuid::WithoutBraces)},
@@ -406,14 +406,14 @@ void ConnectionManagerTest::signedHandshakeAndHeartbeat() {
                 connection->sendTextMessage(QString::fromUtf8(
                     QJsonDocument(welcome).toJson(QJsonDocument::Compact)));
             } else if (type == QStringLiteral("heartbeat")) {
-                QCOMPARE(message.value("protocolVersion").toInt(), 9);
+                QCOMPARE(message.value("protocolVersion").toInt(), 10);
                 QCOMPARE(message.value("serverBootId").toString(), bootId);
                 heartbeatReceived = true;
                 ++heartbeatCount;
                 if (!acknowledgeHeartbeats) return;
                 QJsonObject ack{
                     {"type", "heartbeat_ack"},
-                    {"protocolVersion", 9},
+                    {"protocolVersion", 10},
                     {"serverBootId", bootId},
                     {"messageId", QUuid::createUuid().toString(QUuid::WithoutBraces)},
                     {"connectionGeneration", message.value("connectionGeneration")},
@@ -626,7 +626,7 @@ void ConnectionManagerTest::signedHandshakeAndHeartbeat() {
         if (!latestConnection) return;
         const QJsonObject message{
             {"type", "client_list"},
-            {"protocolVersion", 9},
+            {"protocolVersion", 10},
             {"serverBootId", bootId},
             {"messageId", QUuid::createUuid().toString(QUuid::WithoutBraces)},
             {"connectionGeneration", static_cast<double>(client.connectionGeneration())},
@@ -686,7 +686,7 @@ void ConnectionManagerTest::suspendInclusiveTransportBoundaryRejectsLateContact(
         peer = server.nextPendingConnection();
         QVERIFY(peer);
         peer->sendTextMessage(QString::fromUtf8(QJsonDocument(QJsonObject{
-            {"type", "auth_challenge"}, {"protocolVersion", 9},
+            {"type", "auth_challenge"}, {"protocolVersion", 10},
             {"serverBootId", bootId},
             {"messageId", QUuid::createUuid().toString(QUuid::WithoutBraces)},
             {"nonce", nonce}, {"issuedAt", 1},
@@ -710,7 +710,7 @@ void ConnectionManagerTest::suspendInclusiveTransportBoundaryRejectsLateContact(
                 {"removalAckTimeoutMs", 30000},
             };
             peer->sendTextMessage(QString::fromUtf8(QJsonDocument(QJsonObject{
-                {"type", "welcome"}, {"protocolVersion", 9},
+                {"type", "welcome"}, {"protocolVersion", 10},
                 {"serverBootId", bootId},
                 {"messageId", QUuid::createUuid().toString(QUuid::WithoutBraces)},
                 {"connectionId", QUuid::createUuid().toString(QUuid::WithoutBraces)},
@@ -744,7 +744,7 @@ void ConnectionManagerTest::suspendInclusiveTransportBoundaryRejectsLateContact(
         QSignalSpy states(&client, &WebSocketClient::remoteSessionLeaseStateChanged);
         QSignalSpy expired(&client, &WebSocketClient::remoteSessionRecoveryExpired);
         QJsonObject state{
-            {"type", "remote_session_opened"}, {"resumeToken", "retained-proof"}, {"protocolVersion", 9},
+            {"type", "remote_session_opened"}, {"resumeToken", "retained-proof"}, {"protocolVersion", 10},
             {"serverBootId", bootId}, {"connectionGeneration", 1},
             {"remoteSessionId", sessionId}, {"generation", 1}, {"stateRevision", 1},
             {"ownerEndpointId", DeviceIdentityStore::endpointIdForInstallation(client.installationId(), "instance-2")},
@@ -813,7 +813,7 @@ void ConnectionManagerTest::suspendInclusiveTransportBoundaryRejectsLateContact(
     // A valid packet at the transport deadline cannot refresh contact. It
     // aborts the stale socket, without manufacturing a global session expiry.
     peer->sendTextMessage(QString::fromUtf8(QJsonDocument(QJsonObject{
-        {"type", "client_list"}, {"protocolVersion", 9},
+        {"type", "client_list"}, {"protocolVersion", 10},
         {"serverBootId", bootId},
         {"messageId", QUuid::createUuid().toString(QUuid::WithoutBraces)},
         {"connectionGeneration", 1}, {"clients", QJsonArray{}},
@@ -862,7 +862,7 @@ void ConnectionManagerTest::handshakeRejectsMalformedEnvelope() {
         QVERIFY(peer);
         QJsonObject challenge{
             {QStringLiteral("type"), QStringLiteral("auth_challenge")},
-            {QStringLiteral("protocolVersion"), 9},
+            {QStringLiteral("protocolVersion"), 10},
             {QStringLiteral("serverBootId"), bootId},
             {QStringLiteral("messageId"),
              QUuid::createUuid().toString(QUuid::WithoutBraces)},
@@ -911,7 +911,7 @@ void ConnectionManagerTest::handshakeRejectsMalformedEnvelope() {
             }
             QJsonObject welcome{
                 {QStringLiteral("type"), QStringLiteral("welcome")},
-                {QStringLiteral("protocolVersion"), 9},
+                {QStringLiteral("protocolVersion"), 10},
                 {QStringLiteral("serverBootId"), bootId},
                 {QStringLiteral("messageId"),
                  QUuid::createUuid().toString(QUuid::WithoutBraces)},
@@ -996,7 +996,7 @@ void ConnectionManagerTest::uploadChannelReadyRequiresExactEnvelope() {
             uploadPeerSeen = true;
             QJsonObject ready{
                 {QStringLiteral("type"), QStringLiteral("upload_channel_ready")},
-                {QStringLiteral("protocolVersion"), 9},
+                {QStringLiteral("protocolVersion"), 10},
                 {QStringLiteral("serverBootId"), bootId},
                 {QStringLiteral("messageId"),
                  QUuid::createUuid().toString(QUuid::WithoutBraces)},
@@ -1021,7 +1021,7 @@ void ConnectionManagerTest::uploadChannelReadyRequiresExactEnvelope() {
         controlPeer = candidate;
         const QJsonObject challenge{
             {QStringLiteral("type"), QStringLiteral("auth_challenge")},
-            {QStringLiteral("protocolVersion"), 9},
+            {QStringLiteral("protocolVersion"), 10},
             {QStringLiteral("serverBootId"), bootId},
             {QStringLiteral("messageId"),
              QUuid::createUuid().toString(QUuid::WithoutBraces)},
@@ -1062,7 +1062,7 @@ void ConnectionManagerTest::uploadChannelReadyRequiresExactEnvelope() {
                 candidate->sendTextMessage(QString::fromUtf8(QJsonDocument(
                     QJsonObject{
                         {QStringLiteral("type"), QStringLiteral("welcome")},
-                        {QStringLiteral("protocolVersion"), 9},
+                        {QStringLiteral("protocolVersion"), 10},
                         {QStringLiteral("serverBootId"), bootId},
                         {QStringLiteral("messageId"),
                          QUuid::createUuid().toString(QUuid::WithoutBraces)},
@@ -1086,7 +1086,7 @@ void ConnectionManagerTest::uploadChannelReadyRequiresExactEnvelope() {
                     QJsonObject{
                         {QStringLiteral("type"),
                          QStringLiteral("upload_channel_token")},
-                        {QStringLiteral("protocolVersion"), 9},
+                        {QStringLiteral("protocolVersion"), 10},
                         {QStringLiteral("serverBootId"), bootId},
                         {QStringLiteral("messageId"),
                          QUuid::createUuid().toString(QUuid::WithoutBraces)},
@@ -1135,7 +1135,7 @@ void ConnectionManagerTest::protocolUploadWireSchemaAndActiveGate() {
     WebSocketClient client(identityDirectory.path(), false);
     const auto sendServerMessage = [&](QJsonObject message) {
         QVERIFY(peer != nullptr);
-        message.insert(QStringLiteral("protocolVersion"), 9);
+        message.insert(QStringLiteral("protocolVersion"), 10);
         message.insert(QStringLiteral("serverBootId"), bootId);
         completeV7TestEnvelope(message);
         message.insert(QStringLiteral("messageId"),
@@ -1149,7 +1149,7 @@ void ConnectionManagerTest::protocolUploadWireSchemaAndActiveGate() {
         QVERIFY(peer != nullptr);
         peer->sendTextMessage(QString::fromUtf8(QJsonDocument(QJsonObject{
             {QStringLiteral("type"), QStringLiteral("auth_challenge")},
-            {QStringLiteral("protocolVersion"), 9},
+            {QStringLiteral("protocolVersion"), 10},
             {QStringLiteral("serverBootId"), bootId},
             {QStringLiteral("messageId"),
              QUuid::createUuid().toString(QUuid::WithoutBraces)},
@@ -1182,7 +1182,7 @@ void ConnectionManagerTest::protocolUploadWireSchemaAndActiveGate() {
                 };
                 peer->sendTextMessage(QString::fromUtf8(QJsonDocument(QJsonObject{
                     {QStringLiteral("type"), QStringLiteral("welcome")},
-                    {QStringLiteral("protocolVersion"), 9},
+                    {QStringLiteral("protocolVersion"), 10},
                     {QStringLiteral("serverBootId"), bootId},
                     {QStringLiteral("messageId"),
                      QUuid::createUuid().toString(QUuid::WithoutBraces)},
@@ -1351,7 +1351,7 @@ void ConnectionManagerTest::protocolUploadWireSchemaAndActiveGate() {
         QStringLiteral("sessionId"), QStringLiteral("deviceId")
     };
     for (const QJsonObject& command : std::as_const(uploadCommands)) {
-        QCOMPARE(command.value(QStringLiteral("protocolVersion")).toInt(), 9);
+        QCOMPARE(command.value(QStringLiteral("protocolVersion")).toInt(), 10);
         QCOMPARE(command.value(QStringLiteral("remoteSessionId")).toString(),
                  remoteSessionId);
         QCOMPARE(command.value(QStringLiteral("generation")).toInt(), 1);
@@ -1438,7 +1438,7 @@ void ConnectionManagerTest::protocolUploadWireSchemaAndActiveGate() {
     QCOMPARE(cursorCommands.first().value(QStringLiteral("x")).toInt(), 12);
     QCOMPARE(cursorCommands.first().value(QStringLiteral("y")).toInt(), 24);
     QCOMPARE(cursorCommands.first().value(QStringLiteral("remoteSessionId")).toString(), incomingSessionId);
-    QCOMPARE(cursorCommands.first().value(QStringLiteral("protocolVersion")).toInt(), 9);
+    QCOMPARE(cursorCommands.first().value(QStringLiteral("protocolVersion")).toInt(), 10);
     QCOMPARE(cursorCommands.first().value(QStringLiteral("connectionGeneration")).toInt(), 1);
     QCOMPARE(cursorCommands.last().value(QStringLiteral("screenId")).toInt(), -1);
     QCOMPARE(cursorCommands.last().value(QStringLiteral("x")).toInt(), 0);

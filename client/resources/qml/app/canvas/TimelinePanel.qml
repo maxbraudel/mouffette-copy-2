@@ -16,6 +16,8 @@ FocusScope {
     property real viewDurationMs: timeline ? Math.min(maximumMs, timeline.initialViewDurationMs) : 15000
     readonly property real pixelsPerMs: Math.max(1, trackViewport.width - 24) / Math.max(1, viewDurationMs)
     readonly property real rulerHeight: timeline ? timeline.rulerHeightPx : 28
+    readonly property real visibleStartX: trackViewport.contentX
+    readonly property real visibleEndX: trackViewport.contentX + trackViewport.width
     readonly property real clipHeight: timeline ? timeline.clipTrackHeightPx : 64
     readonly property real keyHeight: Math.max(30, trackViewport.height - rulerHeight - clipHeight)
     readonly property real slotMs: 1000 / (timeline ? timeline.slotsPerSecond : 30)
@@ -324,17 +326,17 @@ FocusScope {
                     objectName: "timelineSplitClip"
                     text: "Split clip"
                     iconSource: "qrc:/icons/icons/timeline/split.svg"
-                    visible: !!root.timeline && root.timeline.primaryIsVideo
+                    visible: !!root.timeline && root.timeline.primaryMediaId !== ""
                     enabled: root.editable && root.timeline.canSplit
                     onClicked: { root.focusTrack(); root.timeline.splitClip() }
                 }
                 TimelineEditButton {
                     objectName: "timelineInsertClip"
-                    text: "Insert full video"
+                    text: "Insert clip"
                     iconSource: "qrc:/icons/icons/timeline/insert.svg"
-                    visible: !!root.timeline && root.timeline.primaryIsVideo
-                    enabled: root.editable
-                    onClicked: { root.focusTrack(); root.timeline.insertFullClip() }
+                    visible: !!root.timeline && root.timeline.primaryMediaId !== ""
+                    enabled: root.editable && root.timeline.canInsertClip
+                    onClicked: { root.focusTrack(); root.timeline.insertClip() }
                 }
                 TimelineEditButton {
                     objectName: "timelineCopy"
@@ -455,7 +457,7 @@ FocusScope {
             background: null
         }
         Item {
-            id: timeContent
+            id: timelineContent
             width: trackViewport.contentWidth; height: trackViewport.height
             Rectangle { width: parent.width; height: root.rulerHeight; color: Theme.overlaySelected }
             Rectangle { y: root.rulerHeight; width: parent.width; height: 1; color: Theme.overlayBorder }
@@ -481,7 +483,7 @@ FocusScope {
                     x: 12 + timeMs * root.pixelsPerMs
                     y: root.rulerHeight
                     visible: timeMs <= root.maximumMs
-                    width: 1; height: timeContent.height - y
+                    width: 1; height: timelineContent.height - y
                     color: Theme.overlayBorder; opacity: 0.45
                 }
             }
@@ -492,7 +494,7 @@ FocusScope {
                     readonly property real timeMs: (Math.floor(Math.max(0, trackViewport.contentX - 12) / root.pixelsPerMs / root.tickStep) + index) * root.tickStep
                     x: 12 + timeMs * root.pixelsPerMs
                     visible: timeMs <= root.maximumMs
-                    height: timeContent.height
+                    height: timelineContent.height
                     Rectangle { y: root.rulerHeight - 7; width: 1; height: 7; color: Theme.overlayDisabledText }
                     Rectangle { y: root.rulerHeight; width: 1; height: parent.height - root.rulerHeight; color: Theme.overlayBorder; opacity: 0.35 }
                     Text { x: 4; y: 3; text: root.formatTime(parent.timeMs); font.pixelSize: 10; color: Theme.overlayText }
@@ -544,14 +546,14 @@ FocusScope {
                                 root.focusTrack(); root.shiftHeld = !!(mouse.modifiers & Qt.ShiftModifier)
                                 root.timeline.selectKeyframe(keyItem.modelData.id)
                                 initialMs = keyItem.modelData.timeMs
-                                pressX = mapToItem(timeContent, mouse.x, mouse.y).x
+                                pressX = mapToItem(timelineContent, mouse.x, mouse.y).x
                                 keyItem.rawMs = initialMs; keyItem.previewMs = initialMs
                                 keyItem.dragging = true; root.activeDrag = keyItem
                             }
                             onPositionChanged: mouse => {
                                 if (!pressed) return
                                 root.shiftHeld = !!(mouse.modifiers & Qt.ShiftModifier)
-                                keyItem.rawMs = initialMs + (mapToItem(timeContent, mouse.x, mouse.y).x - pressX) / root.pixelsPerMs
+                                keyItem.rawMs = initialMs + (mapToItem(timelineContent, mouse.x, mouse.y).x - pressX) / root.pixelsPerMs
                                 keyItem.refreshPreview()
                             }
                             onReleased: {
@@ -574,145 +576,36 @@ FocusScope {
                 width: parent.width; height: root.clipHeight
                 Rectangle { anchors.fill: parent; color: Theme.overlaySelected; opacity: 0.45 }
                 Rectangle { width: parent.width; height: 1; color: Theme.overlayBorder }
-                Text { x: trackViewport.contentX + 6; y: 2; text: "VIDEO CLIPS"; font.pixelSize: 9; color: Theme.overlayDisabledText }
+                Text { x: trackViewport.contentX + 6; y: 2; text: "CLIPS"; font.pixelSize: 9; color: Theme.overlayDisabledText }
                 Repeater {
                     model: root.timeline ? root.timeline.otherClips : []
-                    Rectangle {
-                        required property var modelData
-                        objectName: "otherMediaVideoClip"
-                        x: 12 + modelData.startMs * root.pixelsPerMs
-                        y: 17
-                        width: Math.max(2, modelData.durationMs * root.pixelsPerMs)
-                        height: Math.max(12, clipTrack.height - 22)
-                        radius: 3
-                        color: Theme.overlayText
+                    TimelineClip {
+                        panel: root
+                        timeContent: timelineContent
+                        trackHeight: clipTrack.height
+                        interactive: false
                         opacity: root.timeline ? root.timeline.otherKeyframeOpacity : 0.3
                     }
                 }
                 Repeater {
                     model: root.timeline ? root.timeline.clips : []
-                    Rectangle {
-                        id: clipItem
-                        required property var modelData
-                        objectName: "timelineVideoClip"
-                        property bool dragging: false
-                        property int editEdge: 0
-                        property real previewStart: 0
-                        property real previewEnd: 0
-                        property real rawMs: 0
-                        property real initialStart: 0
-                        property real initialEnd: 0
-                        readonly property real shownStart: dragging ? previewStart : modelData.startMs
-                        readonly property real shownEnd: dragging ? previewEnd : modelData.startMs + modelData.durationMs
-                        function refreshPreview() {
-                            if (editEdge === 0) {
-                                previewStart = Math.max(0, Math.min(root.maximumMs - (initialEnd - initialStart),
-                                    root.snapTime(rawMs, modelData.id, initialEnd - initialStart)))
-                                previewEnd = previewStart + (initialEnd - initialStart)
-                            } else if (editEdge < 0) {
-                                previewStart = Math.max(0, initialStart - modelData.sourceInMs,
-                                    Math.min(initialEnd - root.slotMs, root.snapTime(rawMs, modelData.id, 0)))
-                                previewEnd = initialEnd
-                            } else {
-                                previewStart = initialStart
-                                previewEnd = Math.max(initialStart + root.slotMs, Math.min(root.maximumMs,
-                                    initialStart + modelData.sourceDurationMs - modelData.sourceInMs,
-                                    root.snapTime(rawMs, modelData.id, 0)))
-                            }
-                        }
-                        function beginEdit(edge, mouse, area) {
-                            root.focusTrack(); root.shiftHeld = !!(mouse.modifiers & Qt.ShiftModifier)
-                            root.timeline.selectClip(modelData.id)
-                            initialStart = modelData.startMs; initialEnd = modelData.startMs + modelData.durationMs
-                            previewStart = initialStart; previewEnd = initialEnd
-                            editEdge = edge; rawMs = edge > 0 ? initialEnd : initialStart
-                            area.pressX = area.mapToItem(timeContent, mouse.x, mouse.y).x
-                            dragging = true; root.activeDrag = clipItem
-                        }
-                        function updateEdit(mouse, area) {
-                            root.shiftHeld = !!(mouse.modifiers & Qt.ShiftModifier)
-                            rawMs = (editEdge > 0 ? initialEnd : initialStart)
-                                + (area.mapToItem(timeContent, mouse.x, mouse.y).x - area.pressX) / root.pixelsPerMs
-                            refreshPreview()
-                        }
-                        function finishEdit() {
-                            var id = modelData.id; var start = root.clampTime(previewStart); var end = root.clampTime(previewEnd); var edge = editEdge
-                            dragging = false; root.endDrag()
-                            if (start === initialStart && end === initialEnd) return
-                            if (edge === 0) root.timeline.moveClip(id, start)
-                            else root.timeline.trimClip(id, start, end)
-                        }
-                        x: 12 + shownStart * root.pixelsPerMs
-                        y: 17
-                        z: dragging ? 3 : root.timeline && root.timeline.selectedClipId === modelData.id ? 2 : 1
-                        width: Math.max(2, (shownEnd - shownStart) * root.pixelsPerMs)
-                        height: Math.max(12, clipTrack.height - 22)
-                        radius: 3
-                        color: root.timeline && root.timeline.selectedClipId === modelData.id ? Theme.accent : Theme.overlayHover
-                        border.color: Theme.overlayText
-                        clip: true
-                        Rectangle {
-                            objectName: "timelineClipPadding"
-                            // Resizing left or moving preserves the source exit; trimming right changes it.
-                            readonly property real paddingMs: Math.max(0, clipItem.modelData.sourceEndMs
-                                - clipItem.modelData.actualSourceDurationMs + (clipItem.dragging && clipItem.editEdge > 0 ? clipItem.shownEnd - clipItem.initialEnd : 0))
-                            visible: paddingMs > 0
-                            anchors.right: parent.right
-                            width: Math.min(parent.width, Math.max(2, paddingMs * root.pixelsPerMs))
-                            height: parent.height
-                            color: Theme.overlayText; opacity: 0.4
-                            border.color: Theme.overlayBackground
-                        }
-                        ToolTip.visible: clipHover.hovered && modelData.paddingMs > 0
-                        ToolTip.text: "Final frame held silently for " + modelData.paddingMs.toFixed(3) + " ms"
-                        HoverHandler { id: clipHover }
-                        Text {
-                            anchors.fill: parent; anchors.margins: 8
-                            text: root.formatTime(clipItem.modelData.sourceInMs) + " → " + root.formatTime(clipItem.modelData.sourceOutMs)
-                            font.pixelSize: 10; color: Theme.overlayText; verticalAlignment: Text.AlignVCenter; elide: Text.ElideRight
-                        }
-                        MouseArea {
-                            id: clipMove
-                            anchors.fill: parent
-                            enabled: root.editable
-                            cursorShape: Qt.SizeAllCursor
-                            property real pressX: 0
-                            onPressed: mouse => clipItem.beginEdit(0, mouse, clipMove)
-                            onPositionChanged: mouse => { if (pressed) clipItem.updateEdit(mouse, clipMove) }
-                            onReleased: clipItem.finishEdit()
-                            onCanceled: { clipItem.dragging = false; root.endDrag() }
-                        }
-                        Repeater {
-                            model: [-1, 1]
-                            MouseArea {
-                                id: trimHandle
-                                required property int modelData
-                                objectName: modelData < 0 ? "timelineClipTrimStart" : "timelineClipTrimEnd"
-                                x: modelData < 0 ? 0 : clipItem.width - width
-                                width: Math.min(8, clipItem.width / 3); height: clipItem.height
-                                enabled: root.editable
-                                cursorShape: Qt.SizeHorCursor
-                                property real pressX: 0
-                                Rectangle { anchors.centerIn: parent; width: 2; height: Math.min(20, parent.height - 6); color: Theme.overlayText }
-                                onPressed: mouse => clipItem.beginEdit(modelData, mouse, trimHandle)
-                                onPositionChanged: mouse => { if (pressed) clipItem.updateEdit(mouse, trimHandle) }
-                                onReleased: clipItem.finishEdit()
-                                onCanceled: { clipItem.dragging = false; root.endDrag() }
-                            }
-                        }
+                    TimelineClip {
+                        panel: root
+                        timeContent: timelineContent
+                        trackHeight: clipTrack.height
                     }
                 }
             }
             Rectangle {
                 x: 12 + (root.timeline ? root.timeline.effectiveEndMs : root.maximumMs) * root.pixelsPerMs
                 y: root.rulerHeight
-                width: Math.max(0, timeContent.width - x); height: timeContent.height - y
+                width: Math.max(0, timelineContent.width - x); height: timelineContent.height - y
                 color: "#44000000"
             }
             Rectangle {
                 objectName: "timelinePlayhead"
                 x: 12 + (root.timeline ? root.timeline.positionMs : 0) * root.pixelsPerMs
-                width: 1; height: timeContent.height
+                width: 1; height: timelineContent.height
                 color: Theme.accent
                 Shape {
                     id: playheadCap
@@ -743,7 +636,7 @@ FocusScope {
                 property real rawMs: 0
                 function refreshPreview() { previewMs = root.snapTime(rawMs, "", 0) }
                 x: 12 + (dragging ? previewMs : root.timeline ? root.timeline.stopTimeMs : 0) * root.pixelsPerMs - 8
-                width: 16; height: timeContent.height
+                width: 16; height: timelineContent.height
                 Rectangle { x: 7.5; width: 1; height: parent.height; color: "#ee7979" }
                 Rectangle { width: 14; height: Math.max(16, root.rulerHeight - 4); color: "#b74646"; radius: 2 }
                 Text { y: 2; anchors.horizontalCenter: parent.horizontalCenter; text: "S"; color: "white"; font.pixelSize: 11 }
@@ -759,7 +652,7 @@ FocusScope {
                     onPositionChanged: mouse => {
                         if (!pressed) return
                         root.shiftHeld = !!(mouse.modifiers & Qt.ShiftModifier)
-                        stopMarker.rawMs = (mapToItem(timeContent, mouse.x, mouse.y).x - 12) / root.pixelsPerMs
+                        stopMarker.rawMs = (mapToItem(timelineContent, mouse.x, mouse.y).x - 12) / root.pixelsPerMs
                         stopMarker.refreshPreview()
                     }
                     onReleased: {
@@ -772,7 +665,7 @@ FocusScope {
             Rectangle {
                 visible: root.snapGuideMs >= 0
                 x: 12 + root.snapGuideMs * root.pixelsPerMs
-                width: 1; height: timeContent.height
+                width: 1; height: timelineContent.height
                 color: Theme.accent
                 Text { x: 4; y: root.rulerHeight + 2; text: root.snapGuideLabel; color: Theme.accent; font.pixelSize: 11 }
             }

@@ -36,6 +36,7 @@ class TimelineController final : public QObject
     Q_PROPERTY(QString selectedKeyframeId READ selectedKeyframeId NOTIFY changed)
     Q_PROPERTY(QString selectedClipId READ selectedClipId NOTIFY changed)
     Q_PROPERTY(bool canCapture READ canCapture NOTIFY transportChanged)
+    Q_PROPERTY(bool canInsertClip READ canInsertClip NOTIFY transportChanged)
     Q_PROPERTY(bool canSplit READ canSplit NOTIFY transportChanged)
     Q_PROPERTY(bool canPaste READ canPaste NOTIFY transportChanged)
     Q_PROPERTY(bool hasKeyframeAtPosition READ hasKeyframeAtPosition NOTIFY transportChanged)
@@ -74,6 +75,7 @@ public:
     QString selectedClipId() const { return m_clipId; }
     bool canCapture() const;
     bool canSplit() const;
+    bool canInsertClip() const;
     bool canPaste() const;
     bool hasKeyframeAtPosition() const;
     QString errorText() const { return m_error; }
@@ -96,7 +98,7 @@ public:
     Q_INVOKABLE void moveClip(const QString& id, qreal startMs);
     Q_INVOKABLE void trimClip(const QString& id, qreal startMs, qreal endMs);
     Q_INVOKABLE void splitClip();
-    Q_INVOKABLE void insertFullClip();
+    Q_INVOKABLE void insertClip();
     Q_INVOKABLE void deleteSelected();
     Q_INVOKABLE void copySelected();
     Q_INVOKABLE void paste();

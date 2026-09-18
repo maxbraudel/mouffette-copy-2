@@ -995,7 +995,7 @@ Rectangle {
                     scale: effectiveScale * root.viewScale
                     transformOrigin: Item.TopLeft
                     z: media ? media.z : 0
-                    visible: !!media && media.contentVisible
+                    visible: !!media && media.clipActive !== false && media.contentVisible
                     opacity: media ? media.contentOpacity : 1.0
                     // Opacity alone does not disable Qt input. Match the picker
                     // for the whole subtree, including TextEdit and MouseArea,

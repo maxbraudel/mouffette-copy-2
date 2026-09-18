@@ -50,20 +50,66 @@ private slots:
         MediaTrack t;QVERIFY(insertClip(t,{"old",100,1000,1000},5000));
         QVERIFY(insertClip(t,{"new",300,0,200},5000));
         QCOMPARE(t.clips.size(),3);
-        QCOMPARE(t.clips[0].startSlot,100);QCOMPARE(t.clips[0].sourceStartSlot,1000);QCOMPARE(t.clips[0].sourceEndSlot(),1200);
+        QCOMPARE(t.clips[0].startSlot,100);QCOMPARE(t.clips[0].sourceStartSlot.value(),1000);QCOMPARE(t.clips[0].sourceEndSlot(),1200);
         QCOMPARE(t.clips[1].id,QString("new"));
-        QCOMPARE(t.clips[2].startSlot,500);QCOMPARE(t.clips[2].sourceStartSlot,1400);QCOMPARE(t.clips[2].sourceEndSlot(),2000);
+        QCOMPARE(t.clips[2].startSlot,500);QCOMPARE(t.clips[2].sourceStartSlot.value(),1400);QCOMPARE(t.clips[2].sourceEndSlot(),2000);
         QVERIFY(splitClip(t,"new",400));QCOMPARE(t.clips.size(),4);
         auto restored=MediaTrack{};QVERIFY(MediaTrack::fromJson(t.toJson(),&restored,5000));QCOMPARE(restored.toJson(),t.toJson());
     }
-    void clipSamplesHoldFramesAndSilenceGaps() {
+    void clipPresenceIsHalfOpenAndGapsAreSilent() {
         SceneSettings grid;
         MediaTrack t;insertClip(t,{"a",12,3,6},60);insertClip(t,{"b",27,21,9},60);
-        auto before=evaluateVideo(t,0,1500,grid);QCOMPARE(before.sourceTimeMs,100);QVERIFY(!before.playing);
-        auto start=evaluateVideo(t,400,1500,grid);QCOMPARE(start.sourceTimeMs,100);QVERIFY(start.playing);
-        auto gap=evaluateVideo(t,700,1500,grid);QCOMPARE(gap.sourceTimeMs,299);QVERIFY(!gap.playing);
-        auto end=evaluateVideo(t,1200,1500,grid);QCOMPARE(end.sourceTimeMs,999);QVERIFY(!end.playing);
-        removeClip(t,"a");removeClip(t,"b");QVERIFY(t.clipsInitialized);QCOMPARE(evaluateVideo(t,900,1500,grid).sourceTimeMs,0);
+        for (qreal time : {0.0, 399.999, 600.0, 700.0, 1200.0}) {
+            const auto sample=evaluateVideo(t,time,1500,grid);
+            QVERIFY(!sample.clipActive); QVERIFY(!sample.playing); QVERIFY(sample.clipId.isEmpty());
+        }
+        auto start=evaluateVideo(t,400,1500,grid);
+        QCOMPARE(start.sourceTimeMs,100); QVERIFY(start.playing); QVERIFY(start.clipActive);
+        QVERIFY(activeClip(t,12)); QVERIFY(activeClip(t,17)); QVERIFY(!activeClip(t,18));
+        removeClip(t,"a");removeClip(t,"b");QVERIFY(t.clipsInitialized);
+        QVERIFY(!evaluateVideo(t,900,1500,grid).clipActive);
+    }
+    void staticClipsShareEditingAndNeverAcquireSourceOffsets() {
+        MediaTrack t; ElementState state;
+        QVERIFY(upsertKeyframe(t,{"key",25,state},100));
+        QVERIFY(insertClip(t,{"full",0,std::nullopt,100},100));
+        QVERIFY(trimClip(t,"full",10,80,100));
+        QVERIFY(splitClip(t,"full",30));
+        QVERIFY(moveClip(t,"full",50,100));
+        QVERIFY(insertClip(t,{"overwrite",55,std::nullopt,10},100));
+        for (const auto& clip : t.clips) QVERIFY(!clip.sourceStartSlot);
+        QCOMPARE(t.keyframes.first().slot,25);
+        MediaTrack restored; QVERIFY(MediaTrack::fromJson(t.toJson(),&restored,100));
+        QCOMPARE(restored.toJson(),t.toJson());
+        QVERIFY(validateMediaTrack(t,"image",0));
+        QVERIFY(!validateMediaTrack(t,"video",1000));
+        t.keyframes.clear(); QVERIFY(validateMediaTrack(t,"text",0));
+        auto malformed=t.toJson(); auto clips=malformed["clips"].toArray();
+        auto clip=clips.first().toObject();clip.remove("sourceStartSlot");clips[0]=clip;malformed["clips"]=clips;
+        QVERIFY(!MediaTrack::fromJson(malformed,&restored,100));
+    }
+    void extensionsRecoverSourceAndCutsPreserveEntirelyHeldFragments() {
+        SceneSettings grid; MediaTrack t;
+        QVERIFY(insertClip(t,{"source",12,0,8},60));
+        QVERIFY(trimClip(t,"source",0,30,60));
+        QCOMPARE(t.clips.first().sourceStartSlot.value(),-12);
+        const auto leading=evaluateVideo(t,100,250,grid);
+        QVERIFY(leading.clipActive); QVERIFY(!leading.playing); QCOMPARE(leading.sourceTimeMs,0);
+        QVERIFY(evaluateVideo(t,400,250,grid).playing);
+        QCOMPARE(evaluateVideo(t,500,250,grid).sourceTimeMs,100);
+        const auto trailing=evaluateVideo(t,650,250,grid);
+        QVERIFY(trailing.clipActive); QVERIFY(!trailing.playing); QCOMPARE(trailing.sourceTimeMs,249);
+        QVERIFY(!evaluateVideo(t,1000,250,grid).clipActive);
+        QVERIFY(splitClip(t,"source",6)); // An entirely frozen leading fragment.
+        QVERIFY(!evaluateVideo(t,199,250,grid).playing);
+        QVERIFY(splitClip(t,t.clips.last().id,24)); // An entirely frozen trailing fragment.
+        const auto tail=t.clips.last(); QVERIFY(*tail.sourceStartSlot > grid.sourceSlots(250));
+        QVERIFY(moveClip(t,tail.id,40,60));
+        QCOMPARE(evaluateVideo(t,grid.timeMs(40),250,grid).sourceTimeMs,249);
+        QVERIFY(trimClip(t,tail.id,24,46,60)); // Recover earlier source frames.
+        QVERIFY(evaluateVideo(t,grid.timeMs(28),250,grid).playing);
+        MediaTrack restored; QVERIFY(MediaTrack::fromJson(t.toJson(),&restored,60));
+        QCOMPARE(restored.toJson(),t.toJson()); QVERIFY(validateMediaTrack(restored,"video",250));
     }
     void steppedInterpolationMatchesBothExamplesAndReversePlayback() {
         SceneSettings grid; ElementState a,b; a.opacity=0; b.opacity=1; b.uppercase=true;
@@ -108,22 +154,27 @@ private slots:
             const auto before=evaluateVideo(t,duration-0.1,duration,grid);
             QVERIFY(before.playing);
             const auto after=evaluateVideo(t,duration,duration,grid);
-            QVERIFY(!after.playing); QCOMPARE(after.sourceTimeMs,duration-1);
+            QVERIFY(!after.playing);
+            QCOMPARE(after.clipActive, grid.timeMs(occupied) > duration);
+            if (after.clipActive) QCOMPARE(after.sourceTimeMs,duration-1);
             if (duration==250) {
                 QCOMPARE(occupied,8); QVERIFY(qAbs(grid.timeMs(occupied)-266.6666666667)<1e-7);
                 QVERIFY(splitClip(t,"clip",4));
                 QCOMPARE(t.clips[0].durationSlots,4); QCOMPARE(t.clips[1].durationSlots,4);
-                QCOMPARE(t.clips[1].sourceStartSlot,4);
+                QCOMPARE(t.clips[1].sourceStartSlot.value(),4);
                 QVERIFY(evaluateVideo(t,249,250,grid).playing);
                 QVERIFY(!evaluateVideo(t,250,250,grid).playing);
                 const QString tail=t.clips[1].id;
-                QVERIFY(trimClip(t,tail,4,100,100,occupied));
-                QCOMPARE(t.clips[1].endSlot(),8); // No arbitrary frozen extension.
+                QVERIFY(trimClip(t,tail,4,100,100));
+                QCOMPARE(t.clips[1].endSlot(),100);
+                QVERIFY(evaluateVideo(t,3000,250,grid).clipActive);
+                QVERIFY(!evaluateVideo(t,3000,250,grid).playing);
+                QVERIFY(trimClip(t,tail,4,8,100));
                 QVERIFY(moveClip(t,tail,10,100)); QCOMPARE(t.clips[1].durationSlots,4);
                 auto copy=t.clips[1]; copy.id="copy"; copy.startSlot=20;
                 QVERIFY(insertClip(t,copy,100)); QCOMPARE(t.clips.last().sourceEndSlot(),8);
                 QVERIFY(insertClip(t,{"overwrite",22,0,1},100));
-                QCOMPARE(t.clips.last().startSlot,23); QCOMPARE(t.clips.last().sourceStartSlot,7);
+                QCOMPARE(t.clips.last().startSlot,23); QCOMPARE(t.clips.last().sourceStartSlot.value(),7);
                 QCOMPARE(t.clips.last().durationSlots,1); // Only this source tail pads.
                 QVERIFY(!evaluateVideo(t,grid.timeMs(23)+20,250,grid).playing);
             }
@@ -133,8 +184,8 @@ private slots:
     void moveAndTrimAreBoundedAndDoNotRipple() {
         MediaTrack t;insertClip(t,{"a",100,500,500},2000);insertClip(t,{"b",1000,0,200},2000);
         QVERIFY(moveClip(t,"a",1900,2000));QCOMPARE(t.clips.last().startSlot,1500);
-        QVERIFY(trimClip(t,"a",1400,1800,2000,3000));
-        QCOMPARE(t.clips.last().sourceStartSlot,400);QCOMPARE(t.clips.last().sourceEndSlot(),800);
+        QVERIFY(trimClip(t,"a",1400,1800,2000));
+        QCOMPARE(t.clips.last().sourceStartSlot.value(),400);QCOMPARE(t.clips.last().sourceEndSlot(),800);
         QCOMPARE(t.clips.first().startSlot,1000);
     }
     void canonicalSchemasRejectUnknownFieldsAndNoncanonicalColors() {

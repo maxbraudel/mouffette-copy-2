@@ -5,4 +5,4 @@ ProjectStore owns projects/projects-v2.json. Its schemaVersion comes from Storag
 See the [central storage architecture and migration guide](../../runtime/storage/README.md) for the
 version inventory, ownership boundaries, upgrade procedure and tests.
 
-Timeline projects use schema 6 / render schema 4. Earlier project schemas reset automatically; there is no conversion of scene automation. The timeline maximum duration and slot cadence are captured when a project is created. Scrubbing and temporary element drafts never enter the durable authoring snapshot.
+Timeline projects use schema 7 / render schema 5. Schema 6 migrates at bootstrap without deleting projects: images and text receive full-scene clips and video tracks are preserved. Schemas 1–5 retain their reset policy. The timeline maximum duration and slot cadence are captured when a project is created. Scrubbing and temporary element drafts never enter the durable authoring snapshot.

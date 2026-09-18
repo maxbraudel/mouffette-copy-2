@@ -44,7 +44,7 @@ function messages(ws, type) {
 
 function envelope(session, extra = {}) {
     return {
-        protocolVersion: 9,
+        protocolVersion: 10,
         serverBootId: session.serverBootId,
         messageId: crypto.randomUUID(),
         remoteSessionId: session.remoteSessionId,
@@ -59,7 +59,7 @@ const asset = Object.freeze({
     mediaIds: ['media-1'], sha256: 'a'.repeat(64), size: 128,
 });
 const scene = Object.freeze({
-    renderSchemaVersion: 4,
+    renderSchemaVersion: 5,
             timeline: { maxDurationMs: 180000, stopSlot: -1, slotsPerSecond: 30 },
     screens: [{ id: 1, x: 0, y: 0, width: 1920, height: 1080, primary: true }],
     media: [{
@@ -707,7 +707,7 @@ for (const invalidCase of [
     assert.equal(messages(owner, 'stopped').at(-1).success, true);
 
     server.handleMessage('owner-connection', {
-        protocolVersion: 9, serverBootId: server.serverBootId,
+        protocolVersion: 10, serverBootId: server.serverBootId,
         messageId: crypto.randomUUID(),
         type: 'remote_scene_start',
     });
@@ -792,7 +792,7 @@ for (const [overrides, accepted] of [
     [{}, true],
     [{ timeline: { clipsInitialized: true, keyframes: [], clips: [] } }, true],
     [{ timeline: { clipsInitialized: false, keyframes: [], clips: [clip] } }, false],
-    [{ timeline: { clipsInitialized: true, keyframes: [], clips: [{ ...clip, durationSlots: 121 }] } }, false],
+    [{ timeline: { clipsInitialized: true, keyframes: [], clips: [{ ...clip, durationSlots: 121 }] } }, true],
     [{ timeline: { clipsInitialized: true, keyframes: [], clips: [{ ...clip, startSlot: 5370 }] } }, false],
     [{ timeline: { clipsInitialized: true, keyframes: [], clips: [{ ...clip, durationSlots: 0 }] } }, false],
     [{ timeline: { clipsInitialized: true, keyframes: [], clips: [{ ...clip, startSlot: 0.5 }] } }, false],
@@ -841,7 +841,7 @@ for (const [overrides, accepted] of [
     }
 }
 
-console.log('scene protocol v9 tests passed');
+console.log('scene protocol v10 tests passed');
 
 // Residency is a separate, authenticated barrier; upload completion never implies it.
 {

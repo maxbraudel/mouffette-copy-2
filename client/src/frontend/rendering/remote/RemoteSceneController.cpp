@@ -835,7 +835,7 @@ void RemoteSceneController::onRemoteSceneStart(const QString& senderClientId, co
         || !scene.value(QStringLiteral("screens")).isArray()
         || !scene.value(QStringLiteral("media")).isArray()
         || sceneInstanceId.isEmpty()) {
-        rejectStart(QStringLiteral("Scene does not conform to render schema 4"));
+        rejectStart(QStringLiteral("Scene does not conform to render schema 5"));
         return;
     }
 
@@ -995,7 +995,6 @@ void RemoteSceneController::onRemoteSceneStart(const QString& senderClientId, co
             || !SceneTimeline::ElementState::fromMediaJson(object, &state, &timelineError)
             || !SceneTimeline::MediaTrack::fromJson(object.value(QStringLiteral("timeline")).toObject(),
                                                     &track, timelineSettings.maxSlot(), &timelineError)
-            || (type != QLatin1String("video") && !track.clips.isEmpty())
             || std::any_of(track.keyframes.cbegin(), track.keyframes.cend(),
                            [&type](const auto& key) { return key.state.type != type; })) {
             failWithMessage(QStringLiteral("Invalid timeline media %1: %2").arg(id, timelineError));
@@ -1003,13 +1002,16 @@ void RemoteSceneController::onRemoteSceneStart(const QString& senderClientId, co
         }
         if (type == QLatin1String("video")) {
             qint64 durationMs = 0;
-            if (!readBoundedInt64(object, "durationMs", 0, 604800000, durationMs)
-                || std::any_of(track.clips.cbegin(), track.clips.cend(),
-                               [durationMs, &timelineSettings](const auto& clip) { return clip.sourceEndSlot() > timelineSettings.sourceSlots(durationMs); })) {
-                failWithMessage(QStringLiteral("Invalid timeline video duration"));
+            if (!readBoundedInt64(object, "durationMs", 0, SceneTimeline::MaximumSupportedDurationMs, durationMs)
+                || !SceneTimeline::validateMediaTrack(track, type, durationMs, &timelineError)) {
+                failWithMessage(QStringLiteral("Invalid timeline video: %1").arg(timelineError));
                 return;
             }
+        } else if (!SceneTimeline::validateMediaTrack(track, type, 0, &timelineError)) {
+            failWithMessage(timelineError);
+            return;
         }
+
         if (type != QLatin1String("text")
             && (object.value(QStringLiteral("fileId")).toString().isEmpty()
                 || object.value(QStringLiteral("fileId")).toString().size() > kMaxRemoteIdentifierLength
@@ -2075,6 +2077,7 @@ void RemoteSceneController::publishMediaSpan(const std::shared_ptr<RemoteMediaIt
     media.insert(QStringLiteral("height"), std::max(1, item->baseHeight));
     media.insert(QStringLiteral("z"), item->z);
     media.insert(QStringLiteral("contentVisible"), item->contentVisible);
+    media.insert(QStringLiteral("clipActive"), item->clipActive);
     media.insert(QStringLiteral("renderVisible"), item->renderVisible && span.destNw > 0 && span.destNh > 0);
     media.insert(QStringLiteral("renderOpacity"), item->renderOpacity);
 
@@ -2149,6 +2152,7 @@ void RemoteSceneController::updatePublishedMediaItem(
             media.insert(QStringLiteral("height"), std::max(1, item->baseHeight));
             media.insert(QStringLiteral("z"), item->z);
             media.insert(QStringLiteral("contentVisible"), item->contentVisible);
+            media.insert(QStringLiteral("clipActive"), item->clipActive);
             media.insert(QStringLiteral("renderVisible"), item->renderVisible && span.destNw > 0 && span.destNh > 0);
             media.insert(QStringLiteral("renderOpacity"), item->renderOpacity);
             if (item->type == QLatin1String("text")) {
@@ -2255,11 +2259,9 @@ void RemoteSceneController::scheduleMedia(const std::shared_ptr<RemoteMediaItem>
         return;
     }
     const qint64 duration = (resident->durationUs + 999) / 1000;
-    for (const auto& clip : item->timeline.clips) {
-        if (clip.sourceEndSlot() > m_timelineSettings.sourceSlots(duration)) {
-            sendPrepareResult(false, QStringLiteral("Video clip exceeds the validated source duration"));
-            return;
-        }
+    if (!SceneTimeline::validateMediaTrack(item->timeline, item->type, duration)) {
+        sendPrepareResult(false, QStringLiteral("Invalid clips for the validated source"));
+        return;
     }
     item->player = new ResidentVideoPlayer(this);
     item->audio = new QAudioOutput(this);
@@ -2304,7 +2306,8 @@ void RemoteSceneController::updateTimelineGeometry(
     item->z = state.z;
     item->contentVisible = state.visible;
     item->contentOpacity = state.opacity;
-    item->renderVisible = state.visible;
+    item->clipActive = SceneTimeline::activeClip(item->timeline, m_timelineSettings.slotAt(m_timelinePositionMs)) != nullptr;
+    item->renderVisible = state.visible && item->clipActive;
     item->renderOpacity = state.opacity;
     item->muted = state.muted;
     item->volume = state.volume;
@@ -2395,13 +2398,20 @@ void RemoteSceneController::evaluateTimelineAt(qreal positionMs, bool playing)
         updateTimelineGeometry(item, state);
         if (!item->player) continue;
         const auto video = SceneTimeline::evaluateVideo(item->timeline, m_timelinePositionMs, item->player->duration(), m_timelineSettings);
+        item->timelineRequestedSourceMs = video.sourceTimeMs;
+        if (!video.clipActive) {
+            item->player->pause();
+            item->audio->setMuted(true);
+            item->timelineClipId.clear();
+            item->timelineVideoPlaying = false;
+            continue;
+        }
         const bool shouldPlay = playing && video.playing;
         const bool changedClip = item->timelineClipId != video.clipId;
         const bool discontinuity = changedClip
             && !contiguousTimelineClips(item->timeline, item->timelineClipId, video.clipId);
         const bool transition = shouldPlay != item->timelineVideoPlaying;
         item->timelineVideoPlaying = shouldPlay;
-        item->timelineRequestedSourceMs = video.sourceTimeMs;
         if (!shouldPlay) item->player->pause();
         const qint64 error = qAbs(item->player->position() - video.sourceTimeMs);
         const bool drift = shouldPlay && error > AppConfig::instance().sceneVideoSyncPositionToleranceMs()

@@ -26,7 +26,7 @@
 #include <utility>
 
 namespace {
-constexpr auto kCanvasClipboardMime = "application/x-mouffette-media-v2";
+constexpr auto kCanvasClipboardMime = "application/x-mouffette-media-v3";
 constexpr qreal kSnapDistancePx = 10.0;
 constexpr qreal kCornerSnapDistancePx = 20.0;
 constexpr qreal kSnapReleaseFactor = 1.4;
@@ -359,7 +359,7 @@ void QuickCanvasController::publishSelection()
     if (!m_document) return;
     QVariantList list;
     for (CanvasMedia* media : m_document->media()) {
-        if (!media || !media->selected()) continue;
+        if (!media || !media->selected() || !media->clipActive()) continue;
         const QRectF rect = media->sceneRect();
         list.append(QVariantMap{{QStringLiteral("mediaId"), media->mediaId()},
                                 {QStringLiteral("isPrimary"), media->mediaId() == m_document->primarySelectedMediaId()},
@@ -661,7 +661,7 @@ void QuickCanvasController::handleMediaMoveStarted(const QString& mediaId,
     finishSelectionScaleGesture();
     if (!editingEnabled()) return;
     CanvasMedia* media = m_document->mediaById(mediaId);
-    if (!media || mediaId != primarySelectedMediaId()) return;
+    if (!media || !media->clipActive() || mediaId != primarySelectedMediaId()) return;
     m_dragMediaId = mediaId;
     m_lastMoveSnapped = false;
     m_liveSnapDragMediaId.clear();
@@ -679,7 +679,7 @@ void QuickCanvasController::rebuildSnapTargets(CanvasMedia* activeMedia)
         if (screen.isValid() && !screen.isEmpty()) m_snapTargetRects.append(screen);
     }
     for (CanvasMedia* media : m_document->media()) {
-        if (!media || media == activeMedia
+        if (!media || !media->clipActive() || media == activeMedia
             || m_transformStarts.contains(media->mediaId())) continue;
         const QRectF rect = media->sceneRect();
         if (rect.isValid() && !rect.isEmpty()) m_snapTargetRects.append(rect);
@@ -1413,7 +1413,7 @@ void QuickCanvasController::updateSelectionScaleGesture(qreal factor, bool phase
         || qFuzzyCompare(factor, 1.0) || !m_dragMediaId.isEmpty()
         || !m_resizeMediaId.isEmpty()) return;
     CanvasMedia* active = selectedMediaItem();
-    if (!active) return;
+    if (!active || !active->clipActive()) return;
 
     const bool startingGesture = !m_scaleGestureActive;
     if (!m_scaleGestureActive) {
@@ -1491,7 +1491,7 @@ void QuickCanvasController::handleMediaResizeRequested(
     CanvasMedia* media = m_document ? m_document->mediaById(mediaId) : nullptr;
     // Geometry edits do not depend on decoded content. Loading media shares
     // the same transform transaction as every other selected occurrence.
-    if (!media || editsLocked() || mediaId != primarySelectedMediaId()) return;
+    if (!media || !media->clipActive() || editsLocked() || mediaId != primarySelectedMediaId()) return;
     if (m_resizeMediaId != mediaId) {
         captureTransformSelection(media);
         m_resizeMediaId = mediaId;

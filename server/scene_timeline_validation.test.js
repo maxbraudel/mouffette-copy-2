@@ -36,13 +36,13 @@ const clip = { id: 'clip-1', startSlot: 6, sourceStartSlot: 3, durationSlots: 5 
 const videoTrack = { clipsInitialized: true, keyframes: [], clips: [clip] };
 assert.equal(isCanonicalMediaTrack(videoTrack, 'video', oneSecond, 250), true); // 8 source slots
 assert.equal(isCanonicalMediaTrack(videoTrack, 'image', oneSecond, 250), false);
-assert.equal(isCanonicalMediaTrack(videoTrack, 'video', oneSecond, 233), false); // Only 7 source slots
+assert.equal(isCanonicalMediaTrack(videoTrack, 'video', oneSecond, 233), true); // The tail holds the final source frame
 assert.equal(isCanonicalMediaTrack(videoTrack, 'video', { ...oneSecond, maxDurationMs: 333 }, 250), false);
 for (const [duration, length] of [[1, 1], [250, 8], [300, 9]]) {
     const short = { ...videoTrack, clips: [{ ...clip, startSlot: 0, sourceStartSlot: 0, durationSlots: length }] };
     assert.equal(isCanonicalMediaTrack(short, 'video', oneSecond, duration), true);
     short.clips[0].durationSlots++;
-    assert.equal(isCanonicalMediaTrack(short, 'video', oneSecond, duration), false);
+    assert.equal(isCanonicalMediaTrack(short, 'video', oneSecond, duration), true);
 }
 for (const [startSlot, accepted] of [[11, true], [10, false]])
     assert.equal(isCanonicalMediaTrack({ ...videoTrack, clips: [clip, { ...clip, id: 'clip-2', startSlot }] }, 'video', oneSecond, 250), accepted);
@@ -58,3 +58,16 @@ for (const time of [-1, NaN, Infinity, '0'])
 assert.equal(isCanonicalTimelineSnapshot({ timelinePositionMs: 0, media: [] }, settings), false);
 assert.equal(isCanonicalTimelineSnapshot({ timelinePositionMs: 180000 }, settings), true);
 console.log('scene timeline grid validation tests passed');
+
+// Presence clips have the same schema; only source offsets differ by media type.
+const staticTrack = { ...videoTrack, clips: [{ ...clip, sourceStartSlot: null, durationSlots: 20 }] };
+for (const type of ['image', 'text']) {
+    assert.equal(isCanonicalMediaTrack(staticTrack, type, oneSecond), true);
+    assert.equal(isCanonicalMediaTrack(videoTrack, type, oneSecond), false);
+}
+assert.equal(isCanonicalMediaTrack(staticTrack, 'video', oneSecond, 250), false);
+for (const sourceStartSlot of [-100, -3, 100, 100000])
+    assert.equal(isCanonicalMediaTrack({ ...videoTrack, clips: [{ ...clip, sourceStartSlot }] }, 'video', oneSecond, 250), true);
+for (const sourceStartSlot of [null, '0', 0.5, NaN, Infinity, -(2 ** 52) - 1, 2 ** 52])
+    assert.equal(isCanonicalMediaTrack({ ...videoTrack, clips: [{ ...clip, sourceStartSlot }] }, 'video', oneSecond, 250), false);
+assert.equal(isCanonicalMediaTrack(videoTrack, 'video', oneSecond, 0), false);

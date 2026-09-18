@@ -5,6 +5,8 @@
 #include <QQuickItem>
 #include <QQuickStyle>
 #include <QQuickView>
+#include <QTemporaryDir>
+#include <QImage>
 #include <QtTest>
 
 #include "backend/domain/canvas/CanvasDocument.h"
@@ -112,7 +114,7 @@ private slots:
             QCOMPARE(f.item("timelineMaximumTime")->property("text").toString(), maximumTime);
         }
         f.timeline.goToStart();
-        for (int width : {1100, 680, 420, 320}) {
+        for (int width : {1440, 680, 540, 320}) {
             f.view.resize(width, 240);
             QTRY_COMPARE(f.view.rootObject()->width(), qreal(width));
             QTRY_VERIFY(qAbs(playback->mapToScene({playback->width()/2, 0}).x() - width/2.0) <= 0.5);
@@ -127,9 +129,9 @@ private slots:
             for (const auto* name : {"timelinePlaceKeyframe", "timelineCopy", "timelinePaste",
                                      "timelineDelete", "timelinePlaceStop", "timelineRemoveStop",
                                      "timelineZoomOut", "timelineZoomIn", "timelineFitDuration"}) {
-                QTRY_COMPARE(f.item(name)->property("iconOnly").toBool(), width < 1100);
+                QTRY_COMPARE(f.item(name)->property("iconOnly").toBool(), width < 1440);
             }
-            if (width == 420)
+            if (width == 540)
                 QTRY_COMPARE(editActions->property("contentWidth").toReal(), editActions->width());
             QTRY_COMPARE(layout->mapToScene({0, 0}).y(), edit->y());
             auto* authoring = f.item("timelinePlaceKeyframe")->parentItem();
@@ -163,7 +165,7 @@ private slots:
         const auto rightmostScroll = editActions->property("contentX").toReal();
         f.wheel(layout->mapToScene({layout->width()/2, 12}).toPoint(), {80, 0}, {});
         QCOMPARE(editActions->property("contentX").toReal(), qMax(qreal(0), rightmostScroll - 80));
-        f.view.resize(1100, 240);
+        f.view.resize(1440, 240);
         QTRY_VERIFY(!play->property("iconOnly").toBool());
         QTRY_COMPARE(editActions->property("contentX").toReal(), qreal(0));
         QTRY_VERIFY(!f.item("timelinePlaceKeyframe")->property("iconOnly").toBool());
@@ -371,9 +373,9 @@ private slots:
         QCOMPARE(foreground->mapToScene({foreground->width()/2, foreground->height()/2}).y(), keyCenter);
         QCOMPARE(background->mapToScene({background->width()/2, background->height()/2}).y(), keyCenter);
         QVERIFY(background->opacity() < foreground->opacity());
-        auto* ghost = f.item("otherMediaVideoClip");
+        auto* ghost = f.item("otherMediaClip");
         QVERIFY(ghost);
-        QVERIFY(ghost->childItems().isEmpty()); // No text, handles or pointer handlers.
+        QVERIFY(!ghost->property("interactive").toBool()); // Shared delegate, inert for other media.
         const auto saved = f.host->serializeProjectState();
         const QPoint ghostCenter = ghost->mapToScene({ghost->width()/2, ghost->height()/2}).toPoint();
         QTest::mousePress(&f.view, Qt::LeftButton, Qt::NoModifier, ghostCenter);
@@ -383,7 +385,7 @@ private slots:
         QCOMPARE(doc->primarySelectedMediaId(), primary->mediaId());
         QCOMPARE(f.host->serializeProjectState(), saved);
 
-        const auto clips = timelineItems(f.view.rootObject(), "timelineVideoClip");
+        const auto clips = timelineItems(f.view.rootObject(), "timelineClip");
         QCOMPARE(clips.size(), 2);
         auto* moving = clips.first();
         auto* stationary = clips.last();
@@ -405,14 +407,122 @@ private slots:
         QVERIFY(f.item("timelineClipTrack")->isVisible());
         QCOMPARE(f.item("timelineClipTrack")->height(), clipHeight);
         QCOMPARE(f.timeline.otherClips().size(), 3);
-        QCOMPARE(timelineItems(f.view.rootObject(), "otherMediaVideoClip").size(), 3);
+        QCOMPARE(timelineItems(f.view.rootObject(), "otherMediaClip").size(), 3);
         auto* text = doc->addText({}, "Static media");
         doc->select(text->mediaId());
         QVERIFY(f.item("timelineClipTrack")->isVisible());
         QCOMPARE(f.item("timelineClipTrack")->height(), clipHeight);
         QCOMPARE(f.timeline.otherClips().size(), 3);
         doc->removeMedia(other->mediaId());
-        QCOMPARE(timelineItems(f.view.rootObject(), "otherMediaVideoClip").size(), 2);
+        QCOMPARE(timelineItems(f.view.rootObject(), "otherMediaClip").size(), 2);
+    }
+
+    void staticClipsControlPresenceWithoutChangingKeyframes()
+    {
+        TimelineFixture f; QVERIFY(f.initialize());
+        auto* doc = f.host->document();
+        f.timeline.seek(2000);
+        auto* media = doc->addText({}, "Presence");
+        QVERIFY(media);
+        const auto maximum = doc->timelineSettings().maxSlot();
+        QCOMPARE(media->timelineTrack().clips.size(),1);
+        const auto full = media->timelineTrack().clips.first();
+        QCOMPARE(full.startSlot,0); QCOMPARE(full.durationSlots,maximum);
+        QVERIFY(!full.sourceStartSlot); QVERIFY(media->clipActive());
+        QVERIFY(!f.timeline.canInsertClip());
+        f.timeline.trimClip(full.id,1000,3000);
+        f.timeline.seek(0);
+        QVERIFY(!media->clipActive()); QVERIFY(media->contentVisible());
+        QVERIFY(f.host->controller()->selectionChromeModel().isEmpty());
+        const auto saved = doc->serializeSceneState();
+        f.timeline.seek(2000); QVERIFY(media->clipActive());
+        f.timeline.seek(0); QCOMPARE(doc->serializeSceneState(),saved);
+        f.timeline.placeKeyframe();
+        QVERIFY(media->timelineTrack().keyframes.first().state.visible);
+        const auto keys = media->timelineTrack().keyframes;
+        f.timeline.moveClip(full.id,4000);
+        QCOMPARE(media->timelineTrack().keyframes.first().slot,keys.first().slot);
+        QVERIFY(f.timeline.canInsertClip());
+        f.timeline.insertClip();
+        QCOMPARE(media->timelineTrack().clips.first().endSlot(),120);
+        QCOMPARE(media->timelineTrack().clips.first().sourceStartSlot,std::nullopt);
+        f.timeline.seek(1000); QVERIFY(f.timeline.canSplit()); f.timeline.splitClip();
+        QCOMPARE(media->timelineTrack().clips.size(),3);
+        const auto piece = media->timelineTrack().clips[1];
+        f.timeline.selectClip(piece.id); f.timeline.copySelected();
+        f.timeline.seek(8000); QVERIFY(f.timeline.canPaste()); f.timeline.paste();
+        QCOMPARE(media->timelineTrack().clips.last().startSlot,240);
+        QCOMPARE(media->timelineTrack().clips.last().durationSlots,piece.durationSlots);
+        QVERIFY(!media->timelineTrack().clips.last().sourceStartSlot);
+        // Delete every clip, then capture/delete a key outside all presence windows.
+        while (!media->timelineTrack().clips.isEmpty()) {
+            f.timeline.selectClip(media->timelineTrack().clips.first().id); f.timeline.deleteSelected();
+        }
+        QVERIFY(!media->clipActive()); QVERIFY(media->contentVisible());
+        media->ensureDefaultClip(doc->timelineSettings()); QVERIFY(media->timelineTrack().clips.isEmpty());
+        f.timeline.selectKeyframe(media->timelineTrack().keyframes.first().id); f.timeline.deleteSelected();
+        QVERIFY(media->authorElementState().visible); QVERIFY(!media->clipActive());
+        CanvasDocument restored;
+        QVERIFY(restored.restoreProjectState(doc->serializeProjectState(),{}));
+        auto* copy=restored.mediaById(media->mediaId()); QVERIFY(copy);
+        QVERIFY(copy->timelineTrack().clipsInitialized); QVERIFY(copy->timelineTrack().clips.isEmpty());
+        QVERIFY(!copy->clipActive());
+    }
+
+    void imagesReceiveFullSceneClipsEvenAfterStop()
+    {
+        TimelineFixture f; QVERIFY(f.initialize());
+        auto* doc=f.host->document();
+        QTemporaryDir temporary; QVERIFY(temporary.isValid());
+        const auto path=temporary.filePath("image.png");
+        QImage image(64,64,QImage::Format_RGB32); image.fill(Qt::green); QVERIFY(image.save(path));
+        f.timeline.seek(1000); f.timeline.placeStop(); f.timeline.seek(2000);
+        auto* media=doc->addPreparedFile(path,{64,64},false,{}); QVERIFY(media);
+        const auto clip=media->timelineTrack().clips.first();
+        QCOMPARE(clip.startSlot,0); QCOMPARE(clip.endSlot(),doc->timelineSettings().maxSlot());
+        QVERIFY(!clip.sourceStartSlot); QVERIFY(media->clipActive());
+        doc->select(media->mediaId()); QCOMPARE(f.timeline.clips().size(),1);
+        f.timeline.trimClip(clip.id,3000,4000); QVERIFY(!media->clipActive());
+        f.timeline.seek(3000); QVERIFY(media->clipActive());
+        f.timeline.seek(4000); QVERIFY(!media->clipActive());
+    }
+
+    void videoExtensionsShowHatchingDuringResize()
+    {
+        TimelineFixture f; QVERIFY(f.initialize());
+        auto* doc=f.host->document();
+        auto* media=doc->addPreparedFile(QString::fromUtf8(TEST_VIDEO_FILE),{160,90},true,{});
+        QVERIFY(media); QTRY_VERIFY(media->residencyReady() && !media->timelineTrack().clips.isEmpty());
+        doc->select(media->mediaId());
+        const auto clip=media->timelineTrack().clips.first();
+        f.timeline.moveClip(clip.id,2000);
+        const qreal end=doc->timelineSettings().timeMs(media->timelineTrack().clips.first().endSlot());
+        f.timeline.trimClip(clip.id,1000,end+2000);
+        auto* item=f.item("timelineClip"); QVERIFY(item);
+        QCOMPARE(item->property("leadingHoldMs").toDouble(),1000.0);
+        QVERIFY(item->property("trailingHoldMs").toDouble()>=2000);
+        for (qreal zoom : {20000.0, 40000.0, 80000.0}) {
+            f.view.rootObject()->setProperty("viewDurationMs", zoom);
+            QCOMPARE(f.item("timelineClipLeadingHold")->width(), 1000.0 * f.scale());
+            QCOMPARE(f.item("timelineClipTrailingHold")->width(),
+                item->property("trailingHoldMs").toDouble() * f.scale());
+        }
+        f.view.rootObject()->setProperty("viewDurationMs", 40000.0);
+        const auto screenshot=qEnvironmentVariable("MOUFFETTE_CLIP_SCREENSHOT");
+        if (!screenshot.isEmpty()) {
+            QTest::qWait(100);
+            QVERIFY(f.view.grabWindow().save(screenshot));
+        }
+        // A drag preview uses the same signed source mapping, before committing.
+        const auto saved=doc->serializeSceneState();
+        item->setProperty("initialStart",1000.0); item->setProperty("initialEnd",end+2000);
+        item->setProperty("previewStart",0.0); item->setProperty("previewEnd",end+2000);
+        item->setProperty("editEdge",-1); item->setProperty("dragging",true);
+        QCOMPARE(item->property("leadingHoldMs").toDouble(),2000.0);
+        QCOMPARE(doc->serializeSceneState(),saved);
+        item->setProperty("dragging",false);
+        f.timeline.selectClip(clip.id); f.timeline.copySelected(); f.timeline.seek(30000); f.timeline.paste();
+        QCOMPARE(media->timelineTrack().clips.last().sourceStartSlot.value(),-30);
     }
 
     void previewNeverSavesAndCaptureCommitsOnlyTheDraft()
@@ -574,7 +684,7 @@ private slots:
         SceneTimeline::ElementState wrongType;
         wrongType.type = QStringLiteral("image");
         auto* mime = new QMimeData;
-        mime->setData("application/x-mouffette-timeline-v4", QJsonDocument(QJsonObject{
+        mime->setData("application/x-mouffette-timeline-v5", QJsonDocument(QJsonObject{
             {"mediaId", media->mediaId()}, {"projectId", host->document()->projectId()},
             {"kind", "keyframe"}, {"state", wrongType.toJson()}}).toJson());
         QGuiApplication::clipboard()->setMimeData(mime);
@@ -622,13 +732,17 @@ private slots:
 
     void firstClipResizePreservesTheOppositeEdge_data()
     {
+        QTest::addColumn<QString>("mediaType");
         QTest::addColumn<bool>("trimStart");
-        QTest::newRow("start") << true;
-        QTest::newRow("end") << false;
+        for (const auto& type : {QStringLiteral("text"), QStringLiteral("image"), QStringLiteral("video")}) {
+            QTest::newRow(qPrintable(type + "-start")) << type << true;
+            QTest::newRow(qPrintable(type + "-end")) << type << false;
+        }
     }
 
     void firstClipResizePreservesTheOppositeEdge()
     {
+        QFETCH(QString, mediaType);
         QFETCH(bool, trimStart);
         auto& residency = MediaResidencyManager::instance();
         residency.setMemorySnapshotForTesting({8ULL << 30, 6ULL << 30, 512ULL << 20, false, 0});
@@ -651,20 +765,27 @@ private slots:
         QCOMPARE(view.status(), QQuickView::Ready);
         view.show();
         QVERIFY(QTest::qWaitForWindowExposed(&view));
-        auto* media = host->document()->addPreparedFile(QString::fromUtf8(TEST_VIDEO_FILE), {160, 90}, true, {});
+        QTemporaryDir temporary;
+        QVERIFY(temporary.isValid());
+        const auto imagePath = temporary.filePath("clip.png");
+        QImage image(160, 90, QImage::Format_RGB32); image.fill(Qt::cyan);
+        QVERIFY(image.save(imagePath));
+        auto* media = mediaType == "text" ? host->document()->addText({}, "Clip")
+            : host->document()->addPreparedFile(mediaType == "video"
+                ? QString::fromUtf8(TEST_VIDEO_FILE) : imagePath,
+                {160, 90}, mediaType == "video", {});
         QVERIFY(media);
         host->document()->select(media->mediaId());
         QTRY_VERIFY(media->residencyReady() && !media->timelineTrack().clips.isEmpty());
         const auto original = media->timelineTrack().clips.first();
         QVERIFY(original.durationSlots > 100);
         const auto& grid = host->document()->timelineSettings();
-        const qreal sourceEnd = grid.timeMs(grid.sourceSlots(media->sourceDurationMs()));
         QVERIFY(!publishedClips.isEmpty());
         for (const auto& row : publishedClips) {
             QCOMPARE(row.value("actualSourceDurationMs").toLongLong(), media->sourceDurationMs());
-            QCOMPARE(row.value("sourceDurationMs").toDouble(), sourceEnd);
+            QCOMPARE(row.value("isVideo").toBool(), mediaType == "video");
         }
-        view.rootObject()->setProperty("viewDurationMs", 40000.0);
+        view.rootObject()->setProperty("viewDurationMs", qMax(40000.0, grid.timeMs(original.endSlot())));
         const auto findItem = [&](const QString& name) {
             QQuickItem* result = nullptr;
             auto visit = [&](auto&& self, QQuickItem* item) -> void {
@@ -674,7 +795,7 @@ private slots:
             visit(visit, view.rootObject());
             return result;
         };
-        QQuickItem* clip = findItem("timelineVideoClip");
+        QQuickItem* clip = findItem("timelineClip");
         QVERIFY(clip);
         QQuickItem* handle = findItem(trimStart ? "timelineClipTrimStart" : "timelineClipTrimEnd");
         QVERIFY(handle);
@@ -699,7 +820,9 @@ private slots:
         const auto result = media->timelineTrack().clips.first();
         QCOMPARE(result.startSlot, expectedStart);
         QCOMPARE(result.endSlot(), expectedEnd);
-        QCOMPARE(result.sourceStartSlot, original.sourceStartSlot + (trimStart ? expectedDelta : 0));
+        if (original.sourceStartSlot)
+            QCOMPARE(result.sourceStartSlot, *original.sourceStartSlot + (trimStart ? expectedDelta : 0));
+        else QVERIFY(!result.sourceStartSlot);
 
         // Re-extend the same edge to the source boundary, including its final
         // compensated slot. The first gesture must not lose that source range.
@@ -711,7 +834,10 @@ private slots:
         QTest::mouseRelease(&view, Qt::LeftButton, Qt::NoModifier, press);
         const auto extended = media->timelineTrack().clips.first();
         QCOMPARE(extended.startSlot, original.startSlot);
-        QCOMPARE(extended.durationSlots, original.durationSlots);
+        const qint64 expectedExtendedEnd = trimStart ? original.endSlot()
+            : grid.nearestSlot(grid.timeMs(result.endSlot())
+                + (press.x() - extendFrom.x()) / view.rootObject()->property("pixelsPerMs").toDouble());
+        QCOMPARE(extended.endSlot(),expectedExtendedEnd);
         QCOMPARE(extended.sourceStartSlot, original.sourceStartSlot);
     }
 

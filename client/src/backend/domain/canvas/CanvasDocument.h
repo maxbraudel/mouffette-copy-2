@@ -40,10 +40,12 @@ public:
     CanvasMedia* addText(const QPointF& position,
                          const QString& text = QStringLiteral("Text"),
                          qreal initialSceneHeight = 0.0);
+    // Metadata duration initializes the video clip before decoded residency.
     CanvasMedia* addPreparedFile(const QString& sourcePath,
                                  const QSize& nativeSize,
                                  bool video,
-                                 const QPointF& position);
+                                 const QPointF& position,
+                                 qint64 sourceDurationMs = 0);
     // Persist the accepted drop before metadata work starts. Its identity is
     // retained when the selected, exact-size CanvasMedia is created.
     QString queueFileImport(const QString& sourcePath, const QPointF& center);

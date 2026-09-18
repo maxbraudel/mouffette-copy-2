@@ -1093,6 +1093,7 @@ private slots:
             ? fixture.document.addText({250, 220}, "Scale me")
             : fixture.document.addPreparedFile(path, image.size(), video, {250, 220});
         QVERIFY(media);
+        QTRY_VERIFY(media->clipActive());
         media->setFitToTextEnabled(false);
         media->setBaseSize({160, 90});
         media->setScale(1.5);
@@ -1674,7 +1675,7 @@ private slots:
             QVERIFY(copy->player() != original->player());
             QVERIFY(!copy->isPlaying());
             QTRY_VERIFY(copy->residencyReady());
-            QCOMPARE(copy->timelineTrack().clips.first().sourceStartSlot, 15);
+            QCOMPARE(copy->timelineTrack().clips.first().sourceStartSlot.value(),15);
         }
         QCOMPARE(toasts.size(), 1);
         QCOMPARE(toasts.last()[0].toString(), QStringLiteral("Media pasted."));
@@ -2660,6 +2661,15 @@ private slots:
                  "The rendered frame must contain the loading skeleton at the drop location");
         QPointer<CanvasMedia> media = fixture.document.selectedMedia();
         QVERIFY(media && !media->residencyReady());
+        QVERIFY(media->clipActive());
+        QVERIFY(media->timelineTrack().clipsInitialized);
+        QCOMPARE(media->timelineTrack().clips.size(), 1);
+        if (media->isVideo()) {
+            QVERIFY(media->sourceDurationMs() > 0);
+            QCOMPARE(media->timelineTrack().clips.first().durationSlots,
+                qMin(fixture.document.timelineSettings().maxSlot(),
+                     fixture.document.timelineSettings().sourceSlots(media->sourceDurationMs())));
+        }
         // RAM admission is still refused: an empty shell must not allocate a
         // full-size painted image/video surface behind its loading skeleton.
         QVERIFY(fixture.view.rootObject()->findChildren<RemoteVideoFrameItem*>().isEmpty());
@@ -2725,7 +2735,10 @@ private slots:
         image.fill(Qt::cyan);
         if (!video) QVERIFY(image.save(path));
         QVERIFY(QFile::exists(path));
-        auto* media = fixture.document.addPreparedFile(path, image.size(), video, {100, 100});
+        const auto metadata = MediaDecoder::inspectGeometry(path);
+        QVERIFY2(metadata.accepted(), qPrintable(metadata.error));
+        const qint64 durationMs = (metadata.durationUs + 999) / 1000;
+        auto* media = fixture.document.addPreparedFile(path, image.size(), video, {100, 100}, durationMs);
         QVERIFY(media && !media->residencyReady());
         media->setScale(2.0);
         QTRY_VERIFY(!media->residencyState().isEmpty());
@@ -2755,7 +2768,7 @@ private slots:
         QVERIFY(clickTopAction(QStringLiteral("qrc:/icons/icons/delete.svg")));
         QTRY_VERIFY(fixture.document.media().isEmpty());
 
-        media = fixture.document.addPreparedFile(path, image.size(), video, {100, 100});
+        media = fixture.document.addPreparedFile(path, image.size(), video, {100, 100}, durationMs);
         QVERIFY(media && !media->residencyReady());
         media->setScale(2.0);
         MediaSettingsViewModel settings;
@@ -3198,6 +3211,7 @@ private slots:
                 sourcePath, {240, 140}, isVideo, {180, 160});
         }
         QVERIFY(media);
+        QTRY_VERIFY(media->clipActive());
         if (media->isText()) media->setFitToTextEnabled(false);
         media->setBaseSize({240, 140});
         media->setPosition({180, 160});

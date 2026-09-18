@@ -710,6 +710,7 @@ QVariantMap CanvasMedia::toModelMap(qreal unit) const
         {QStringLiteral("uploadProgress"), m_uploadProgress},
         {QStringLiteral("displayName"), displayName()},
         {QStringLiteral("contentVisible"), m_contentVisible},
+        {QStringLiteral("clipActive"), m_clipActive},
         {QStringLiteral("contentOpacity"), m_contentOpacity},
         {QStringLiteral("textContent"), isText() ? m_text : QString()},
         {QStringLiteral("textEditable"), isText()},
@@ -842,12 +843,22 @@ void CanvasMedia::setTimelineTrack(const SceneTimeline::MediaTrack& track)
     m_timelineTrack=track;
     emit changed();
 }
-void CanvasMedia::ensureDefaultVideoClip(const SceneTimeline::SceneSettings& settings)
+void CanvasMedia::setClipActive(bool active)
 {
-    if (!isVideo() || m_timelineTrack.clipsInitialized || !m_player || m_player->duration()<=0) return;
+    if (m_clipActive == active) return;
+    m_clipActive = active;
+    emit presentationChanged();
+}
+void CanvasMedia::ensureDefaultClip(const SceneTimeline::SceneSettings& settings)
+{
+    if (m_timelineTrack.clipsInitialized) return;
+    const qint64 duration = isVideo() ? sourceDurationMs() : 0;
+    if (isVideo() && duration <= 0) return;
     auto track=m_timelineTrack;
     track.clipsInitialized=true;
-    track.clips.append({SceneTimeline::newId(),0,0,qMin(settings.maxSlot(),settings.sourceSlots(m_player->duration()))});
+    track.clips.append({SceneTimeline::newId(),0,
+        isVideo() ? std::optional<qint64>(0) : std::nullopt,
+        isVideo() ? qMin(settings.maxSlot(),settings.sourceSlots(duration)) : settings.maxSlot()});
     setTimelineTrack(track);
 }
 

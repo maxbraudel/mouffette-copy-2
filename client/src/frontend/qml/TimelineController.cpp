@@ -17,7 +17,7 @@
 #include <limits>
 
 namespace {
-constexpr auto ClipboardMime = "application/x-mouffette-timeline-v4";
+constexpr auto ClipboardMime = "application/x-mouffette-timeline-v5";
 QJsonObject clipboardObject()
 {
     const auto* mime = QGuiApplication::clipboard()->mimeData();
@@ -32,6 +32,20 @@ QVariantMap keyframeRow(const SceneTimeline::Keyframe& key, const CanvasMedia* m
             {QStringLiteral("mediaId"), media->mediaId()},
             {QStringLiteral("mediaName"), media->displayName()}};
 }
+QVariantMap clipRow(const SceneTimeline::Clip& clip, const CanvasMedia* media, const SceneTimeline::SceneSettings& grid)
+{
+    return {{QStringLiteral("id"), clip.id},
+        {QStringLiteral("mediaId"), media->mediaId()},
+        {QStringLiteral("mediaName"), media->displayName()},
+        {QStringLiteral("isVideo"), clip.sourceStartSlot.has_value()},
+        {QStringLiteral("startMs"), grid.timeMs(clip.startSlot)},
+        {QStringLiteral("startSlot"), clip.startSlot},
+        {QStringLiteral("sourceInMs"), grid.timeMs(clip.sourceStartSlot.value_or(0))},
+        {QStringLiteral("durationMs"), grid.timeMs(clip.durationSlots)},
+        {QStringLiteral("durationSlots"), clip.durationSlots},
+        {QStringLiteral("actualSourceDurationMs"), media->sourceDurationMs()}};
+}
+
 }
 
 TimelineController::TimelineController(QObject* parent) : QObject(parent)
@@ -129,35 +143,24 @@ QVariantList TimelineController::otherKeyframes() const
 QVariantList TimelineController::clips() const
 {
     QVariantList rows;
-    if (auto* media = primary(); media && media->isVideo()) {
-        for (const auto& clip : media->timelineTrack().clips) {
-            rows.append(QVariantMap{{QStringLiteral("id"), clip.id},
-                {QStringLiteral("startMs"), grid().timeMs(clip.startSlot)},
-                {QStringLiteral("startSlot"), clip.startSlot},
-                {QStringLiteral("sourceInMs"), grid().timeMs(clip.sourceStartSlot)},
-                {QStringLiteral("sourceEndMs"), grid().timeMs(clip.sourceEndSlot())},
-                {QStringLiteral("sourceOutMs"), qMin(qreal(media->sourceDurationMs()), grid().timeMs(clip.sourceEndSlot()))},
-                {QStringLiteral("durationMs"), grid().timeMs(clip.durationSlots)},
-                {QStringLiteral("durationSlots"), clip.durationSlots},
-                {QStringLiteral("actualSourceDurationMs"), media->sourceDurationMs()},
-                {QStringLiteral("paddingMs"), qMax(0.0, grid().timeMs(clip.sourceEndSlot()) - media->sourceDurationMs())},
-                {QStringLiteral("sourceDurationMs"), grid().timeMs(grid().sourceSlots(media->sourceDurationMs()))}});
-        }
-    }
+    if (auto* media = primary())
+        for (const auto& clip : media->timelineTrack().clips) rows.append(clipRow(clip, media, grid()));
     return rows;
 }
 QVariantList TimelineController::otherClips() const
 {
     QVariantList rows;
     if (m_document) for (auto* media : m_document->media()) {
-        if (media == primary() || !media->isVideo()) continue;
-        for (const auto& clip : media->timelineTrack().clips)
-            rows.append(QVariantMap{{QStringLiteral("id"), clip.id},
-                {QStringLiteral("mediaId"), media->mediaId()},
-                {QStringLiteral("startMs"), grid().timeMs(clip.startSlot)},
-                {QStringLiteral("durationMs"), grid().timeMs(clip.durationSlots)}});
+        if (media == primary()) continue;
+        for (const auto& clip : media->timelineTrack().clips) rows.append(clipRow(clip, media, grid()));
     }
     return rows;
+}
+bool TimelineController::canInsertClip() const
+{
+    if (!editable() || !primary() || positionSlot() >= grid().maxSlot()) return false;
+    return primaryIsVideo() ? primary()->sourceDurationMs() > 0
+        : !SceneTimeline::activeClip(primary()->timelineTrack(), positionSlot());
 }
 bool TimelineController::hasKeyframeAtPosition() const
 {
@@ -167,7 +170,7 @@ bool TimelineController::hasKeyframeAtPosition() const
 }
 bool TimelineController::canSplit() const
 {
-    if (!editable() || !primaryIsVideo()) return false;
+    if (!editable() || !primary()) return false;
     for (const auto& clip : primary()->timelineTrack().clips)
         if ((m_clipId.isEmpty() || clip.id == m_clipId)
             && clip.startSlot < positionSlot() && clip.endSlot() > positionSlot()) return true;
@@ -181,7 +184,7 @@ bool TimelineController::canPaste() const
     return value.value(QStringLiteral("mediaId")).toString() == primaryMediaId()
         && value.value(QStringLiteral("projectId")).toString() == m_document->projectId()
         && (kind == QLatin1String("keyframe")
-            || (kind == QLatin1String("clip") && primaryIsVideo() && positionMs() < maxDurationMs()));
+            || (kind == QLatin1String("clip") && positionMs() < maxDurationMs()));
 }
 
 int TimelineController::timelineHeightPx() const { return AppConfig::instance().timelineHeightPx(); }
@@ -229,18 +232,9 @@ bool TimelineController::commitTrack(CanvasMedia* media, const SceneTimeline::Me
         error(reason);
         return false;
     }
-    const QString elementType = media->authorElementState().type;
-    for (const auto& key : validated.keyframes) {
-        if (key.state.type != elementType) {
-            error(QStringLiteral("A keyframe must describe the same media type."));
-            return false;
-        }
-    }
-    for (const auto& clip : validated.clips) {
-        if (!media->isVideo() || clip.sourceEndSlot() > grid().sourceSlots(media->sourceDurationMs())) {
-            error(QStringLiteral("A clip must stay within its video source duration."));
-            return false;
-        }
+    if (!SceneTimeline::validateMediaTrack(validated, media->typeName(), media->sourceDurationMs(), &reason)) {
+        error(reason);
+        return false;
     }
     auto scene = m_document->serializeSceneState();
     auto items = scene.value(QStringLiteral("media")).toArray();
@@ -325,7 +319,7 @@ void TimelineController::moveKeyframe(const QString& id, qreal timeMs)
 }
 void TimelineController::selectClip(const QString& id)
 {
-    if (!primaryIsVideo() || !editable()) return;
+    if (!primary() || !editable()) return;
     for (const auto& clip : primary()->timelineTrack().clips) if (clip.id == id) {
         m_clipId = id;
         m_keyframeId.clear();
@@ -336,7 +330,7 @@ void TimelineController::selectClip(const QString& id)
 }
 void TimelineController::moveClip(const QString& id, qreal startMs)
 {
-    if (!editable() || !primaryIsVideo()) return;
+    if (!editable() || !primary()) return;
     auto track = primary()->timelineTrack();
     if (!SceneTimeline::moveClip(track, id, grid().nearestSlot(startMs), grid().maxSlot())) return;
     if (!commitTrack(primary(), track)) return;
@@ -345,9 +339,9 @@ void TimelineController::moveClip(const QString& id, qreal startMs)
 }
 void TimelineController::trimClip(const QString& id, qreal startMs, qreal endMs)
 {
-    if (!editable() || !primaryIsVideo()) return;
+    if (!editable() || !primary()) return;
     auto track = primary()->timelineTrack();
-    if (!SceneTimeline::trimClip(track, id, grid().nearestSlot(startMs), grid().nearestSlot(endMs), grid().maxSlot(), grid().sourceSlots(primary()->sourceDurationMs()))) return;
+    if (!SceneTimeline::trimClip(track, id, grid().nearestSlot(startMs), grid().nearestSlot(endMs), grid().maxSlot())) return;
     if (!commitTrack(primary(), track)) return;
     m_clipId = id;
     reevaluate();
@@ -363,13 +357,16 @@ void TimelineController::splitClip()
     if (!commitTrack(primary(), track)) return;
     reevaluate();
 }
-void TimelineController::insertFullClip()
+void TimelineController::insertClip()
 {
-    if (!editable() || !primaryIsVideo()) return;
-    const auto duration = std::min(grid().sourceSlots(primary()->sourceDurationMs()), grid().maxSlot() - positionSlot());
-    if (duration <= 0) return;
+    if (!canInsertClip()) return;
     auto track = primary()->timelineTrack();
-    SceneTimeline::VideoClip clip{SceneTimeline::newId(), positionSlot(), 0, duration};
+    qint64 end = grid().maxSlot();
+    if (primaryIsVideo()) end = qMin(end, positionSlot() + grid().sourceSlots(primary()->sourceDurationMs()));
+    else for (const auto& clip : track.clips)
+        if (clip.startSlot > positionSlot()) { end = clip.startSlot; break; }
+    SceneTimeline::Clip clip{SceneTimeline::newId(), positionSlot(),
+        primaryIsVideo() ? std::optional<qint64>(0) : std::nullopt, end - positionSlot()};
     if (!SceneTimeline::insertClip(track, clip, grid().maxSlot())) return;
     if (!commitTrack(primary(), track)) return;
     m_clipId = clip.id;
@@ -407,7 +404,7 @@ void TimelineController::copySelected()
     } else if (!m_clipId.isEmpty()) {
         for (const auto& clip : track.clips) if (clip.id == m_clipId) {
             value.insert(QStringLiteral("kind"), QStringLiteral("clip"));
-            value.insert(QStringLiteral("sourceStartSlot"), clip.sourceStartSlot);
+            value.insert(QStringLiteral("sourceStartSlot"), clip.sourceStartSlot ? QJsonValue(double(*clip.sourceStartSlot)) : QJsonValue(QJsonValue::Null));
             value.insert(QStringLiteral("durationSlots"), clip.durationSlots);
             break;
         }
@@ -431,12 +428,20 @@ void TimelineController::paste()
         m_keyframeId = key.id;
         m_clipId.clear();
     } else {
-        const qint64 in = value.value(QStringLiteral("sourceStartSlot")).toInteger(-1);
-        const qint64 duration = value.value(QStringLiteral("durationSlots")).toInteger(-1);
-        const qint64 sourceSlots = grid().sourceSlots(primary()->sourceDurationMs());
-        if (in < 0 || duration <= 0 || in > sourceSlots || duration > sourceSlots - in) return;
-        SceneTimeline::VideoClip clip{SceneTimeline::newId(), positionSlot(), in,
-            std::min(duration, grid().maxSlot() - positionSlot())};
+        // Reuse the canonical parser, including signed offsets and static nulls.
+        auto object = value;
+        object.remove(QStringLiteral("kind"));
+        object.remove(QStringLiteral("mediaId"));
+        object.remove(QStringLiteral("projectId"));
+        object.insert(QStringLiteral("id"), SceneTimeline::newId());
+        object.insert(QStringLiteral("startSlot"), 0);
+        SceneTimeline::MediaTrack copied;
+        if (!SceneTimeline::MediaTrack::fromJson({{"keyframes", QJsonArray{}},
+                {"clips", QJsonArray{object}}, {"clipsInitialized", true}}, &copied, grid().maxSlot())
+            || !SceneTimeline::validateMediaTrack(copied, primary()->typeName(), primary()->sourceDurationMs())) return;
+        auto clip = copied.clips.first();
+        clip.startSlot = positionSlot();
+        clip.durationSlots = qMin(clip.durationSlots, grid().maxSlot() - positionSlot());
         if (!SceneTimeline::insertClip(track, clip, grid().maxSlot())) return;
         if (!commitTrack(primary(), track)) return;
         m_clipId = clip.id;

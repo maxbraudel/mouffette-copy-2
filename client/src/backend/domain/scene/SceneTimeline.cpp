@@ -45,11 +45,13 @@ QColor blendColor(const QColor& a, const QColor& b, qreal f) {
 }
 void sortTrack(MediaTrack& t) {
     std::sort(t.keyframes.begin(), t.keyframes.end(), [](const Keyframe& a, const Keyframe& b) { return a.slot < b.slot; });
-    std::sort(t.clips.begin(), t.clips.end(), [](const VideoClip& a, const VideoClip& b) { return a.startSlot < b.startSlot; });
+    std::sort(t.clips.begin(), t.clips.end(), [](const Clip& a, const Clip& b) { return a.startSlot < b.startSlot; });
 }
-bool validClip(const VideoClip& c, qint64 maximum) {
-    return !c.id.isEmpty() && c.startSlot >= 0 && c.sourceStartSlot >= 0 && c.durationSlots > 0
-        && c.sourceEndSlot() <= MaximumSupportedDurationMs * 240 / 1000 && c.endSlot() <= maximum;
+bool validClip(const Clip& c, qint64 maximum) {
+    return !c.id.isEmpty() && c.startSlot >= 0 && c.startSlot < maximum
+        && c.durationSlots > 0 && c.durationSlots <= maximum - c.startSlot
+        && (!c.sourceStartSlot || (*c.sourceStartSlot >= -MaximumSourceOffsetSlots
+            && *c.sourceStartSlot <= MaximumSourceOffsetSlots - c.durationSlots));
 }
 }
 QString newId() { return QUuid::createUuid().toString(QUuid::WithoutBraces); }
@@ -134,7 +136,7 @@ QJsonObject MediaTrack::toJson() const {
     QJsonArray keys, segments;
     for (const auto& k : keyframes) keys.append(QJsonObject{{"id",k.id},{"slot",double(k.slot)},{"state",k.state.toJson()}});
     for (const auto& c : clips) segments.append(QJsonObject{{"id",c.id},{"startSlot",double(c.startSlot)},
-        {"sourceStartSlot",double(c.sourceStartSlot)},{"durationSlots",double(c.durationSlots)}});
+        {"sourceStartSlot",c.sourceStartSlot ? QJsonValue(double(*c.sourceStartSlot)) : QJsonValue(QJsonValue::Null)},{"durationSlots",double(c.durationSlots)}});
     return {{"keyframes",keys},{"clips",segments},{"clipsInitialized",clipsInitialized}};
 }
 bool MediaTrack::fromJson(const QJsonObject& o, MediaTrack* out, qint64 maximum, QString* error) {
@@ -152,12 +154,17 @@ bool MediaTrack::fromJson(const QJsonObject& o, MediaTrack* out, qint64 maximum,
         ids.insert(key.id); times.insert(key.slot); t.keyframes.append(key);
     }
     for (auto v : clips) {
-        auto c = v.toObject(); VideoClip clip; clip.id = c.value("id").toString();
+        auto c = v.toObject(); Clip clip; clip.id = c.value("id").toString();
+        qint64 source = 0;
+        if (!c.value("sourceStartSlot").isNull()) {
+            if (!integer(c,"sourceStartSlot",-MaximumSourceOffsetSlots,MaximumSourceOffsetSlots,&source))
+                return fail(error,"Invalid clip source offset");
+            clip.sourceStartSlot = source;
+        }
         if (!onlyKeys(c,{"id","startSlot","sourceStartSlot","durationSlots"}) || clip.id.isEmpty() || clip.id.size() > 128 || ids.contains(clip.id)
             || !integer(c,"startSlot",0,maximum,&clip.startSlot)
-            || !integer(c,"sourceStartSlot",0,MaximumSupportedDurationMs * 240 / 1000,&clip.sourceStartSlot)
             || !integer(c,"durationSlots",1,MaximumSupportedDurationMs * 240 / 1000,&clip.durationSlots) || !validClip(clip,maximum))
-            return fail(error,"Invalid video clip");
+            return fail(error,"Invalid clip");
         ids.insert(clip.id); t.clips.append(clip);
     }
     sortTrack(t);
@@ -227,29 +234,36 @@ ElementState materialize(const ElementState& value) {
     if(s.outlineColorOverrideEnabled || s.outlineColor != QColor(Qt::black)) {s.outlineColorOverrideEnabled=true;s.rawOutlineColor=s.outlineColor;}
     return s;
 }
+const Clip* activeClip(const MediaTrack& track, qint64 slot) {
+    const auto next = std::upper_bound(track.clips.cbegin(), track.clips.cend(), slot,
+        [](qint64 value, const Clip& clip) { return value < clip.startSlot; });
+    if (next == track.clips.cbegin()) return nullptr;
+    const auto& clip = *(next - 1);
+    return slot < clip.endSlot() ? &clip : nullptr;
+}
+bool validateMediaTrack(const MediaTrack& track, const QString& type, qint64 duration, QString* error) {
+    if (type != "video" && type != "image" && type != "text") return fail(error,"Invalid media type");
+    for (const auto& key : track.keyframes)
+        if (key.state.type != type) return fail(error,"A keyframe must describe the same media type");
+    if (type == "video" && (duration < 0 || duration > MaximumSupportedDurationMs))
+        return fail(error,"Invalid video source duration");
+    for (const auto& clip : track.clips) {
+        if (clip.sourceStartSlot.has_value() != (type == "video"))
+            return fail(error,"Clip source offset does not match its media type");
+        if (type == "video" && duration <= 0) return fail(error,"A clip requires a loaded video source");
+    }
+    return true;
+}
 VideoSample evaluateVideo(const MediaTrack& track, qreal time, qint64 duration, const SceneSettings& settings) {
     VideoSample result;
-    if (track.clips.isEmpty() || duration <= 0) return result;
-    const auto exitTime = [&](const VideoClip& clip) {
-        return qMax<qint64>(0, qCeil(qMin(qreal(duration), settings.timeMs(clip.sourceEndSlot()))) - 1);
-    };
-    const VideoClip* previous = nullptr;
-    for (const auto& clip : track.clips) {
-        if (time < settings.timeMs(clip.startSlot)) {
-            result.sourceTimeMs = previous ? exitTime(*previous) : qRound64(settings.timeMs(clip.sourceStartSlot));
-            break;
-        }
-        if (time < settings.timeMs(clip.endSlot())) {
-            const qreal source = time + settings.timeMs(clip.sourceStartSlot - clip.startSlot);
-            result.playing = source < qMin(qreal(duration), settings.timeMs(clip.sourceEndSlot()));
-            result.sourceTimeMs = result.playing ? qRound64(source) : exitTime(clip);
-            result.clipId = clip.id;
-            break;
-        }
-        previous = &clip;
-        result.sourceTimeMs = exitTime(clip);
-    }
-    result.sourceTimeMs = qBound<qint64>(0, result.sourceTimeMs, duration - 1);
+    if (!std::isfinite(time) || time < 0 || duration <= 0) return result;
+    const auto* clip = activeClip(track, settings.slotAt(time));
+    if (!clip || !clip->sourceStartSlot) return result;
+    result.clipActive = true;
+    result.clipId = clip->id;
+    const qreal source = time + settings.timeMs(*clip->sourceStartSlot - clip->startSlot);
+    result.playing = source >= 0 && source < duration;
+    result.sourceTimeMs = qRound64(qBound(qreal(0), source, qreal(duration - 1)));
     return result;
 }
 QJsonObject evaluateMedia(const QJsonObject& media, qreal time, const SceneSettings& settings) {
@@ -259,6 +273,7 @@ QJsonObject evaluateMedia(const QJsonObject& media, qreal time, const SceneSetti
     QJsonObject result = media;
     const auto evaluated = evaluate(base, track, settings.slotAt(time)).toJson();
     for (auto it = evaluated.begin(); it != evaluated.end(); ++it) result.insert(it.key(), it.value());
+    result.insert("clipActive", activeClip(track, settings.slotAt(time)) != nullptr);
     return result;
 }
 bool upsertKeyframe(MediaTrack& track,Keyframe key,qint64 maximum) {
@@ -274,15 +289,15 @@ bool removeKeyframe(MediaTrack& track,const QString& id) {
 bool moveKeyframe(MediaTrack& track,const QString& id,qint64 time,qint64 maximum) {
     for(const auto& k:track.keyframes) if(k.id==id){auto copy=k;copy.slot=qBound<qint64>(0,time,maximum);return upsertKeyframe(track,copy,maximum);}return false;
 }
-bool insertClip(MediaTrack& track,VideoClip clip,qint64 maximum) {
+bool insertClip(MediaTrack& track,Clip clip,qint64 maximum) {
     if(clip.id.isEmpty()) clip.id=newId();
     if(!validClip(clip,maximum)) return false;
-    QList<VideoClip> result;
+    QList<Clip> result;
     for(const auto& old:track.clips) {
         if(old.id==clip.id) continue;
         if(old.endSlot()<=clip.startSlot || old.startSlot>=clip.endSlot()){result.append(old);continue;}
         if(old.startSlot<clip.startSlot) {auto left=old;left.durationSlots=clip.startSlot-left.startSlot;result.append(left);}
-        if(old.endSlot()>clip.endSlot()) {auto right=old;right.id=newId();right.durationSlots=old.endSlot()-clip.endSlot();right.sourceStartSlot+=clip.endSlot()-right.startSlot;right.startSlot=clip.endSlot();result.append(right);}
+        if(old.endSlot()>clip.endSlot()) {auto right=old;right.id=newId();right.durationSlots=old.endSlot()-clip.endSlot();if(right.sourceStartSlot) *right.sourceStartSlot+=clip.endSlot()-right.startSlot;right.startSlot=clip.endSlot();result.append(right);}
     }
     result.append(clip);track.clips=result;track.clipsInitialized=true;sortTrack(track);return true;
 }
@@ -296,19 +311,17 @@ bool splitClip(MediaTrack& track,const QString& id,qint64 time) {
     for(qsizetype i=0;i<track.clips.size();++i) if(track.clips[i].id==id) {
         const auto old=track.clips[i];if(time<=old.startSlot || time>=old.endSlot()) return false;
         auto left=old,right=old;left.durationSlots=time-old.startSlot;
-        right.id=newId();right.startSlot=time;right.sourceStartSlot=old.sourceStartSlot+left.durationSlots;right.durationSlots=old.durationSlots-left.durationSlots;
+        right.id=newId();right.startSlot=time;if(right.sourceStartSlot) *right.sourceStartSlot+=left.durationSlots;right.durationSlots=old.durationSlots-left.durationSlots;
         track.clips[i]=left;track.clips.insert(i+1,right);return true;
     }return false;
 }
-bool trimClip(MediaTrack& track,const QString& id,qint64 start,qint64 end,qint64 maximum,qint64 duration) {
-    if (duration <= 0 || maximum <= 0) return false;
+bool trimClip(MediaTrack& track,const QString& id,qint64 start,qint64 end,qint64 maximum) {
+    if (maximum <= 0) return false;
     for(const auto& c:track.clips) if(c.id==id) {
-        auto trimmed=c;const qint64 minimum=qMax<qint64>(0,c.startSlot-c.sourceStartSlot);
-        const qint64 maximumEnd=qMin(maximum,c.startSlot+duration-c.sourceStartSlot);
-        if (maximumEnd <= minimum) return false;
-        trimmed.startSlot=qBound(minimum,start,qMax(minimum,maximumEnd-1));
-        end=qBound(trimmed.startSlot+1,end,maximumEnd);
-        trimmed.sourceStartSlot=c.sourceStartSlot+trimmed.startSlot-c.startSlot;
+        auto trimmed=c;
+        trimmed.startSlot=qBound<qint64>(0,start,maximum-1);
+        end=qBound(trimmed.startSlot+1,end,maximum);
+        if (trimmed.sourceStartSlot) *trimmed.sourceStartSlot += trimmed.startSlot-c.startSlot;
         trimmed.durationSlots=end-trimmed.startSlot;
         return insertClip(track,trimmed,maximum);
     }return false;

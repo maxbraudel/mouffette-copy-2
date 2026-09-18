@@ -154,6 +154,7 @@ void CanvasDocument::startPendingImport(const QString& mediaId)
                                                  : CanvasMedia::Type::Image,
                                       probe.displaySize);
         media->restoreMediaId(pending.mediaId);
+        media->restoreSourceDurationMs((probe.durationUs + 999) / 1000);
         media->setSourcePath(pending.sourcePath);
         media->setPosition(pending.center - QPointF(probe.displaySize.width() / 2.0,
                                                     probe.displaySize.height() / 2.0));
@@ -194,6 +195,7 @@ void CanvasDocument::adoptMedia(CanvasMedia* media)
     media->setResidencySuspended(m_mediaResidencySuspended);
     m_media.append(media);
     connect(media, &CanvasMedia::changed, this, [this, media]() {
+        media->setClipActive(SceneTimeline::activeClip(media->timelineTrack(), m_timelineSettings.slotAt(m_timelinePositionMs)) != nullptr);
         emit mediaChanged(media->mediaId());
         emit documentChanged();
     });
@@ -201,11 +203,11 @@ void CanvasDocument::adoptMedia(CanvasMedia* media)
         if (!m_evaluatingTimeline) emit mediaChanged(media->mediaId());
     });
     connect(media, &CanvasMedia::residencyChanged, this, [this, media]() {
-        media->ensureDefaultVideoClip(m_timelineSettings);
+        media->ensureDefaultClip(m_timelineSettings);
         emit mediaChanged(media->mediaId());
     });
     connect(media, &CanvasMedia::runtimeStateChanged, this, [this, media]() {
-        media->ensureDefaultVideoClip(m_timelineSettings);
+        media->ensureDefaultClip(m_timelineSettings);
     });
     connect(media, &CanvasMedia::identityReady, this, [this, media](const QString& fileId) {
         if (m_fileManager) {
@@ -227,7 +229,8 @@ void CanvasDocument::adoptMedia(CanvasMedia* media)
         if (!m_projectId.isEmpty())
             m_fileManager->associateFileWithProject(media->fileId(), m_projectId);
     }
-    media->ensureDefaultVideoClip(m_timelineSettings);
+    media->ensureDefaultClip(m_timelineSettings);
+    media->setClipActive(SceneTimeline::activeClip(media->timelineTrack(), m_timelineSettings.slotAt(m_timelinePositionMs)) != nullptr);
     emit mediaAdded(media);
     emit documentChanged();
 }
@@ -260,13 +263,14 @@ CanvasMedia* CanvasDocument::addText(const QPointF& position,
 
 CanvasMedia* CanvasDocument::addPreparedFile(
     const QString& sourcePath, const QSize& nativeSize, bool video,
-    const QPointF& position)
+    const QPointF& position, qint64 sourceDurationMs)
 {
     if (m_editsLocked || sourcePath.isEmpty()) return nullptr;
     auto* media = new CanvasMedia(video ? CanvasMedia::Type::Video
                                         : CanvasMedia::Type::Image,
                                   nativeSize.expandedTo(QSize(1, 1)));
     media->setResidencySuspended(m_mediaResidencySuspended);
+    media->restoreSourceDurationMs(sourceDurationMs);
     media->setSourcePath(sourcePath);
     media->setPosition(position);
     media->setZ(nextZ());
@@ -449,6 +453,7 @@ void CanvasDocument::evaluateTimeline()
     if (m_evaluatingTimeline) return;
     m_evaluatingTimeline = true;
     for(CanvasMedia* media:m_media) {
+        media->setClipActive(SceneTimeline::activeClip(media->timelineTrack(), m_timelineSettings.slotAt(m_timelinePositionMs)) != nullptr);
         if(media->timelineTrack().keyframes.isEmpty()) media->clearEvaluatedElementState();
         else media->setEvaluatedElementState(SceneTimeline::evaluate(media->authorElementState(),media->timelineTrack(),m_timelineSettings.slotAt(m_timelinePositionMs)));
     }
@@ -776,7 +781,6 @@ QStringList CanvasDocument::insertProjectMedia(
             || !SceneTimeline::MediaTrack::fromJson(source.value(QStringLiteral("timeline")).toObject(),&track,m_timelineSettings.maxSlot())) {skip();continue;}
         bool compatible=true;
         for(const auto& key:track.keyframes) if(key.state.type!=element.type) compatible=false;
-        if(element.type!=QLatin1String("video") && !track.clips.isEmpty()) compatible=false;
         const bool text=element.type==QLatin1String("text"),video=element.type==QLatin1String("video");
         qint64 sourceDuration=0;
         if(video) {
@@ -785,9 +789,8 @@ QStringList CanvasDocument::insertProjectMedia(
             if(!value.isDouble() || !std::isfinite(duration) || duration<0
                 || duration>SceneTimeline::MaximumSupportedDurationMs || std::floor(duration)!=duration) compatible=false;
             else sourceDuration=static_cast<qint64>(duration);
-            for(const auto& clip:track.clips) if(clip.sourceEndSlot()>m_timelineSettings.sourceSlots(sourceDuration)) compatible=false;
         }
-        if(!compatible){skip();continue;}
+        if(!compatible || !SceneTimeline::validateMediaTrack(track, element.type, sourceDuration)){skip();continue;}
         const QString path=sourcePathByMediaId.value(id);
         if(!text && (path.isEmpty() || !QFileInfo::exists(path))){skip();continue;}
         auto* media=new CanvasMedia(text?CanvasMedia::Type::Text:(video?CanvasMedia::Type::Video:CanvasMedia::Type::Image),element.baseSize.toSize());

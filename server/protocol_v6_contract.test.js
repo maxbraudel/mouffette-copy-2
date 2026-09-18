@@ -44,7 +44,7 @@ function addClient(server, connectionId, endpointId, options = {}) {
 function envelope(server, type, extra = {}) {
     return {
         type,
-        protocolVersion: 9,
+        protocolVersion: 10,
         serverBootId: server.serverBootId,
         messageId: crypto.randomUUID(),
         connectionGeneration: 1,
@@ -119,7 +119,7 @@ function containsRemovedWireKey(value, forbidden) {
         connectionGeneration: 99,
     }));
     const outbound = lastMessage(recipient.ws, 'test_outbound');
-    assert.equal(outbound.protocolVersion, 9);
+    assert.equal(outbound.protocolVersion, 10);
     assert.equal(outbound.serverBootId, server.serverBootId);
     assert.equal(outbound.connectionGeneration, 99);
     assert.match(outbound.messageId,
@@ -144,7 +144,7 @@ for (const obsoleteVersion of [1, 7, 8]) {
     });
     const mismatch = lastMessage(old.ws, 'error');
     assert.equal(mismatch.code, 'protocol_version_mismatch');
-    assert.equal(mismatch.protocolVersion, 9);
+    assert.equal(mismatch.protocolVersion, 10);
     assert.equal(mismatch.serverBootId, server.serverBootId);
     assert.equal(typeof mismatch.messageId, 'string');
     assert.deepEqual(old.ws.closes, [{ code: 1002, reason: 'Protocol version mismatch' }]);

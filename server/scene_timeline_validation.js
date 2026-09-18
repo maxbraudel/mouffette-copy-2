@@ -1,6 +1,7 @@
 'use strict';
 
-// Canonical render schema 4. Keep numeric bounds in sync with SceneTimeline.cpp.
+// Canonical render schema 5. Keep numeric bounds in sync with SceneTimeline.cpp.
+const MAXIMUM_SOURCE_OFFSET_SLOTS = 2 ** 52;
 const MAXIMUM_DURATION_MS = 604_800_000;
 const COMMON_ELEMENT_KEYS = Object.freeze([
     'type', 'x', 'y', 'width', 'height', 'baseWidth', 'baseHeight', 'scale',
@@ -54,7 +55,6 @@ function isCanonicalElement(value, extraKeys = []) {
         && ['top', 'center', 'bottom'].includes(value.verticalAlignment);
 }
 const maximumSlot = settings => Math.floor(settings.maxDurationMs * settings.slotsPerSecond / 1000);
-const sourceSlots = (duration, rate) => Math.ceil(duration * rate / 1000);
 function isCanonicalTimelineSettings(value) {
     return onlyKeys(value, ['maxDurationMs', 'stopSlot', 'slotsPerSecond'])
         && integer(value.maxDurationMs, 1, MAXIMUM_DURATION_MS)
@@ -62,15 +62,14 @@ function isCanonicalTimelineSettings(value) {
         && integer(value.stopSlot, -1, maximumSlot(value));
 }
 function isCanonicalMediaTrack(value, type, settings, sourceDuration = 0) {
-    if (!isCanonicalTimelineSettings(settings)
+    if (!isCanonicalTimelineSettings(settings) || !['image', 'video', 'text'].includes(type)
         || !onlyKeys(value, ['keyframes', 'clips', 'clipsInitialized'])
         || !Array.isArray(value.keyframes) || value.keyframes.length > 10_000
         || !Array.isArray(value.clips) || value.clips.length > 10_000
         || !boolean(value.clipsInitialized)
-        || ((!value.clipsInitialized || type !== 'video') && value.clips.length > 0)
+        || (!value.clipsInitialized && value.clips.length > 0)
         || (type === 'video' && !integer(sourceDuration, 0, MAXIMUM_DURATION_MS))) return false;
     const maximum = maximumSlot(settings);
-    const sourceLength = sourceSlots(sourceDuration, settings.slotsPerSecond);
     const ids = new Set(); const times = new Set();
     for (const key of value.keyframes) {
         if (!onlyKeys(key, ['id', 'slot', 'state']) || !identifier(key.id) || ids.has(key.id)
@@ -81,8 +80,11 @@ function isCanonicalMediaTrack(value, type, settings, sourceDuration = 0) {
     for (const clip of value.clips) {
         if (!onlyKeys(clip, ['id', 'startSlot', 'sourceStartSlot', 'durationSlots'])
             || !identifier(clip.id) || ids.has(clip.id) || !integer(clip.startSlot, 0, maximum)
-            || !integer(clip.sourceStartSlot, 0, sourceLength)
-            || !integer(clip.durationSlots, 1, sourceLength - clip.sourceStartSlot)
+            || !integer(clip.durationSlots, 1, maximum)
+            || (type === 'video'
+                ? sourceDuration <= 0 || !integer(clip.sourceStartSlot, -MAXIMUM_SOURCE_OFFSET_SLOTS,
+                    MAXIMUM_SOURCE_OFFSET_SLOTS - clip.durationSlots)
+                : clip.sourceStartSlot !== null)
             || clip.startSlot + clip.durationSlots > maximum) return false;
         ids.add(clip.id);
     }

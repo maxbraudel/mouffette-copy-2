@@ -2,6 +2,7 @@
 #include "StorageIO.h"
 #include "StorageVersions.h"
 #include "migrations/settings/v0_to_v1.h"
+#include "migrations/projects/v6_to_v7.h"
 #include "backend/domain/project/ProjectStore.h"
 #include "backend/notifications/HistoryStore.h"
 
@@ -100,7 +101,9 @@ QList<Component> components(const RuntimeProfileContext& context)
           {2, 6, Transition::Kind::Reset, {}},
           {3, 6, Transition::Kind::Reset, {}},
           {4, 6, Transition::Kind::Reset, {}},
-          {5, 6, Transition::Kind::Reset, {}}}},
+          {5, 6, Transition::Kind::Reset, {}},
+          {6, 7, Transition::Kind::Migrate,
+           [=] { return Migrations::projectsV6ToV7(root, projects); }}}},
         {QStringLiteral("history"), StorageVersions::History,
          [=] { return inspectHistory(root, history); },
          [=] { return writeJson(root, history,

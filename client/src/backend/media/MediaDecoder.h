@@ -9,6 +9,7 @@ public:
     struct Geometry {
         bool video = false;
         QSize displaySize;
+        qint64 durationUs = 0;
         QString error;
         bool accepted() const { return error.isEmpty() && displaySize.isValid(); }
     };

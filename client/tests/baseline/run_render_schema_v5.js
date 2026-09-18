@@ -19,7 +19,7 @@ function main() {
   const sceneSerializer = sender.slice(sceneStart, sceneEnd);
 
   assert(sceneStart >= 0 && sceneEnd > sceneStart, 'scene serializer boundaries missing');
-  assert(schema.includes('RenderSchemaVersion = 4'), 'schema v4 marker missing');
+  assert(schema.includes('RenderSchemaVersion = 5'), 'schema v5 marker missing');
   assert(sceneSerializer.includes('SceneTimeline::RenderSchemaVersion'), 'sender bypasses canonical schema version');
   assert(sceneSerializer.includes('m_timelineSettings.toJson()'), 'scene timeline settings missing');
   for (const field of ['fontPixelSize', 'fontUnderline', 'fontUppercase', 'textOutlineWidthPx', 'z', 'visible']) {
@@ -47,11 +47,11 @@ function main() {
   assert(outline(12.5, 48) === 6, 'outline formula regression');
   assert(outline(150, 48) === 72, 'outline formula must not introduce a hidden clamp');
 
-  console.log('[RENDER_SCHEMA_V4] PASS');
+  console.log('[RENDER_SCHEMA_V5] PASS');
 }
 
 try { main(); } catch (error) {
-  console.error('[RENDER_SCHEMA_V4] FAIL');
+  console.error('[RENDER_SCHEMA_V5] FAIL');
   console.error(error.message);
   process.exit(1);
 }

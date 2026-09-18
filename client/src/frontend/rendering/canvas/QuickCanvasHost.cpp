@@ -513,9 +513,8 @@ QString QuickCanvasHost::mediaReadinessReason(bool remote) const
             return QStringLiteral("Wait until every media is validated and resident in memory (%1)").arg(media->displayName());
         if (media->isVideo() && media->player()) {
             const qint64 duration = media->player()->duration();
-            if (std::any_of(media->timelineTrack().clips.cbegin(), media->timelineTrack().clips.cend(),
-                            [this, duration](const auto& clip) { return clip.sourceEndSlot() > m_document->timelineSettings().sourceSlots(duration); }))
-                return QStringLiteral("A video clip exceeds its source duration (%1)").arg(media->displayName());
+            if (!SceneTimeline::validateMediaTrack(media->timelineTrack(), media->typeName(), duration))
+                return QStringLiteral("Invalid clips (%1)").arg(media->displayName());
         }
         if (remote && (!m_uploadManager || !m_uploadManager->remoteMediaReady(
                 m_targetClientId, manager.sha256(media->residencyOwnerId()))))
@@ -920,6 +919,13 @@ void QuickCanvasHost::applyTimeline(qreal positionMs, bool playing, bool forceSe
         if (!media->isVideo() || !media->player()) continue;
         auto* player = media->player();
         const auto sample = SceneTimeline::evaluateVideo(media->timelineTrack(), time, player->duration(), m_document->timelineSettings());
+        if (!sample.clipActive) {
+            player->pause();
+            if (auto* audio = player->audioOutput()) audio->setMuted(true);
+            m_timelineClipIds.remove(media->mediaId());
+            m_timelineVideoPlaying.insert(media->mediaId(), false);
+            continue;
+        }
         const bool shouldPlay = playing && sample.playing;
         const QString previousClip = m_timelineClipIds.value(media->mediaId());
         const bool changedClip = previousClip != sample.clipId;

@@ -74,7 +74,7 @@ function envelope(ctx, client, type, values = {}) {
     const value = candidate(ctx, keys, 2);
     const { challenge, response } = value;
     assert.equal(challengePayload({ ...challenge, ...response }).toString(),
-        `mouffette-v9\n${challenge.serverBootId}\n${challenge.nonce}\n${response.runtimeId}\ninstance-2\n2`);
+        `mouffette-v10\n${challenge.serverBootId}\n${challenge.nonce}\n${response.runtimeId}\ninstance-2\n2`);
     const verify = response => verifyAuthResponse(challenge, response, ctx.now(), 10000);
     assert.equal(verify(response).ok, true);
     assert.equal(verify({ ...response, protocolVersion: 7 }).error, 'protocol_version_mismatch');
@@ -273,4 +273,4 @@ function envelope(ctx, client, type, values = {}) {
     assert.notEqual(reboot.server.serverBootId, ctx.server.serverBootId);
 }
 
-console.log('instance identity protocol v9 tests passed');
+console.log('instance identity protocol v10 tests passed');

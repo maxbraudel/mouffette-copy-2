@@ -424,6 +424,7 @@ MediaDecoder::Geometry MediaDecoder::inspectGeometry(
         return result;
     }
     result.displaySize = displaySize(format.get(), format->streams[index]);
+    result.durationUs = sourceDuration(format.get(), format->streams[index]);
     if (!result.displaySize.isValid()) result.error = QStringLiteral("Invalid video dimensions");
     return result;
 }

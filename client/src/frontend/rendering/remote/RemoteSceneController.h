@@ -122,6 +122,7 @@ private:
 		int baseWidth = 0;
 		int baseHeight = 0;
 		double z = 0.0;
+		bool clipActive = false;
 		bool contentVisible = true;
 		double renderOpacity = 0.0;
 		bool renderVisible = true;

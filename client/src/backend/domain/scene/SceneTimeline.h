@@ -6,11 +6,14 @@
 #include <QPointF>
 #include <QSizeF>
 #include <QString>
+#include <optional>
 
 // Authoring data and the deterministic, clock-independent scene evaluator.
 namespace SceneTimeline {
-inline constexpr int RenderSchemaVersion = 4;
+inline constexpr int RenderSchemaVersion = 5;
 inline constexpr qint64 MaximumSupportedDurationMs = 604800000;
+// Exactly representable in JSON, including arithmetic with a scene duration.
+inline constexpr qint64 MaximumSourceOffsetSlots = qint64(1) << 52;
 
 struct ElementState {
     QString type = QStringLiteral("image");
@@ -63,17 +66,18 @@ struct Keyframe {
     qint64 slot = 0;
     ElementState state;
 };
-struct VideoClip {
+struct Clip {
     QString id;
     qint64 startSlot = 0;
-    qint64 sourceStartSlot = 0;
+    // Static clips have no source clock. Video offsets may be outside the file.
+    std::optional<qint64> sourceStartSlot;
     qint64 durationSlots = 0;
     qint64 endSlot() const { return startSlot + durationSlots; }
-    qint64 sourceEndSlot() const { return sourceStartSlot + durationSlots; }
+    qint64 sourceEndSlot() const { return sourceStartSlot.value_or(0) + durationSlots; }
 };
 struct MediaTrack {
     QList<Keyframe> keyframes;
-    QList<VideoClip> clips;
+    QList<Clip> clips;
     bool clipsInitialized = false;
     QJsonObject toJson() const;
     static bool fromJson(const QJsonObject&, MediaTrack*, qint64 maxSlot,
@@ -96,11 +100,15 @@ struct SceneSettings {
 struct VideoSample {
     qint64 sourceTimeMs = 0;
     bool playing = false;
+    bool clipActive = false;
     QString clipId;
 };
 
 ElementState evaluate(const ElementState& base, const MediaTrack&, qint64 slot);
 ElementState materialize(const ElementState& evaluated);
+const Clip* activeClip(const MediaTrack&, qint64 slot);
+bool validateMediaTrack(const MediaTrack&, const QString& type, qint64 sourceDurationMs,
+                        QString* error = nullptr);
 VideoSample evaluateVideo(const MediaTrack&, qreal timeMs, qint64 sourceDurationMs,
                           const SceneSettings&);
 QJsonObject evaluateMedia(const QJsonObject& media, qreal timeMs, const SceneSettings&);
@@ -110,10 +118,10 @@ bool removeKeyframe(MediaTrack&, const QString& id);
 bool moveKeyframe(MediaTrack&, const QString& id, qint64 slot, qint64 maxSlot);
 // Insertion/movement/extension overwrite only their occupied interval, keeping
 // source-correct fragments on either side. Operations are atomic.
-bool insertClip(MediaTrack&, VideoClip, qint64 maxSlot);
+bool insertClip(MediaTrack&, Clip, qint64 maxSlot);
 bool removeClip(MediaTrack&, const QString& id);
 bool moveClip(MediaTrack&, const QString& id, qint64 startSlot, qint64 maxSlot);
 bool splitClip(MediaTrack&, const QString& id, qint64 slot);
 bool trimClip(MediaTrack&, const QString& id, qint64 startSlot, qint64 endSlot,
-              qint64 maxSlot, qint64 sourceSlots);
+              qint64 maxSlot);
 }

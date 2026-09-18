@@ -185,6 +185,7 @@ set(MOUFFETTE_STORAGE_SOURCES
     src/backend/runtime/storage/StorageIO.cpp
     src/backend/runtime/storage/StorageRegistry.cpp
     src/backend/runtime/storage/migrations/settings/v0_to_v1.cpp
+    src/backend/runtime/storage/migrations/projects/v6_to_v7.cpp
 )
 
 # Source files - Frontend/Backend Architecture
@@ -517,6 +518,7 @@ qt_add_qml_module(MouffetteClient
         resources/qml/app/canvas/OverlayActionButton.qml
         resources/qml/app/canvas/SceneElementPanel.qml
         resources/qml/app/canvas/TimelinePanel.qml
+        resources/qml/app/canvas/TimelineClip.qml
         resources/qml/app/dialogs/BootstrapWindow.qml
         resources/qml/app/dialogs/MemoryUsagePopup.qml
         resources/qml/app/dialogs/SettingsDialog.qml

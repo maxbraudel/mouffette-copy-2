@@ -166,6 +166,7 @@ private slots:
         QVERIFY2(geometry.accepted(), qPrintable(geometry.error));
         QCOMPARE(geometry.displaySize, source.size());
         QVERIFY(!geometry.video);
+        QCOMPARE(geometry.durationUs, 0);
         const auto probe = MediaDecoder::probe(path);
         QVERIFY2(probe.accepted(), qPrintable(probe.error));
         QCOMPARE(probe.displaySize, source.size());
@@ -426,6 +427,8 @@ private slots:
         const auto probe = MediaDecoder::probe(path);
         QVERIFY2(probe.accepted(), qPrintable(probe.error));
         QCOMPARE(probe.displaySize, QSize(48, 128));
+        QVERIFY(geometry.durationUs > 0);
+        QCOMPARE(geometry.durationUs, probe.durationUs);
         QString error;
         const auto asset = MediaDecoder::decode(path, {}, &error);
         QVERIFY2(asset, qPrintable(error));

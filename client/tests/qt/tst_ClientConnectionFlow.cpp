@@ -172,7 +172,7 @@ public:
                 QJsonObject message)
     {
         if (!socket) return false;
-        message.insert(QStringLiteral("protocolVersion"), 9);
+        message.insert(QStringLiteral("protocolVersion"), 10);
         message.insert(QStringLiteral("serverBootId"), socketBootId);
         completeV7TestEnvelope(message);
         if (message.value(QStringLiteral("messageId")).toString().isEmpty()) {
@@ -1552,7 +1552,7 @@ private slots:
         QJsonObject authentication;
         auto sendServerMessage = [&](QJsonObject message) {
             QVERIFY2(peer, "The fake server has no authenticated peer");
-            message.insert(QStringLiteral("protocolVersion"), 9);
+            message.insert(QStringLiteral("protocolVersion"), 10);
             message.insert(QStringLiteral("serverBootId"), bootId);
             completeV7TestEnvelope(message);
             if (message.value(QStringLiteral("messageId")).toString().isEmpty()) {
@@ -4202,7 +4202,7 @@ private slots:
 
         auto sendServerMessage = [&](QJsonObject message) {
             QVERIFY2(peer, "The fake server has no authenticated peer");
-            message.insert(QStringLiteral("protocolVersion"), 9);
+            message.insert(QStringLiteral("protocolVersion"), 10);
             message.insert(QStringLiteral("serverBootId"), bootId);
             completeV7TestEnvelope(message);
             if (message.value(QStringLiteral("messageId")).toString().isEmpty()) {

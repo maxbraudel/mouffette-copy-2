@@ -69,6 +69,9 @@ public:
 
     bool selected() const { return m_selected; }
     void setSelected(bool selected);
+    // Presentation-only presence; never changes intrinsic visibility or saved keys.
+    bool clipActive() const { return m_clipActive; }
+    void setClipActive(bool active);
     bool contentVisible() const { return m_contentVisible; }
     void setContentVisible(bool visible);
     qreal contentOpacity() const { return m_contentOpacity; }
@@ -90,7 +93,7 @@ public:
     void beginElementEdit();
     const SceneTimeline::MediaTrack& timelineTrack() const { return m_timelineTrack; }
     void setTimelineTrack(const SceneTimeline::MediaTrack& track);
-    void ensureDefaultVideoClip(const SceneTimeline::SceneSettings& settings);
+    void ensureDefaultClip(const SceneTimeline::SceneSettings& settings);
 
     const MediaSettingsState& settings() const { return m_settings; }
     void setSettings(const MediaSettingsState& settings);
@@ -197,6 +200,7 @@ private:
     qreal m_scale = 1.0;
     qreal m_z = 1.0;
     bool m_selected = false;
+    bool m_clipActive = false;
     bool m_contentVisible = true;
     qreal m_contentOpacity = 1.0;
     UploadState m_uploadState = UploadState::NotUploaded;

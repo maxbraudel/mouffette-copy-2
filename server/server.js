@@ -166,7 +166,7 @@ function isCanonicalSceneMedia(item, screenIds, settings) {
 function isCanonicalScene(scene, maximumScreens, maximumMedia) {
     if (!isPlainObject(scene)
         || !hasOnlyKeys(scene, ['renderSchemaVersion', 'timeline', 'screens', 'media'])
-        || scene.renderSchemaVersion !== 4
+        || scene.renderSchemaVersion !== 5
         || !isCanonicalTimelineSettings(scene.timeline)
         || !Array.isArray(scene.screens) || scene.screens.length < 1
         || scene.screens.length > maximumScreens
@@ -189,7 +189,7 @@ function isCanonicalScene(scene, maximumScreens, maximumMedia) {
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// MOUFFETTE SERVER - PROTOCOL V9 IDENTITY BOUNDARY
+// MOUFFETTE SERVER - PROTOCOL V10 IDENTITY BOUNDARY
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 //
 // Protocol v8 authenticates one installation key, derives one addressable
@@ -1363,21 +1363,21 @@ class MouffetteServer {
             return;
         }
         if (!this.isValidOpaqueId(message.type)) {
-            this.sendError(clientId, 'Invalid protocol v9 message type',
+            this.sendError(clientId, 'Invalid protocol v10 message type',
                 'invalid_message_type');
             return;
         }
         if (REMOVED_MESSAGE_TYPES.has(message.type)
             || (typeof message.type === 'string' && message.type.startsWith('remote_scene_'))) {
             this.sendError(clientId,
-                `Obsolete message type is not supported by protocol v9: ${message.type}`,
+                `Obsolete message type is not supported by protocol v10: ${message.type}`,
                 'removed_message_type');
             return;
         }
         const removedField = findRemovedWireField(message);
         if (removedField) {
             this.sendError(clientId,
-                `Obsolete field is not supported by protocol v9: ${removedField}`,
+                `Obsolete field is not supported by protocol v10: ${removedField}`,
                 'removed_protocol_field');
             return;
         }
@@ -1557,7 +1557,7 @@ class MouffetteServer {
                 this.handleRemoteSessionTeardownAck(clientId, message);
                 break;
             default:
-                this.sendError(clientId, 'Unknown protocol v9 message type', 'unknown_message_type');
+                this.sendError(clientId, 'Unknown protocol v10 message type', 'unknown_message_type');
         }
     }
 

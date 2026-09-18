@@ -95,7 +95,7 @@ private slots:
         QVERIFY(!video->isPlaying());
         QVERIFY(video->muted());
         QCOMPARE(video->volume(), 0.27);
-        QCOMPARE(video->timelineTrack().clips.first().sourceStartSlot,30);
+        QCOMPARE(video->timelineTrack().clips.first().sourceStartSlot.value(),30);
         QCOMPARE(video->timelineTrack().clips.first().sourceEndSlot(),72);
     }
 
@@ -221,8 +221,8 @@ private slots:
         video->setTimelineTrack(track);
         const auto saved=host->serializeProjectState();
         QSignalSpy writes(host->document(),&CanvasDocument::documentChanged);
-        host->timelineSeek(0);QTRY_COMPARE(video->positionMs(),qint64(100));
-        host->timelineSeek(1200);QTRY_COMPARE(video->positionMs(),qint64(699));
+        host->timelineSeek(0);QVERIFY(!video->clipActive());
+        host->timelineSeek(1200);QVERIFY(!video->clipActive());
         host->timelineSeek(1500);QTRY_COMPARE(video->positionMs(),qint64(2100));
         QCOMPARE(writes.count(),0);QCOMPARE(host->serializeProjectState(),saved);
         CanvasDocument restored;restored.setMediaResidencySuspended(true);
@@ -232,7 +232,7 @@ private slots:
         QVERIFY(!saved.value("media").toArray()[0].toObject().contains("previewPositionMs"));
     }
 
-    void timelinePlaybackHoldsFirstFrameAndStopsAtClipEnd()
+    void timelinePlaybackHidesOutsideClipAndStopsAtSceneEnd()
     {
         std::unique_ptr<QuickCanvasHost> host(QuickCanvasHost::create());
         QVERIFY(host);host->setProjectEditingEnabled(true);
@@ -242,13 +242,14 @@ private slots:
         SceneTimeline::MediaTrack track;SceneTimeline::insertClip(track,{"clip",11,15,15},5400);
         video->setTimelineTrack(track);
         auto settings=host->document()->timelineSettings();settings.stopSlot=36;QVERIFY(host->document()->setTimelineSettings(settings));
-        host->timelineSeek(0);QTRY_COMPARE(video->positionMs(),qint64(500));
+        host->timelineSeek(0);QVERIFY(!video->clipActive());
         QVERIFY(!video->isPlaying());host->timelinePlay();
         QTRY_VERIFY_WITH_TIMEOUT(video->isPlaying(),5000);
         QTRY_VERIFY_WITH_TIMEOUT(!video->isPlaying(),3000);
         QTRY_VERIFY_WITH_TIMEOUT(!host->timelinePlaying(),3000);
         QCOMPARE(host->timelinePositionMs(),qint64(1200));
-        QVERIFY(qAbs(video->positionMs()-999)<=1);
+        QVERIFY(!video->clipActive());
+        QVERIFY(video->audioOutput()->isMuted());
     }
 
     void timelineAudioUsesKeyframesAndSilencesPausedPreview()

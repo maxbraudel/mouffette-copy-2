@@ -1349,7 +1349,7 @@ private slots:
         media->beginElementEdit();media->setUppercase(true);QVERIFY(media->hasElementDraft());
         QCOMPARE(document.serializeProjectState(),saved);QCOMPARE(writes.count(),0);
         document.setTimelinePosition(600);QVERIFY(!media->hasElementDraft());QVERIFY(!media->uppercase());
-        QCOMPARE(document.serializeSceneState().value("renderSchemaVersion").toInt(),4);
+        QCOMPARE(document.serializeSceneState().value("renderSchemaVersion").toInt(),5);
         const auto serialized=document.serializeSceneState().value("media").toArray()[0].toObject();
         QVERIFY(!serialized.contains("autoDisplay"));QVERIFY(!serialized.contains("projectMediaSettings"));
     }
