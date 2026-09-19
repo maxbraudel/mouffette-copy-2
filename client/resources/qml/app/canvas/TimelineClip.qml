@@ -11,6 +11,7 @@ Rectangle {
     property bool interactive: true
     objectName: interactive ? "timelineClip" : "otherMediaClip"
     readonly property bool isClipDrag: true
+    property bool editPending: false
     property bool dragging: false
     property int initialTrack: 0
     property int previewTrack: 0
@@ -31,8 +32,12 @@ Rectangle {
     property real rawMs: 0
     property real initialStart: 0
     property real initialEnd: 0
-    readonly property real shownStart: dragging ? previewStart : modelData.startMs
-    readonly property real shownEnd: dragging ? previewEnd : modelData.startMs + modelData.durationMs
+    property var adjacentPreview: null
+    readonly property var linkedPreview: panel.activeDrag && panel.activeDrag.isClipDrag
+        && panel.activeDrag.adjacentPreview && panel.activeDrag.adjacentPreview.id === modelData.id
+        ? panel.activeDrag.adjacentPreview : null
+    readonly property real shownStart: dragging ? previewStart : linkedPreview ? linkedPreview.startMs : modelData.startMs
+    readonly property real shownEnd: dragging ? previewEnd : linkedPreview ? linkedPreview.endMs : modelData.startMs + modelData.durationMs
     readonly property bool selected: interactive && modelData.selected
     function refreshPreview() {
         if (editEdge === 0) {
@@ -53,6 +58,7 @@ Rectangle {
         var result = panel.timeline.previewClipEdit(modelData.id, wantedStart, wantedEnd, requestedTrack,
             editEdge, lastValidStart, lastValidEnd, lastValidTrack, panel.controlHeld)
         if (result.startMs === undefined) { cancelEdit(); return }
+        adjacentPreview = result.adjacentClip || null
         previewStart = result.startMs; previewEnd = result.endMs; previewTrack = result.row
         if (result.free) {
             lastValidStart = previewStart; lastValidEnd = previewEnd; lastValidTrack = previewTrack
@@ -78,6 +84,7 @@ Rectangle {
         requestedTrack = initialTrack; lastValidTrack = initialTrack
         initialStart = modelData.startMs; initialEnd = modelData.startMs + modelData.durationMs
         previewStart = initialStart; previewEnd = initialEnd
+        adjacentPreview = null
         lastValidStart = initialStart; lastValidEnd = initialEnd
         editEdge = edge; rawMs = edge > 0 ? initialEnd : initialStart
         var point = area.mapToItem(timeContent, mouse.x, mouse.y)
@@ -85,8 +92,10 @@ Rectangle {
         var panelPoint = area.mapToItem(panel, mouse.x, mouse.y)
         pressPanelX = panelPoint.x; pressPanelY = panelPoint.y
         pointerPanelX = panelPoint.x; pointerPanelY = panelPoint.y
+        editPending = true
     }
     function updateEdit(mouse, area) {
+        if (!editPending) return
         panel.updateModifiers(mouse.modifiers)
         var point = area.mapToItem(panel, mouse.x, mouse.y)
         pointerPanelX = point.x; pointerPanelY = point.y
@@ -99,16 +108,17 @@ Rectangle {
         }
         refreshFromPointer()
     }
-    function cancelEdit() { dragging = false; panel.endDrag() }
+    function cancelEdit() { editPending = false; dragging = false; panel.endDrag() }
     function finishEdit(mouse, area) {
-        if (!dragging) return
+        if (!dragging) { editPending = false; return }
         panel.updateModifiers(mouse.modifiers)
         var point = area.mapToItem(panel, mouse.x, mouse.y)
         pointerPanelX = point.x; pointerPanelY = point.y
         refreshFromPointer()
+        if (!dragging) return
         var overwrite = panel.controlHeld
         var id = modelData.id; var start = panel.clampTime(previewStart); var end = panel.clampTime(previewEnd); var edge = editEdge; var track = previewTrack
-        dragging = false; panel.endDrag()
+        editPending = false; dragging = false; panel.endDrag()
         if (start === initialStart && end === initialEnd && track === initialTrack) return
         if (edge === 0) panel.timeline.moveClip(id, start, track, overwrite)
         else panel.timeline.trimClip(id, start, end, overwrite)
@@ -126,7 +136,8 @@ Rectangle {
     // Resize hit areas straddle the border; the viewport provides clipping.
     clip: false
     readonly property real shownSourceIn: modelData.sourceInMs
-        + (dragging && editEdge < 0 ? shownStart - initialStart : 0)
+        + (dragging && editEdge < 0 ? shownStart - initialStart
+            : linkedPreview ? shownStart - modelData.startMs : 0)
     readonly property real shownDuration: shownEnd - shownStart
     readonly property real leadingHoldMs: modelData.isVideo
         ? Math.min(shownDuration, Math.max(0, -shownSourceIn)) : 0

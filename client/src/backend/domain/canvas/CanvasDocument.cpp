@@ -923,6 +923,20 @@ int CanvasDocument::timelineTrackAtRow(int row) const
     return firstRowTrack + row;
 }
 
+CanvasMedia* CanvasDocument::adjacentTimelineClip(const QString& clipId, int edge) const
+{
+    const auto* media = mediaForTimelineClip(clipId);
+    if (!media || edge == 0) return nullptr;
+    const auto& original = media->timelineTrack();
+    for (auto* other : m_media) {
+        const auto& track = other->timelineTrack();
+        if (other != media && track.trackIndex == original.trackIndex
+            && (edge < 0 ? track.clip.endSlot() == original.clip.startSlot
+                         : track.clip.startSlot == original.clip.endSlot())) return other;
+    }
+    return nullptr;
+}
+
 bool CanvasDocument::timelinePlacementFree(const QString& clipId, const ClipPlacement& placement) const
 {
     if (placement.startSlot < 0 || placement.endSlot > m_timelineSettings.maxSlot()
@@ -957,6 +971,13 @@ CanvasDocument::ClipPlacement CanvasDocument::previewTimelineClip(const QString&
         }
     }
     if (mode == PlacementMode::Overwrite) return requested;
+    if (const auto* neighbour = adjacentTimelineClip(clipId, edge)) {
+        // Roll the shared boundary inside the pair's fixed outer edges.
+        const auto& clip = neighbour->timelineTrack().clip;
+        if (edge < 0) requested.startSlot = qMax(clip.startSlot + 1, requested.startSlot);
+        else requested.endSlot = qMin(clip.endSlot() - 1, requested.endSlot);
+        return requested;
+    }
     // The UI retains this anchor independently of any overlapping Control preview.
     auto anchor = lastValid;
     if (!timelinePlacementFree(clipId, anchor))
@@ -1229,8 +1250,34 @@ bool CanvasDocument::trimTimelineClip(const QString& clipId, qint64 startSlot, q
     auto track = media->timelineTrack();
     startSlot = qBound<qint64>(0, startSlot, m_timelineSettings.maxSlot() - 1);
     endSlot = qBound(startSlot + 1, endSlot, m_timelineSettings.maxSlot());
+    const int edge = endSlot == track.clip.endSlot() && startSlot != track.clip.startSlot ? -1
+        : startSlot == track.clip.startSlot && endSlot != track.clip.endSlot() ? 1 : 0;
+    auto* neighbour = mode == PlacementMode::Avoid ? adjacentTimelineClip(clipId, edge) : nullptr;
+    if (neighbour) {
+        const ClipPlacement original{track.clip.startSlot, track.clip.endSlot(), track.trackIndex};
+        const auto placement = previewTimelineClip(clipId, {startSlot, endSlot, track.trackIndex}, edge, original);
+        startSlot = placement.startSlot; endSlot = placement.endSlot;
+    }
     if (track.clip.sourceStartSlot) *track.clip.sourceStartSlot += startSlot - track.clip.startSlot;
     track.clip.startSlot = startSlot; track.clip.durationSlots = endSlot - startSlot;
+    if (neighbour) {
+        auto adjacent = neighbour->timelineTrack();
+        if (edge < 0) adjacent.clip.durationSlots = startSlot - adjacent.clip.startSlot;
+        else {
+            adjacent.clip.durationSlots = adjacent.clip.endSlot() - endSlot;
+            if (adjacent.clip.sourceStartSlot) *adjacent.clip.sourceStartSlot += endSlot - adjacent.clip.startSlot;
+            adjacent.clip.startSlot = endSlot;
+        }
+        if (!m_editsLocked && !m_publishingTimelineEdit && track.toJson() == media->timelineTrack().toJson()) return true;
+        // Publish both sides atomically: observers must never see a gap or overlap.
+        QJsonArray items;
+        for (auto* item : m_media) {
+            const auto snapshot = timelineMediaSnapshot(item);
+            items.append(item == media ? withTimeline(snapshot, track)
+                : item == neighbour ? withTimeline(snapshot, adjacent) : snapshot);
+        }
+        return applyMediaPlan(items, {}, media->mediaId(), false, error);
+    }
     return applyTimelinePlacement(withTimeline(timelineMediaSnapshot(media->mediaId()), track), media->sourcePath(), false, error, mode);
 }
 

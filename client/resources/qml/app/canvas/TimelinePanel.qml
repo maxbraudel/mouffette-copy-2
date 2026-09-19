@@ -175,8 +175,8 @@ FocusScope {
     onControlHeldChanged: if (activeDrag && activeDrag.isClipDrag) activeDrag.refreshPreview()
     onExpandedChanged: {
         if (!expanded && activeDrag) {
-            activeDrag.dragging = false
-            endDrag()
+            if (activeDrag.isClipDrag) activeDrag.cancelEdit()
+            else { activeDrag.dragging = false; endDrag() }
         }
     }
     onFirstTrackIndexChanged: Qt.callLater(scrollTracks, 0)
@@ -645,6 +645,17 @@ FocusScope {
                 Rectangle { y: root.rulerHeight; width: parent.width; height: 1; color: Theme.overlayBorder }
                 MouseArea {
                     id: scrubber
+                    objectName: "timelineScrubber"
+                    property bool dragging: false
+                    property real rawMs: 0
+                    function refreshPreview() {
+                        if (dragging) root.timeline.seek(root.snapTime(rawMs, "", 0))
+                    }
+                    function updatePosition(mouse) {
+                        rawMs = (mouse.x - 12) / root.pixelsPerMs
+                        root.updateModifiers(mouse.modifiers)
+                        refreshPreview()
+                    }
                     width: parent.width
                     height: root.rulerHeight
                     acceptedButtons: Qt.LeftButton
@@ -652,9 +663,15 @@ FocusScope {
                     enabled: !!root.timeline && !root.timeline.remoteActive
                     onPressed: mouse => {
                         root.focusTrack()
-                        root.timeline.seek(root.clampTime((mouse.x - 12) / root.pixelsPerMs))
+                        dragging = true; root.activeDrag = scrubber
+                        updatePosition(mouse)
                     }
-                    onPositionChanged: mouse => { if (pressed) root.timeline.seek(root.clampTime((mouse.x - 12) / root.pixelsPerMs)) }
+                    onPositionChanged: mouse => { if (pressed && dragging) updatePosition(mouse) }
+                    onReleased: mouse => {
+                        if (dragging) updatePosition(mouse)
+                        dragging = false; root.endDrag()
+                    }
+                    onCanceled: { dragging = false; root.endDrag() }
                 }
                 MouseArea {
                     y: clipViewport.y

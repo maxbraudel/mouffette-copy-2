@@ -425,9 +425,17 @@ QVariantMap TimelineController::previewClipEdit(const QString& id, qreal startMs
         m_document->timelineTrackAtRow(qBound(0, lastRow, trackCount() - 1))};
     const auto result = m_document->previewTimelineClip(id, requested, edge, last,
         overwrite ? CanvasDocument::PlacementMode::Overwrite : CanvasDocument::PlacementMode::Avoid);
-    return {{"startMs", timing.timeMs(result.startSlot)}, {"endMs", timing.timeMs(result.endSlot)},
+    QVariantMap preview{{"startMs", timing.timeMs(result.startSlot)}, {"endMs", timing.timeMs(result.endSlot)},
             {"row", m_document->timelineRow(result.trackIndex)},
             {"free", m_document->timelinePlacementFree(id, result)}};
+    if (const auto* neighbour = overwrite ? nullptr : m_document->adjacentTimelineClip(id, edge)) {
+        const auto& clip = neighbour->timelineTrack().clip;
+        preview.insert("adjacentClip", QVariantMap{{"id", clip.id},
+            {"startMs", timing.timeMs(edge < 0 ? clip.startSlot : result.endSlot)},
+            {"endMs", timing.timeMs(edge < 0 ? result.startSlot : clip.endSlot())}});
+        preview.insert("free", true);
+    }
+    return preview;
 }
 
 void TimelineController::splitClip()

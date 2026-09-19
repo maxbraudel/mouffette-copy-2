@@ -69,11 +69,16 @@ in a key or saved in the project.
 Moving and extending avoid other clips by default. Horizontal movement stops at
 the nearest neighbour in either direction, including fast pointer jumps across a
 whole clip. A track change is accepted only if the whole clip fits at the requested
-time; otherwise the last valid placement remains. Resize clamps the manipulated
-edge against its neighbour while retaining the opposite edge and at least one slot.
+time; otherwise the last valid placement remains. Resizing an edge that already
+touches another clip on the same track rolls their shared boundary: one clip grows
+by exactly the amount the other shrinks, with both outer edges fixed and at least
+one slot remaining on each side. Both clips preview together and commit atomically;
+video source offsets follow the changed start edge, while keyframes stay fixed.
+An edge separated from its neighbour resizes independently and stops at contact.
 Preview resolution does not mutate the document; the commit validates again.
 
-Holding the physical Control key enables overwrite for moving and resizing.
+Holding the physical Control key enables overwrite for moving and resizing,
+including at a shared boundary instead of rolling the two clips together.
 Pressing/releasing it refreshes the preview immediately, including with a stationary
 pointer; releasing it over an overlap restores an allowed placement. On macOS this
 is Control, not Command (Qt maps physical Control to `MetaModifier`/`Key_Meta`).
@@ -177,8 +182,9 @@ selection, including when the selected instance is absent at the new playhead.
 Clicking empty clip-track content clears instance selection and chooses the paste
 destination. Clicking empty keyframe content only clears the selected keyframe;
 the selected instances and their displayed keys remain. The header column does neither.
-Shift temporarily snaps against all keys and clip boundaries;
-releasing it immediately restores ordinary grid alignment. The ruler groups grid
+Shift temporarily snaps against all keys and clip boundaries, including when
+scrubbing the playhead on the ruler; pressing or releasing it updates a held drag
+even without pointer movement. Releasing it restores ordinary grid alignment. The ruler groups grid
 lines when zoomed out; it never changes the actual slot size. Left/right arrows
 move one slot when the timeline has focus; the transport displays the current slot.
 Clip extensions shade their silent holds. Other media keys are decorative.

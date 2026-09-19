@@ -55,6 +55,7 @@ public:
     bool removeMedia(const QString& mediaId);
     void clear();
     CanvasMedia* mediaForTimelineClip(const QString& clipId) const;
+    CanvasMedia* adjacentTimelineClip(const QString& clipId, int edge) const;
     int firstTimelineTrack() const;
     int timelineTrackCount() const;
     int timelineRow(int trackIndex) const;
