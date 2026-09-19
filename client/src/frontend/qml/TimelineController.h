@@ -66,6 +66,7 @@ public:
     int slotsPerSecond() const;
     Q_INVOKABLE qreal gridTime(qreal timeMs) const;
     Q_INVOKABLE void stepSlots(int delta);
+    Q_INVOKABLE void seekClipBoundary(int direction);
     bool playing() const;
     bool remoteActive() const;
     bool editable() const;

@@ -189,6 +189,10 @@ its own playhead position. Pressing or releasing Shift updates a held drag
 even without pointer movement. Releasing it restores ordinary grid alignment. The ruler groups grid
 lines when zoomed out; it never changes the actual slot size. Left/right arrows
 move one slot when the timeline has focus; the transport displays the current slot.
+Shift+Left/Right jumps to the nearest clip start or end strictly in that direction
+across all tracks, including tracks outside the viewport. Coincident boundaries
+count as one position; keyframes and Stop are not targets. With no further boundary
+the head stays put. Jumps preserve selection and scroll horizontally to reveal the head.
 Snap targets and clip offsets are resolved in integer slots. A clip's guide is
 published only after placement constraints confirm that the chosen edge reaches
 the target; rounding in millisecond display values cannot erase a valid guide.

@@ -565,6 +565,106 @@ private slots:
         QCOMPARE(doc->serializeProjectState(), saved); QCOMPARE(writes.count(), 0);
     }
 
+    void shiftArrowsVisitDistinctClipEdgesAcrossAllTracks()
+    {
+        TimelineFixture f; QVERIFY(f.initialize());
+        auto* doc = f.host->document();
+        auto* selected = doc->addText({}, "Selected");
+        auto* below = doc->addText({}, "Below the viewport");
+        auto* above = doc->addText({}, "Above the viewport");
+        QVERIFY(selected && below && above);
+        const auto place = [](CanvasMedia* media, int row, qint64 start, qint64 end) {
+            auto track = media->timelineTrack(); track.trackIndex = row;
+            track.clip.startSlot = start; track.clip.durationSlots = end - start;
+            media->setTimelineTrack(track);
+        };
+        // Creation order, selection and vertical visibility must not order the jumps.
+        place(selected, 0, 121, 300); place(below, 5, 31, 121); place(above, -4, 61, 180);
+        auto track = selected->timelineTrack();
+        track.keyframes = {{"selected-key", 45, selected->authorElementState()}};
+        selected->setTimelineTrack(track);
+        doc->select(selected->mediaId()); doc->select(below->mediaId(), true);
+        doc->setPrimarySelectedMedia(selected->mediaId());
+        f.timeline.selectKeyframe("selected-key");
+        const auto& grid = doc->timelineSettings();
+        f.timeline.setStopTime(grid.timeMs(77));
+        f.timeline.seek(0);
+        f.view.rootObject()->setProperty("viewDurationMs", grid.timeMs(90));
+        f.item("timelineClipViewport")->setProperty("contentY", 0.0);
+        f.view.requestActivate(); QVERIFY(QTest::qWaitForWindowActive(&f.view));
+        f.view.rootObject()->forceActiveFocus();
+        const auto saved = doc->serializeProjectState();
+        const auto selection = doc->selectedMediaIds();
+        const auto activeRow = f.timeline.activeTrackIndex();
+        QSignalSpy writes(doc, &CanvasDocument::documentChanged);
+        QSignalSpy selectionChanges(doc, &CanvasDocument::selectionChanged);
+        const auto headVisible = [&] {
+            auto* viewport = f.item("timelineTracks");
+            const auto x = f.item("timelinePlayhead")->mapToItem(viewport, {0, 0}).x();
+            return x >= 0 && x <= viewport->width();
+        };
+        for (qint64 slot : {31, 61, 121, 180, 300, 300}) {
+            QTest::keyClick(&f.view, Qt::Key_Right, Qt::ShiftModifier);
+            QCOMPARE(f.timeline.positionSlot(), slot);
+            QVERIFY(headVisible());
+        }
+        QVERIFY(f.scroll() > 0);
+        for (qint64 slot : {180, 121, 61, 31, 31}) {
+            QTest::keyClick(&f.view, Qt::Key_Left, Qt::ShiftModifier);
+            QCOMPARE(f.timeline.positionSlot(), slot);
+            QVERIFY(headVisible());
+        }
+        // Ordinary arrows retain single-frame movement between boundaries.
+        QTest::keyClick(&f.view, Qt::Key_Right); QCOMPARE(f.timeline.positionSlot(), 32);
+        QTest::keyClick(&f.view, Qt::Key_Right, Qt::ShiftModifier); QCOMPARE(f.timeline.positionSlot(), 61);
+        QTest::keyClick(&f.view, Qt::Key_Left); QCOMPARE(f.timeline.positionSlot(), 60);
+        QTest::keyClick(&f.view, Qt::Key_Left, Qt::ShiftModifier); QCOMPARE(f.timeline.positionSlot(), 31);
+        QCOMPARE(doc->selectedMediaIds(), selection);
+        QCOMPARE(doc->primarySelectedMedia(), selected);
+        QCOMPARE(f.timeline.selectedKeyframeId(), QStringLiteral("selected-key"));
+        QCOMPARE(f.timeline.activeTrackIndex(), activeRow);
+        QCOMPARE(f.item("timelineClipViewport")->property("contentY").toReal(), 0.0);
+        QCOMPARE(doc->serializeProjectState(), saved);
+        QCOMPARE(writes.count(), 0); QCOMPARE(selectionChanges.count(), 0);
+
+        f.view.rootObject()->setProperty("expanded", false);
+        QTest::keyClick(&f.view, Qt::Key_Right, Qt::ShiftModifier);
+        QCOMPARE(f.timeline.positionSlot(), 31);
+        f.view.rootObject()->setProperty("expanded", true);
+        f.host->setProjectEditingEnabled(false);
+        QTest::keyClick(&f.view, Qt::Key_Right, Qt::ShiftModifier);
+        QCOMPARE(f.timeline.positionSlot(), 31);
+    }
+
+    void clipBoundaryNavigationHandlesEmptyTimelinesAndSceneEnds()
+    {
+        std::unique_ptr<QuickCanvasHost> host(QuickCanvasHost::create()); QVERIFY(host);
+        host->setProjectEditingEnabled(true);
+        TimelineController timeline; timeline.setHost(host.get());
+        auto* doc = host->document();
+        const auto& grid = doc->timelineSettings();
+        timeline.seek(grid.timeMs(151));
+        QSignalSpy writes(doc, &CanvasDocument::documentChanged);
+        for (int direction : {-1, 0, 1}) {
+            timeline.seekClipBoundary(direction);
+            QCOMPARE(timeline.positionSlot(), 151);
+        }
+        QCOMPARE(writes.count(), 0);
+        auto* media = doc->addText({}, "Whole scene"); QVERIFY(media);
+        auto track = media->timelineTrack();
+        track.clip.startSlot = 0; track.clip.durationSlots = grid.maxSlot();
+        media->setTimelineTrack(track); writes.clear();
+        const auto saved = doc->serializeProjectState();
+        timeline.seekClipBoundary(0); QCOMPARE(timeline.positionSlot(), 151);
+        timeline.seekClipBoundary(-1); QCOMPARE(timeline.positionSlot(), 0);
+        timeline.seekClipBoundary(-1); QCOMPARE(timeline.positionSlot(), 0);
+        timeline.seekClipBoundary(1); QCOMPARE(timeline.positionSlot(), grid.maxSlot());
+        timeline.seekClipBoundary(1); QCOMPARE(timeline.positionSlot(), grid.maxSlot());
+        host->setProjectEditingEnabled(false);
+        timeline.seekClipBoundary(-1); QCOMPARE(timeline.positionSlot(), grid.maxSlot());
+        QCOMPARE(doc->serializeProjectState(), saved); QCOMPARE(writes.count(), 0);
+    }
+
     void navigationPreservesSelection_data()
     {
         QTest::addColumn<bool>("multiple");

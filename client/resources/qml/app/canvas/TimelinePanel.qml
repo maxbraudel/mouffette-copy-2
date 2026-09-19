@@ -166,12 +166,20 @@ FocusScope {
         }
         wheel.accepted = true
     }
-    function followHead() {
-        if (!timeline || (!timeline.playing && !timeline.remoteActive)) return
+    function revealHead() {
+        if (!timeline) return
         var head = timeline.positionMs * pixelsPerMs + 12
         if (head < trackViewport.contentX || head > trackViewport.contentX + trackViewport.width - 30)
-            trackViewport.contentX = Math.max(0, Math.min(trackViewport.contentWidth - trackViewport.width,
-                head - trackViewport.width * 0.2))
+            scrollTo(head - trackViewport.width * 0.2)
+    }
+    function followHead() {
+        if (timeline && (timeline.playing || timeline.remoteActive)) revealHead()
+    }
+    function jumpToClipBoundary(direction) {
+        if (!timeline) return
+        var previousSlot = timeline.positionSlot
+        timeline.seekClipBoundary(direction)
+        if (timeline.positionSlot !== previousSlot) revealHead()
     }
     onShiftHeldChanged: if (activeDrag) activeDrag.refreshPreview()
     onControlHeldChanged: if (activeDrag && activeDrag.isClipDrag) activeDrag.refreshPreview()
@@ -1005,6 +1013,8 @@ FocusScope {
     }
     TimelineShortcut { sequence: "Left"; autoRepeat: true; onActivated: root.timeline.stepSlots(-1) }
     TimelineShortcut { sequence: "Right"; autoRepeat: true; onActivated: root.timeline.stepSlots(1) }
+    TimelineShortcut { sequence: "Shift+Left"; autoRepeat: true; onActivated: root.jumpToClipBoundary(-1) }
+    TimelineShortcut { sequence: "Shift+Right"; autoRepeat: true; onActivated: root.jumpToClipBoundary(1) }
     TimelineShortcut {
         sequences: ["Delete", "Backspace", "Ctrl+Backspace"]
         onActivated: root.timeline.deleteSelected()

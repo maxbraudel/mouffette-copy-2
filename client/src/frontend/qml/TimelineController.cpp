@@ -157,6 +157,21 @@ void TimelineController::stepSlots(int delta)
 {
     if (editable()) seek(grid().timeMs(qBound<qint64>(0, positionSlot() + delta, grid().maxSlot())));
 }
+void TimelineController::seekClipBoundary(int direction)
+{
+    if (!editable() || !m_document || direction == 0) return;
+    const qint64 current = positionSlot();
+    qint64 target = current;
+    for (const auto* media : m_document->media()) {
+        const auto& clip = media->timelineTrack().clip;
+        for (qint64 boundary : {clip.startSlot, clip.endSlot()}) {
+            if (direction > 0 ? boundary > current && (target == current || boundary < target)
+                              : boundary < current && (target == current || boundary > target))
+                target = boundary;
+        }
+    }
+    if (target != current) seek(grid().timeMs(target));
+}
 bool TimelineController::playing() const
 { return m_host && (m_host->timelinePlaying() || m_host->testSceneLaunched()); }
 bool TimelineController::remoteActive() const
