@@ -2029,6 +2029,91 @@ private slots:
         QCOMPARE(snap.value(QStringLiteral("timeMs")).toDouble(), 1000.0);
     }
 
+    void playheadSnapUsesThresholdAndCanBeExcluded()
+    {
+        std::unique_ptr<QuickCanvasHost> host(QuickCanvasHost::create());
+        QVERIFY(host);
+        host->setProjectEditingEnabled(true);
+        TimelineController timeline; timeline.setHost(host.get());
+        timeline.seek(5000);
+        for (qreal duration : {0.0, 2000.0}) {
+            const qreal start = 5000 - duration;
+            const auto snap = timeline.snapTime(start + 5, 1, {}, duration, true);
+            QVERIFY(snap.value("snapped").toBool());
+            QCOMPARE(snap.value("timeMs").toReal(), start);
+            QCOMPARE(snap.value("targetTimeMs").toReal(), 5000.0);
+            QCOMPARE(snap.value("mediaName").toString(), QStringLiteral("Playhead"));
+            QVERIFY(!timeline.snapTime(start + timeline.snapDistancePx() + 1, 1, {}, duration, true)
+                .value("snapped").toBool());
+            QVERIFY(!timeline.snapTime(start + 5, 1, {}, duration).value("snapped").toBool());
+        }
+        // The nearest target still wins when another clip is closer than the head.
+        auto* media = host->document()->addText({}, "Other target"); QVERIFY(media);
+        auto track = media->timelineTrack(); track.clip.startSlot = 153;
+        media->setTimelineTrack(track);
+        QCOMPARE(timeline.snapTime(5090, 0.1, {}, 0, true).value("targetTimeMs").toReal(), 5100.0);
+        timeline.seek(0);
+        QCOMPARE(timeline.snapTime(5, 1, {}, 2000, true).value("timeMs").toReal(), 0.0);
+    }
+
+    void clipShiftSnapsToPlayhead_data()
+    {
+        QTest::addColumn<int>("edge");
+        QTest::addColumn<bool>("snapEnd");
+        QTest::newRow("move-start") << 0 << false;
+        QTest::newRow("move-end") << 0 << true;
+        QTest::newRow("trim-start") << -1 << false;
+        QTest::newRow("trim-end") << 1 << true;
+    }
+
+    void clipShiftSnapsToPlayhead()
+    {
+        QFETCH(int, edge); QFETCH(bool, snapEnd);
+        TimelineFixture f; QVERIFY(f.initialize());
+        auto* doc = f.host->document();
+        auto* media = doc->addText({}, "Clip"); QVERIFY(media);
+        auto track = media->timelineTrack();
+        track.clip.startSlot = 30; track.clip.durationSlots = 60;
+        media->setTimelineTrack(track);
+        const qreal head = edge < 0 ? 2000 : edge > 0 ? 4000 : 5000;
+        f.timeline.seek(head);
+        f.view.rootObject()->setProperty("viewDurationMs", 10000.0);
+        f.item("timelineClipViewport")->setProperty("contentY", 0.0);
+        auto* clip = f.item("timelineClip"); QVERIFY(clip);
+        auto* handle = edge == 0 ? clip : timelineItems(clip,
+            edge < 0 ? "timelineClipTrimStart" : "timelineClipTrimEnd").first();
+        const auto from = handle->mapToScene({handle->width()/2, handle->height()/2}).toPoint();
+        const qreal desired = head - (edge == 0 && snapEnd ? 2000 : 0);
+        const auto to = from + QPoint(qRound((desired - (edge > 0 ? 3000 : 1000)) * f.scale()) + 5, 0);
+        const auto saved = doc->serializeProjectState();
+        QSignalSpy writes(doc, &CanvasDocument::documentChanged);
+        QTest::mousePress(&f.view, Qt::LeftButton, Qt::NoModifier, from);
+        f.movePointer(to);
+        QVERIFY(clip->property("dragging").toBool());
+        const auto snappedEdge = snapEnd ? "shownEnd" : "shownStart";
+        const qreal unsnapped = clip->property(snappedEdge).toReal();
+        QVERIFY(unsnapped != head);
+        QTest::keyPress(&f.view, Qt::Key_Shift);
+        QCOMPARE(clip->property(snappedEdge).toReal(), head);
+        QCOMPARE(f.view.rootObject()->property("snapGuideMs").toReal(), head);
+        QCOMPARE(f.view.rootObject()->property("snapGuideLabel").toString(), QStringLiteral("Playhead"));
+        QCOMPARE(f.timeline.positionMs(), head);
+        QCOMPARE(doc->serializeProjectState(), saved); QCOMPARE(writes.count(), 0);
+        QTest::keyRelease(&f.view, Qt::Key_Shift);
+        QCOMPARE(clip->property(snappedEdge).toReal(), unsnapped);
+        QCOMPARE(f.view.rootObject()->property("snapGuideMs").toReal(), -1.0);
+        QTest::keyPress(&f.view, Qt::Key_Shift);
+        QTest::mouseRelease(&f.view, Qt::LeftButton, Qt::ShiftModifier, to);
+        QTest::keyRelease(&f.view, Qt::Key_Shift);
+        const auto& result = media->timelineTrack().clip;
+        QCOMPARE(doc->timelineSettings().timeMs(snapEnd ? result.endSlot() : result.startSlot), head);
+        if (edge == 0) QCOMPARE(result.durationSlots, 60);
+        else if (edge < 0) QCOMPARE(result.endSlot(), 90);
+        else QCOMPARE(result.startSlot, 30);
+        QCOMPARE(f.timeline.positionMs(), head); QCOMPARE(writes.count(), 1);
+        QCOMPARE(f.view.rootObject()->property("snapGuideMs").toReal(), -1.0);
+    }
+
     void clipboardCannotChangeTheOccurrenceType()
     {
         std::unique_ptr<QuickCanvasHost> host(QuickCanvasHost::create());

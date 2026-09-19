@@ -42,16 +42,16 @@ Rectangle {
     function refreshPreview() {
         if (editEdge === 0) {
             previewStart = Math.max(0, Math.min(panel.maximumMs - (initialEnd - initialStart),
-                panel.snapTime(rawMs, modelData.id, initialEnd - initialStart)))
+                panel.snapTime(rawMs, modelData.id, initialEnd - initialStart, true)))
             previewEnd = previewStart + (initialEnd - initialStart)
         } else if (editEdge < 0) {
             previewStart = Math.max(0,
-                Math.min(initialEnd - panel.slotMs, panel.snapTime(rawMs, modelData.id, 0)))
+                Math.min(initialEnd - panel.slotMs, panel.snapTime(rawMs, modelData.id, 0, true)))
             previewEnd = initialEnd
         } else {
             previewStart = initialStart
             previewEnd = Math.max(initialStart + panel.slotMs, Math.min(panel.maximumMs,
-                panel.snapTime(rawMs, modelData.id, 0)))
+                panel.snapTime(rawMs, modelData.id, 0, true)))
         }
         var wantedStart = previewStart
         var wantedEnd = previewEnd

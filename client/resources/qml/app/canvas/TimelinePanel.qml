@@ -85,11 +85,11 @@ FocusScope {
     }
     function focusTrack() { root.forceActiveFocus() }
     function clampTime(ms) { return timeline ? timeline.gridTime(ms) : 0 }
-    function snapTime(ms, excludeId, duration) {
+    function snapTime(ms, excludeId, duration, includePlayhead) {
         snapGuideMs = -1
         snapGuideLabel = ""
         if (!shiftHeld || !timeline) return clampTime(ms)
-        var result = timeline.snapTime(ms, pixelsPerMs, excludeId || "", duration || 0)
+        var result = timeline.snapTime(ms, pixelsPerMs, excludeId || "", duration || 0, !!includePlayhead)
         if (result.snapped) {
             snapGuideMs = result.targetTimeMs
             snapGuideLabel = result.mediaName

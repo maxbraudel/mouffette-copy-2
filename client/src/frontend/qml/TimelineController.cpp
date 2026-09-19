@@ -545,14 +545,14 @@ void TimelineController::clearKeyframeSelection()
 }
 
 QVariantMap TimelineController::snapTime(qreal timeMs, qreal pixelsPerMs,
-                                        const QString& excludeId, qreal clipDurationMs) const
+                                        const QString& excludeId, qreal clipDurationMs, bool includePlayhead) const
 {
     QVariantMap result{{QStringLiteral("timeMs"), gridTime(timeMs)}, {QStringLiteral("snapped"), false},
                       {QStringLiteral("targetTimeMs"), -1}, {QStringLiteral("mediaName"), QString()}};
     if (!m_document || !std::isfinite(timeMs) || !std::isfinite(clipDurationMs) || !std::isfinite(pixelsPerMs) || pixelsPerMs <= 0 || clipDurationMs < 0) return result;
     qreal bestDistance = snapDistancePx() + 1e-6;
     qreal bestTarget = std::numeric_limits<qreal>::max();
-    const auto consider = [&](qreal target, const CanvasMedia* media) {
+    const auto consider = [&](qreal target, const QString& label) {
         for (qreal offset : {qreal(0), gridTime(clipDurationMs)}) {
             const qreal proposed = gridTime(target - offset);
             if (target - offset < -1e-9 || proposed < 0 || proposed > maxDurationMs() - clipDurationMs + 1e-9) continue;
@@ -562,17 +562,19 @@ QVariantMap TimelineController::snapTime(qreal timeMs, qreal pixelsPerMs,
             bestDistance = distance;
             bestTarget = target;
             result = {{QStringLiteral("timeMs"), proposed}, {QStringLiteral("snapped"), true},
-                      {QStringLiteral("targetTimeMs"), target}, {QStringLiteral("mediaName"), media->displayName()}};
+                      {QStringLiteral("targetTimeMs"), target}, {QStringLiteral("mediaName"), label}};
         }
     };
     for (auto* media : m_document->media()) {
         for (const auto& key : media->timelineTrack().keyframes)
-            if (key.id != excludeId) consider(grid().timeMs(key.slot), media);
+            if (key.id != excludeId) consider(grid().timeMs(key.slot), media->displayName());
         const auto& clip = media->timelineTrack().clip;
         if (clip.id != excludeId) {
-            consider(grid().timeMs(clip.startSlot), media);
-            consider(grid().timeMs(clip.endSlot()), media);
+            consider(grid().timeMs(clip.startSlot), media->displayName());
+            consider(grid().timeMs(clip.endSlot()), media->displayName());
         }
     }
+    // Clip gestures opt in; the scrubber must never snap to its own position.
+    if (includePlayhead) consider(positionMs(), tr("Playhead"));
     return result;
 }

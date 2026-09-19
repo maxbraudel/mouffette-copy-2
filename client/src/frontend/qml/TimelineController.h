@@ -122,7 +122,7 @@ public:
     Q_INVOKABLE void clearKeyframeSelection();
     Q_INVOKABLE QVariantMap snapTime(qreal timeMs, qreal pixelsPerMs,
                                     const QString& excludeId,
-                                    qreal clipDurationMs = 0) const;
+                                    qreal clipDurationMs = 0, bool includePlayhead = false) const;
 
 signals:
     void changed();
