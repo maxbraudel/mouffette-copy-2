@@ -1043,8 +1043,8 @@ private slots:
         QVERIFY(f.item("timelineClipTrimStart")->childItems().isEmpty());
         QVERIFY(f.item("timelineClipTrimEnd")->childItems().isEmpty());
         const qreal trackHeight = f.view.rootObject()->property("clipHeight").toReal();
-        QCOMPARE(clip->y(), 5.0);
-        QCOMPARE(clip->height(), trackHeight - 10);
+        QCOMPARE(clip->y(), 0.0);
+        QCOMPARE(clip->height(), trackHeight);
         QCOMPARE(label->height(), clip->height());
         QVERIFY(f.item("timelineClipTrackLabel")->isVisible());
         QCOMPARE(title->property("text").toString(), media->displayName());

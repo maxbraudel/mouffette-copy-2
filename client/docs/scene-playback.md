@@ -145,8 +145,8 @@ Track 0 with positive and negative neighbours. Its shared width measures every t
 font, plus 12 px padding on each side and a 1 px separator. Clip track names follow
 the clips' vertical scroll; the Keyframes header stays fixed. Header clicks are
 informational and wheel events navigate the same timeline. Track backgrounds do
-not highlight the active paste destination. Clips fill their track with a 5 px
-top and bottom inset. Only the media name is shown, centered in the intersection
+not highlight the active paste destination. Clips fill the entire track height
+without vertical insets. Only the media name is shown, centered in the intersection
 of its clip with the visible time viewport, including during drag and resize.
 Long names elide to the available width. Resize zones remain on the edges with a
 horizontal resize cursor but no visible handle bars. Clips support temporal and
