@@ -1261,7 +1261,7 @@ private slots:
         auto* tracks = f.item("timelineTracks");
         QVERIFY(clip && viewport && tracks);
         QCOMPARE(clip->property("modelData").toMap().value("id").toString(), track.clip.id);
-        const qreal localX = editEdge < 0 ? 4 : editEdge > 0 ? clip->width() - 4 : clip->width()/2;
+        const qreal localX = editEdge < 0 ? 2 : editEdge > 0 ? clip->width() - 2 : clip->width()/2;
         const qreal pointerX = viewportEdge == "left" ? 10
             : viewportEdge == "right" ? tracks->width() - f.item("timelineVerticalScrollBar")->width() - 10 : tracks->width()/2;
         const qreal pointerY = viewportEdge == "top" ? 10
@@ -1456,10 +1456,10 @@ private slots:
         const auto leftEdge = tracks->mapToScene({10, f.timeline.rulerHeightPx() + 32.0 + 24}).toPoint();
         QVERIFY(leftEdge.x() > 22); // The panel edge is outside the temporal viewport.
         QTest::mouseMove(&f.view, from);
-        QTRY_COMPARE(f.view.cursor().shape(), Qt::ArrowCursor);
+        QTRY_COMPARE(f.view.cursor().shape(), Qt::OpenHandCursor);
         QTest::mousePress(&f.view, Qt::LeftButton, Qt::NoModifier, from);
         QVERIFY(!clip->property("dragging").toBool());
-        QCOMPARE(f.view.cursor().shape(), Qt::ArrowCursor);
+        QCOMPARE(f.view.cursor().shape(), Qt::OpenHandCursor);
         QTest::mouseMove(&f.view, leftEdge, 20);
         QVERIFY(clip->property("dragging").toBool());
         QTRY_COMPARE(f.view.cursor().shape(), Qt::ClosedHandCursor);
@@ -1475,8 +1475,106 @@ private slots:
         QTRY_VERIFY(f.scroll() > scrolled);
         QTest::mouseRelease(&f.view, Qt::LeftButton, Qt::NoModifier, rightEdge);
         QVERIFY(!clip->property("dragging").toBool());
-        QTRY_COMPARE(f.view.cursor().shape(), Qt::ArrowCursor);
+        QTest::mouseMove(&f.view, from); // Move off the vertical scrollbar and back onto the clip.
+        QTRY_COMPARE(f.view.cursor().shape(), Qt::OpenHandCursor);
         QCOMPARE(media->timelineTrack().toJson(), saved); // Full-scene clip cannot move in time.
+    }
+
+    void clipResizeHandlesStraddleEdges_data()
+    {
+        QTest::addColumn<int>("edge");
+        QTest::addColumn<bool>("outside");
+        QTest::newRow("start-inside") << -1 << false;
+        QTest::newRow("start-outside") << -1 << true;
+        QTest::newRow("end-inside") << 1 << false;
+        QTest::newRow("end-outside") << 1 << true;
+    }
+
+    void clipResizeHandlesStraddleEdges()
+    {
+        QFETCH(int, edge); QFETCH(bool, outside);
+        TimelineFixture f; QVERIFY(f.initialize());
+        auto* media = f.host->document()->addText({}, "Resize"); QVERIFY(media);
+        f.timeline.trimClip(media->timelineTrack().clip.id, 1000, 4000);
+        f.view.rootObject()->setProperty("viewDurationMs", 6000.0);
+        f.item("timelineClipViewport")->setProperty("contentY", 0.0);
+        auto* clip = f.item("timelineClip"); QVERIFY(clip);
+        QTest::mouseMove(&f.view, clip->mapToScene({clip->width()/2, clip->height()/2}).toPoint());
+        QTRY_COMPARE(f.view.cursor().shape(), Qt::OpenHandCursor);
+        const qreal edgeX = edge < 0 ? 0 : clip->width();
+        const auto from = clip->mapToScene({edgeX + edge * (outside ? 2 : -2), clip->height()/2}).toPoint();
+        const auto to = from + QPoint(-edge * 40, 0);
+        const auto original = media->timelineTrack().clip;
+        QTest::mouseMove(&f.view, from);
+        QTRY_COMPARE(f.view.cursor().shape(), Qt::SizeHorCursor);
+        QTest::mousePress(&f.view, Qt::LeftButton, Qt::NoModifier, from);
+        QCOMPARE(clip->property("editEdge").toInt(), edge);
+        QTest::mouseMove(&f.view, to, 20);
+        QVERIFY(clip->property("dragging").toBool());
+        QTRY_COMPARE(f.view.cursor().shape(), Qt::SizeHorCursor);
+        const auto& grid = f.host->document()->timelineSettings();
+        const qint64 trimmedSlots = grid.nearestSlot(40 / f.scale());
+        QTest::mouseRelease(&f.view, Qt::LeftButton, Qt::NoModifier, to);
+        QCOMPARE(media->timelineTrack().clip.startSlot, original.startSlot + (edge < 0 ? trimmedSlots : 0));
+        QCOMPARE(media->timelineTrack().clip.endSlot(), original.endSlot() - (edge > 0 ? trimmedSlots : 0));
+    }
+
+    void neighbouringClipResizeChoosesNearestBody_data()
+    {
+        QTest::addColumn<int>("gapSlots");
+        QTest::addColumn<bool>("leftSide");
+        QTest::addColumn<bool>("selectTarget");
+        for (const int gap : {0, 1})
+            for (const bool left : {true, false})
+                for (const bool selected : {true, false})
+                    QTest::newRow(qPrintable(QString("gap-%1-%2-selected-%3").arg(gap)
+                        .arg(left ? "left" : "right").arg(selected))) << gap << left << selected;
+    }
+
+    void neighbouringClipResizeChoosesNearestBody()
+    {
+        QFETCH(int, gapSlots); QFETCH(bool, leftSide); QFETCH(bool, selectTarget);
+        TimelineFixture f; QVERIFY(f.initialize());
+        auto* doc = f.host->document();
+        auto* left = doc->addText({}, "Left");
+        auto* right = doc->addText({}, "Right");
+        QVERIFY(left && right);
+        auto leftTrack = left->timelineTrack();
+        leftTrack.trackIndex = 0; leftTrack.clip.startSlot = 30; leftTrack.clip.durationSlots = 60;
+        left->setTimelineTrack(leftTrack);
+        auto rightTrack = right->timelineTrack();
+        rightTrack.trackIndex = 0; rightTrack.clip.startSlot = 90 + gapSlots; rightTrack.clip.durationSlots = 60;
+        right->setTimelineTrack(rightTrack);
+        auto* target = leftSide ? left : right;
+        auto* neighbour = leftSide ? right : left;
+        f.timeline.selectClip((selectTarget ? target : neighbour)->timelineTrack().clip.id);
+        f.view.rootObject()->setProperty("viewDurationMs", 6000.0);
+        f.item("timelineClipViewport")->setProperty("contentY", 0.0);
+        QQuickItem* leftItem = nullptr;
+        QQuickItem* rightItem = nullptr;
+        for (auto* item : timelineItems(f.view.rootObject(), "timelineClip")) {
+            const auto id = item->property("modelData").toMap().value("id").toString();
+            if (id == leftTrack.clip.id) leftItem = item;
+            if (id == rightTrack.clip.id) rightItem = item;
+        }
+        QVERIFY(leftItem && rightItem);
+        const qreal midpoint = (leftItem->x() + leftItem->width() + rightItem->x()) / 2;
+        const auto from = leftItem->parentItem()->mapToScene({midpoint + (leftSide ? -1 : 1),
+            leftItem->y() + leftItem->height()/2}).toPoint();
+        const auto to = from + QPoint(leftSide ? -40 : 40, 0);
+        const auto original = target->timelineTrack().clip;
+        const auto neighbourBefore = neighbour->timelineTrack().toJson();
+        QTest::mouseMove(&f.view, from);
+        QTRY_COMPARE(f.view.cursor().shape(), Qt::SizeHorCursor);
+        QTest::mousePress(&f.view, Qt::LeftButton, Qt::NoModifier, from);
+        QCOMPARE(f.timeline.selectedClipId(), original.id);
+        QCOMPARE((leftSide ? leftItem : rightItem)->property("editEdge").toInt(), leftSide ? 1 : -1);
+        QTest::mouseMove(&f.view, to, 20);
+        const qint64 trimmedSlots = doc->timelineSettings().nearestSlot(40 / f.scale());
+        QTest::mouseRelease(&f.view, Qt::LeftButton, Qt::NoModifier, to);
+        QCOMPARE(target->timelineTrack().clip.startSlot, original.startSlot + (leftSide ? 0 : trimmedSlots));
+        QCOMPARE(target->timelineTrack().clip.endSlot(), original.endSlot() - (leftSide ? trimmedSlots : 0));
+        QCOMPARE(neighbour->timelineTrack().toJson(), neighbourBefore);
     }
 
     void clipDragScrollsTracksInShortPanel()

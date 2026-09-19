@@ -123,7 +123,8 @@ Rectangle {
         ? Theme.controlSelectionBackground : interactive ? Theme.overlayHover : Theme.overlayPressed
     border.width: 1
     border.color: interactive ? Theme.overlayText : Theme.overlayBorder
-    clip: true
+    // Resize hit areas straddle the border; the viewport provides clipping.
+    clip: false
     readonly property real shownSourceIn: modelData.sourceInMs
         + (dragging && editEdge < 0 ? shownStart - initialStart : 0)
     readonly property real shownDuration: shownEnd - shownStart
@@ -177,7 +178,7 @@ Rectangle {
         id: clipMove
         anchors.fill: parent
         enabled: clipItem.interactive && panel.editable
-        cursorShape: clipItem.dragging ? Qt.ClosedHandCursor : Qt.ArrowCursor
+        cursorShape: clipItem.dragging ? Qt.ClosedHandCursor : Qt.OpenHandCursor
         acceptedButtons: Qt.LeftButton | (Qt.platform.os === "osx" ? Qt.RightButton : Qt.NoButton)
         onPressed: mouse => clipItem.beginEdit(0, mouse, clipMove)
         onPositionChanged: mouse => { if (pressed) clipItem.updateEdit(mouse, clipMove) }
@@ -190,11 +191,21 @@ Rectangle {
             id: trimHandle
             required property int modelData
             objectName: modelData < 0 ? "timelineClipTrimStart" : "timelineClipTrimEnd"
-            x: modelData < 0 ? 0 : clipItem.width - width
+            x: (modelData < 0 ? 0 : clipItem.width) - width / 2
             width: Math.min(8, clipItem.width / 3); height: clipItem.height
             visible: clipItem.interactive
             enabled: clipItem.interactive && panel.editable
             cursorShape: Qt.SizeHorCursor
+            containmentMask: QtObject {
+                function contains(p: point): bool {
+                    if (p.x < 0 || p.x >= trimHandle.width
+                            || p.y < 0 || p.y >= trimHandle.height) return false
+                    var clipX = trimHandle.x + p.x
+                    // Inside a clip, its own edge wins over a neighbour's overhang.
+                    if (clipX >= 0 && clipX < clipItem.width) return true
+                    return panel.clipOwnsResizePoint(clipItem, clipItem.x + clipX)
+                }
+            }
             acceptedButtons: Qt.LeftButton | (Qt.platform.os === "osx" ? Qt.RightButton : Qt.NoButton)
             onPressed: mouse => clipItem.beginEdit(modelData, mouse, trimHandle)
             onPositionChanged: mouse => { if (pressed) clipItem.updateEdit(mouse, trimHandle) }

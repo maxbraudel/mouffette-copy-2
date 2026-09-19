@@ -156,9 +156,11 @@ informational and wheel events navigate the same timeline. Track backgrounds do
 not highlight the active paste destination. Clips fill the entire track height
 without vertical insets. Only the media name is shown, centered in the intersection
 of its clip with the visible time viewport, including during drag and resize.
-Long names elide to the available width. Resize zones remain on the edges with a
-horizontal resize cursor but no visible handle bars. Clip bodies use the normal
-arrow on hover and the canvas's closed-hand cursor while moving. Clips support
+Long names elide to the available width. Invisible resize zones straddle each
+edge equally inside and outside the clip, with a horizontal resize cursor.
+Overlapping zones belong to the nearest clip body, independently of selection
+or stacking order; exact ties go to the clip on the right. Clip bodies use an
+open hand on hover and the canvas's closed hand while moving. Clips support
 temporal and vertical dragging with edge auto-scroll at 96 logical px/s by default,
 configured by `MOUFFETTE_TIMELINE_AUTO_SCROLL_SPEED_PX_PER_SECOND` (0 disables it).
 The clip viewport initially centers

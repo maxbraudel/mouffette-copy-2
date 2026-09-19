@@ -30,7 +30,7 @@ Production inherits these values unless explicitly overridden in `.env.productio
 Clip dragging scrolls at viewport edges at the configured speed in logical pixels
 per second, horizontally and vertically. The default is two 48-pixel tracks per
 second; 0 disables automatic scrolling. Delayed frames have bounded catch-up to
-avoid sudden jumps. The clip body uses an arrow on hover and a closed hand while
+avoid sudden jumps. The clip body uses an open hand on hover and a closed hand while
 moving, like the canvas; trim handles retain their horizontal resize cursor.
 
 The minimum track counts retain empty tracks above and below Track 0, including in

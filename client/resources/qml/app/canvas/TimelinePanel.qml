@@ -61,17 +61,17 @@ FocusScope {
     }
     implicitHeight: timeline ? timeline.timelineHeightPx : 240
 
-    // A grabbed MouseArea loses its cursor outside its bounds. Keep the move
+    // A grabbed MouseArea loses its cursor outside its bounds. Keep the edit
     // cursor over the window while dragging past the timeline's viewport.
     MouseArea {
         parent: root.Window.window ? root.Window.window.contentItem : root
         anchors.fill: parent
         z: 10000
         visible: root.visible && !!root.activeDrag && !!root.activeDrag.isClipDrag
-            && root.activeDrag.editEdge === 0
         acceptedButtons: Qt.NoButton
         hoverEnabled: true
-        cursorShape: Qt.ClosedHandCursor
+        cursorShape: root.activeDrag && root.activeDrag.editEdge !== 0
+            ? Qt.SizeHorCursor : Qt.ClosedHandCursor
     }
 
     function formatTime(ms) {
@@ -97,6 +97,18 @@ FocusScope {
         return clampTime(result.timeMs)
     }
     function endDrag() { activeDrag = null; snapGuideMs = -1; snapGuideLabel = "" }
+    function clipOwnsResizePoint(clip, contentX) {
+        var distance = Math.max(clip.x - contentX, contentX - clip.x - clip.width, 0)
+        for (var i = 0; i < clipRepeater.count; ++i) {
+            var other = clipRepeater.itemAt(i)
+            if (!other || other === clip || other.shownTrack !== clip.shownTrack) continue
+            var otherDistance = Math.max(other.x - contentX, contentX - other.x - other.width, 0)
+            // Split overlapping hit areas at the gap midpoint; ties go right.
+            if (otherDistance < distance - 0.0001
+                    || (Math.abs(otherDistance - distance) < 0.0001 && other.x > clip.x)) return false
+        }
+        return true
+    }
     function scrollTracks(delta) {
         clipViewport.contentY = Math.max(-clipViewport.topMargin,
             Math.min(clipViewport.contentHeight + clipViewport.bottomMargin - clipViewport.height,
@@ -825,6 +837,7 @@ FocusScope {
                             }
                         }
                         Repeater {
+                            id: clipRepeater
                             model: root.timeline ? root.timeline.clipModel : null
                             TimelineClip {
                                 panel: root
