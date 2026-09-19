@@ -1387,6 +1387,60 @@ private slots:
         QCOMPARE(colorAt(after), colorAt(before));
     }
 
+    void clipAutoScrollUsesConfiguredSpeed_data()
+    {
+        QTest::addColumn<int>("speed");
+        QTest::addColumn<int>("direction");
+        for (const int speed : {0, 48, 96, 192}) {
+            QTest::newRow(qPrintable(QString("%1-top-left").arg(speed))) << speed << -1;
+            QTest::newRow(qPrintable(QString("%1-bottom-right").arg(speed))) << speed << 1;
+        }
+    }
+
+    void clipAutoScrollUsesConfiguredSpeed()
+    {
+        QFETCH(int, speed); QFETCH(int, direction);
+        const AppConfig previous = AppConfig::instance();
+        const auto restoreConfig = qScopeGuard([&] { AppConfig::instance() = previous; });
+        AppConfig::LoadOptions options;
+        options.defaultEnvFilePath.clear();
+        options.processEnvironment.insert("MOUFFETTE_TIMELINE_AUTO_SCROLL_SPEED_PX_PER_SECOND", QString::number(speed));
+        QString error;
+        QVERIFY2(AppConfig::instance().load(options, &error), qPrintable(error));
+        TimelineFixture f; QVERIFY(f.initialize());
+        QCOMPARE(f.timeline.autoScrollSpeedPxPerSecond(), speed);
+        auto* media = f.host->document()->addText({}, "Scroll speed"); QVERIFY(media);
+        f.timeline.trimClip(media->timelineTrack().clip.id, 0, f.timeline.maxDurationMs());
+        auto* viewport = f.item("timelineClipViewport");
+        auto* tracks = f.item("timelineTracks");
+        auto* clip = f.item("timelineClip");
+        tracks->setProperty("contentX", 400.0);
+        viewport->setProperty("contentY", 0.0);
+        const auto from = viewport->mapToScene({100, 24}).toPoint();
+        QTest::mousePress(&f.view, Qt::LeftButton, Qt::NoModifier, from);
+        const auto release = qScopeGuard([&] {
+            QTest::mouseRelease(&f.view, Qt::LeftButton, Qt::NoModifier, from);
+        });
+        // Advance edge scrolling with a controlled clock, independent of the test machine's frame rate.
+        const auto edge = viewport->mapToItem(f.view.rootObject(), direction < 0
+            ? QPointF(10, 10) : QPointF(viewport->width() - 10, viewport->height() - 10));
+        clip->setProperty("pointerPanelX", edge.x());
+        clip->setProperty("pointerPanelY", edge.y());
+        for (int tick = 0; tick < 20; ++tick) {
+            QVERIFY(QMetaObject::invokeMethod(f.view.rootObject(), "autoScrollClip",
+                Q_ARG(QVariant, QVariant::fromValue<QObject*>(clip)), Q_ARG(QVariant, 16)));
+        }
+        const qreal distance = direction * speed * 0.32;
+        QVERIFY(qAbs(f.scroll() - (400 + distance)) < 0.001);
+        QVERIFY(qAbs(viewport->property("contentY").toReal() - distance) < 0.001);
+        // A delayed frame must not teleport the viewport by several seconds of scrolling.
+        QVERIFY(QMetaObject::invokeMethod(f.view.rootObject(), "autoScrollClip",
+            Q_ARG(QVariant, QVariant::fromValue<QObject*>(clip)), Q_ARG(QVariant, 2000)));
+        const qreal afterStall = direction * speed * 0.37;
+        QVERIFY(qAbs(f.scroll() - (400 + afterStall)) < 0.001);
+        QVERIFY(qAbs(viewport->property("contentY").toReal() - afterStall) < 0.001);
+    }
+
     void clipDragScrollsAtTemporalViewportEdges()
     {
         TimelineFixture f; QVERIFY(f.initialize());
@@ -1401,12 +1455,19 @@ private slots:
         const auto from = tracks->mapToScene({100, f.timeline.rulerHeightPx() + 32.0 + 24}).toPoint();
         const auto leftEdge = tracks->mapToScene({10, f.timeline.rulerHeightPx() + 32.0 + 24}).toPoint();
         QVERIFY(leftEdge.x() > 22); // The panel edge is outside the temporal viewport.
+        QTest::mouseMove(&f.view, from);
+        QTRY_COMPARE(f.view.cursor().shape(), Qt::ArrowCursor);
         QTest::mousePress(&f.view, Qt::LeftButton, Qt::NoModifier, from);
         QVERIFY(!clip->property("dragging").toBool());
+        QCOMPARE(f.view.cursor().shape(), Qt::ArrowCursor);
         QTest::mouseMove(&f.view, leftEdge, 20);
         QVERIFY(clip->property("dragging").toBool());
+        QTRY_COMPARE(f.view.cursor().shape(), Qt::ClosedHandCursor);
         QTRY_VERIFY(f.scroll() < 400);
         QCOMPARE(headers->x(), 0.0);
+        const auto outside = tracks->mapToScene({-10, f.timeline.rulerHeightPx() + 32.0 + 24}).toPoint();
+        QTest::mouseMove(&f.view, outside, 20);
+        QTRY_COMPARE(f.view.cursor().shape(), Qt::ClosedHandCursor);
         const qreal scrolled = f.scroll();
         const auto rightEdge = tracks->mapToScene({tracks->width() - 10,
             f.timeline.rulerHeightPx() + 32.0 + 24}).toPoint();
@@ -1414,6 +1475,7 @@ private slots:
         QTRY_VERIFY(f.scroll() > scrolled);
         QTest::mouseRelease(&f.view, Qt::LeftButton, Qt::NoModifier, rightEdge);
         QVERIFY(!clip->property("dragging").toBool());
+        QTRY_COMPARE(f.view.cursor().shape(), Qt::ArrowCursor);
         QCOMPARE(media->timelineTrack().toJson(), saved); // Full-scene clip cannot move in time.
     }
 
@@ -1442,6 +1504,10 @@ private slots:
         const auto edge = viewport->mapToScene({60, viewport->height() - 3}).toPoint();
         QTest::mousePress(&f.view, Qt::LeftButton, modifier, from);
         f.movePointer(edge, modifier);
+        QTest::qWait(200);
+        const qreal distance = viewport->property("contentY").toReal() - initialScroll;
+        QVERIFY(distance > 0);
+        QVERIFY(distance < f.timeline.clipTrackHeightPx()); // Less than one track in 200 ms.
         QTRY_VERIFY(viewport->property("contentY").toReal() >= initialScroll + f.timeline.clipTrackHeightPx());
         const int destination = target->property("previewTrack").toInt();
         QVERIFY(destination >= 2);

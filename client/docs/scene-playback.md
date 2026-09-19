@@ -149,8 +149,11 @@ not highlight the active paste destination. Clips fill the entire track height
 without vertical insets. Only the media name is shown, centered in the intersection
 of its clip with the visible time viewport, including during drag and resize.
 Long names elide to the available width. Resize zones remain on the edges with a
-horizontal resize cursor but no visible handle bars. Clips support temporal and
-vertical dragging with edge auto-scroll. The clip viewport initially centers
+horizontal resize cursor but no visible handle bars. Clip bodies use the normal
+arrow on hover and the canvas's closed-hand cursor while moving. Clips support
+temporal and vertical dragging with edge auto-scroll at 96 logical px/s by default,
+configured by `MOUFFETTE_TIMELINE_AUTO_SCROLL_SPEED_PX_PER_SECOND` (0 disables it).
+The clip viewport initially centers
 Track 0. Track coordinates and the viewport center stay fixed when the range grows
 at either end; resizing preserves the center and removal clamps to the remaining
 range. Selecting a partly visible clip never scrolls it under the pointer. The

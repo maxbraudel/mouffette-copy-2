@@ -60,6 +60,19 @@ FocusScope {
     }
     implicitHeight: timeline ? timeline.timelineHeightPx : 240
 
+    // A grabbed MouseArea loses its cursor outside its bounds. Keep the move
+    // cursor over the window while dragging past the timeline's viewport.
+    MouseArea {
+        parent: root.Window.window ? root.Window.window.contentItem : root
+        anchors.fill: parent
+        z: 10000
+        visible: root.visible && !!root.activeDrag && !!root.activeDrag.isClipDrag
+            && root.activeDrag.editEdge === 0
+        acceptedButtons: Qt.NoButton
+        hoverEnabled: true
+        cursorShape: Qt.ClosedHandCursor
+    }
+
     function formatTime(ms) {
         ms = Math.max(0, Math.round(ms))
         return String(Math.floor(ms / 60000)).padStart(minuteDigits, "0") + ":"
@@ -88,11 +101,14 @@ FocusScope {
             Math.min(clipViewport.contentHeight + clipViewport.bottomMargin - clipViewport.height,
             clipViewport.contentY + delta))
     }
-    function autoScrollClip(drag) {
+    function autoScrollClip(drag, elapsedMs) {
+        // Bound catch-up after a stalled frame so the clip never jumps ahead.
+        var step = (timeline ? timeline.autoScrollSpeedPxPerSecond : 96)
+            * Math.max(0, Math.min(50, elapsedMs)) / 1000
         var point = clipViewport.mapFromItem(root, drag.pointerPanelX, drag.pointerPanelY)
         var viewportPoint = trackViewport.mapFromItem(root, drag.pointerPanelX, drag.pointerPanelY)
-        var dy = point.y < 22 ? -8 : point.y > clipViewport.height - 22 ? 8 : 0
-        var dx = viewportPoint.x < 22 ? -8 : viewportPoint.x > trackViewport.width - 22 ? 8 : 0
+        var dy = point.y < 22 ? -step : point.y > clipViewport.height - 22 ? step : 0
+        var dx = viewportPoint.x < 22 ? -step : viewportPoint.x > trackViewport.width - 22 ? step : 0
         if (dy !== 0) scrollTracks(dy)
         if (dx !== 0) scrollTo(trackViewport.contentX + dx)
         if (dx !== 0 || dy !== 0) drag.refreshFromPointer()
@@ -910,7 +926,13 @@ FocusScope {
             interval: 16
             repeat: true
             running: !!root.activeDrag && !!root.activeDrag.isClipDrag
-            onTriggered: root.autoScrollClip(root.activeDrag)
+            property real previousTickMs: 0
+            onRunningChanged: previousTickMs = Date.now()
+            onTriggered: {
+                var now = Date.now()
+                root.autoScrollClip(root.activeDrag, now - previousTickMs)
+                previousTickMs = now
+            }
         }
         MouseArea {
             id: trackInput

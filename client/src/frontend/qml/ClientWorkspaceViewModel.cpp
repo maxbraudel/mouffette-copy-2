@@ -245,9 +245,9 @@ void ClientWorkspaceViewModel::setSettingsVisible(bool visible)
 QString ClientWorkspaceViewModel::remoteSceneActionText() const
 {
     switch (remoteSceneActionState()) {
-    case SceneActionState::Starting: return QStringLiteral("Launching Remote Scene...");
+    case SceneActionState::Starting: return QStringLiteral("Launching Remote Scene");
     case SceneActionState::Active: return QStringLiteral("Stop Remote Scene");
-    case SceneActionState::Stopping: return QStringLiteral("Stopping Remote Scene...");
+    case SceneActionState::Stopping: return QStringLiteral("Stopping Remote Scene");
     case SceneActionState::Unavailable:
     case SceneActionState::Ready: return QStringLiteral("Launch Remote Scene");
     }

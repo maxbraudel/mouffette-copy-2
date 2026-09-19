@@ -52,6 +52,7 @@ class TimelineController final : public QObject
     Q_PROPERTY(int keyframeSizePx READ keyframeSizePx CONSTANT)
     Q_PROPERTY(qreal otherKeyframeOpacity READ otherKeyframeOpacity CONSTANT)
     Q_PROPERTY(int snapDistancePx READ snapDistancePx CONSTANT)
+    Q_PROPERTY(int autoScrollSpeedPxPerSecond READ autoScrollSpeedPxPerSecond CONSTANT)
     Q_PROPERTY(int initialViewDurationMs READ initialViewDurationMs CONSTANT)
 
 public:
@@ -93,6 +94,7 @@ public:
     int keyframeSizePx() const;
     qreal otherKeyframeOpacity() const;
     int snapDistancePx() const;
+    int autoScrollSpeedPxPerSecond() const;
     int initialViewDurationMs() const;
 
     Q_INVOKABLE void seek(qreal timeMs);

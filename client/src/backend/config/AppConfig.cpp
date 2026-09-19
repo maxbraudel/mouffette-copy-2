@@ -24,7 +24,7 @@ struct SettingSpec {
     bool boolean;
 };
 
-constexpr std::array<SettingSpec, 90> kSpecs{{
+constexpr std::array<SettingSpec, 91> kSpecs{{
     {Key::ServerUrl, "MOUFFETTE_SERVER_URL", "server-url", "serverUrl", "ws://localhost:8080", false},
     {Key::RemoteSessionHiddenTimeoutMs, "MOUFFETTE_REMOTE_SESSION_HIDDEN_TIMEOUT_MS", "remote-session-hidden-timeout-ms", nullptr, "60000", false},
     {Key::ProjectMediaHiddenTimeoutMs, "MOUFFETTE_PROJECT_MEDIA_HIDDEN_TIMEOUT_MS", "project-media-hidden-timeout-ms", nullptr, "60000", false},
@@ -93,6 +93,7 @@ constexpr std::array<SettingSpec, 90> kSpecs{{
     {Key::TimelineKeyframeSizePx, "MOUFFETTE_TIMELINE_KEYFRAME_SIZE_PX", "timeline-keyframe-size-px", nullptr, "10", false},
     {Key::TimelineOtherKeyframeOpacityPercent, "MOUFFETTE_TIMELINE_OTHER_KEYFRAME_OPACITY_PERCENT", "timeline-other-keyframe-opacity-percent", nullptr, "30", false},
     {Key::TimelineSnapDistancePx, "MOUFFETTE_TIMELINE_SNAP_DISTANCE_PX", "timeline-snap-distance-px", nullptr, "10", false},
+    {Key::TimelineAutoScrollSpeedPxPerSecond, "MOUFFETTE_TIMELINE_AUTO_SCROLL_SPEED_PX_PER_SECOND", "timeline-auto-scroll-speed-px-per-second", nullptr, "96", false},
     {Key::TimelineInitialViewDurationMs, "MOUFFETTE_TIMELINE_INITIAL_VIEW_DURATION_MS", "timeline-initial-view-duration-ms", nullptr, "15000", false},
     {Key::RemoteCursorDiameterPx, "MOUFFETTE_REMOTE_CURSOR_DIAMETER_PX", "remote-cursor-diameter-px", nullptr, "30", false},
     {Key::CanvasTextInitialHeightPercent, "MOUFFETTE_CANVAS_TEXT_INITIAL_HEIGHT_PERCENT", "canvas-text-initial-height-percent", nullptr, "8", false},
@@ -470,6 +471,7 @@ void AppConfig::resetToCompiledDefaults() {
     m_timelineKeyframeSizePx = 10;
     m_timelineOtherKeyframeOpacityPercent = 30;
     m_timelineSnapDistancePx = 10;
+    m_timelineAutoScrollSpeedPxPerSecond = 96;
     m_timelineInitialViewDurationMs = 15000;
     m_canvasTextInitialHeightPercent = 8;
     m_remoteCursorDiameterPx = 30;
@@ -697,6 +699,7 @@ bool AppConfig::load(const LoadOptions& options, QString* errorMessage) {
         || !parseIntSetting(Key::TimelineKeyframeSizePx, 4, 64, &candidate.m_timelineKeyframeSizePx)
         || !parseIntSetting(Key::TimelineOtherKeyframeOpacityPercent, 0, 100, &candidate.m_timelineOtherKeyframeOpacityPercent)
         || !parseIntSetting(Key::TimelineSnapDistancePx, 0, 100, &candidate.m_timelineSnapDistancePx)
+        || !parseIntSetting(Key::TimelineAutoScrollSpeedPxPerSecond, 0, 2000, &candidate.m_timelineAutoScrollSpeedPxPerSecond)
         || !parseIntSetting(Key::TimelineInitialViewDurationMs, 1, 604800000, &candidate.m_timelineInitialViewDurationMs)
         || !parseIntSetting(Key::RemoteCursorDiameterPx, 4, 256,
                             &candidate.m_remoteCursorDiameterPx)

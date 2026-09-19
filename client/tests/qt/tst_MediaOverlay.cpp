@@ -670,8 +670,8 @@ void MediaOverlayTest::mediaPanelWidthSurvivesActionAndUploadTransitions()
     QVERIFY(remote && upload);
     const qreal remoteWidth = remote->implicitWidth();
     const qreal uploadWidth = upload->implicitWidth();
-    for (const auto& label : {"Launch Remote Scene", "Launching Remote Scene...",
-                              "Stop Remote Scene", "Stopping Remote Scene..."}) {
+    for (const auto& label : {"Launch Remote Scene", "Launching Remote Scene",
+                              "Stop Remote Scene", "Stopping Remote Scene"}) {
         session->setProperty("remoteSceneActionText", label);
         QCOMPARE(remote->implicitWidth(), remoteWidth);
         QCOMPARE(panel->implicitWidth(), initialWidth);

@@ -22,9 +22,16 @@ Maximum duration and slot cadence are copied to each new project. Existing proje
 | `MOUFFETTE_TIMELINE_KEYFRAME_SIZE_PX` | 10 | 4–64 |
 | `MOUFFETTE_TIMELINE_OTHER_KEYFRAME_OPACITY_PERCENT` | 30 | 0–100 |
 | `MOUFFETTE_TIMELINE_SNAP_DISTANCE_PX` | 10 | 0–100 |
+| `MOUFFETTE_TIMELINE_AUTO_SCROLL_SPEED_PX_PER_SECOND` | 96 | integer 0–2000 |
 | `MOUFFETTE_TIMELINE_INITIAL_VIEW_DURATION_MS` | 15000 | 1–604800000 |
 
 Production inherits these values unless explicitly overridden in `.env.production`. Shift snapping uses screen pixels, so its tolerance stays consistent at every zoom level.
+
+Clip dragging scrolls at viewport edges at the configured speed in logical pixels
+per second, horizontally and vertically. The default is two 48-pixel tracks per
+second; 0 disables automatic scrolling. Delayed frames have bounded catch-up to
+avoid sudden jumps. The clip body uses an arrow on hover and a closed hand while
+moving, like the canvas; trim handles retain their horizontal resize cursor.
 
 The minimum track counts retain empty tracks above and below Track 0, including in
 empty projects. The defaults keep 21 tracks, labeled +10 through -10. Occupied

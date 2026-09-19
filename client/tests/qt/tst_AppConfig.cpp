@@ -124,11 +124,24 @@ void AppConfigTest::configuresTimeline() {
     QCOMPARE(config.timelineDefaultClipDurationSlots(), 30);
     QCOMPARE(config.timelineOtherKeyframeOpacityPercent(), 45);
     QCOMPARE(config.timelineSnapDistancePx(), 0);
+    QCOMPARE(config.timelineAutoScrollSpeedPxPerSecond(), 96);
     QCOMPARE(config.timelineHeightPx(), 240);
     QCOMPARE(config.timelineRulerHeightPx(), 28);
     QCOMPARE(config.timelineClipTrackHeightPx(), 48);
     QCOMPARE(config.timelineKeyframeSizePx(), 10);
     QCOMPARE(config.timelineInitialViewDurationMs(), 15000);
+    const QString scrollSpeedKey = QStringLiteral("MOUFFETTE_TIMELINE_AUTO_SCROLL_SPEED_PX_PER_SECOND");
+    for (const QString speed : {QStringLiteral("0"), QStringLiteral("48"), QStringLiteral("2000")}) {
+        options.processEnvironment.insert(scrollSpeedKey, speed);
+        QVERIFY2(config.load(options, &error), qPrintable(error));
+        QCOMPARE(config.timelineAutoScrollSpeedPxPerSecond(), speed.toInt());
+    }
+    for (const QString speed : {QStringLiteral("-1"), QStringLiteral("2001"), QStringLiteral("1.5"), QStringLiteral("abc")}) {
+        options.processEnvironment.insert(scrollSpeedKey, speed);
+        QVERIFY(!config.load(options, &error));
+        QVERIFY(error.contains(scrollSpeedKey));
+    }
+    options.processEnvironment.remove(scrollSpeedKey);
     for (const QString length : {QStringLiteral("1"), QStringLiteral("12"), QStringLiteral("145152000")}) {
         options.processEnvironment.insert(QStringLiteral("MOUFFETTE_TIMELINE_DEFAULT_CLIP_DURATION_SLOTS"), length);
         QVERIFY2(config.load(options, &error), qPrintable(error));

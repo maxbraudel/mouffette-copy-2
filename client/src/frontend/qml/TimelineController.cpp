@@ -238,6 +238,7 @@ int TimelineController::clipTrackHeightPx() const { return AppConfig::instance()
 int TimelineController::keyframeSizePx() const { return AppConfig::instance().timelineKeyframeSizePx(); }
 qreal TimelineController::otherKeyframeOpacity() const { return AppConfig::instance().timelineOtherKeyframeOpacityPercent() / 100.0; }
 int TimelineController::snapDistancePx() const { return AppConfig::instance().timelineSnapDistancePx(); }
+int TimelineController::autoScrollSpeedPxPerSecond() const { return AppConfig::instance().timelineAutoScrollSpeedPxPerSecond(); }
 int TimelineController::initialViewDurationMs() const { return AppConfig::instance().timelineInitialViewDurationMs(); }
 
 void TimelineController::refresh()

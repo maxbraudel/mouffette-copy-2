@@ -177,7 +177,7 @@ Rectangle {
         id: clipMove
         anchors.fill: parent
         enabled: clipItem.interactive && panel.editable
-        cursorShape: Qt.SizeAllCursor
+        cursorShape: clipItem.dragging ? Qt.ClosedHandCursor : Qt.ArrowCursor
         acceptedButtons: Qt.LeftButton | (Qt.platform.os === "osx" ? Qt.RightButton : Qt.NoButton)
         onPressed: mouse => clipItem.beginEdit(0, mouse, clipMove)
         onPositionChanged: mouse => { if (pressed) clipItem.updateEdit(mouse, clipMove) }

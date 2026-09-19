@@ -91,6 +91,7 @@ public:
         TimelineKeyframeSizePx,
         TimelineOtherKeyframeOpacityPercent,
         TimelineSnapDistancePx,
+        TimelineAutoScrollSpeedPxPerSecond,
         TimelineInitialViewDurationMs,
         CanvasTextInitialHeightPercent,
         RemoteCursorDiameterPx,
@@ -232,6 +233,7 @@ public:
     int timelineKeyframeSizePx() const { return m_timelineKeyframeSizePx; }
     int timelineOtherKeyframeOpacityPercent() const { return m_timelineOtherKeyframeOpacityPercent; }
     int timelineSnapDistancePx() const { return m_timelineSnapDistancePx; }
+    int timelineAutoScrollSpeedPxPerSecond() const { return m_timelineAutoScrollSpeedPxPerSecond; }
     int timelineInitialViewDurationMs() const { return m_timelineInitialViewDurationMs; }
     int remoteCursorDiameterPx() const { return m_remoteCursorDiameterPx; }
     int canvasTextInitialHeightPercent() const { return m_canvasTextInitialHeightPercent; }
@@ -336,6 +338,7 @@ private:
     int m_timelineKeyframeSizePx = 10;
     int m_timelineOtherKeyframeOpacityPercent = 30;
     int m_timelineSnapDistancePx = 10;
+    int m_timelineAutoScrollSpeedPxPerSecond = 96;
     int m_timelineInitialViewDurationMs = 15000;
     int m_canvasTextInitialHeightPercent = 8;
     int m_remoteCursorDiameterPx = 30;

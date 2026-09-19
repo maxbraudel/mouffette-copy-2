@@ -246,8 +246,8 @@ Rectangle {
                 width: actions.width
                 text: root.session ? root.session.remoteSceneActionText : "Launch Remote Scene"
                 iconSource: root.session ? root.session.remoteSceneActionIcon : "qrc:/icons/icons/remote-play.svg"
-                textVariants: ["Launch Remote Scene", "Launching Remote Scene...",
-                               "Stop Remote Scene", "Stopping Remote Scene..."]
+                textVariants: ["Launch Remote Scene", "Launching Remote Scene",
+                               "Stop Remote Scene", "Stopping Remote Scene"]
                 tone: root.session ? root.session.remoteSceneActionTone : OverlayActionButton.Normal
                 busy: tone === OverlayActionButton.Uploading && !root.session.actionPending
                 enabled: !!root.session
