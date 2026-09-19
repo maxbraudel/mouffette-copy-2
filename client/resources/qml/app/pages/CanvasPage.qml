@@ -9,6 +9,7 @@ AppPanel {
     id: root
     required property var controller
     readonly property var session: controller.activeWorkspace
+    readonly property real overlaySpacing: 10
     property bool timelineExpanded: true
     color: Theme.canvasBackground
 
@@ -50,9 +51,10 @@ AppPanel {
     // Timeline visibility remains available during playback. The toolbar
     // unloads its editing controls independently when the scene owns the canvas.
     Loader {
-        anchors.left: parent.left
-        anchors.top: parent.top
-        anchors.margins: 10
+        id: toolbarLoader
+        anchors.left: canvasLoader.left
+        anchors.top: canvasLoader.top
+        anchors.margins: root.overlaySpacing
         z: 100000
         active: !!root.session
         sourceComponent: CanvasToolbar {
@@ -64,16 +66,16 @@ AppPanel {
 
     Loader {
         id: settingsLoader
-        anchors.left: parent.left
-        anchors.top: parent.top
-        anchors.leftMargin: 10
-        anchors.topMargin: 52
+        anchors.left: toolbarLoader.left
+        anchors.top: toolbarLoader.bottom
+        anchors.topMargin: root.overlaySpacing
         z: 100001
         active: !!root.session && root.session.mediaEditingEnabled
         sourceComponent: SceneElementPanel {
             id: sceneElementPanel
             objectName: "canvasSceneElementPanel"
-            maximumHeight: Math.max(0, canvasLoader.height - settingsLoader.y - 10)
+            maximumHeight: Math.max(0, canvasLoader.y + canvasLoader.height
+                - settingsLoader.y - root.overlaySpacing)
             session: root.session
             presentationReady: {
                 var canvas = canvasLoader.item
@@ -85,10 +87,10 @@ AppPanel {
 
     MediaListPanel {
         objectName: "mediaListPanel"
-        maximumHeight: Math.max(0, canvasLoader.height - 32)
-        anchors.right: parent.right
+        maximumHeight: Math.max(0, canvasLoader.height - root.overlaySpacing * 2)
+        anchors.right: canvasLoader.right
         anchors.bottom: canvasLoader.bottom
-        anchors.margins: 16
+        anchors.margins: root.overlaySpacing
         z: 100000
         session: root.session
     }

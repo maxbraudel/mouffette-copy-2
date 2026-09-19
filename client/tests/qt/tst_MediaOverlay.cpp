@@ -1932,7 +1932,9 @@ void MediaOverlayTest::scenePlaybackUnloadsEditorOverlays()
     QVERIFY(mediaList->isVisible());
     QVERIFY(timelineToggle && timelineToggle->isVisible() && timelineToggle->isEnabled());
     QCOMPARE(findVisualItem(page, QStringLiteral("canvasTimelineButton")), timelineToggle.data());
-    QTRY_COMPARE(timelineToggle->mapToScene({0, 0}).x(), 10.0); // No gap left by unloaded tools.
+    auto* canvasViewport = findVisualItem(page, QStringLiteral("activeCanvasLoader"));
+    QVERIFY(canvasViewport);
+    QTRY_COMPARE(timelineToggle->mapToItem(canvasViewport, {0, 0}).x(), 10.0); // No gap left by unloaded tools.
     auto* timelinePanel = findVisualItem(page, QStringLiteral("sceneTimeline"));
     auto* timelineBody = findVisualItem(page, QStringLiteral("timelineEditorBody"));
     QVERIFY(timelinePanel && timelineBody);
