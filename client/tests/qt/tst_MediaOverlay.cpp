@@ -235,12 +235,14 @@ Item {
         property var mediaModel: host.externalModel
         property int mediaCount: host.testMediaCount
         property string remoteSceneActionText: "Launch Remote Scene"
+        property url remoteSceneActionIcon: "qrc:/icons/icons/remote-play.svg"
         property bool remoteSceneActionEnabled: true
         property string remoteSceneUnavailableReason: ""
         property string testSceneActionText: "Launch Test Scene"
         property bool testSceneActionEnabled: true
         property string testSceneUnavailableReason: ""
         property string uploadActionText: "Upload"
+        property url uploadActionIcon: "qrc:/icons/icons/upload.svg"
         property int uploadActionTone: 0
         property bool uploadActionEnabled: true
         property string uploadUnavailableReason: ""
@@ -1172,7 +1174,7 @@ void MediaOverlayTest::mediaRowsAndProgress()
     QVERIFY(panel->width() <= 300.0);
     photo->setUploadNotUploaded();
     host->document()->clear();
-    QTRY_VERIFY(panel->isVisible());
+    QTRY_VERIFY(!panel->isVisible());
     QTRY_COMPARE(panel->height(), panel->property("actionAreaHeight").toReal());
 }
 

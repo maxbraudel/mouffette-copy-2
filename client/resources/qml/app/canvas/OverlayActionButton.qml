@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Controls
+import QtQuick.Effects
 import Mouffette.App
 import "../components"
 
@@ -13,6 +14,9 @@ AbstractButton {
     property bool monospace: false
     property real bottomRadius: 0
     property string unavailableReason: ""
+    property url iconSource: ""
+    readonly property bool hasIcon: iconSource.toString().length > 0
+    readonly property real iconLabelWidth: hasIcon ? 16 + 6 : 0
     property alias textVariants: textMetrics.textVariants
     property alias monospaceTextVariants: monospaceMetrics.textVariants
     readonly property bool dimmed: !enabled && !busy
@@ -37,7 +41,8 @@ AbstractButton {
              : hovered ? Theme.overlayHover : "transparent"
     }
 
-    implicitWidth: Math.max(textMetrics.maximumWidth, monospaceMetrics.maximumWidth) + leftPadding + rightPadding
+    implicitWidth: Math.max(textMetrics.maximumWidth, monospaceMetrics.maximumWidth)
+        + iconLabelWidth + leftPadding + rightPadding
     implicitHeight: Theme.overlayButtonHeight
     padding: 0
     leftPadding: 20
@@ -60,15 +65,42 @@ AbstractButton {
         font.pixelSize: 14
         font.bold: true
     }
-    contentItem: Text {
-        id: label
-        text: control.text
-        textFormat: Text.PlainText
-        color: control.foregroundColor
-        font: control.monospace ? monospaceMetrics.font : textMetrics.font
-        horizontalAlignment: Text.AlignHCenter
-        verticalAlignment: Text.AlignVCenter
-        elide: Text.ElideRight
+    contentItem: Item {
+        id: buttonContent
+        readonly property real labelWidth: Math.min(label.implicitWidth,
+            Math.max(0, width - control.iconLabelWidth))
+        Row {
+            anchors.centerIn: parent
+            height: parent.height
+            spacing: 6
+            Image {
+                anchors.verticalCenter: parent.verticalCenter
+                visible: control.hasIcon
+                width: 16; height: 16
+                source: control.iconSource
+                sourceSize: Qt.size(width * 4, height * 4)
+                fillMode: Image.PreserveAspectFit
+                layer.enabled: control.hasIcon
+                layer.effect: MultiEffect {
+                    contrast: -1
+                    brightness: 0.5
+                    colorization: 1
+                    colorizationColor: control.foregroundColor
+                }
+            }
+            Text {
+                id: label
+                width: buttonContent.labelWidth
+                height: parent.height
+                text: control.text
+                textFormat: Text.PlainText
+                color: control.foregroundColor
+                font: control.monospace ? monospaceMetrics.font : textMetrics.font
+                horizontalAlignment: Text.AlignHCenter
+                verticalAlignment: Text.AlignVCenter
+                elide: Text.ElideRight
+            }
+        }
     }
     background: Rectangle {
         color: control.backgroundColor

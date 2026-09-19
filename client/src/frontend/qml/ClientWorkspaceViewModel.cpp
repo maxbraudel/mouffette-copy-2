@@ -254,6 +254,14 @@ QString ClientWorkspaceViewModel::remoteSceneActionText() const
     return QStringLiteral("Launch Remote Scene");
 }
 
+QUrl ClientWorkspaceViewModel::remoteSceneActionIcon() const
+{
+    const auto state = remoteSceneActionState();
+    return QUrl(state == SceneActionState::Active || state == SceneActionState::Stopping
+        ? QStringLiteral("qrc:/icons/icons/stop.svg")
+        : QStringLiteral("qrc:/icons/icons/remote-play.svg"));
+}
+
 ClientWorkspaceViewModel::SceneActionState
 ClientWorkspaceViewModel::remoteSceneActionState() const
 {
@@ -347,6 +355,17 @@ QString ClientWorkspaceViewModel::uploadActionText() const
     case UploadState::Ready: return QStringLiteral("Upload");
     }
     return QStringLiteral("Upload");
+}
+
+QUrl ClientWorkspaceViewModel::uploadActionIcon() const
+{
+    switch (uploadState()) {
+    case UploadState::Uploaded:
+    case UploadState::Removing: return QUrl(QStringLiteral("qrc:/icons/icons/delete.svg"));
+    case UploadState::Uploading:
+    case UploadState::Cancelling: return QUrl(QStringLiteral("qrc:/icons/icons/stop.svg"));
+    default: return QUrl(QStringLiteral("qrc:/icons/icons/upload.svg"));
+    }
 }
 
 ClientWorkspaceViewModel::UploadState ClientWorkspaceViewModel::uploadState() const

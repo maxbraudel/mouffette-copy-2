@@ -245,6 +245,7 @@ Rectangle {
                 objectName: "remoteSceneAction"
                 width: actions.width
                 text: root.session ? root.session.remoteSceneActionText : "Launch Remote Scene"
+                iconSource: root.session ? root.session.remoteSceneActionIcon : "qrc:/icons/icons/remote-play.svg"
                 textVariants: ["Launch Remote Scene", "Launching Remote Scene...",
                                "Stop Remote Scene", "Stopping Remote Scene..."]
                 tone: root.session ? root.session.remoteSceneActionTone : OverlayActionButton.Normal
@@ -264,6 +265,7 @@ Rectangle {
                 visible: root.showUploadAction
                 width: actions.width
                 text: root.session ? root.session.uploadActionText : "Upload"
+                iconSource: root.session ? root.session.uploadActionIcon : "qrc:/icons/icons/upload.svg"
                 textVariants: ["Upload", "Unload", "Preparing…", "Uploading…",
                                "Finalizing…", "Cancelling…", "Removing…"]
                 // Reserve upload counters from the number of unique sources. Keep all

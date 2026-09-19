@@ -3,6 +3,7 @@
 
 #include <QObject>
 #include <QPointer>
+#include <QUrl>
 #include <functional>
 
 class ICanvasHost;
@@ -42,6 +43,7 @@ class ClientWorkspaceViewModel : public QObject
     Q_PROPERTY(QString activeTool READ activeTool NOTIFY activeToolChanged)
     Q_PROPERTY(bool settingsVisible READ settingsVisible WRITE setSettingsVisible NOTIFY settingsVisibleChanged)
     Q_PROPERTY(QString remoteSceneActionText READ remoteSceneActionText NOTIFY actionStateChanged)
+    Q_PROPERTY(QUrl remoteSceneActionIcon READ remoteSceneActionIcon NOTIFY actionStateChanged)
     Q_PROPERTY(SceneActionState remoteSceneActionState READ remoteSceneActionState NOTIFY actionStateChanged)
     Q_PROPERTY(bool remoteSceneActionEnabled READ remoteSceneActionEnabled NOTIFY actionStateChanged)
     Q_PROPERTY(int remoteSceneActionTone READ remoteSceneActionTone NOTIFY actionStateChanged)
@@ -52,6 +54,7 @@ class ClientWorkspaceViewModel : public QObject
     Q_PROPERTY(int testSceneActionTone READ testSceneActionTone NOTIFY actionStateChanged)
     Q_PROPERTY(QString testSceneUnavailableReason READ testSceneUnavailableReason NOTIFY actionStateChanged)
     Q_PROPERTY(QString uploadActionText READ uploadActionText NOTIFY actionStateChanged)
+    Q_PROPERTY(QUrl uploadActionIcon READ uploadActionIcon NOTIFY actionStateChanged)
     Q_PROPERTY(UploadState uploadState READ uploadState NOTIFY actionStateChanged)
     Q_PROPERTY(bool uploadActionEnabled READ uploadActionEnabled NOTIFY actionStateChanged)
     Q_PROPERTY(QString uploadUnavailableReason READ uploadUnavailableReason NOTIFY actionStateChanged)
@@ -115,6 +118,7 @@ public:
     bool settingsVisible() const { return m_settingsVisible; }
     void setSettingsVisible(bool visible);
     QString remoteSceneActionText() const;
+    QUrl remoteSceneActionIcon() const;
     SceneActionState remoteSceneActionState() const;
     bool remoteSceneActionEnabled() const;
     int remoteSceneActionTone() const;
@@ -125,6 +129,7 @@ public:
     int testSceneActionTone() const;
     QString testSceneUnavailableReason() const;
     QString uploadActionText() const;
+    QUrl uploadActionIcon() const;
     UploadState uploadState() const;
     bool uploadActionEnabled() const;
     QString uploadUnavailableReason() const;
