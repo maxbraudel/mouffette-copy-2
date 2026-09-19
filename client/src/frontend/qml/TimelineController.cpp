@@ -11,10 +11,12 @@
 #include <QGuiApplication>
 #include <QJsonArray>
 #include <QJsonDocument>
+#include <QMap>
 #include <QMimeData>
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <utility>
 
 // Update rows in place so selecting a clip cannot destroy a pointer grab.
 class TimelineClipModel final : public QAbstractListModel
@@ -207,9 +209,28 @@ QVariantList TimelineController::otherKeyframes() const
 QVariantList TimelineController::clips() const
 {
     QVariantList rows;
-    if (m_document) for (auto* media : m_document->media()) {
-        auto row = clipRow(media->timelineTrack().clip, media, grid());
-        row.insert(QStringLiteral("displayTrackIndex"), m_document->timelineRow(media->timelineTrack().trackIndex));
+    if (!m_document) return rows;
+    const auto timing = grid();
+    // Match neighbours in integer slots; visual proximity must never create a joint trim.
+    QMap<std::pair<int, qint64>, const CanvasMedia*> starts, ends;
+    const int firstTrack = m_document->timelineTrackAtRow(0);
+    const auto interval = [&](const CanvasMedia* media) -> QVariantMap {
+        if (!media) return {};
+        const auto& track = media->timelineTrack();
+        return {{"id", track.clip.id}, {"startMs", timing.timeMs(track.clip.startSlot)},
+                {"endMs", timing.timeMs(track.clip.endSlot())}, {"displayTrackIndex", track.trackIndex - firstTrack}};
+    };
+    for (auto* media : m_document->media()) {
+        const auto& track = media->timelineTrack();
+        starts.insert({track.trackIndex, track.clip.startSlot}, media);
+        ends.insert({track.trackIndex, track.clip.endSlot()}, media);
+    }
+    for (auto* media : m_document->media()) {
+        const auto& track = media->timelineTrack();
+        auto row = clipRow(track.clip, media, timing);
+        row.insert(QStringLiteral("displayTrackIndex"), track.trackIndex - firstTrack);
+        row.insert(QStringLiteral("startNeighbour"), interval(ends.value({track.trackIndex, track.clip.startSlot})));
+        row.insert(QStringLiteral("endNeighbour"), interval(starts.value({track.trackIndex, track.clip.endSlot()})));
         rows.append(row);
     }
     return rows;
@@ -251,6 +272,10 @@ bool TimelineController::canPaste() const
 int TimelineController::timelineHeightPx() const { return AppConfig::instance().timelineHeightPx(); }
 int TimelineController::rulerHeightPx() const { return AppConfig::instance().timelineRulerHeightPx(); }
 int TimelineController::clipTrackHeightPx() const { return AppConfig::instance().timelineClipTrackHeightPx(); }
+int TimelineController::clipResizeHandleWidthPx() const { return AppConfig::instance().timelineClipResizeHandleWidthPx(); }
+int TimelineController::clipJointResizeHandleWidthPx() const { return AppConfig::instance().timelineClipJointResizeHandleWidthPx(); }
+int TimelineController::clipJointMinResizeWidthPx() const { return AppConfig::instance().timelineClipJointMinResizeWidthPx(); }
+int TimelineController::clipMinResizeWidthPx() const { return AppConfig::instance().timelineClipMinResizeWidthPx(); }
 int TimelineController::keyframeSizePx() const { return AppConfig::instance().timelineKeyframeSizePx(); }
 qreal TimelineController::otherKeyframeOpacity() const { return AppConfig::instance().timelineOtherKeyframeOpacityPercent() / 100.0; }
 int TimelineController::snapDistancePx() const { return AppConfig::instance().timelineSnapDistancePx(); }
@@ -418,12 +443,13 @@ void TimelineController::moveClip(const QString& id, qreal startMs, int row, boo
     reevaluate();
     emit revealTrack(activeTrackIndex());
 }
-void TimelineController::trimClip(const QString& id, qreal startMs, qreal endMs, bool overwrite)
+void TimelineController::trimClip(const QString& id, qreal startMs, qreal endMs, bool overwrite, bool rolling)
 {
     if (!editable() || !m_document) return;
     QString reason;
     const auto mode = overwrite ? CanvasDocument::PlacementMode::Overwrite : CanvasDocument::PlacementMode::Avoid;
-    if (!m_document->trimTimelineClip(id, grid().nearestSlot(startMs), grid().nearestSlot(endMs), &reason, mode)) {
+    const auto trimMode = rolling ? CanvasDocument::TrimMode::Rolling : CanvasDocument::TrimMode::Independent;
+    if (!m_document->trimTimelineClip(id, grid().nearestSlot(startMs), grid().nearestSlot(endMs), &reason, mode, trimMode)) {
         if (!reason.isEmpty()) error(reason);
         return;
     }
@@ -431,7 +457,7 @@ void TimelineController::trimClip(const QString& id, qreal startMs, qreal endMs,
     reevaluate();
 }
 QVariantMap TimelineController::previewClipEdit(const QString& id, qreal startMs, qreal endMs, int row,
-    int edge, qreal lastStartMs, qreal lastEndMs, int lastRow, bool overwrite, const QVariantMap& snap) const
+    int edge, qreal lastStartMs, qreal lastEndMs, int lastRow, bool overwrite, const QVariantMap& snap, bool rolling) const
 {
     if (!m_document || !m_document->mediaForTimelineClip(id)) return {};
     const auto timing = grid();
@@ -440,11 +466,12 @@ QVariantMap TimelineController::previewClipEdit(const QString& id, qreal startMs
     const CanvasDocument::ClipPlacement last{timing.nearestSlot(lastStartMs), timing.nearestSlot(lastEndMs),
         m_document->timelineTrackAtRow(qBound(0, lastRow, trackCount() - 1))};
     const auto result = m_document->previewTimelineClip(id, requested, edge, last,
-        overwrite ? CanvasDocument::PlacementMode::Overwrite : CanvasDocument::PlacementMode::Avoid);
+        overwrite ? CanvasDocument::PlacementMode::Overwrite : CanvasDocument::PlacementMode::Avoid,
+        rolling ? CanvasDocument::TrimMode::Rolling : CanvasDocument::TrimMode::Independent);
     QVariantMap preview{{"startMs", timing.timeMs(result.startSlot)}, {"endMs", timing.timeMs(result.endSlot)},
             {"row", m_document->timelineRow(result.trackIndex)},
             {"free", m_document->timelinePlacementFree(id, result)}};
-    if (const auto* neighbour = overwrite ? nullptr : m_document->adjacentTimelineClip(id, edge)) {
+    if (const auto* neighbour = rolling && !overwrite ? m_document->adjacentTimelineClip(id, edge) : nullptr) {
         const auto& clip = neighbour->timelineTrack().clip;
         preview.insert("adjacentClip", QVariantMap{{"id", clip.id},
             {"startMs", timing.timeMs(edge < 0 ? clip.startSlot : result.endSlot)},
@@ -572,7 +599,7 @@ void TimelineController::clearKeyframeSelection()
 }
 
 QVariantMap TimelineController::snapTime(qreal timeMs, qreal pixelsPerMs,
-                                        const QString& excludeId, qreal clipDurationMs, bool includePlayhead) const
+                                        const QString& excludeId, qreal clipDurationMs, bool includePlayhead, int rollingEdge) const
 {
     const auto timing = grid();
     QVariantMap result{{QStringLiteral("timeMs"), gridTime(timeMs)}, {QStringLiteral("snapped"), false},
@@ -580,6 +607,9 @@ QVariantMap TimelineController::snapTime(qreal timeMs, qreal pixelsPerMs,
     if (!m_document || !std::isfinite(timeMs) || !std::isfinite(clipDurationMs) || !std::isfinite(pixelsPerMs)
         || pixelsPerMs <= 0 || clipDurationMs < 0 || clipDurationMs > maxDurationMs()) return result;
     const qint64 durationSlots = timing.nearestSlot(clipDurationMs);
+    const auto* neighbour = rollingEdge == -1 || rollingEdge == 1
+        ? m_document->adjacentTimelineClip(excludeId, rollingEdge) : nullptr;
+    const QString adjacentId = neighbour ? neighbour->timelineTrack().clip.id : QString();
     qreal bestDistance = snapDistancePx() + 1e-6;
     qint64 bestTarget = std::numeric_limits<qint64>::max();
     const auto consider = [&](qint64 targetSlot, const QString& label, const QString& kind) {
@@ -605,7 +635,7 @@ QVariantMap TimelineController::snapTime(qreal timeMs, qreal pixelsPerMs,
         for (const auto& key : media->timelineTrack().keyframes)
             if (key.id != excludeId) consider(key.slot, media->displayName(), QStringLiteral("keyframe"));
         const auto& clip = media->timelineTrack().clip;
-        if (clip.id != excludeId) {
+        if (clip.id != excludeId && clip.id != adjacentId) {
             consider(clip.startSlot, media->displayName(), QStringLiteral("clip"));
             consider(clip.endSlot(), media->displayName(), QStringLiteral("clip"));
         }

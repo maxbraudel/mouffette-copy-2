@@ -69,12 +69,16 @@ in a key or saved in the project.
 Moving and extending avoid other clips by default. Horizontal movement stops at
 the nearest neighbour in either direction, including fast pointer jumps across a
 whole clip. A track change is accepted only if the whole clip fits at the requested
-time; otherwise the last valid placement remains. Resizing an edge that already
-touches another clip on the same track rolls their shared boundary: one clip grows
+time; otherwise the last valid placement remains. At a junction between two clips
+on the same track, pressing the dedicated handle centered on their junction rolls the
+shared boundary: one clip grows
 by exactly the amount the other shrinks, with both outer edges fixed and at least
 one slot remaining on each side. Both clips preview together and commit atomically;
 video source offsets follow the changed start edge, while keyframes stay fixed.
-An edge separated from its neighbour resizes independently and stops at contact.
+The ordinary handle on either side resizes only its own clip, allowing a gap
+to open without changing its neighbour. An independent extension stops at contact.
+The pointer location at press chooses the mode for the whole gesture. The backend
+also requires an explicit rolling mode; ordinary trim commands never compensate a neighbour.
 Preview resolution does not mutate the document; the commit validates again.
 
 Holding the physical Control key enables overwrite for moving and resizing,
@@ -164,8 +168,32 @@ informational and wheel events navigate the same timeline. Track backgrounds do
 not highlight the active paste destination. Clips fill the entire track height
 without vertical insets. Only the media name is shown, centered in the intersection
 of its clip with the visible time viewport, including during drag and resize.
-Long names elide to the available width. Invisible resize zones straddle each
-edge equally inside and outside the clip, with a horizontal resize cursor.
+Long names elide to the available width. Invisible resize zones straddle edges
+equally inside and outside the clip when no joint handle is present, with a horizontal double-arrow cursor. Each
+zone stays a fixed number of logical viewport pixels wide, independently of time
+zoom or clip duration (`MOUFFETTE_TIMELINE_CLIP_RESIZE_HANDLE_WIDTH_PX`, default 8).
+Below `MOUFFETTE_TIMELINE_CLIP_MIN_RESIZE_WIDTH_PX` pixels of displayed clip width
+(default 24; 0 disables this threshold), the whole clip and both edge
+zones move the clip instead, using the hand cursor. Zooming in restores resizing.
+An edit already in progress keeps its original mode when crossing this threshold.
+At a junction, a separate handle is centered on the exact shared boundary.
+Its width is configured by `MOUFFETTE_TIMELINE_CLIP_JOINT_RESIZE_HANDLE_WIDTH_PX`
+(default 8), independently of the ordinary handle width. It uses the horizontal
+split cursor, with arrows and a vertical divider, for rolling both clips. The
+ordinary right handle of the left clip sits immediately before the joint handle;
+the ordinary left handle of the right clip sits immediately after it. Each retains
+its full width, without overlapping the joint handle. Opening a gap restores their
+50/50 placement on the clip edges immediately, including during the preview.
+The joint handle has its own cutoff, `MOUFFETTE_TIMELINE_CLIP_JOINT_MIN_RESIZE_WIDTH_PX`
+(default 24; 0 disables it), measured against the **sum of the two displayed clip
+widths**. Individual resizing still uses the separate per-clip cutoff. An ongoing
+joint gesture retains its handle and mode even when one clip becomes very short.
+These dimensions remain fixed in viewport pixels. Cursor feedback
+follows the chosen mode throughout the drag, including outside the viewport;
+holding Control temporarily uses the independent overwrite cursor.
+While rolling, Shift snapping excludes the clip boundaries of both edited clips,
+including their original shared boundary. Other clips, stationary keyframes and
+the playhead remain snap targets.
 Overlapping zones belong to the nearest clip body, independently of selection
 or stacking order; exact ties go to the clip on the right. Clip bodies use an
 open hand on hover and the canvas's closed hand while moving. Clips support

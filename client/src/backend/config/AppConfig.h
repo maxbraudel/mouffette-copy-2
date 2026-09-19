@@ -86,6 +86,10 @@ public:
         TimelineHeightPx,
         TimelineRulerHeightPx,
         TimelineClipTrackHeightPx,
+        TimelineClipResizeHandleWidthPx,
+        TimelineClipJointResizeHandleWidthPx,
+        TimelineClipJointMinResizeWidthPx,
+        TimelineClipMinResizeWidthPx,
         TimelineMinTracksAbove,
         TimelineMinTracksBelow,
         TimelineKeyframeSizePx,
@@ -228,6 +232,10 @@ public:
     int timelineHeightPx() const { return m_timelineHeightPx; }
     int timelineRulerHeightPx() const { return m_timelineRulerHeightPx; }
     int timelineClipTrackHeightPx() const { return m_timelineClipTrackHeightPx; }
+    int timelineClipResizeHandleWidthPx() const { return m_timelineClipResizeHandleWidthPx; }
+    int timelineClipJointResizeHandleWidthPx() const { return m_timelineClipJointResizeHandleWidthPx; }
+    int timelineClipJointMinResizeWidthPx() const { return m_timelineClipJointMinResizeWidthPx; }
+    int timelineClipMinResizeWidthPx() const { return m_timelineClipMinResizeWidthPx; }
     int timelineMinTracksAbove() const { return m_timelineMinTracksAbove; }
     int timelineMinTracksBelow() const { return m_timelineMinTracksBelow; }
     int timelineKeyframeSizePx() const { return m_timelineKeyframeSizePx; }
@@ -333,6 +341,10 @@ private:
     int m_timelineHeightPx = 240;
     int m_timelineRulerHeightPx = 28;
     int m_timelineClipTrackHeightPx = 48;
+    int m_timelineClipResizeHandleWidthPx = 8;
+    int m_timelineClipJointResizeHandleWidthPx = 8;
+    int m_timelineClipJointMinResizeWidthPx = 24;
+    int m_timelineClipMinResizeWidthPx = 24;
     int m_timelineMinTracksAbove = 10;
     int m_timelineMinTracksBelow = 10;
     int m_timelineKeyframeSizePx = 10;

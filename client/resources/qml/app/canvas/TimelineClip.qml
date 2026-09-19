@@ -27,6 +27,10 @@ Rectangle {
     property real pointerPanelY: 0
     readonly property int shownTrack: dragging ? previewTrack : modelData.displayTrackIndex
     property int editEdge: 0
+    property bool editRolling: false
+    readonly property int editCursor: editEdge === 0
+        ? (dragging ? Qt.ClosedHandCursor : Qt.OpenHandCursor)
+        : editRolling && !panel.controlHeld ? Qt.SplitHCursor : Qt.SizeHorCursor
     property real previewStart: 0
     property real previewEnd: 0
     property real rawMs: 0
@@ -39,12 +43,17 @@ Rectangle {
     readonly property real shownStart: dragging ? previewStart : linkedPreview ? linkedPreview.startMs : modelData.startMs
     readonly property real shownEnd: dragging ? previewEnd : linkedPreview ? linkedPreview.endMs : modelData.endMs
     readonly property bool selected: interactive && modelData.selected
+    // Time zoom changes clip geometry, not the item scale: these stay in viewport pixels.
+    readonly property real resizeHandleWidth: panel.timeline ? panel.timeline.clipResizeHandleWidthPx : 8
+    readonly property real minResizeWidth: panel.timeline ? panel.timeline.clipMinResizeWidthPx : 24
+    readonly property bool resizeAvailable: width >= minResizeWidth
     function refreshPreview() {
-        var snap = panel.snapResult(rawMs, modelData.id, editEdge === 0 ? modelData.durationMs : 0, true)
+        var snap = panel.snapResult(rawMs, modelData.id, editEdge === 0 ? modelData.durationMs : 0,
+            true, editRolling && !panel.controlHeld ? editEdge : 0)
         var wantedStart = editEdge > 0 ? initialStart : snap.timeMs
         var wantedEnd = editEdge < 0 ? initialEnd : editEdge > 0 ? snap.timeMs : wantedStart + modelData.durationMs
         var result = panel.timeline.previewClipEdit(modelData.id, wantedStart, wantedEnd, requestedTrack,
-            editEdge, lastValidStart, lastValidEnd, lastValidTrack, panel.controlHeld, snap)
+            editEdge, lastValidStart, lastValidEnd, lastValidTrack, panel.controlHeld, snap, editRolling)
         if (result.startMs === undefined) { cancelEdit(); return }
         adjacentPreview = result.adjacentClip || null
         previewStart = result.startMs; previewEnd = result.endMs; previewTrack = result.row
@@ -60,7 +69,7 @@ Rectangle {
             initialTrack + Math.round((point.y - pressContentY) / trackHeight))) : initialTrack
         refreshPreview()
     }
-    function beginEdit(edge, mouse, area) {
+    function beginEdit(edge, mouse, area, rolling) {
         if (mouse.button !== Qt.LeftButton && !(mouse.modifiers & panel.controlModifier)) {
             mouse.accepted = false; return
         }
@@ -72,7 +81,7 @@ Rectangle {
         previewStart = initialStart; previewEnd = initialEnd
         adjacentPreview = null
         lastValidStart = initialStart; lastValidEnd = initialEnd
-        editEdge = edge; rawMs = edge > 0 ? initialEnd : initialStart
+        editEdge = edge; editRolling = !!rolling; rawMs = edge > 0 ? initialEnd : initialStart
         var point = area.mapToItem(timeContent, mouse.x, mouse.y)
         pressContentX = point.x; pressContentY = point.y
         var panelPoint = area.mapToItem(panel, mouse.x, mouse.y)
@@ -107,7 +116,7 @@ Rectangle {
         editPending = false; dragging = false; panel.endDrag()
         if (start === initialStart && end === initialEnd && track === initialTrack) return
         if (edge === 0) panel.timeline.moveClip(id, start, track, overwrite)
-        else panel.timeline.trimClip(id, start, end, overwrite)
+        else panel.timeline.trimClip(id, start, end, overwrite, editRolling)
     }
     x: 12 + shownStart * panel.pixelsPerMs
     y: (shownTrack + panel.firstTrackIndex) * trackHeight
@@ -188,11 +197,15 @@ Rectangle {
             id: trimHandle
             required property int modelData
             objectName: modelData < 0 ? "timelineClipTrimStart" : "timelineClipTrimEnd"
+            readonly property bool besideJoint: panel.jointResizeAvailable(clipItem.modelData, modelData)
             x: (modelData < 0 ? 0 : clipItem.width) - width / 2
-            width: Math.min(8, clipItem.width / 3); height: clipItem.height
+                - (besideJoint ? modelData * (width + panel.jointResizeWidth) / 2 : 0)
+            width: clipItem.resizeHandleWidth; height: clipItem.height
             visible: clipItem.interactive
             enabled: clipItem.interactive && panel.editable
-            cursorShape: Qt.SizeHorCursor
+            // Keep the gesture chosen on press, even if a trim crosses the size threshold.
+            cursorShape: clipItem.editPending ? clipItem.editCursor
+                : clipItem.resizeAvailable ? Qt.SizeHorCursor : Qt.OpenHandCursor
             containmentMask: QtObject {
                 function contains(p: point): bool {
                     if (p.x < 0 || p.x >= trimHandle.width
@@ -204,7 +217,8 @@ Rectangle {
                 }
             }
             acceptedButtons: Qt.LeftButton | (Qt.platform.os === "osx" ? Qt.RightButton : Qt.NoButton)
-            onPressed: mouse => clipItem.beginEdit(modelData, mouse, trimHandle)
+            onPressed: mouse => clipItem.beginEdit(clipItem.resizeAvailable ? modelData : 0,
+                mouse, trimHandle, false)
             onPositionChanged: mouse => { if (pressed) clipItem.updateEdit(mouse, trimHandle) }
             onReleased: mouse => clipItem.finishEdit(mouse, trimHandle)
             onCanceled: clipItem.cancelEdit()

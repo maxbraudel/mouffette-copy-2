@@ -17,6 +17,10 @@ Maximum duration and slot cadence are copied to each new project. Existing proje
 | `MOUFFETTE_TIMELINE_HEIGHT_PX` | 240 | 120–1200 |
 | `MOUFFETTE_TIMELINE_RULER_HEIGHT_PX` | 28 | 16–160 |
 | `MOUFFETTE_TIMELINE_CLIP_TRACK_HEIGHT_PX` | 48 | 24–600 |
+| `MOUFFETTE_TIMELINE_CLIP_RESIZE_HANDLE_WIDTH_PX` | 8 | integer 1–100 |
+| `MOUFFETTE_TIMELINE_CLIP_JOINT_RESIZE_HANDLE_WIDTH_PX` | 8 | integer 1–100 |
+| `MOUFFETTE_TIMELINE_CLIP_JOINT_MIN_RESIZE_WIDTH_PX` | 24 | integer 0–1000 |
+| `MOUFFETTE_TIMELINE_CLIP_MIN_RESIZE_WIDTH_PX` | 24 | integer 0–1000 |
 | `MOUFFETTE_TIMELINE_MIN_TRACKS_ABOVE` | 10 | integer 0–9999 |
 | `MOUFFETTE_TIMELINE_MIN_TRACKS_BELOW` | 10 | integer 0–9999 |
 | `MOUFFETTE_TIMELINE_KEYFRAME_SIZE_PX` | 10 | 4–64 |
@@ -26,6 +30,21 @@ Maximum duration and slot cadence are copied to each new project. Existing proje
 | `MOUFFETTE_TIMELINE_INITIAL_VIEW_DURATION_MS` | 15000 | 1–604800000 |
 
 Production inherits these values unless explicitly overridden in `.env.production`. Shift snapping uses screen pixels, so its tolerance stays consistent at every zoom level.
+
+Clip edge hit zones keep their configured width in logical viewport pixels at
+every zoom level. Below the independently configured minimum displayed clip
+width, the entire clip and its edge zones move the clip instead of resizing it.
+A separate joint handle is centered on each exact clip junction. The ordinary
+handles sit immediately to its left and right, retaining their full configured
+width with no overlap between the three zones. The widths are independent; the
+joint width may equal or exceed the ordinary width. When the junction disappears,
+the ordinary handles return to their 50/50 placement on the clip edges.
+The joint minimum is measured against the **combined displayed width of both clips**,
+independently of the ordinary per-clip minimum. Setting either minimum to 0 disables
+that cutoff. The mode of an ongoing
+gesture does not change when crossing the threshold. These settings are read at
+startup: rebuild after editing the embedded `client/.env`, or restart with
+`--env-file <path>` to load an external file without rebuilding.
 
 Clip dragging scrolls at viewport edges at the configured speed in logical pixels
 per second, horizontally and vertically. The default is two 48-pixel tracks per

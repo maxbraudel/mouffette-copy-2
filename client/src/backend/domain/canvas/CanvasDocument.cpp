@@ -951,7 +951,7 @@ bool CanvasDocument::timelinePlacementFree(const QString& clipId, const ClipPlac
 }
 
 CanvasDocument::ClipPlacement CanvasDocument::previewTimelineClip(const QString& clipId,
-    ClipPlacement requested, int edge, const ClipPlacement& lastValid, PlacementMode mode) const
+    ClipPlacement requested, int edge, const ClipPlacement& lastValid, PlacementMode mode, TrimMode trimMode) const
 {
     const auto* media = mediaForTimelineClip(clipId);
     if (!media) return lastValid;
@@ -971,7 +971,7 @@ CanvasDocument::ClipPlacement CanvasDocument::previewTimelineClip(const QString&
         }
     }
     if (mode == PlacementMode::Overwrite) return requested;
-    if (const auto* neighbour = adjacentTimelineClip(clipId, edge)) {
+    if (const auto* neighbour = trimMode == TrimMode::Rolling ? adjacentTimelineClip(clipId, edge) : nullptr) {
         // Roll the shared boundary inside the pair's fixed outer edges.
         const auto& clip = neighbour->timelineTrack().clip;
         if (edge < 0) requested.startSlot = qMax(clip.startSlot + 1, requested.startSlot);
@@ -1243,7 +1243,8 @@ bool CanvasDocument::moveTimelineClip(const QString& clipId, qint64 startSlot, i
     return applyTimelinePlacement(withTimeline(timelineMediaSnapshot(media->mediaId()), track), media->sourcePath(), false, error, mode);
 }
 
-bool CanvasDocument::trimTimelineClip(const QString& clipId, qint64 startSlot, qint64 endSlot, QString* error, PlacementMode mode)
+bool CanvasDocument::trimTimelineClip(const QString& clipId, qint64 startSlot, qint64 endSlot, QString* error,
+                                      PlacementMode mode, TrimMode trimMode)
 {
     auto* media = mediaForTimelineClip(clipId);
     if (!media) return timelineFailure(error, "Unknown clip.");
@@ -1252,10 +1253,11 @@ bool CanvasDocument::trimTimelineClip(const QString& clipId, qint64 startSlot, q
     endSlot = qBound(startSlot + 1, endSlot, m_timelineSettings.maxSlot());
     const int edge = endSlot == track.clip.endSlot() && startSlot != track.clip.startSlot ? -1
         : startSlot == track.clip.startSlot && endSlot != track.clip.endSlot() ? 1 : 0;
-    auto* neighbour = mode == PlacementMode::Avoid ? adjacentTimelineClip(clipId, edge) : nullptr;
+    auto* neighbour = mode == PlacementMode::Avoid && trimMode == TrimMode::Rolling
+        ? adjacentTimelineClip(clipId, edge) : nullptr;
     if (neighbour) {
         const ClipPlacement original{track.clip.startSlot, track.clip.endSlot(), track.trackIndex};
-        const auto placement = previewTimelineClip(clipId, {startSlot, endSlot, track.trackIndex}, edge, original);
+        const auto placement = previewTimelineClip(clipId, {startSlot, endSlot, track.trackIndex}, edge, original, mode, trimMode);
         startSlot = placement.startSlot; endSlot = placement.endSlot;
     }
     if (track.clip.sourceStartSlot) *track.clip.sourceStartSlot += startSlot - track.clip.startSlot;

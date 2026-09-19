@@ -61,6 +61,7 @@ public:
     int timelineRow(int trackIndex) const;
     int timelineTrackAtRow(int row) const;
     enum class PlacementMode { Avoid, Overwrite };
+    enum class TrimMode { Independent, Rolling };
     struct ClipPlacement {
         qint64 startSlot = 0;
         qint64 endSlot = 0;
@@ -69,12 +70,14 @@ public:
     bool timelinePlacementFree(const QString& clipId, const ClipPlacement& placement) const;
     ClipPlacement previewTimelineClip(const QString& clipId, ClipPlacement requested,
                                       int edge, const ClipPlacement& lastValid,
-                                      PlacementMode mode = PlacementMode::Avoid) const;
+                                      PlacementMode mode = PlacementMode::Avoid,
+                                      TrimMode trimMode = TrimMode::Independent) const;
     QJsonObject timelineMediaSnapshot(const QString& mediaId) const;
     bool moveTimelineClip(const QString& clipId, qint64 startSlot, int trackIndex, QString* error = nullptr,
                           PlacementMode mode = PlacementMode::Avoid);
     bool trimTimelineClip(const QString& clipId, qint64 startSlot, qint64 endSlot, QString* error = nullptr,
-                          PlacementMode mode = PlacementMode::Avoid);
+                          PlacementMode mode = PlacementMode::Avoid,
+                          TrimMode trimMode = TrimMode::Independent);
     bool splitTimelineClip(const QString& clipId, qint64 slot, QString* error = nullptr);
     QString pasteTimelineClip(const QJsonObject& snapshot, const QHash<QString, QString>& sourcePaths,
                              qint64 startSlot, int trackIndex, QString* error = nullptr);

@@ -37,6 +37,7 @@ private slots:
     void loadsEmbeddedDefaults();
     void validatesRetentionAndDiagnostics();
     void configuresTimeline();
+    void configuresTimelineClipResizeZones();
     void configuresMinimumTimelineTracks();
     void appAlwaysOnTopIsOptionalAndPersistent();
     void configuresMediaRamReserve();
@@ -173,6 +174,86 @@ void AppConfigTest::configuresTimeline() {
     QVERIFY(config.load(options, &error));
     options.processEnvironment.insert(QStringLiteral("MOUFFETTE_TIMELINE_MAX_DURATION_MS"), QStringLiteral("0"));
     QVERIFY(!config.load(options, &error));
+}
+
+void AppConfigTest::configuresTimelineClipResizeZones() {
+    AppConfig config;
+    QCOMPARE(config.timelineClipResizeHandleWidthPx(), 8);
+    QCOMPARE(config.timelineClipJointResizeHandleWidthPx(), 8);
+    QCOMPARE(config.timelineClipJointMinResizeWidthPx(), 24);
+    QCOMPARE(config.timelineClipMinResizeWidthPx(), 24);
+    QTemporaryDir directory;
+    const auto path = writeEnvFile(directory, "resize.env",
+        "MOUFFETTE_TIMELINE_CLIP_RESIZE_HANDLE_WIDTH_PX=12\n"
+        "MOUFFETTE_TIMELINE_CLIP_JOINT_RESIZE_HANDLE_WIDTH_PX=6\n"
+        "MOUFFETTE_TIMELINE_CLIP_JOINT_MIN_RESIZE_WIDTH_PX=60\n"
+        "MOUFFETTE_TIMELINE_CLIP_MIN_RESIZE_WIDTH_PX=40\n");
+    QVERIFY(!path.isEmpty());
+    auto options = isolatedOptions(path);
+    QString error;
+    QVERIFY2(config.load(options, &error), qPrintable(error));
+    QCOMPARE(config.timelineClipResizeHandleWidthPx(), 12);
+    QCOMPARE(config.timelineClipJointResizeHandleWidthPx(), 6);
+    QCOMPARE(config.timelineClipJointMinResizeWidthPx(), 60);
+    QCOMPARE(config.timelineClipMinResizeWidthPx(), 40);
+    for (const bool handle : {true, false}) {
+        const QString key = handle ? "MOUFFETTE_TIMELINE_CLIP_RESIZE_HANDLE_WIDTH_PX"
+                                   : "MOUFFETTE_TIMELINE_CLIP_MIN_RESIZE_WIDTH_PX";
+        if (handle) options.processEnvironment.insert("MOUFFETTE_TIMELINE_CLIP_JOINT_RESIZE_HANDLE_WIDTH_PX", "1");
+        for (const int value : {handle ? 1 : 0, handle ? 100 : 1000}) {
+            options.processEnvironment.insert(key, QString::number(value));
+            QVERIFY2(config.load(options, &error), qPrintable(error));
+            QCOMPARE(handle ? config.timelineClipResizeHandleWidthPx() : config.timelineClipMinResizeWidthPx(), value);
+        }
+        for (const QString value : {handle ? QString("0") : QString("-1"),
+                                    handle ? QString("101") : QString("1001"), QString("1.5"), QString("abc")}) {
+            options.processEnvironment.insert(key, value);
+            QVERIFY(!config.load(options, &error));
+            QVERIFY(error.contains(key));
+        }
+        options.processEnvironment.remove(key);
+        options.processEnvironment.remove("MOUFFETTE_TIMELINE_CLIP_JOINT_RESIZE_HANDLE_WIDTH_PX");
+    }
+    const QString jointKey = "MOUFFETTE_TIMELINE_CLIP_JOINT_RESIZE_HANDLE_WIDTH_PX";
+    const QString normalKey = "MOUFFETTE_TIMELINE_CLIP_RESIZE_HANDLE_WIDTH_PX";
+    options.processEnvironment.insert(normalKey, "100");
+    for (const auto* value : {"1", "100"}) {
+        options.processEnvironment.insert(jointKey, value);
+        QVERIFY2(config.load(options, &error), qPrintable(error));
+        QCOMPARE(config.timelineClipJointResizeHandleWidthPx(), QString(value).toInt());
+    }
+    for (const auto* value : {"0", "101", "1.5", "abc"}) {
+        options.processEnvironment.insert(jointKey, value);
+        QVERIFY(!config.load(options, &error)); QVERIFY(error.contains(jointKey));
+    }
+    options.processEnvironment.insert(normalKey, "12");
+    for (const auto* value : {"6", "12", "20", "100"}) {
+        options.processEnvironment.insert(jointKey, value);
+        QVERIFY2(config.load(options, &error), qPrintable(error));
+        QCOMPARE(config.timelineClipJointResizeHandleWidthPx(), QString(value).toInt());
+    }
+    options.processEnvironment.insert(jointKey, "11");
+    QVERIFY2(config.load(options, &error), qPrintable(error));
+    options.processEnvironment.remove(normalKey); options.processEnvironment.remove(jointKey);
+    const QString minimumJointKey = "MOUFFETTE_TIMELINE_CLIP_JOINT_MIN_RESIZE_WIDTH_PX";
+    for (const auto* value : {"0", "24", "1000"}) {
+        options.processEnvironment.insert(minimumJointKey, value);
+        QVERIFY2(config.load(options, &error), qPrintable(error));
+        QCOMPARE(config.timelineClipJointMinResizeWidthPx(), QString(value).toInt());
+        QCOMPARE(config.timelineClipMinResizeWidthPx(), 40);
+    }
+    for (const auto* value : {"-1", "1001", "1.5", "abc"}) {
+        options.processEnvironment.insert(minimumJointKey, value);
+        QVERIFY(!config.load(options, &error)); QVERIFY(error.contains(minimumJointKey));
+    }
+    options.processEnvironment.remove(minimumJointKey);
+    // Loading a fresh configuration restores compiled defaults, without stale overrides.
+    options.defaultEnvFilePath.clear();
+    QVERIFY2(config.load(options, &error), qPrintable(error));
+    QCOMPARE(config.timelineClipResizeHandleWidthPx(), 8);
+    QCOMPARE(config.timelineClipJointResizeHandleWidthPx(), 8);
+    QCOMPARE(config.timelineClipJointMinResizeWidthPx(), 24);
+    QCOMPARE(config.timelineClipMinResizeWidthPx(), 24);
 }
 
 void AppConfigTest::appAlwaysOnTopIsOptionalAndPersistent() {

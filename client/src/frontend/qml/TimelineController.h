@@ -49,6 +49,10 @@ class TimelineController final : public QObject
     Q_PROPERTY(int timelineHeightPx READ timelineHeightPx CONSTANT)
     Q_PROPERTY(int rulerHeightPx READ rulerHeightPx CONSTANT)
     Q_PROPERTY(int clipTrackHeightPx READ clipTrackHeightPx CONSTANT)
+    Q_PROPERTY(int clipResizeHandleWidthPx READ clipResizeHandleWidthPx CONSTANT)
+    Q_PROPERTY(int clipJointResizeHandleWidthPx READ clipJointResizeHandleWidthPx CONSTANT)
+    Q_PROPERTY(int clipJointMinResizeWidthPx READ clipJointMinResizeWidthPx CONSTANT)
+    Q_PROPERTY(int clipMinResizeWidthPx READ clipMinResizeWidthPx CONSTANT)
     Q_PROPERTY(int keyframeSizePx READ keyframeSizePx CONSTANT)
     Q_PROPERTY(qreal otherKeyframeOpacity READ otherKeyframeOpacity CONSTANT)
     Q_PROPERTY(int snapDistancePx READ snapDistancePx CONSTANT)
@@ -92,6 +96,10 @@ public:
     int timelineHeightPx() const;
     int rulerHeightPx() const;
     int clipTrackHeightPx() const;
+    int clipResizeHandleWidthPx() const;
+    int clipJointResizeHandleWidthPx() const;
+    int clipJointMinResizeWidthPx() const;
+    int clipMinResizeWidthPx() const;
     int keyframeSizePx() const;
     qreal otherKeyframeOpacity() const;
     int snapDistancePx() const;
@@ -108,10 +116,10 @@ public:
     Q_INVOKABLE void selectClip(const QString& id);
     Q_INVOKABLE void setActiveTrackIndex(int index);
     Q_INVOKABLE void moveClip(const QString& id, qreal startMs, int row = -1, bool overwrite = false);
-    Q_INVOKABLE void trimClip(const QString& id, qreal startMs, qreal endMs, bool overwrite = false);
+    Q_INVOKABLE void trimClip(const QString& id, qreal startMs, qreal endMs, bool overwrite = false, bool rolling = false);
     Q_INVOKABLE QVariantMap previewClipEdit(const QString& id, qreal startMs, qreal endMs, int row,
                                           int edge, qreal lastStartMs, qreal lastEndMs, int lastRow,
-                                          bool overwrite, const QVariantMap& snap = QVariantMap()) const;
+                                          bool overwrite, const QVariantMap& snap = QVariantMap(), bool rolling = false) const;
     Q_INVOKABLE void splitClip();
     Q_INVOKABLE void deleteSelected();
     Q_INVOKABLE void copySelected();
@@ -123,7 +131,7 @@ public:
     Q_INVOKABLE void clearKeyframeSelection();
     Q_INVOKABLE QVariantMap snapTime(qreal timeMs, qreal pixelsPerMs,
                                     const QString& excludeId,
-                                    qreal clipDurationMs = 0, bool includePlayhead = false) const;
+                                    qreal clipDurationMs = 0, bool includePlayhead = false, int rollingEdge = 0) const;
 
 signals:
     void changed();

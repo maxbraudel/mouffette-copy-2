@@ -18,6 +18,7 @@ FocusScope {
     readonly property real maximumMs: timeline ? timeline.maxDurationMs : 180000
     property real viewDurationMs: timeline ? Math.min(maximumMs, timeline.initialViewDurationMs) : 15000
     readonly property real pixelsPerMs: Math.max(1, trackViewport.width - 24) / Math.max(1, viewDurationMs)
+    readonly property real jointResizeWidth: timeline ? timeline.clipJointResizeHandleWidthPx : 8
     readonly property real rulerHeight: timeline ? timeline.rulerHeightPx : 28
     readonly property real visibleStartX: trackViewport.contentX
     readonly property real visibleEndX: trackViewport.contentX + trackViewport.width
@@ -71,8 +72,7 @@ FocusScope {
         visible: root.visible && !!root.activeDrag && !!root.activeDrag.isClipDrag
         acceptedButtons: Qt.NoButton
         hoverEnabled: true
-        cursorShape: root.activeDrag && root.activeDrag.editEdge !== 0
-            ? Qt.SizeHorCursor : Qt.ClosedHandCursor
+        cursorShape: root.activeDrag && root.activeDrag.isClipDrag ? root.activeDrag.editCursor : Qt.ClosedHandCursor
     }
 
     function formatTime(ms) {
@@ -86,9 +86,9 @@ FocusScope {
     }
     function focusTrack() { root.forceActiveFocus() }
     function clampTime(ms) { return timeline ? timeline.gridTime(ms) : 0 }
-    function snapResult(ms, excludeId, duration, includePlayhead) {
+    function snapResult(ms, excludeId, duration, includePlayhead, rollingEdge) {
         if (!shiftHeld || !timeline) return { timeMs: clampTime(ms), snapped: false }
-        return timeline.snapTime(ms, pixelsPerMs, excludeId || "", duration || 0, !!includePlayhead)
+        return timeline.snapTime(ms, pixelsPerMs, excludeId || "", duration || 0, !!includePlayhead, rollingEdge || 0)
     }
     function showSnapGuide(result) {
         snapGuide = result && result.snapped ? result : null
@@ -99,6 +99,40 @@ FocusScope {
         return result.timeMs
     }
     function endDrag() { activeDrag = null; showSnapGuide(null) }
+    function shownClipInterval(data) {
+        if (activeDrag && activeDrag.isClipDrag) {
+            if (activeDrag.modelData.id === data.id)
+                return { startMs: activeDrag.shownStart, endMs: activeDrag.shownEnd,
+                    displayTrackIndex: activeDrag.shownTrack }
+            if (activeDrag.adjacentPreview && activeDrag.adjacentPreview.id === data.id)
+                return { startMs: activeDrag.adjacentPreview.startMs, endMs: activeDrag.adjacentPreview.endMs,
+                    displayTrackIndex: data.displayTrackIndex }
+        }
+        return data
+    }
+    function jointResizeAvailable(data, edge) {
+        var neighbour = edge < 0 ? data.startNeighbour : data.endNeighbour
+        if (!timeline || !neighbour || !neighbour.id) return false
+        var own = shownClipInterval(data)
+        var other = shownClipInterval(neighbour)
+        if (own.displayTrackIndex !== other.displayTrackIndex
+                || (edge < 0 ? own.startMs !== other.endMs : own.endMs !== other.startMs)) return false
+        // Keep the grabbed junction and its flanking zones together through minimum-length previews.
+        if (activeDrag && activeDrag.isClipDrag && activeDrag.editRolling && activeDrag.adjacentPreview
+                && ((activeDrag.modelData.id === data.id && activeDrag.adjacentPreview.id === neighbour.id)
+                    || (activeDrag.modelData.id === neighbour.id && activeDrag.adjacentPreview.id === data.id))) return true
+        // Joint eligibility uses the pair's combined width, independently of either clip's own threshold.
+        var combinedWidth = Math.max(2, (own.endMs - own.startMs) * pixelsPerMs)
+            + Math.max(2, (other.endMs - other.startMs) * pixelsPerMs)
+        return combinedWidth >= timeline.clipJointMinResizeWidthPx
+    }
+    function clipItemForId(id) {
+        for (var i = 0; i < clipRepeater.count; ++i) {
+            var item = clipRepeater.itemAt(i)
+            if (item && item.modelData.id === id) return item
+        }
+        return null
+    }
     function clipOwnsResizePoint(clip, contentX) {
         var distance = Math.max(clip.x - contentX, contentX - clip.x - clip.width, 0)
         for (var i = 0; i < clipRepeater.count; ++i) {
@@ -871,6 +905,43 @@ FocusScope {
                                 panel: root
                                 timeContent: clipViewport.contentItem
                                 trackHeight: root.clipHeight
+                            }
+                        }
+                        Repeater {
+                            model: root.timeline ? root.timeline.clipModel : null
+                            MouseArea {
+                                id: jointHandle
+                                required property var modelData
+                                objectName: "timelineClipJointTrim"
+                                property var editingClip: null
+                                x: 12 + (editingClip && editingClip.editPending ? editingClip.shownEnd : modelData.endMs)
+                                    * root.pixelsPerMs - width / 2
+                                y: (modelData.displayTrackIndex + root.firstTrackIndex) * root.clipHeight
+                                width: root.jointResizeWidth
+                                height: root.clipHeight
+                                z: 4 // Above clip bodies; the ordinary handles flank it without overlap.
+                                visible: pressed || root.jointResizeAvailable(modelData, 1)
+                                enabled: root.editable
+                                cursorShape: editingClip && editingClip.editPending ? editingClip.editCursor
+                                    : root.controlHeld ? Qt.SizeHorCursor : Qt.SplitHCursor
+                                acceptedButtons: Qt.LeftButton | (Qt.platform.os === "osx" ? Qt.RightButton : Qt.NoButton)
+                                onPressed: mouse => {
+                                    editingClip = root.clipItemForId(modelData.id)
+                                    if (!editingClip) { mouse.accepted = false; return }
+                                    editingClip.beginEdit(1, mouse, jointHandle, true)
+                                    if (!editingClip.editPending) editingClip = null
+                                }
+                                onPositionChanged: mouse => {
+                                    if (pressed && editingClip) editingClip.updateEdit(mouse, jointHandle)
+                                }
+                                onReleased: mouse => {
+                                    if (editingClip) editingClip.finishEdit(mouse, jointHandle)
+                                    editingClip = null
+                                }
+                                onCanceled: {
+                                    if (editingClip) editingClip.cancelEdit()
+                                    editingClip = null
+                                }
                             }
                         }
                     }

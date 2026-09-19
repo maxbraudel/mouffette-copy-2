@@ -1669,24 +1669,208 @@ private slots:
         QCOMPARE(media->timelineTrack().clip.endSlot(), original.endSlot() - (edge > 0 ? trimmedSlots : 0));
     }
 
+    void smallClipsMoveFromTheirBodyAndEdgeZones_data()
+    {
+        QTest::addColumn<int>("durationSlots");
+        QTest::addColumn<int>("region");
+        for (const int duration : {1, 9})
+            for (int region = -2; region <= 2; ++region)
+                QTest::newRow(qPrintable(QString("slots-%1-region-%2").arg(duration).arg(region)))
+                    << duration << region;
+    }
+
+    void smallClipsMoveFromTheirBodyAndEdgeZones()
+    {
+        QFETCH(int, durationSlots); QFETCH(int, region);
+        TimelineFixture f; QVERIFY(f.initialize());
+        auto* doc = f.host->document();
+        auto* media = doc->addText({}, "Small"); QVERIFY(media);
+        auto track = media->timelineTrack();
+        track.clip.startSlot = 120; track.clip.durationSlots = durationSlots;
+        media->setTimelineTrack(track);
+        const auto& grid = doc->timelineSettings();
+        f.view.rootObject()->setProperty("viewDurationMs",
+            grid.timeMs(1) * (f.item("timelineTracks")->width() - 24) / 2);
+        f.item("timelineClipViewport")->setProperty("contentY", 0.0);
+        auto* clip = f.item("timelineClip"); QVERIFY(clip);
+        QVERIFY(clip->width() < 24);
+        const qreal x = region == -2 ? -2 : region == -1 ? 1 : region == 0 ? clip->width()/2
+            : region == 1 ? clip->width() - 1 : clip->width() + 2;
+        const auto from = clip->mapToScene({x, clip->height()/2}).toPoint();
+        const auto to = from + QPoint(40, 0);
+        QSignalSpy writes(doc, &CanvasDocument::documentChanged);
+        QTest::mouseMove(&f.view, from);
+        QTRY_COMPARE(f.view.cursor().shape(), Qt::OpenHandCursor);
+        QTest::mousePress(&f.view, Qt::LeftButton, Qt::NoModifier, from);
+        QCOMPARE(clip->property("editEdge").toInt(), 0);
+        QCOMPARE(f.timeline.selectedClipId(), track.clip.id);
+        f.movePointer(to);
+        QVERIFY(clip->property("dragging").toBool());
+        QTRY_COMPARE(f.view.cursor().shape(), Qt::ClosedHandCursor);
+        QCOMPARE(writes.count(), 0);
+        QTest::mouseRelease(&f.view, Qt::LeftButton, Qt::NoModifier, to);
+        QCOMPARE(media->timelineTrack().clip.startSlot, track.clip.startSlot + grid.nearestSlot(40 / f.scale()));
+        QCOMPARE(media->timelineTrack().clip.durationSlots, track.clip.durationSlots);
+        QCOMPARE(writes.count(), 1);
+    }
+
+    void clipEdgeZonesStayFixedWhenZoomingAndResizingTheViewport_data()
+    {
+        QTest::addColumn<int>("handleWidth"); QTest::addColumn<int>("minimumWidth");
+        QTest::newRow("defaults") << 8 << 24;
+        QTest::newRow("custom") << 12 << 40;
+        QTest::newRow("no-threshold") << 4 << 0;
+    }
+
+    void clipEdgeZonesStayFixedWhenZoomingAndResizingTheViewport()
+    {
+        QFETCH(int, handleWidth); QFETCH(int, minimumWidth);
+        const AppConfig previous = AppConfig::instance();
+        const auto restore = qScopeGuard([&] { AppConfig::instance() = previous; });
+        AppConfig::LoadOptions options;
+        options.defaultEnvFilePath.clear();
+        options.processEnvironment.insert("MOUFFETTE_TIMELINE_CLIP_RESIZE_HANDLE_WIDTH_PX", QString::number(handleWidth));
+        options.processEnvironment.insert("MOUFFETTE_TIMELINE_CLIP_JOINT_RESIZE_HANDLE_WIDTH_PX", QString::number(handleWidth / 2));
+        options.processEnvironment.insert("MOUFFETTE_TIMELINE_CLIP_MIN_RESIZE_WIDTH_PX", QString::number(minimumWidth));
+        QString error;
+        QVERIFY2(AppConfig::instance().load(options, &error), qPrintable(error));
+        TimelineFixture f; QVERIFY(f.initialize());
+        auto* doc = f.host->document();
+        auto* media = doc->addText({}, "Zoom"); QVERIFY(media);
+        auto track = media->timelineTrack();
+        track.clip.startSlot = 30; track.clip.durationSlots = 30;
+        media->setTimelineTrack(track);
+        f.item("timelineClipViewport")->setProperty("contentY", 0.0);
+        auto* clip = f.item("timelineClip"); QVERIFY(clip);
+        for (const int viewportWidth : {1100, 680}) {
+            f.view.resize(viewportWidth, 240);
+            QTRY_COMPARE(f.view.rootObject()->width(), qreal(viewportWidth));
+            for (const qreal clipWidth : {120.0, qreal(qMax(12, minimumWidth)),
+                                         qreal(qMax(12, minimumWidth - 1)), 12.0, 48.0}) {
+                f.view.rootObject()->setProperty("viewDurationMs",
+                    doc->timelineSettings().timeMs(30) * (f.item("timelineTracks")->width() - 24) / clipWidth);
+                QVERIFY(qAbs(clip->width() - clipWidth) < 0.001);
+                for (const auto* name : {"timelineClipTrimStart", "timelineClipTrimEnd"}) {
+                    auto* handle = f.item(name); QVERIFY(handle);
+                    const auto extent = handle->mapToScene({handle->width(), 0}) - handle->mapToScene({0, 0});
+                    QCOMPARE(extent.x(), qreal(handleWidth));
+                }
+                const auto from = clip->mapToScene({1, clip->height()/2}).toPoint();
+                QTest::mouseMove(&f.view, from);
+                QTRY_COMPARE(f.view.cursor().shape(), clipWidth >= minimumWidth ? Qt::SizeHorCursor : Qt::OpenHandCursor);
+                QTest::mousePress(&f.view, Qt::LeftButton, Qt::NoModifier, from);
+                QCOMPARE(clip->property("editEdge").toInt(), clipWidth >= minimumWidth ? -1 : 0);
+                QTest::mouseRelease(&f.view, Qt::LeftButton, Qt::NoModifier, from);
+            }
+        }
+        QCOMPARE(media->timelineTrack().toJson(), track.toJson());
+    }
+
+    void clipResizeCanCrossTheSmallClipThreshold_data()
+    {
+        QTest::addColumn<int>("edge");
+        QTest::newRow("start") << -1;
+        QTest::newRow("end") << 1;
+    }
+
+    void clipResizeCanCrossTheSmallClipThreshold()
+    {
+        QFETCH(int, edge);
+        TimelineFixture f; QVERIFY(f.initialize());
+        auto* doc = f.host->document();
+        auto* media = doc->addText({}, "Shrink"); QVERIFY(media);
+        auto track = media->timelineTrack();
+        track.clip.startSlot = 120; track.clip.durationSlots = 30;
+        media->setTimelineTrack(track);
+        const auto& grid = doc->timelineSettings();
+        f.view.rootObject()->setProperty("viewDurationMs",
+            grid.timeMs(1) * (f.item("timelineTracks")->width() - 24) / 2);
+        f.item("timelineClipViewport")->setProperty("contentY", 0.0);
+        auto* clip = f.item("timelineClip"); QVERIFY(clip);
+        const auto from = clip->mapToScene({edge < 0 ? 1.0 : clip->width() - 1, clip->height()/2}).toPoint();
+        QTest::mousePress(&f.view, Qt::LeftButton, Qt::NoModifier, from);
+        const auto to = from + QPoint(-edge * 42, 0);
+        f.movePointer(to);
+        QVERIFY(clip->width() < 24);
+        QVERIFY(clip->property("dragging").toBool());
+        QCOMPARE(clip->property("editEdge").toInt(), edge);
+        QTRY_COMPARE(f.view.cursor().shape(), Qt::SizeHorCursor);
+        QTest::mouseRelease(&f.view, Qt::LeftButton, Qt::NoModifier, to);
+        QCOMPARE(media->timelineTrack().clip.durationSlots, 9);
+        QCOMPARE(media->timelineTrack().clip.startSlot, track.clip.startSlot + (edge < 0 ? 21 : 0));
+        const auto nextPress = clip->mapToScene({edge < 0 ? 1.0 : clip->width() - 1, clip->height()/2}).toPoint();
+        QTest::mouseMove(&f.view, nextPress);
+        QTRY_COMPARE(f.view.cursor().shape(), Qt::OpenHandCursor);
+        QTest::mouseClick(&f.view, Qt::LeftButton, Qt::NoModifier, nextPress);
+        QCOMPARE(clip->property("editEdge").toInt(), 0);
+    }
+
+    void smallClipBodyWinsOverNeighbourResizeZone_data()
+    {
+        QTest::addColumn<bool>("leftSide"); QTest::addColumn<bool>("selectSmall");
+        for (const bool left : {true, false})
+            for (const bool selected : {true, false})
+                QTest::newRow(qPrintable(QString("left-%1-selected-%2").arg(left).arg(selected))) << left << selected;
+    }
+
+    void smallClipBodyWinsOverNeighbourResizeZone()
+    {
+        QFETCH(bool, leftSide); QFETCH(bool, selectSmall);
+        TimelineFixture f; QVERIFY(f.initialize());
+        auto* doc = f.host->document();
+        auto* large = doc->addText({}, "Large");
+        auto* small = doc->addText({}, "Small"); QVERIFY(large && small);
+        auto largeTrack = large->timelineTrack();
+        largeTrack.trackIndex = 0; largeTrack.clip.startSlot = 120; largeTrack.clip.durationSlots = 60;
+        large->setTimelineTrack(largeTrack);
+        auto smallTrack = small->timelineTrack();
+        smallTrack.trackIndex = 0; smallTrack.clip.startSlot = leftSide ? 117 : 180; smallTrack.clip.durationSlots = 3;
+        small->setTimelineTrack(smallTrack);
+        f.timeline.selectClip((selectSmall ? smallTrack : largeTrack).clip.id);
+        const auto& grid = doc->timelineSettings();
+        f.view.rootObject()->setProperty("viewDurationMs",
+            grid.timeMs(1) * (f.item("timelineTracks")->width() - 24) / 2);
+        f.item("timelineClipViewport")->setProperty("contentY", 0.0);
+        QQuickItem* clip = nullptr;
+        for (auto* item : timelineItems(f.view.rootObject(), "timelineClip"))
+            if (item->property("modelData").toMap().value("id").toString() == smallTrack.clip.id) clip = item;
+        QVERIFY(clip);
+        const auto from = clip->mapToScene({leftSide ? 1 : clip->width() - 1, clip->height()/2}).toPoint();
+        const auto to = from + QPoint(leftSide ? -40 : 40, 0);
+        QTest::mouseMove(&f.view, from);
+        QTRY_COMPARE(f.view.cursor().shape(), Qt::OpenHandCursor);
+        QTest::mousePress(&f.view, Qt::LeftButton, Qt::NoModifier, from);
+        QCOMPARE(f.timeline.selectedClipId(), smallTrack.clip.id);
+        QCOMPARE(clip->property("editEdge").toInt(), 0);
+        f.movePointer(to);
+        QTest::mouseRelease(&f.view, Qt::LeftButton, Qt::NoModifier, to);
+        QCOMPARE(small->timelineTrack().clip.startSlot, smallTrack.clip.startSlot + (leftSide ? -20 : 20));
+        QCOMPARE(small->timelineTrack().clip.durationSlots, 3);
+        QCOMPARE(large->timelineTrack().toJson(), largeTrack.toJson());
+    }
+
     void neighbouringClipResizeChoosesNearestBody_data()
     {
         QTest::addColumn<int>("gapSlots");
+        QTest::addColumn<bool>("jointZone");
         QTest::addColumn<bool>("leftSide");
         QTest::addColumn<bool>("selectTarget");
         QTest::addColumn<int>("direction");
         for (const int gap : {0, 1})
-            for (const bool left : {true, false})
-                for (const bool selected : {true, false})
-                    for (const int direction : {-1, 1})
-                        QTest::newRow(qPrintable(QString("gap-%1-%2-selected-%3-direction-%4").arg(gap)
-                            .arg(left ? "left" : "right").arg(selected).arg(direction))) << gap << left << selected << direction;
+            for (const bool joint : {true, false}) {
+                if (gap > 0 && joint) continue;
+                for (const bool left : {true, false})
+                    for (const bool selected : {true, false})
+                        for (const int direction : {-1, 1})
+                            QTest::newRow(qPrintable(QString("gap-%1-joint-%2-%3-selected-%4-direction-%5").arg(gap).arg(joint)
+                                .arg(left ? "left" : "right").arg(selected).arg(direction))) << gap << joint << left << selected << direction;
+            }
     }
 
     void neighbouringClipResizeChoosesNearestBody()
     {
         QFETCH(int, gapSlots); QFETCH(bool, leftSide); QFETCH(bool, selectTarget);
-        QFETCH(int, direction);
+        QFETCH(int, direction); QFETCH(bool, jointZone);
         TimelineFixture f; QVERIFY(f.initialize());
         auto* doc = f.host->document();
         auto* left = doc->addText({}, "Left");
@@ -1698,8 +1882,9 @@ private slots:
         auto rightTrack = right->timelineTrack();
         rightTrack.trackIndex = 0; rightTrack.clip.startSlot = 90 + gapSlots; rightTrack.clip.durationSlots = 60;
         right->setTimelineTrack(rightTrack);
-        auto* target = leftSide ? left : right;
-        auto* neighbour = leftSide ? right : left;
+        const bool trimLeft = jointZone || leftSide; // The dedicated junction handle belongs to the left clip.
+        auto* target = trimLeft ? left : right;
+        auto* neighbour = trimLeft ? right : left;
         f.timeline.selectClip((selectTarget ? target : neighbour)->timelineTrack().clip.id);
         f.view.rootObject()->setProperty("viewDurationMs", 6000.0);
         f.item("timelineClipViewport")->setProperty("contentY", 0.0);
@@ -1712,7 +1897,9 @@ private slots:
         }
         QVERIFY(leftItem && rightItem);
         const qreal midpoint = (leftItem->x() + leftItem->width() + rightItem->x()) / 2;
-        const auto from = leftItem->parentItem()->mapToScene({midpoint + (leftSide ? -1 : 1),
+        const qreal offset = gapSlots == 0 && !jointZone
+            ? (f.timeline.clipResizeHandleWidthPx() + f.timeline.clipJointResizeHandleWidthPx()) / 2.0 : 1;
+        const auto from = leftItem->parentItem()->mapToScene({midpoint + (leftSide ? -offset : offset),
             leftItem->y() + leftItem->height()/2}).toPoint();
         const auto to = from + QPoint(direction * 40, 0);
         const auto original = target->timelineTrack().clip;
@@ -1720,30 +1907,249 @@ private slots:
         const auto saved = doc->serializeProjectState();
         QSignalSpy writes(doc, &CanvasDocument::documentChanged);
         QTest::mouseMove(&f.view, from);
-        QTRY_COMPARE(f.view.cursor().shape(), Qt::SizeHorCursor);
+        QTRY_COMPARE(f.view.cursor().shape(), jointZone ? Qt::SplitHCursor : Qt::SizeHorCursor);
         QTest::mousePress(&f.view, Qt::LeftButton, Qt::NoModifier, from);
         QCOMPARE(f.timeline.selectedClipId(), original.id);
-        QCOMPARE((leftSide ? leftItem : rightItem)->property("editEdge").toInt(), leftSide ? 1 : -1);
+        QCOMPARE((trimLeft ? leftItem : rightItem)->property("editEdge").toInt(), trimLeft ? 1 : -1);
+        QCOMPARE((trimLeft ? leftItem : rightItem)->property("editRolling").toBool(), jointZone);
         QTest::mouseMove(&f.view, to, 20);
+        QTRY_COMPARE(f.view.cursor().shape(), jointZone ? Qt::SplitHCursor : Qt::SizeHorCursor);
         const qint64 trimmedSlots = doc->timelineSettings().nearestSlot(40 / f.scale());
-        const qint64 delta = gapSlots == 0 ? direction * trimmedSlots
+        const qint64 delta = jointZone ? direction * trimmedSlots
             : leftSide ? qMin<qint64>(gapSlots, direction * trimmedSlots)
                        : qMax<qint64>(-gapSlots, direction * trimmedSlots);
-        if (gapSlots == 0) {
+        if (jointZone) {
             QCOMPARE(leftItem->property("shownEnd").toReal(), doc->timelineSettings().timeMs(90 + delta));
             QCOMPARE(rightItem->property("shownStart").toReal(), leftItem->property("shownEnd").toReal());
             QCOMPARE(leftItem->property("shownStart").toReal(), 1000.0);
             QCOMPARE(rightItem->property("shownEnd").toReal(), 5000.0);
+        } else if (gapSlots == 0 && delta != 0) {
+            auto* leftHandle = timelineItems(leftItem, "timelineClipTrimEnd").first();
+            auto* rightHandle = timelineItems(rightItem, "timelineClipTrimStart").first();
+            QCOMPARE(leftHandle->x() + leftHandle->width()/2, leftItem->width());
+            QCOMPARE(rightHandle->x() + rightHandle->width()/2, 0.0);
+            for (auto* joint : timelineItems(f.view.rootObject(), "timelineClipJointTrim"))
+                QVERIFY(!joint->isVisible());
         }
         QCOMPARE(doc->serializeProjectState(), saved); QCOMPARE(writes.count(), 0);
         QTest::mouseRelease(&f.view, Qt::LeftButton, Qt::NoModifier, to);
-        QCOMPARE(target->timelineTrack().clip.startSlot, original.startSlot + (leftSide ? 0 : delta));
-        QCOMPARE(target->timelineTrack().clip.endSlot(), original.endSlot() + (leftSide ? delta : 0));
-        if (gapSlots == 0) {
+        QCOMPARE(target->timelineTrack().clip.startSlot, original.startSlot + (trimLeft ? 0 : delta));
+        QCOMPARE(target->timelineTrack().clip.endSlot(), original.endSlot() + (trimLeft ? delta : 0));
+        if (jointZone) {
             QCOMPARE(left->timelineTrack().clip.endSlot(), right->timelineTrack().clip.startSlot);
             QCOMPARE(left->timelineTrack().clip.startSlot, 30);
             QCOMPARE(right->timelineTrack().clip.endSlot(), 150);
         } else QCOMPARE(neighbour->timelineTrack().toJson(), neighbourBefore);
+        QCOMPARE(writes.count(), delta != 0 ? 1 : 0);
+    }
+
+    void junctionCursorTracksTheHoveredZoneBeforePress_data()
+    {
+        QTest::addColumn<int>("normalWidth"); QTest::addColumn<int>("jointWidthPx");
+        QTest::newRow("equal-widths") << 8 << 8;
+        QTest::newRow("wider-joint") << 12 << 20;
+    }
+
+    void junctionCursorTracksTheHoveredZoneBeforePress()
+    {
+        QFETCH(int, normalWidth); QFETCH(int, jointWidthPx);
+        const AppConfig previous = AppConfig::instance();
+        const auto restore = qScopeGuard([&] { AppConfig::instance() = previous; });
+        AppConfig::LoadOptions options; options.defaultEnvFilePath.clear();
+        options.processEnvironment.insert("MOUFFETTE_TIMELINE_CLIP_RESIZE_HANDLE_WIDTH_PX", QString::number(normalWidth));
+        options.processEnvironment.insert("MOUFFETTE_TIMELINE_CLIP_JOINT_RESIZE_HANDLE_WIDTH_PX", QString::number(jointWidthPx));
+        QString error; QVERIFY2(AppConfig::instance().load(options, &error), qPrintable(error));
+        TimelineFixture f; QVERIFY(f.initialize());
+        auto* doc = f.host->document();
+        auto* left = doc->addText({}, "Left");
+        auto* right = doc->addText({}, "Right"); QVERIFY(left && right);
+        auto leftTrack = left->timelineTrack(), rightTrack = right->timelineTrack();
+        leftTrack.trackIndex = rightTrack.trackIndex = 0;
+        leftTrack.clip.startSlot = 30; leftTrack.clip.durationSlots = 60;
+        rightTrack.clip.startSlot = 90; rightTrack.clip.durationSlots = 60;
+        left->setTimelineTrack(leftTrack); right->setTimelineTrack(rightTrack);
+        f.view.rootObject()->setProperty("viewDurationMs",
+            doc->timelineSettings().timeMs(1) * (f.item("timelineTracks")->width() - 24) / 4);
+        f.item("timelineClipViewport")->setProperty("contentY", 0.0);
+        QQuickItem* leftItem = nullptr;
+        for (auto* item : timelineItems(f.view.rootObject(), "timelineClip"))
+            if (item->property("modelData").toMap().value("id").toString() == leftTrack.clip.id) leftItem = item;
+        QVERIFY(leftItem);
+        QList<QQuickItem*> jointHandles;
+        for (auto* item : timelineItems(f.view.rootObject(), "timelineClipJointTrim"))
+            if (item->isVisible()) jointHandles.append(item);
+        QCOMPARE(jointHandles.size(), 1); // A single independent overlay owns the exact centre.
+        auto* joint = jointHandles.first();
+        auto* normal = timelineItems(leftItem, "timelineClipTrimEnd").first();
+        QQuickItem* rightItem = nullptr;
+        for (auto* item : timelineItems(f.view.rootObject(), "timelineClip"))
+            if (item->property("modelData").toMap().value("id").toString() == rightTrack.clip.id) rightItem = item;
+        QVERIFY(rightItem);
+        auto* normalRight = timelineItems(rightItem, "timelineClipTrimStart").first();
+        const auto viewDuration = f.view.rootObject()->property("viewDurationMs").toReal();
+        for (const qreal zoom : {0.5, 1.0, 2.0}) {
+            f.view.rootObject()->setProperty("viewDurationMs", viewDuration * zoom);
+            QCOMPARE(joint->mapToScene({joint->width(), 0}).x() - joint->mapToScene({0, 0}).x(), qreal(jointWidthPx));
+            QCOMPARE(normal->width(), qreal(normalWidth));
+            QCOMPARE(normal->mapToScene({normal->width(), 0}).x(), joint->mapToScene({0, 0}).x());
+            QCOMPARE(normalRight->mapToScene({0, 0}).x(), joint->mapToScene({joint->width(), 0}).x());
+            QCOMPARE(normalRight->width(), qreal(normalWidth));
+            QCOMPARE(joint->mapToScene({joint->width()/2, 0}).x(), leftItem->mapToScene({leftItem->width(), 0}).x());
+        }
+        f.view.rootObject()->setProperty("viewDurationMs", viewDuration);
+        const auto origin = leftItem->mapToScene({leftItem->width(), leftItem->height()/2}).toPoint();
+        const qreal width = f.timeline.clipResizeHandleWidthPx();
+        const qreal jointWidth = f.timeline.clipJointResizeHandleWidthPx();
+        const qreal normalOffset = (width + jointWidth) / 2;
+        const qreal outsideOffset = width + jointWidth/2 + 2;
+        for (const bool selectLeft : {true, false}) {
+            f.timeline.selectClip((selectLeft ? leftTrack : rightTrack).clip.id);
+            // Sweep across the ordinary and joint handles without pressing.
+            for (const qreal offset : {-outsideOffset, -normalOffset, -1.0, 0.0, 1.0, normalOffset, outsideOffset}) {
+                QTest::mouseMove(&f.view, origin + QPoint(qRound(offset), 0));
+                QTRY_COMPARE(f.view.cursor().shape(), qAbs(offset) > width + jointWidth / 2 ? Qt::OpenHandCursor
+                    : qAbs(offset) < jointWidth / 2 ? Qt::SplitHCursor : Qt::SizeHorCursor);
+            }
+        }
+        f.view.requestActivate(); QVERIFY(QTest::qWaitForWindowActive(&f.view));
+        f.view.rootObject()->forceActiveFocus();
+        QTest::mouseMove(&f.view, origin);
+        QTRY_COMPARE(f.view.cursor().shape(), Qt::SplitHCursor);
+        const auto controlKey = Qt::Key(f.view.rootObject()->property("controlKey").toInt());
+        QTest::keyPress(&f.view, controlKey);
+        QTRY_COMPARE(f.view.cursor().shape(), Qt::SizeHorCursor);
+        QTest::keyRelease(&f.view, controlKey);
+        QTRY_COMPARE(f.view.cursor().shape(), Qt::SplitHCursor);
+        QCOMPARE(left->timelineTrack().toJson(), leftTrack.toJson());
+        QCOMPARE(right->timelineTrack().toJson(), rightTrack.toJson());
+        // Breaking contact removes the joint handle and recentres both ordinary handles.
+        f.timeline.trimClip(leftTrack.clip.id, 1000, doc->timelineSettings().timeMs(89));
+        QVERIFY(!joint->isVisible());
+        QCOMPARE(normal->x() + normal->width()/2, leftItem->width());
+        QCOMPARE(normalRight->x() + normalRight->width()/2, 0.0);
+    }
+
+    void jointResizeThresholdUsesTheCombinedDisplayedWidth_data()
+    {
+        QTest::addColumn<int>("leftSlots"); QTest::addColumn<int>("rightSlots");
+        QTest::addColumn<int>("minimum"); QTest::addColumn<bool>("available");
+        QTest::newRow("two-small-clips-at-threshold") << 9 << 9 << 36 << true;
+        QTest::newRow("two-small-clips-below-threshold") << 9 << 9 << 37 << false;
+        QTest::newRow("asymmetric-at-threshold") << 3 << 27 << 60 << true;
+        QTest::newRow("asymmetric-below-threshold") << 3 << 27 << 61 << false;
+        QTest::newRow("disabled-cutoff") << 1 << 1 << 0 << true;
+        QTest::newRow("independent-resize-still-available") << 60 << 60 << 1000 << false;
+    }
+
+    void jointResizeThresholdUsesTheCombinedDisplayedWidth()
+    {
+        QFETCH(int, leftSlots); QFETCH(int, rightSlots); QFETCH(int, minimum); QFETCH(bool, available);
+        const AppConfig previous = AppConfig::instance();
+        const auto restore = qScopeGuard([&] { AppConfig::instance() = previous; });
+        AppConfig::LoadOptions options; options.defaultEnvFilePath.clear();
+        options.processEnvironment.insert("MOUFFETTE_TIMELINE_CLIP_JOINT_MIN_RESIZE_WIDTH_PX", QString::number(minimum));
+        QString error; QVERIFY2(AppConfig::instance().load(options, &error), qPrintable(error));
+        TimelineFixture f; QVERIFY(f.initialize());
+        auto* doc = f.host->document();
+        auto* left = doc->addText({}, "Left");
+        auto* right = doc->addText({}, "Right"); QVERIFY(left && right);
+        auto leftTrack = left->timelineTrack(), rightTrack = right->timelineTrack();
+        leftTrack.trackIndex = rightTrack.trackIndex = 0;
+        leftTrack.clip.startSlot = 30; leftTrack.clip.durationSlots = leftSlots;
+        rightTrack.clip.startSlot = 30 + leftSlots; rightTrack.clip.durationSlots = rightSlots;
+        left->setTimelineTrack(leftTrack); right->setTimelineTrack(rightTrack);
+        const qreal duration = doc->timelineSettings().timeMs(1) * (f.item("timelineTracks")->width() - 24) / 2;
+        f.view.rootObject()->setProperty("viewDurationMs", duration);
+        f.item("timelineClipViewport")->setProperty("contentY", 0.0);
+        QQuickItem* clip = nullptr;
+        QQuickItem* joint = nullptr;
+        for (auto* item : timelineItems(f.view.rootObject(), "timelineClip"))
+            if (item->property("modelData").toMap().value("id").toString() == leftTrack.clip.id) clip = item;
+        for (auto* item : timelineItems(f.view.rootObject(), "timelineClipJointTrim"))
+            if (item->property("modelData").toMap().value("id").toString() == leftTrack.clip.id) joint = item;
+        QVERIFY(clip && joint);
+        QCOMPARE(f.timeline.clipJointMinResizeWidthPx(), minimum);
+        QCOMPARE(f.timeline.clipMinResizeWidthPx(), 24);
+        QCOMPARE(joint->isVisible(), available);
+        const bool individual = leftSlots * 2 >= 24;
+        QCOMPARE(clip->property("resizeAvailable").toBool(), individual);
+        auto* normal = timelineItems(clip, "timelineClipTrimEnd").first();
+        if (available && minimum > 0) {
+            f.view.rootObject()->setProperty("viewDurationMs", duration * 2);
+            QVERIFY(!joint->isVisible());
+            QCOMPARE(normal->x() + normal->width()/2, clip->width());
+            f.view.rootObject()->setProperty("viewDurationMs", duration);
+            QVERIFY(joint->isVisible());
+        }
+        const auto from = available ? joint->mapToScene({joint->width()/2, joint->height()/2}).toPoint()
+            : clip->mapToScene({clip->width() - 1, clip->height()/2}).toPoint();
+        QTest::mouseMove(&f.view, from);
+        QTRY_COMPARE(f.view.cursor().shape(), available ? Qt::SplitHCursor
+            : individual ? Qt::SizeHorCursor : Qt::OpenHandCursor);
+        QTest::mouseClick(&f.view, Qt::LeftButton, Qt::NoModifier, from);
+        QCOMPARE(clip->property("editRolling").toBool(), available);
+        QCOMPARE(clip->property("editEdge").toInt(), available || individual ? 1 : 0);
+        QCOMPARE(left->timelineTrack().toJson(), leftTrack.toJson());
+        QCOMPARE(right->timelineTrack().toJson(), rightTrack.toJson());
+    }
+
+    void jointResizeSnappingIgnoresBothParticipants()
+    {
+        TimelineFixture f; QVERIFY(f.initialize());
+        auto* doc = f.host->document();
+        auto* left = doc->addText({}, "Left");
+        auto* right = doc->addText({}, "Right");
+        auto* other = doc->addText({}, "Other"); QVERIFY(left && right && other);
+        auto leftTrack = left->timelineTrack(), rightTrack = right->timelineTrack(), otherTrack = other->timelineTrack();
+        leftTrack.trackIndex = rightTrack.trackIndex = 0; otherTrack.trackIndex = 1;
+        leftTrack.clip.startSlot = 30; leftTrack.clip.durationSlots = 60;
+        rightTrack.clip.startSlot = 90; rightTrack.clip.durationSlots = 60;
+        otherTrack.clip.startSlot = 100; otherTrack.clip.durationSlots = 30;
+        rightTrack.keyframes = {{"stationary-key", 95, right->authorElementState()}};
+        left->setTimelineTrack(leftTrack); right->setTimelineTrack(rightTrack); other->setTimelineTrack(otherTrack);
+        const auto& grid = doc->timelineSettings();
+        f.view.rootObject()->setProperty("viewDurationMs", grid.timeMs(1) * (f.item("timelineTracks")->width() - 24) / 4);
+        f.item("timelineClipViewport")->setProperty("contentY", 0.0);
+        f.timeline.seek(grid.timeMs(110));
+        for (const int edge : {-1, 1}) {
+            const auto id = (edge < 0 ? rightTrack : leftTrack).clip.id;
+            for (const int slot : {89, 90, 91}) {
+                const auto snap = f.timeline.snapTime(grid.timeMs(slot), f.scale(), id, 0, true, edge);
+                QVERIFY(!snap.value("snapped").toBool());
+                QCOMPARE(snap.value("timeMs").toReal(), grid.timeMs(slot));
+            }
+            QVERIFY(f.timeline.snapTime(3000, f.scale(), id, 0, true).value("snapped").toBool());
+            const auto key = f.timeline.snapTime(grid.timeMs(94), f.scale(), id, 0, true, edge);
+            QCOMPARE(key.value("targetKind").toString(), "keyframe");
+            QCOMPARE(key.value("targetSlot").toLongLong(), 95);
+        }
+        QQuickItem* joint = nullptr;
+        for (auto* item : timelineItems(f.view.rootObject(), "timelineClipJointTrim"))
+            if (item->isVisible()) joint = item;
+        QVERIFY(joint);
+        f.view.requestActivate(); QVERIFY(QTest::qWaitForWindowActive(&f.view));
+        f.timeline.selectClip(rightTrack.clip.id);
+        const auto from = joint->mapToScene({joint->width()/2, joint->height()/2}).toPoint();
+        QSignalSpy writes(doc, &CanvasDocument::documentChanged);
+        QTest::mousePress(&f.view, Qt::LeftButton, Qt::NoModifier, from);
+        f.movePointer(from + QPoint(40, 0)); // Cross the drag threshold before returning near the old junction.
+        f.movePointer(from + QPoint(4, 0));
+        QTest::keyPress(&f.view, Qt::Key_Shift);
+        QCOMPARE(f.view.rootObject()->property("snapGuideMs").toReal(), -1.0);
+        auto* active = qvariant_cast<QQuickItem*>(f.view.rootObject()->property("activeDrag")); QVERIFY(active);
+        QCOMPARE(active->property("shownEnd").toReal(), grid.timeMs(91));
+        f.movePointer(from + QPoint(36, 0), Qt::ShiftModifier);
+        QCOMPARE(active->property("shownEnd").toReal(), grid.timeMs(100));
+        QCOMPARE(f.view.rootObject()->property("snapGuideLabel").toString(), other->displayName());
+        f.movePointer(from + QPoint(76, 0), Qt::ShiftModifier);
+        QCOMPARE(active->property("shownEnd").toReal(), grid.timeMs(110));
+        QCOMPARE(f.view.rootObject()->property("snapGuideLabel").toString(), QStringLiteral("Playhead"));
+        QCOMPARE(writes.count(), 0);
+        QTest::mouseRelease(&f.view, Qt::LeftButton, Qt::ShiftModifier, from + QPoint(76, 0));
+        QTest::keyRelease(&f.view, Qt::Key_Shift);
+        QCOMPARE(left->timelineTrack().clip.endSlot(), 110);
+        QCOMPARE(right->timelineTrack().clip.startSlot, 110);
+        QCOMPARE(right->timelineTrack().keyframes.first().slot, 95);
         QCOMPARE(writes.count(), 1);
     }
 
@@ -1793,20 +2199,25 @@ private slots:
         QTest::mousePress(&f.view, Qt::LeftButton, Qt::NoModifier, from);
         f.movePointer(to);
         QVERIFY(leftItem->property("dragging").toBool());
+        QTRY_COMPARE(f.view.cursor().shape(), Qt::SplitHCursor);
         const qreal boundaryMs = leftItem->property("shownEnd").toReal();
         QCOMPARE(rightItem->property("shownStart").toReal(), boundaryMs);
         QCOMPARE(rightItem->property("leadingHoldMs").toReal(), 3000 - boundaryMs);
         // Control temporarily restores independent overwrite; release restores the roll.
         const auto controlKey = Qt::Key(f.view.rootObject()->property("controlKey").toInt());
         QTest::keyPress(&f.view, controlKey);
+        QTRY_COMPARE(f.view.cursor().shape(), Qt::SizeHorCursor);
         QCOMPARE(rightItem->property("shownStart").toReal(), 3000.0);
         QCOMPARE(rightItem->property("leadingHoldMs").toReal(), 0.0);
         QTest::keyRelease(&f.view, controlKey);
+        QTRY_COMPARE(f.view.cursor().shape(), Qt::SplitHCursor);
         QCOMPARE(rightItem->property("shownStart").toReal(), boundaryMs);
         f.movePointer(from - QPoint(600, 0));
+        QCOMPARE(leftItem->property("editCursor").toInt(), int(Qt::SplitHCursor)); // Pointer is outside the window.
         QCOMPARE(grid.nearestSlot(leftItem->property("shownEnd").toReal()), 31);
         QCOMPARE(rightItem->property("shownStart").toReal(), leftItem->property("shownEnd").toReal());
         f.movePointer(from + QPoint(600, 0));
+        QCOMPARE(leftItem->property("editCursor").toInt(), int(Qt::SplitHCursor));
         QCOMPARE(grid.nearestSlot(rightItem->property("shownStart").toReal()), 149);
         QCOMPARE(leftItem->property("shownEnd").toReal(), rightItem->property("shownStart").toReal());
         QCOMPARE(doc->serializeProjectState(), beforeDrag); QCOMPARE(writes.count(), 0);
@@ -1820,7 +2231,7 @@ private slots:
             // Alternate the side holding the mouse; both sides must roll identically.
             const bool trimLeft = boundary == 60 || boundary == 31 || boundary == 90;
             f.timeline.trimClip(trimLeft ? leftId : rightId,
-                grid.timeMs(trimLeft ? 30 : boundary), grid.timeMs(trimLeft ? boundary : 150));
+                grid.timeMs(trimLeft ? 30 : boundary), grid.timeMs(trimLeft ? boundary : 150), false, true);
             QVERIFY2(f.timeline.errorText().isEmpty(), qPrintable(f.timeline.errorText()));
             QVERIFY(atomic);
             QCOMPARE(left->timelineTrack().clip.startSlot, 30);
@@ -1835,14 +2246,26 @@ private slots:
         QCOMPARE(writes.count(), 5); QCOMPARE(doc->media().size(), 2);
         const auto saved = doc->serializeProjectState();
         const int row = doc->timelineRow(0);
-        const auto previewLeft = f.timeline.previewClipEdit(rightId, 0, 5000, row, -1, 3000, 5000, row, false);
+        const auto previewLeft = f.timeline.previewClipEdit(rightId, 0, 5000, row, -1, 3000, 5000, row, false, {}, true);
         QCOMPARE(previewLeft.value("startMs").toReal(), grid.timeMs(31));
-        const auto previewRight = f.timeline.previewClipEdit(leftId, 1000, 9000, row, 1, 1000, 3000, row, false);
+        const auto previewRight = f.timeline.previewClipEdit(leftId, 1000, 9000, row, 1, 1000, 3000, row, false, {}, true);
         QCOMPARE(previewRight.value("endMs").toReal(), grid.timeMs(149));
         QCOMPARE(doc->serializeProjectState(), saved); QCOMPARE(writes.count(), 5);
         doc->setEditsLocked(true);
-        QVERIFY(!doc->trimTimelineClip(leftId, 30, 60));
+        QVERIFY(!doc->trimTimelineClip(leftId, 30, 60, nullptr,
+            CanvasDocument::PlacementMode::Avoid, CanvasDocument::TrimMode::Rolling));
         QCOMPARE(doc->serializeProjectState(), saved); QCOMPARE(writes.count(), 5);
+
+        // A normal trim at the same junction changes only the chosen video, including its source offset.
+        doc->setEditsLocked(false);
+        const auto leftBefore = left->timelineTrack().toJson();
+        f.timeline.trimClip(rightId, grid.timeMs(100), 5000);
+        QCOMPARE(left->timelineTrack().toJson(), leftBefore);
+        QCOMPARE(right->timelineTrack().clip.startSlot, 100);
+        QCOMPARE(right->timelineTrack().clip.endSlot(), 150);
+        QCOMPARE(right->timelineTrack().clip.sourceStartSlot.value(), 10);
+        QCOMPARE(right->timelineTrack().toJson().value("keyframes"), rightTrack.toJson().value("keyframes"));
+        QCOMPARE(writes.count(), 6);
     }
 
     void clipDragScrollsTracksInShortPanel()
@@ -2252,7 +2675,7 @@ private slots:
         };
         const auto& grid = doc->timelineSettings();
         bool readOnlyPreviews = true;
-        const auto preview = [&](qint64 target, int edge, bool snapEnd, int row = 0, bool overwrite = false) {
+        const auto preview = [&](qint64 target, int edge, bool snapEnd, int row = 0, bool overwrite = false, bool rolling = false) {
             f.timeline.seek(grid.timeMs(target));
             const auto saved = doc->serializeProjectState();
             QSignalSpy writes(doc, &CanvasDocument::documentChanged);
@@ -2263,7 +2686,7 @@ private slots:
                 edge > 0 ? grid.timeMs(30) : snap.value("timeMs").toReal(),
                 edge < 0 ? grid.timeMs(91) : edge > 0 ? snap.value("timeMs").toReal()
                     : snap.value("timeMs").toReal() + grid.timeMs(61),
-                doc->timelineRow(row), edge, grid.timeMs(30), grid.timeMs(91), doc->timelineRow(0), overwrite, snap);
+                doc->timelineRow(row), edge, grid.timeMs(30), grid.timeMs(91), doc->timelineRow(0), overwrite, snap, rolling);
             readOnlyPreviews &= doc->serializeProjectState() == saved && writes.count() == 0;
             return result;
         };
@@ -2287,9 +2710,13 @@ private slots:
 
         placeObstacle(0, 91, 130);
         result = preview(120, 1, false);
+        QCOMPARE(result.value("endMs").toReal(), grid.timeMs(91));
+        QVERIFY(result.value("adjacentClip").toMap().isEmpty());
+        QVERIFY(result.value("snap").toMap().isEmpty());
+        result = preview(120, 1, false, 0, false, true);
         QVERIFY(result.value("snap").toMap().value("snapped").toBool());
         QCOMPARE(result.value("adjacentClip").toMap().value("startMs").toReal(), grid.timeMs(120));
-        result = preview(157, 1, false);
+        result = preview(157, 1, false, 0, false, true);
         QCOMPARE(result.value("endMs").toReal(), grid.timeMs(129));
         QVERIFY(result.value("snap").toMap().isEmpty());
         QVERIFY(readOnlyPreviews);
