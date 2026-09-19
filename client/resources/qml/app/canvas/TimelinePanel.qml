@@ -49,8 +49,9 @@ FocusScope {
         controlHeld = !!(modifiers & controlModifier)
     }
     property var activeDrag: null
-    property real snapGuideMs: -1
-    property string snapGuideLabel: ""
+    property var snapGuide: null
+    readonly property real snapGuideMs: snapGuide ? snapGuide.targetTimeMs : -1
+    readonly property string snapGuideLabel: snapGuide ? snapGuide.mediaName : ""
     readonly property bool textInputFocused: {
         var item = root.Window.window ? root.Window.window.activeFocusItem : null
         while (item) {
@@ -85,18 +86,19 @@ FocusScope {
     }
     function focusTrack() { root.forceActiveFocus() }
     function clampTime(ms) { return timeline ? timeline.gridTime(ms) : 0 }
-    function snapTime(ms, excludeId, duration, includePlayhead) {
-        snapGuideMs = -1
-        snapGuideLabel = ""
-        if (!shiftHeld || !timeline) return clampTime(ms)
-        var result = timeline.snapTime(ms, pixelsPerMs, excludeId || "", duration || 0, !!includePlayhead)
-        if (result.snapped) {
-            snapGuideMs = result.targetTimeMs
-            snapGuideLabel = result.mediaName
-        }
-        return clampTime(result.timeMs)
+    function snapResult(ms, excludeId, duration, includePlayhead) {
+        if (!shiftHeld || !timeline) return { timeMs: clampTime(ms), snapped: false }
+        return timeline.snapTime(ms, pixelsPerMs, excludeId || "", duration || 0, !!includePlayhead)
     }
-    function endDrag() { activeDrag = null; snapGuideMs = -1; snapGuideLabel = "" }
+    function showSnapGuide(result) {
+        snapGuide = result && result.snapped ? result : null
+    }
+    function snapTime(ms, excludeId, duration, includePlayhead) {
+        var result = snapResult(ms, excludeId, duration, includePlayhead)
+        showSnapGuide(result)
+        return result.timeMs
+    }
+    function endDrag() { activeDrag = null; showSnapGuide(null) }
     function clipOwnsResizePoint(clip, contentX) {
         var distance = Math.max(clip.x - contentX, contentX - clip.x - clip.width, 0)
         for (var i = 0; i < clipRepeater.count; ++i) {
@@ -933,11 +935,24 @@ FocusScope {
                     }
                 }
                 Rectangle {
-                    visible: root.snapGuideMs >= 0
+                    id: snapGuideLine
+                    objectName: "timelineSnapGuide"
+                    visible: root.snapGuideMs >= 0 && x >= root.visibleStartX && x < root.visibleEndX
                     x: 12 + root.snapGuideMs * root.pixelsPerMs
+                    z: 20
                     width: 1; height: timelineContent.height
                     color: Theme.accent
-                    Text { x: 4; y: root.rulerHeight + 2; text: root.snapGuideLabel; color: Theme.accent; font.pixelSize: 11 }
+                    Text {
+                        objectName: "timelineSnapGuideLabel"
+                        width: Math.min(implicitWidth, Math.max(0, trackViewport.width - 8))
+                        x: Math.max(root.visibleStartX + 4,
+                            Math.min(snapGuideLine.x + 4, root.visibleEndX - width - 4)) - snapGuideLine.x
+                        y: root.rulerHeight + 2
+                        text: root.snapGuideLabel
+                        textFormat: Text.PlainText
+                        elide: Text.ElideRight
+                        color: Theme.accent; font.pixelSize: 11
+                    }
                 }
             }
         }

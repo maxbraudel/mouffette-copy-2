@@ -37,35 +37,21 @@ Rectangle {
         && panel.activeDrag.adjacentPreview && panel.activeDrag.adjacentPreview.id === modelData.id
         ? panel.activeDrag.adjacentPreview : null
     readonly property real shownStart: dragging ? previewStart : linkedPreview ? linkedPreview.startMs : modelData.startMs
-    readonly property real shownEnd: dragging ? previewEnd : linkedPreview ? linkedPreview.endMs : modelData.startMs + modelData.durationMs
+    readonly property real shownEnd: dragging ? previewEnd : linkedPreview ? linkedPreview.endMs : modelData.endMs
     readonly property bool selected: interactive && modelData.selected
     function refreshPreview() {
-        if (editEdge === 0) {
-            previewStart = Math.max(0, Math.min(panel.maximumMs - (initialEnd - initialStart),
-                panel.snapTime(rawMs, modelData.id, initialEnd - initialStart, true)))
-            previewEnd = previewStart + (initialEnd - initialStart)
-        } else if (editEdge < 0) {
-            previewStart = Math.max(0,
-                Math.min(initialEnd - panel.slotMs, panel.snapTime(rawMs, modelData.id, 0, true)))
-            previewEnd = initialEnd
-        } else {
-            previewStart = initialStart
-            previewEnd = Math.max(initialStart + panel.slotMs, Math.min(panel.maximumMs,
-                panel.snapTime(rawMs, modelData.id, 0, true)))
-        }
-        var wantedStart = previewStart
-        var wantedEnd = previewEnd
+        var snap = panel.snapResult(rawMs, modelData.id, editEdge === 0 ? modelData.durationMs : 0, true)
+        var wantedStart = editEdge > 0 ? initialStart : snap.timeMs
+        var wantedEnd = editEdge < 0 ? initialEnd : editEdge > 0 ? snap.timeMs : wantedStart + modelData.durationMs
         var result = panel.timeline.previewClipEdit(modelData.id, wantedStart, wantedEnd, requestedTrack,
-            editEdge, lastValidStart, lastValidEnd, lastValidTrack, panel.controlHeld)
+            editEdge, lastValidStart, lastValidEnd, lastValidTrack, panel.controlHeld, snap)
         if (result.startMs === undefined) { cancelEdit(); return }
         adjacentPreview = result.adjacentClip || null
         previewStart = result.startMs; previewEnd = result.endMs; previewTrack = result.row
         if (result.free) {
             lastValidStart = previewStart; lastValidEnd = previewEnd; lastValidTrack = previewTrack
         }
-        if (previewStart !== wantedStart || previewEnd !== wantedEnd || previewTrack !== requestedTrack) {
-            panel.snapGuideMs = -1; panel.snapGuideLabel = ""
-        }
+        panel.showSnapGuide(result.snap)
     }
     function refreshFromPointer() {
         var point = timeContent.mapFromItem(panel, pointerPanelX, pointerPanelY)
@@ -82,7 +68,7 @@ Rectangle {
         panel.timeline.selectClip(modelData.id)
         initialTrack = modelData.displayTrackIndex; previewTrack = initialTrack
         requestedTrack = initialTrack; lastValidTrack = initialTrack
-        initialStart = modelData.startMs; initialEnd = modelData.startMs + modelData.durationMs
+        initialStart = modelData.startMs; initialEnd = modelData.endMs
         previewStart = initialStart; previewEnd = initialEnd
         adjacentPreview = null
         lastValidStart = initialStart; lastValidEnd = initialEnd

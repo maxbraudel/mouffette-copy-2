@@ -2052,6 +2052,10 @@ private slots:
         auto track = media->timelineTrack(); track.clip.startSlot = 153;
         media->setTimelineTrack(track);
         QCOMPARE(timeline.snapTime(5090, 0.1, {}, 0, true).value("targetTimeMs").toReal(), 5100.0);
+        timeline.seek(5100);
+        const auto coincident = timeline.snapTime(5105, 1, {}, 0, true);
+        QCOMPARE(coincident.value("targetKind").toString(), QStringLiteral("playhead"));
+        QCOMPARE(coincident.value("mediaName").toString(), QStringLiteral("Playhead"));
         timeline.seek(0);
         QCOMPARE(timeline.snapTime(5, 1, {}, 2000, true).value("timeMs").toReal(), 0.0);
     }
@@ -2060,31 +2064,43 @@ private slots:
     {
         QTest::addColumn<int>("edge");
         QTest::addColumn<bool>("snapEnd");
-        QTest::newRow("move-start") << 0 << false;
-        QTest::newRow("move-end") << 0 << true;
-        QTest::newRow("trim-start") << -1 << false;
-        QTest::newRow("trim-end") << 1 << true;
+        QTest::addColumn<int>("durationSlots");
+        QTest::addColumn<int>("rate");
+        for (int rate : {24, 30, 60, 240}) for (int duration : {59, 60, 61, 91}) {
+            const auto suffix = QString("%1-slots-%2-fps").arg(duration).arg(rate);
+            QTest::newRow(qPrintable("move-start-" + suffix)) << 0 << false << duration << rate;
+            QTest::newRow(qPrintable("move-end-" + suffix)) << 0 << true << duration << rate;
+            QTest::newRow(qPrintable("trim-start-" + suffix)) << -1 << false << duration << rate;
+            QTest::newRow(qPrintable("trim-end-" + suffix)) << 1 << true << duration << rate;
+        }
     }
 
     void clipShiftSnapsToPlayhead()
     {
         QFETCH(int, edge); QFETCH(bool, snapEnd);
+        QFETCH(int, durationSlots);
+        QFETCH(int, rate);
         TimelineFixture f; QVERIFY(f.initialize());
         auto* doc = f.host->document();
+        auto settings = doc->timelineSettings(); settings.slotsPerSecond = rate;
+        QVERIFY(doc->setTimelineSettings(settings));
         auto* media = doc->addText({}, "Clip"); QVERIFY(media);
         auto track = media->timelineTrack();
-        track.clip.startSlot = 30; track.clip.durationSlots = 60;
+        track.clip.startSlot = 30; track.clip.durationSlots = durationSlots;
         media->setTimelineTrack(track);
-        const qreal head = edge < 0 ? 2000 : edge > 0 ? 4000 : 5000;
+        const auto& grid = doc->timelineSettings();
+        const qreal initialStart = grid.timeMs(track.clip.startSlot);
+        const qreal initialEnd = grid.timeMs(track.clip.endSlot());
+        const qreal head = grid.timeMs(edge < 0 ? 60 : edge > 0 ? 151 : 157);
         f.timeline.seek(head);
-        f.view.rootObject()->setProperty("viewDurationMs", 10000.0);
+        f.view.rootObject()->setProperty("viewDurationMs", grid.timeMs(300));
         f.item("timelineClipViewport")->setProperty("contentY", 0.0);
         auto* clip = f.item("timelineClip"); QVERIFY(clip);
         auto* handle = edge == 0 ? clip : timelineItems(clip,
             edge < 0 ? "timelineClipTrimStart" : "timelineClipTrimEnd").first();
         const auto from = handle->mapToScene({handle->width()/2, handle->height()/2}).toPoint();
-        const qreal desired = head - (edge == 0 && snapEnd ? 2000 : 0);
-        const auto to = from + QPoint(qRound((desired - (edge > 0 ? 3000 : 1000)) * f.scale()) + 5, 0);
+        const qreal desired = head - (edge == 0 && snapEnd ? grid.timeMs(durationSlots) : 0);
+        const auto to = from + QPoint(qRound((desired - (edge > 0 ? initialEnd : initialStart)) * f.scale()) + 5, 0);
         const auto saved = doc->serializeProjectState();
         QSignalSpy writes(doc, &CanvasDocument::documentChanged);
         QTest::mousePress(&f.view, Qt::LeftButton, Qt::NoModifier, from);
@@ -2097,6 +2113,9 @@ private slots:
         QCOMPARE(clip->property(snappedEdge).toReal(), head);
         QCOMPARE(f.view.rootObject()->property("snapGuideMs").toReal(), head);
         QCOMPARE(f.view.rootObject()->property("snapGuideLabel").toString(), QStringLiteral("Playhead"));
+        QVERIFY(f.item("timelineSnapGuide")->isVisible());
+        QVERIFY(f.item("timelineSnapGuideLabel")->isVisible());
+        QCOMPARE(f.item("timelineSnapGuideLabel")->property("text").toString(), QStringLiteral("Playhead"));
         QCOMPARE(f.timeline.positionMs(), head);
         QCOMPARE(doc->serializeProjectState(), saved); QCOMPARE(writes.count(), 0);
         QTest::keyRelease(&f.view, Qt::Key_Shift);
@@ -2107,11 +2126,175 @@ private slots:
         QTest::keyRelease(&f.view, Qt::Key_Shift);
         const auto& result = media->timelineTrack().clip;
         QCOMPARE(doc->timelineSettings().timeMs(snapEnd ? result.endSlot() : result.startSlot), head);
-        if (edge == 0) QCOMPARE(result.durationSlots, 60);
-        else if (edge < 0) QCOMPARE(result.endSlot(), 90);
+        if (edge == 0) QCOMPARE(result.durationSlots, durationSlots);
+        else if (edge < 0) QCOMPARE(result.endSlot(), track.clip.endSlot());
         else QCOMPARE(result.startSlot, 30);
         QCOMPARE(f.timeline.positionMs(), head); QCOMPARE(writes.count(), 1);
         QCOMPARE(f.view.rootObject()->property("snapGuideMs").toReal(), -1.0);
+    }
+
+    void snapGuideUsesTheResolvedEdgeAndPlacementLimits()
+    {
+        TimelineFixture f; QVERIFY(f.initialize());
+        auto* doc = f.host->document();
+        auto* moving = doc->addText({}, "Moving");
+        auto* obstacle = doc->addText({}, "Obstacle");
+        QVERIFY(moving && obstacle);
+        auto track = moving->timelineTrack();
+        track.trackIndex = 0; track.clip.startSlot = 30; track.clip.durationSlots = 61;
+        moving->setTimelineTrack(track);
+        auto other = obstacle->timelineTrack();
+        const auto placeObstacle = [&](int row, qint64 start, qint64 end) {
+            other.trackIndex = row; other.clip.startSlot = start; other.clip.durationSlots = end - start;
+            obstacle->setTimelineTrack(other);
+        };
+        const auto& grid = doc->timelineSettings();
+        bool readOnlyPreviews = true;
+        const auto preview = [&](qint64 target, int edge, bool snapEnd, int row = 0, bool overwrite = false) {
+            f.timeline.seek(grid.timeMs(target));
+            const auto saved = doc->serializeProjectState();
+            QSignalSpy writes(doc, &CanvasDocument::documentChanged);
+            const qint64 wantedSlot = target - (edge == 0 && snapEnd ? track.clip.durationSlots : 0);
+            const auto snap = f.timeline.snapTime(grid.timeMs(wantedSlot) + 1, 1, track.clip.id,
+                edge == 0 ? grid.timeMs(track.clip.durationSlots) : 0, true);
+            const auto result = f.timeline.previewClipEdit(track.clip.id,
+                edge > 0 ? grid.timeMs(30) : snap.value("timeMs").toReal(),
+                edge < 0 ? grid.timeMs(91) : edge > 0 ? snap.value("timeMs").toReal()
+                    : snap.value("timeMs").toReal() + grid.timeMs(61),
+                doc->timelineRow(row), edge, grid.timeMs(30), grid.timeMs(91), doc->timelineRow(0), overwrite, snap);
+            readOnlyPreviews &= doc->serializeProjectState() == saved && writes.count() == 0;
+            return result;
+        };
+        placeObstacle(1, 0, 300);
+        auto result = preview(30, 0, false, 1);
+        QCOMPARE(result.value("row").toInt(), doc->timelineRow(0)); // Rejected row, still aligned in time.
+        QVERIFY(result.value("snap").toMap().value("snapped").toBool());
+
+        placeObstacle(0, 100, 180);
+        result = preview(157, 0, false);
+        QCOMPARE(result.value("endMs").toReal(), grid.timeMs(100));
+        QVERIFY(result.value("snap").toMap().isEmpty());
+        // Only the opposite edge lands on the target; this is not the requested snap.
+        result = preview(100, 0, false);
+        QCOMPARE(result.value("endMs").toReal(), grid.timeMs(100));
+        QVERIFY(result.value("snap").toMap().isEmpty());
+        QVERIFY(preview(157, 0, false, 0, true).value("snap").toMap().value("snapped").toBool());
+        QVERIFY(preview(100, 0, true).value("snap").toMap().value("snapped").toBool());
+        QVERIFY(preview(30, 1, false).value("snap").toMap().isEmpty()); // Minimum duration.
+        QVERIFY(preview(91, -1, false).value("snap").toMap().isEmpty());
+
+        placeObstacle(0, 91, 130);
+        result = preview(120, 1, false);
+        QVERIFY(result.value("snap").toMap().value("snapped").toBool());
+        QCOMPARE(result.value("adjacentClip").toMap().value("startMs").toReal(), grid.timeMs(120));
+        result = preview(157, 1, false);
+        QCOMPARE(result.value("endMs").toReal(), grid.timeMs(129));
+        QVERIFY(result.value("snap").toMap().isEmpty());
+        QVERIFY(readOnlyPreviews);
+    }
+
+    void constrainedClipDoesNotShowAnUnreachedSnap_data()
+    {
+        QTest::addColumn<int>("edge");
+        QTest::newRow("move-collision") << 0;
+        QTest::newRow("minimum-duration-start") << -1;
+        QTest::newRow("minimum-duration-end") << 1;
+    }
+
+    void constrainedClipDoesNotShowAnUnreachedSnap()
+    {
+        QFETCH(int, edge);
+        TimelineFixture f; QVERIFY(f.initialize());
+        auto* doc = f.host->document();
+        auto* media = doc->addText({}, "Clip"); QVERIFY(media);
+        auto track = media->timelineTrack();
+        track.trackIndex = 0; track.clip.startSlot = 30; track.clip.durationSlots = 61;
+        media->setTimelineTrack(track);
+        if (edge == 0) {
+            auto* obstacle = doc->addText({}, "Obstacle"); QVERIFY(obstacle);
+            auto other = obstacle->timelineTrack(); other.trackIndex = 0;
+            other.clip.startSlot = 100; other.clip.durationSlots = 80;
+            obstacle->setTimelineTrack(other);
+        }
+        const auto& grid = doc->timelineSettings();
+        const qreal head = grid.timeMs(edge < 0 ? 91 : edge > 0 ? 30 : 157);
+        f.timeline.seek(head);
+        f.view.rootObject()->setProperty("viewDurationMs", 10000.0);
+        f.item("timelineClipViewport")->setProperty("contentY", 0.0);
+        auto* clip = f.item("timelineClip"); QVERIFY(clip);
+        auto* handle = edge == 0 ? clip : timelineItems(clip,
+            edge < 0 ? "timelineClipTrimStart" : "timelineClipTrimEnd").first();
+        const auto from = handle->mapToScene({handle->width()/2, handle->height()/2}).toPoint();
+        const auto to = from + QPoint(qRound((head - grid.timeMs(edge > 0 ? 91 : 30)) * f.scale()) + 5, 0);
+        const auto saved = doc->serializeProjectState();
+        QTest::mousePress(&f.view, Qt::LeftButton, Qt::ShiftModifier, from);
+        f.movePointer(to, Qt::ShiftModifier);
+        QVERIFY(clip->property("dragging").toBool());
+        QVERIFY(clip->property(edge > 0 ? "shownEnd" : "shownStart").toReal() != head);
+        QCOMPARE(f.view.rootObject()->property("snapGuideMs").toReal(), -1.0);
+        QVERIFY(!f.item("timelineSnapGuideLabel")->isVisible());
+        if (edge == 0) {
+            const auto controlKey = Qt::Key(f.view.rootObject()->property("controlKey").toInt());
+            QTest::keyPress(&f.view, controlKey, Qt::ShiftModifier);
+            QCOMPARE(clip->property("shownStart").toReal(), head);
+            QCOMPARE(f.view.rootObject()->property("snapGuideMs").toReal(), head);
+            QVERIFY(f.item("timelineSnapGuideLabel")->isVisible());
+            QTest::keyRelease(&f.view, controlKey, Qt::ShiftModifier);
+            QCOMPARE(f.view.rootObject()->property("snapGuideMs").toReal(), -1.0);
+        }
+        QVERIFY(QMetaObject::invokeMethod(clip, "cancelEdit"));
+        QTest::mouseRelease(&f.view, Qt::LeftButton, Qt::ShiftModifier, to);
+        QTest::keyRelease(&f.view, Qt::Key_Shift);
+        QVERIFY(!f.item("timelineSnapGuideLabel")->isVisible());
+        QCOMPARE(doc->serializeProjectState(), saved);
+    }
+
+    void snapGuideLabelStaysInsideTheViewport_data()
+    {
+        QTest::addColumn<QString>("kind");
+        QTest::addColumn<bool>("rightEdge");
+        for (const auto& kind : {QStringLiteral("playhead"), QStringLiteral("clip"), QStringLiteral("keyframe")})
+            for (bool right : {false, true})
+                QTest::newRow(qPrintable(kind + (right ? "-right" : "-left"))) << kind << right;
+    }
+
+    void snapGuideLabelStaysInsideTheViewport()
+    {
+        QFETCH(QString, kind); QFETCH(bool, rightEdge);
+        TimelineFixture f; QVERIFY(f.initialize());
+        auto* doc = f.host->document();
+        auto* target = doc->addText({}, "<b>A very long target name & literal markup</b>"); QVERIFY(target);
+        f.view.rootObject()->setProperty("viewDurationMs", 10000.0);
+        auto* tracks = f.item("timelineTracks");
+        tracks->setProperty("contentX", 400.0);
+        const auto& grid = doc->timelineSettings();
+        const qint64 targetSlot = grid.nearestSlot(f.timeAt(rightEdge ? tracks->width() - 6 : 6));
+        const qreal targetMs = grid.timeMs(targetSlot);
+        auto track = target->timelineTrack(); track.clip.startSlot = 0; track.clip.durationSlots = 30;
+        if (kind == "clip") track.clip.startSlot = targetSlot;
+        if (kind == "keyframe") track.keyframes = {{"target-key", targetSlot, target->authorElementState()}};
+        target->setTimelineTrack(track);
+        f.timeline.seek(kind == "playhead" ? targetMs : 0);
+        const auto snap = f.timeline.snapTime(targetMs + 1, f.scale(), {}, 0, kind == "playhead");
+        QCOMPARE(snap.value("targetKind").toString(), kind);
+        QVERIFY(QMetaObject::invokeMethod(f.view.rootObject(), "showSnapGuide", Q_ARG(QVariant, snap)));
+        auto* guide = f.item("timelineSnapGuide"); auto* label = f.item("timelineSnapGuideLabel");
+        QVERIFY(guide && label); QVERIFY(guide->isVisible()); QVERIFY(label->isVisible());
+        QCOMPARE(label->property("text").toString(), kind == "playhead" ? QStringLiteral("Playhead") : target->displayName());
+        QCOMPARE(label->property("textFormat").toInt(), 0); // Text.PlainText, including names containing markup.
+        const qreal labelX = label->mapToItem(tracks, {0, 0}).x();
+        QVERIFY(labelX >= 3.99);
+        QVERIFY(labelX + label->width() <= tracks->width() - 3.99);
+        const auto screenshot = qEnvironmentVariable("MOUFFETTE_SNAP_SCREENSHOT");
+        if (!screenshot.isEmpty() && rightEdge && kind == "playhead") {
+            QTest::qWait(30);
+            QVERIFY(f.view.grabWindow().save(screenshot));
+        }
+        // A target scrolled out of view must not leave a detached name on screen.
+        tracks->setProperty("contentX", guide->x() + 10);
+        QVERIFY(!guide->isVisible()); QVERIFY(!label->isVisible());
+        QVERIFY(QMetaObject::invokeMethod(f.view.rootObject(), "endDrag"));
+        QVERIFY(f.view.rootObject()->property("snapGuide").isNull());
     }
 
     void clipboardCannotChangeTheOccurrenceType()

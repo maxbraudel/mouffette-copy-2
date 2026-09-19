@@ -77,6 +77,7 @@ QVariantMap clipRow(const SceneTimeline::Clip& clip, const CanvasMedia* media, c
         {QStringLiteral("isVideo"), clip.sourceStartSlot.has_value()},
         {QStringLiteral("startMs"), grid.timeMs(clip.startSlot)},
         {QStringLiteral("startSlot"), clip.startSlot},
+        {QStringLiteral("endMs"), grid.timeMs(clip.endSlot())},
         {QStringLiteral("sourceInMs"), grid.timeMs(clip.sourceStartSlot.value_or(0))},
         {QStringLiteral("durationMs"), grid.timeMs(clip.durationSlots)},
         {QStringLiteral("durationSlots"), clip.durationSlots},
@@ -415,7 +416,7 @@ void TimelineController::trimClip(const QString& id, qreal startMs, qreal endMs,
     reevaluate();
 }
 QVariantMap TimelineController::previewClipEdit(const QString& id, qreal startMs, qreal endMs, int row,
-    int edge, qreal lastStartMs, qreal lastEndMs, int lastRow, bool overwrite) const
+    int edge, qreal lastStartMs, qreal lastEndMs, int lastRow, bool overwrite, const QVariantMap& snap) const
 {
     if (!m_document || !m_document->mediaForTimelineClip(id)) return {};
     const auto timing = grid();
@@ -435,6 +436,15 @@ QVariantMap TimelineController::previewClipEdit(const QString& id, qreal startMs
             {"endMs", timing.timeMs(edge < 0 ? result.startSlot : clip.endSlot())}});
         preview.insert("free", true);
     }
+    // Validate the actual snapped edge after every placement constraint. Other
+    // coordinates (or a rejected track change) cannot invalidate this alignment.
+    QVariantMap guide;
+    const int snappedEdge = edge == 0 ? snap.value("edge").toInt() : edge;
+    if (snap.value("snapped").toBool() && snap.contains("targetSlot")
+        && (snappedEdge == -1 || snappedEdge == 1)
+        && snap.value("targetSlot").toLongLong() == (snappedEdge < 0 ? result.startSlot : result.endSlot))
+        guide = snap;
+    preview.insert("snap", guide);
     return preview;
 }
 
@@ -547,34 +557,43 @@ void TimelineController::clearKeyframeSelection()
 QVariantMap TimelineController::snapTime(qreal timeMs, qreal pixelsPerMs,
                                         const QString& excludeId, qreal clipDurationMs, bool includePlayhead) const
 {
+    const auto timing = grid();
     QVariantMap result{{QStringLiteral("timeMs"), gridTime(timeMs)}, {QStringLiteral("snapped"), false},
                       {QStringLiteral("targetTimeMs"), -1}, {QStringLiteral("mediaName"), QString()}};
-    if (!m_document || !std::isfinite(timeMs) || !std::isfinite(clipDurationMs) || !std::isfinite(pixelsPerMs) || pixelsPerMs <= 0 || clipDurationMs < 0) return result;
+    if (!m_document || !std::isfinite(timeMs) || !std::isfinite(clipDurationMs) || !std::isfinite(pixelsPerMs)
+        || pixelsPerMs <= 0 || clipDurationMs < 0 || clipDurationMs > maxDurationMs()) return result;
+    const qint64 durationSlots = timing.nearestSlot(clipDurationMs);
     qreal bestDistance = snapDistancePx() + 1e-6;
-    qreal bestTarget = std::numeric_limits<qreal>::max();
-    const auto consider = [&](qreal target, const QString& label) {
-        for (qreal offset : {qreal(0), gridTime(clipDurationMs)}) {
-            const qreal proposed = gridTime(target - offset);
-            if (target - offset < -1e-9 || proposed < 0 || proposed > maxDurationMs() - clipDurationMs + 1e-9) continue;
+    qint64 bestTarget = std::numeric_limits<qint64>::max();
+    const auto consider = [&](qint64 targetSlot, const QString& label, const QString& kind) {
+        for (qint64 offset : {qint64(0), durationSlots}) {
+            const qint64 proposedSlot = targetSlot - offset;
+            if (proposedSlot < 0 || proposedSlot > timing.maxSlot() - durationSlots) continue;
+            const qreal proposed = timing.timeMs(proposedSlot);
             const qreal distance = std::abs(qreal(proposed) - timeMs) * pixelsPerMs;
-            if (distance > snapDistancePx()
-                || (distance > bestDistance - 1e-6 && !(std::abs(distance - bestDistance) < 1e-6 && target < bestTarget))) continue;
+            const bool tied = std::abs(distance - bestDistance) < 1e-6;
+            const bool preferred = tied && (targetSlot < bestTarget
+                || (targetSlot == bestTarget && kind == QLatin1String("playhead")
+                    && result.value("targetKind").toString() != QLatin1String("playhead")));
+            if (distance > snapDistancePx() || (distance > bestDistance - 1e-6 && !preferred)) continue;
             bestDistance = distance;
-            bestTarget = target;
+            bestTarget = targetSlot;
             result = {{QStringLiteral("timeMs"), proposed}, {QStringLiteral("snapped"), true},
-                      {QStringLiteral("targetTimeMs"), target}, {QStringLiteral("mediaName"), label}};
+                      {QStringLiteral("targetTimeMs"), timing.timeMs(targetSlot)}, {QStringLiteral("mediaName"), label},
+                      {QStringLiteral("targetSlot"), targetSlot}, {QStringLiteral("targetKind"), kind},
+                      {QStringLiteral("edge"), offset == 0 ? -1 : 1}};
         }
     };
     for (auto* media : m_document->media()) {
         for (const auto& key : media->timelineTrack().keyframes)
-            if (key.id != excludeId) consider(grid().timeMs(key.slot), media->displayName());
+            if (key.id != excludeId) consider(key.slot, media->displayName(), QStringLiteral("keyframe"));
         const auto& clip = media->timelineTrack().clip;
         if (clip.id != excludeId) {
-            consider(grid().timeMs(clip.startSlot), media->displayName());
-            consider(grid().timeMs(clip.endSlot()), media->displayName());
+            consider(clip.startSlot, media->displayName(), QStringLiteral("clip"));
+            consider(clip.endSlot(), media->displayName(), QStringLiteral("clip"));
         }
     }
     // Clip gestures opt in; the scrubber must never snap to its own position.
-    if (includePlayhead) consider(positionMs(), tr("Playhead"));
+    if (includePlayhead) consider(positionSlot(), tr("Playhead"), QStringLiteral("playhead"));
     return result;
 }

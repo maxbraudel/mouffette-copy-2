@@ -189,6 +189,12 @@ its own playhead position. Pressing or releasing Shift updates a held drag
 even without pointer movement. Releasing it restores ordinary grid alignment. The ruler groups grid
 lines when zoomed out; it never changes the actual slot size. Left/right arrows
 move one slot when the timeline has focus; the transport displays the current slot.
+Snap targets and clip offsets are resolved in integer slots. A clip's guide is
+published only after placement constraints confirm that the chosen edge reaches
+the target; rounding in millisecond display values cannot erase a valid guide.
+Coincident targets prefer the playhead label when clip-to-playhead snapping is
+enabled. Guide labels stay within the visible time viewport and render names as
+plain text, including at either edge and after horizontal scrolling.
 Clip extensions shade their silent holds. Other media keys are decorative.
 All clips are selectable and editable. `CanvasDocument` owns instance selection;
 clip highlighting, stacking and the primary clip ID are projections of that same

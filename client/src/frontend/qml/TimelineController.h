@@ -110,7 +110,7 @@ public:
     Q_INVOKABLE void trimClip(const QString& id, qreal startMs, qreal endMs, bool overwrite = false);
     Q_INVOKABLE QVariantMap previewClipEdit(const QString& id, qreal startMs, qreal endMs, int row,
                                           int edge, qreal lastStartMs, qreal lastEndMs, int lastRow,
-                                          bool overwrite) const;
+                                          bool overwrite, const QVariantMap& snap = QVariantMap()) const;
     Q_INVOKABLE void splitClip();
     Q_INVOKABLE void deleteSelected();
     Q_INVOKABLE void copySelected();
