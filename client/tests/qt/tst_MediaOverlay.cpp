@@ -1895,6 +1895,8 @@ void MediaOverlayTest::scenePlaybackUnloadsEditorOverlays()
     QPointer<QQuickItem> mediaList = findVisualItem(page, QStringLiteral("mediaListPanel"));
     QVERIFY(mediaList);
     QVERIFY(mediaList->isVisible());
+    QPointer<QQuickItem> timelineToggle = findVisualItem(page, QStringLiteral("canvasTimelineButton"));
+    QVERIFY(timelineToggle && timelineToggle->isVisible() && timelineToggle->isEnabled());
     if (videoSelected) {
         QTRY_VERIFY_WITH_TIMEOUT(findVisualItem(page, QStringLiteral("videoVolumeSlider"))->isVisible(), 8000);
     }
@@ -1917,6 +1919,26 @@ void MediaOverlayTest::scenePlaybackUnloadsEditorOverlays()
     QCOMPARE(findVisualItem(page, QStringLiteral("canvasRemoteCursor")), remoteCursor.data());
     QVERIFY(mediaList);
     QVERIFY(mediaList->isVisible());
+    QVERIFY(timelineToggle && timelineToggle->isVisible() && timelineToggle->isEnabled());
+    QCOMPARE(findVisualItem(page, QStringLiteral("canvasTimelineButton")), timelineToggle.data());
+    QTRY_COMPARE(timelineToggle->mapToScene({0, 0}).x(), 10.0); // No gap left by unloaded tools.
+    auto* timelinePanel = findVisualItem(page, QStringLiteral("sceneTimeline"));
+    auto* timelineBody = findVisualItem(page, QStringLiteral("timelineEditorBody"));
+    QVERIFY(timelinePanel && timelineBody);
+    const auto expandedHeight = timelinePanel->height();
+    const auto toggleTimeline = [&] {
+        QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier,
+            timelineToggle->mapToScene({timelineToggle->width()/2, timelineToggle->height()/2}).toPoint());
+    };
+    toggleTimeline();
+    QTRY_VERIFY(!timelineBody->isVisible());
+    QVERIFY(!timelineToggle->property("toggled").toBool());
+    QCOMPARE(timelinePanel->height(), timelinePanel->property("transportHeight").toReal());
+    toggleTimeline();
+    QTRY_VERIFY(timelineBody->isVisible());
+    QVERIFY(timelineToggle->property("toggled").toBool());
+    QCOMPARE(timelinePanel->height(), expandedHeight);
+    QVERIFY(!host->controller()->editingEnabled());
     CanvasMedia* selectionBeforeInput = host->document()->selectedMedia();
 
     // Panning/keyboard input still traverses CanvasRoot while chrome is absent.
@@ -1934,6 +1956,7 @@ void MediaOverlayTest::scenePlaybackUnloadsEditorOverlays()
         QTRY_VERIFY2(findVisualItem(page, name), qPrintable(name));
     QVERIFY(remoteCursor && remoteCursor->isVisible());
     QVERIFY(findVisualItem(page, QStringLiteral("sceneTimeline"))->isVisible());
+    QCOMPARE(findVisualItem(page, QStringLiteral("canvasTimelineButton")), timelineToggle.data());
     QVERIFY(!findVisualItem(page, QStringLiteral("sceneSettingsTab")));
     QCOMPARE(findVisualItem(page, QStringLiteral("mediaListPanel")), mediaList.data());
 }

@@ -47,14 +47,14 @@ AppPanel {
         running: visible
     }
 
-    // Scene playback owns the canvas. Unload editor controls completely so
-    // they cannot render, retain focus, or remain exposed to accessibility.
+    // Timeline visibility remains available during playback. The toolbar
+    // unloads its editing controls independently when the scene owns the canvas.
     Loader {
         anchors.left: parent.left
         anchors.top: parent.top
         anchors.margins: 10
         z: 100000
-        active: !!root.session && root.session.mediaEditingEnabled
+        active: !!root.session
         sourceComponent: CanvasToolbar {
             session: root.session
             timelineExpanded: root.timelineExpanded

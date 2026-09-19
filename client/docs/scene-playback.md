@@ -143,6 +143,8 @@ overflow adds neither a scrollbar nor extra height.
 The canvas and timeline each occupy half of the available page height. The
 Timeline toggle beside Settings hides everything below the transport row and
 returns that space to the canvas; timing readouts and Start/Play/End remain visible.
+The Timeline toggle stays visible and usable during local and remote playback;
+Settings, Selection and Text controls are unloaded while editing is locked.
 Reopening preserves horizontal zoom and scroll, and the vertical center.
 A fixed 32 px keyframe band remains above
 48 px clip tracks. The ruler and keys remain fixed vertically while the clips
