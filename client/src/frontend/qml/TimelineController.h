@@ -40,6 +40,7 @@ class TimelineController final : public QObject
     Q_PROPERTY(int activeTrackIndex READ activeTrackIndex NOTIFY changed)
     Q_PROPERTY(QString selectedKeyframeId READ selectedKeyframeId NOTIFY changed)
     Q_PROPERTY(QString selectedClipId READ selectedClipId NOTIFY changed)
+    Q_PROPERTY(bool hasActiveSelection READ hasActiveSelection NOTIFY changed)
     Q_PROPERTY(bool canCapture READ canCapture NOTIFY transportChanged)
     Q_PROPERTY(bool canSplit READ canSplit NOTIFY transportChanged)
     Q_PROPERTY(bool canPaste READ canPaste NOTIFY transportChanged)
@@ -80,6 +81,7 @@ public:
     int activeTrackIndex() const;
     QString selectedKeyframeId() const { return m_keyframeId; }
     QString selectedClipId() const;
+    bool hasActiveSelection() const;
     bool canCapture() const;
     bool canSplit() const;
     bool canPaste() const;
@@ -115,6 +117,7 @@ public:
     Q_INVOKABLE void setStopTime(qreal timeMs);
     Q_INVOKABLE void removeStop();
     Q_INVOKABLE void clearSelection();
+    Q_INVOKABLE void clearKeyframeSelection();
     Q_INVOKABLE QVariantMap snapTime(qreal timeMs, qreal pixelsPerMs,
                                     const QString& excludeId,
                                     qreal clipDurationMs = 0) const;
@@ -126,6 +129,8 @@ signals:
     void revealTrack(int row);
 
 private:
+    enum class SelectionArea { Clips, Keyframes };
+    SelectionArea m_selectionArea = SelectionArea::Clips;
     SceneTimeline::SceneSettings grid() const;
     CanvasMedia* primary() const;
     void refresh();

@@ -84,6 +84,11 @@ void ClientWorkspaceViewModel::refreshSources()
     QHash<QString, QVariantMap> sources;
     QHash<QString, QString> knownPathIds;
     const auto media = m_canvas ? m_canvas->enumerateMediaItems() : QList<CanvasMedia*>();
+    const bool hasMedia = !media.isEmpty();
+    if (m_hasCanvasMedia != hasMedia) {
+        m_hasCanvasMedia = hasMedia;
+        emit hasCanvasMediaChanged();
+    }
     const auto canonicalPath = [](const CanvasMedia* item) {
         const QFileInfo info(item->sourcePath());
         const QString canonical = info.canonicalFilePath();

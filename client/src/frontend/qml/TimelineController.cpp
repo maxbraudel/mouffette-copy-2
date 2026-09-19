@@ -101,6 +101,7 @@ void TimelineController::setHost(QuickCanvasHost* host)
         for (auto* media : m_document->media()) disconnect(media, nullptr, this, nullptr);
     }
     m_activeTrackIndex = -1;
+    m_selectionArea = SelectionArea::Clips;
     m_host = host;
     m_document = host ? host->document() : nullptr;
     m_keyframeId.clear();
@@ -165,6 +166,8 @@ bool TimelineController::hasDraft() const { return primary() && primary()->hasEl
 QString TimelineController::primaryMediaId() const { return primary() ? primary()->mediaId() : QString(); }
 QString TimelineController::selectedClipId() const
 { return primary() ? primary()->timelineTrack().clip.id : QString(); }
+bool TimelineController::hasActiveSelection() const
+{ return primary() && (m_selectionArea == SelectionArea::Clips || !m_keyframeId.isEmpty()); }
 QString TimelineController::primaryMediaName() const { return primary() ? primary()->displayName() : QString(); }
 bool TimelineController::primaryIsVideo() const { return primary() && primary()->isVideo(); }
 bool TimelineController::canCapture() const { return editable() && primary(); }
@@ -249,6 +252,7 @@ void TimelineController::refresh()
     }
     if (primaryChanged) {
         m_primaryId = primaryMediaId();
+        m_selectionArea = SelectionArea::Clips;
         m_keyframeId.clear();
         m_error.clear();
     }
@@ -342,6 +346,7 @@ void TimelineController::placeKeyframe()
     if (!SceneTimeline::upsertKeyframe(track, key, grid().maxSlot())) return;
     if (!commitTrack(media, track)) return;
     m_keyframeId = key.id;
+    m_selectionArea = SelectionArea::Keyframes;
     reevaluate();
 }
 void TimelineController::selectKeyframe(const QString& id)
@@ -350,6 +355,7 @@ void TimelineController::selectKeyframe(const QString& id)
     for (const auto& key : primary()->timelineTrack().keyframes) if (key.id == id) {
         const qreal time = grid().timeMs(key.slot);
         m_keyframeId = id;
+        m_selectionArea = SelectionArea::Keyframes;
         seek(time);
         emit changed();
         return;
@@ -363,6 +369,7 @@ void TimelineController::moveKeyframe(const QString& id, qreal timeMs)
     if (!SceneTimeline::moveKeyframe(track, id, grid().nearestSlot(timeMs), grid().maxSlot())) return;
     if (!commitTrack(primary(), track)) return;
     m_keyframeId = id;
+    m_selectionArea = SelectionArea::Keyframes;
     seek(timeMs);
     refresh();
 }
@@ -373,7 +380,7 @@ void TimelineController::selectClip(const QString& id)
     if (!media) return;
     m_document->select(media->mediaId());
     m_activeTrackIndex = m_document->timelineRow(media->timelineTrack().trackIndex);
-    m_keyframeId.clear();
+    m_selectionArea = SelectionArea::Clips;
     emit changed();
 }
 void TimelineController::moveClip(const QString& id, qreal startMs, int row, bool overwrite)
@@ -389,7 +396,8 @@ void TimelineController::moveClip(const QString& id, qreal startMs, int row, boo
         if (!reason.isEmpty()) error(reason);
         return;
     }
-    m_keyframeId.clear(); m_activeTrackIndex = m_document->timelineRow(media->timelineTrack().trackIndex);
+    m_selectionArea = SelectionArea::Clips;
+    m_activeTrackIndex = m_document->timelineRow(media->timelineTrack().trackIndex);
     reevaluate();
     emit revealTrack(activeTrackIndex());
 }
@@ -402,7 +410,7 @@ void TimelineController::trimClip(const QString& id, qreal startMs, qreal endMs,
         if (!reason.isEmpty()) error(reason);
         return;
     }
-    m_keyframeId.clear();
+    m_selectionArea = SelectionArea::Clips;
     reevaluate();
 }
 QVariantMap TimelineController::previewClipEdit(const QString& id, qreal startMs, qreal endMs, int row,
@@ -430,29 +438,30 @@ void TimelineController::splitClip()
         if (!reason.isEmpty()) error(reason);
         return;
     }
-    m_keyframeId.clear();
+    m_selectionArea = SelectionArea::Clips;
     reevaluate();
 }
 void TimelineController::deleteSelected()
 {
-    if (!canCapture()) return;
+    if (!canCapture() || !hasActiveSelection()) return;
     auto* media = primary();
-    if (!m_keyframeId.isEmpty()) {
+    if (m_selectionArea == SelectionArea::Keyframes) {
         auto track = media->timelineTrack();
         const auto displayed = SceneTimeline::materialize(media->displayedElementState());
         if (!SceneTimeline::removeKeyframe(track, m_keyframeId) || !commitTrack(media, track)) return;
         if (track.keyframes.isEmpty()) media->setElementState(displayed);
+        clearKeyframeSelection();
     } else {
         if (!m_document->removeMedia(media->mediaId())) return;
+        clearSelection();
     }
-    clearSelection();
     reevaluate();
 }
 void TimelineController::copySelected()
 {
-    if (!primary() || !editable()) return;
+    if (!editable() || !hasActiveSelection()) return;
     QJsonObject value{{"mediaId", primaryMediaId()}, {"projectId", m_document->projectId()}};
-    if (!m_keyframeId.isEmpty()) {
+    if (m_selectionArea == SelectionArea::Keyframes) {
         for (const auto& key : primary()->timelineTrack().keyframes) if (key.id == m_keyframeId) {
             value.insert("kind", "keyframe"); value.insert("state", key.state.toJson()); break;
         }
@@ -477,6 +486,7 @@ void TimelineController::paste()
         SceneTimeline::Keyframe key{SceneTimeline::newId(), positionSlot(), state};
         if (!SceneTimeline::upsertKeyframe(track, key, grid().maxSlot()) || !commitTrack(primary(), track)) return;
         m_keyframeId = key.id;
+        m_selectionArea = SelectionArea::Keyframes;
     } else {
         const auto snapshot = value.value("media").toObject();
         QHash<QString, QString> paths;
@@ -488,6 +498,7 @@ void TimelineController::paste()
             m_document->select(id);
             m_activeTrackIndex = m_document->timelineRow(media->timelineTrack().trackIndex);
             m_keyframeId.clear();
+            m_selectionArea = SelectionArea::Clips;
         }
     }
     reevaluate();
@@ -511,9 +522,17 @@ void TimelineController::removeStop()
 }
 void TimelineController::clearSelection()
 {
+    m_selectionArea = SelectionArea::Clips;
     m_keyframeId.clear();
     if (m_document) m_document->clearSelection();
     refresh();
+}
+
+void TimelineController::clearKeyframeSelection()
+{
+    m_selectionArea = SelectionArea::Keyframes;
+    m_keyframeId.clear();
+    emit changed();
 }
 
 QVariantMap TimelineController::snapTime(qreal timeMs, qreal pixelsPerMs,

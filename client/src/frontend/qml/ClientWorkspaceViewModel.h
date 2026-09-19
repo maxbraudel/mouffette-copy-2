@@ -17,6 +17,7 @@ class ClientWorkspaceViewModel : public QObject
     Q_PROPERTY(QString workspaceId READ workspaceId CONSTANT)
     Q_PROPERTY(QObject* mediaModel READ mediaModel NOTIFY mediaModelChanged)
     Q_PROPERTY(int mediaCount READ mediaCount NOTIFY mediaCountChanged)
+    Q_PROPERTY(bool hasCanvasMedia READ hasCanvasMedia NOTIFY hasCanvasMediaChanged)
     Q_PROPERTY(QObject* mediaSettings READ mediaSettings CONSTANT)
     Q_PROPERTY(QObject* timeline READ timeline CONSTANT)
     Q_PROPERTY(QObject* canvasController READ canvasController NOTIFY mediaModelChanged)
@@ -83,6 +84,7 @@ public:
     QString workspaceId() const { return m_workspaceEndpointId; }
     QObject* mediaModel() const;
     int mediaCount() const;
+    bool hasCanvasMedia() const { return m_hasCanvasMedia; }
     QObject* mediaSettings() const;
     QObject* timeline() const;
     QObject* canvasController() const;
@@ -145,6 +147,7 @@ public:
 signals:
     void mediaModelChanged();
     void mediaCountChanged();
+    void hasCanvasMediaChanged();
     void loadingChanged();
     void actionStateChanged();
     void activeToolChanged();
@@ -168,6 +171,7 @@ private:
     std::function<bool()> m_hasUnuploadedFiles;
     std::function<bool()> m_hasProject;
     bool m_loading = true;
+    bool m_hasCanvasMedia = false;
     bool m_actionPending = false;
     bool m_settingsVisible = false;
     MediaSettingsViewModel* m_mediaSettings = nullptr;

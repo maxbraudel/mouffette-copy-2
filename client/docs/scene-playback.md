@@ -161,8 +161,9 @@ scrolls time. Ctrl/Cmd+wheel zooms.
 The ruler, zoom, horizontal scroll and fit command navigate the project.
 Ruler clicks/drags, Start/End and slot navigation preserve instance and keyframe
 selection, including when the selected instance is absent at the new playhead.
-Clicking empty track content clears selection; on a clip track it also chooses
-the paste destination. The header column does neither.
+Clicking empty clip-track content clears instance selection and chooses the paste
+destination. Clicking empty keyframe content only clears the selected keyframe;
+the selected instances and their displayed keys remain. The header column does neither.
 Shift temporarily snaps against all keys and clip boundaries;
 releasing it immediately restores ordinary grid alignment. The ruler groups grid
 lines when zoomed out; it never changes the actual slot size. Left/right arrows
@@ -170,9 +171,13 @@ move one slot when the timeline has focus; the transport displays the current sl
 Clip extensions shade their silent holds. Other media keys are decorative.
 All clips are selectable and editable. `CanvasDocument` owns instance selection;
 clip highlighting, stacking and the primary clip ID are projections of that same
-selection. Clearing selection from the timeline also clears it in the canvas.
-Only the primary instance exposes editable keyframes; a selected keyframe takes
-priority for timeline copy/delete without deselecting its instance.
+selection. Clearing clip selection from the timeline also clears it in the canvas.
+Only the primary instance exposes editable keyframes. Keyframe selection is
+independent: reselecting or moving the same clip preserves its selected keyframe;
+changing the primary instance clears keys belonging to the previous instance.
+Timeline copy/delete target the last selected area (clips or keyframes).
+Deleting a keyframe keeps the instance selected, including after the final key;
+an empty keyframe selection never falls back to copying or deleting the clip.
 Canvas group copy/delete remain available. Clipboard and delete commands are routed by focus between text,
 canvas and timeline. A canvas paste between projects requires matching cadence;
 an animation is never silently reinterpreted on a different grid.
@@ -203,6 +208,10 @@ Client and server validate clip cardinality, global identities, non-overlapping
 intervals within each track, source intervals, track indices and payload limits.
 
 ## Sources panel
+
+The entire overlay, including Upload and Launch Remote Scene, is hidden while the
+canvas has no media instances. Adding content (including text) shows it; removing
+the final instance hides it again.
 
 The overlay lists only referenced image/video sources, grouped by SHA-256 identity
 with canonical paths as a temporary identity while hashing. It excludes text and

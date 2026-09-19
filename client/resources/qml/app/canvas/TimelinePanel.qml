@@ -415,7 +415,7 @@ FocusScope {
                         objectName: "timelineCopy"
                         text: "Copy"
                         iconSource: "qrc:/icons/icons/timeline/copy.svg"
-                        enabled: root.editable && (root.timeline.selectedKeyframeId !== "" || root.timeline.selectedClipId !== "")
+                        enabled: root.editable && root.timeline.hasActiveSelection
                         onClicked: { root.focusTrack(); root.timeline.copySelected() }
                     }
                     TimelineEditButton {
@@ -430,7 +430,7 @@ FocusScope {
                         text: "Delete"
                         iconSource: "qrc:/icons/icons/delete.svg"
                         destructive: true
-                        enabled: root.editable && (root.timeline.selectedKeyframeId !== "" || root.timeline.selectedClipId !== "")
+                        enabled: root.editable && root.timeline.hasActiveSelection
                         onClicked: { root.focusTrack(); root.timeline.deleteSelected() }
                     }
                     TimelineEditButton {
@@ -643,7 +643,7 @@ FocusScope {
                     onPositionChanged: mouse => { if (pressed) root.timeline.seek(root.clampTime((mouse.x - 12) / root.pixelsPerMs)) }
                 }
                 MouseArea {
-                    y: root.rulerHeight
+                    y: clipViewport.y
                     width: parent.width
                     height: parent.height - y
                     acceptedButtons: Qt.LeftButton
@@ -685,6 +685,16 @@ FocusScope {
                     objectName: "timelineKeyframeTrack"
                     y: root.rulerHeight
                     width: parent.width; height: root.keyHeight
+                    MouseArea {
+                        anchors.fill: parent
+                        acceptedButtons: Qt.LeftButton
+                        preventStealing: true
+                        enabled: !!root.timeline && !root.timeline.remoteActive
+                        onPressed: {
+                            root.focusTrack()
+                            root.timeline.clearKeyframeSelection()
+                        }
+                    }
                     Repeater {
                         model: root.timeline ? root.timeline.otherKeyframes : []
                         KeyframeDiamond {

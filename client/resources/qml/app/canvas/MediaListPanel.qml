@@ -32,7 +32,7 @@ Rectangle {
         return bytes.toFixed(unit === 0 ? 0 : bytes < 10 ? 2 : 1) + " " + units[unit]
     }
 
-    visible: session && session.hasProject
+    visible: session && session.hasProject && session.hasCanvasMedia
     implicitWidth: Math.max(200, mediaNaturalWidth, remoteButton.implicitWidth,
                             uploadButton.implicitWidth)
     width: Math.min(implicitWidth, 420, parent ? Math.max(0, parent.width * 0.5) : 420)

@@ -629,7 +629,7 @@ private slots:
 
         QTest::mouseClick(&f.view, Qt::LeftButton, Qt::NoModifier, from);
         QCOMPARE(f.timeline.positionMs(), position);
-        QVERIFY(f.host->document()->selectedMediaIds().isEmpty());
+        QCOMPARE(f.host->document()->selectedMediaIds().isEmpty(), trackName == "timelineClipTrack");
         QTest::mousePress(&f.view, Qt::LeftButton, Qt::NoModifier, from);
         QTest::mouseMove(&f.view, to, 20);
         QCOMPARE(f.timeline.positionMs(), position);
@@ -639,6 +639,77 @@ private slots:
         QTest::mouseRelease(&f.view, Qt::LeftButton, Qt::NoModifier, ruler);
         QCOMPARE(f.timeline.positionMs(), position);
         QCOMPARE(f.host->serializeProjectState(), saved);
+    }
+
+    void keyframeSelectionAndDeletionKeepTheSelectedClips_data()
+    {
+        QTest::addColumn<bool>("useKeyboard");
+        QTest::newRow("toolbar") << false;
+        QTest::newRow("keyboard") << true;
+    }
+
+    void keyframeSelectionAndDeletionKeepTheSelectedClips()
+    {
+        QFETCH(bool, useKeyboard);
+        TimelineFixture f; QVERIFY(f.initialize());
+        f.view.requestActivate();
+        QVERIFY(QTest::qWaitForWindowActive(&f.view));
+        auto* doc = f.host->document();
+        auto* other = doc->addText({}, "Other selected clip"); QVERIFY(other);
+        auto* media = doc->addText({}, "Animated clip"); QVERIFY(media);
+        doc->select(other->mediaId(), true);
+        doc->select(media->mediaId());
+        QCOMPARE(doc->selectedMediaIds().size(), 2);
+        f.timeline.placeKeyframe();
+        f.timeline.seek(1000);
+        f.timeline.placeKeyframe();
+        f.timeline.copySelected();
+        const auto clipboard = QGuiApplication::clipboard()->mimeData()->data("application/x-mouffette-timeline-v6");
+        const auto selectedIds = doc->selectedMediaIds();
+        const auto clipId = media->timelineTrack().clip.id;
+        const int activeRow = f.timeline.activeTrackIndex();
+        QSignalSpy selectionChanges(doc, &CanvasDocument::selectionChanged);
+        const auto saved = doc->serializeProjectState();
+        auto* keys = f.item("timelineKeyframeTrack"); QVERIFY(keys);
+        auto* tracks = f.item("timelineTracks"); QVERIFY(tracks);
+        QTest::mouseClick(&f.view, Qt::LeftButton, Qt::NoModifier,
+            keys->mapToScene({tracks->width() * 0.6, keys->height()/2}).toPoint());
+        QVERIFY(f.timeline.selectedKeyframeId().isEmpty());
+        QCOMPARE(f.timeline.keyframes().size(), 2);
+        QCOMPARE(doc->selectedMediaIds(), selectedIds);
+        QCOMPARE(f.timeline.selectedClipId(), clipId);
+        QVERIFY(!f.item("timelineDelete")->isEnabled());
+        QVERIFY(!f.item("timelineCopy")->isEnabled());
+        f.timeline.copySelected();
+        QCOMPARE(QGuiApplication::clipboard()->mimeData()->data("application/x-mouffette-timeline-v6"), clipboard);
+        QTest::keyClick(&f.view, Qt::Key_Delete);
+        QCOMPARE(doc->serializeProjectState(), saved);
+        for (int remaining : {1, 0}) {
+            auto* key = f.item("timelineKeyframe"); QVERIFY(key);
+            QTest::mouseClick(&f.view, Qt::LeftButton, Qt::NoModifier,
+                key->mapToScene({key->width()/2, key->height()/2}).toPoint());
+            QVERIFY(!f.timeline.selectedKeyframeId().isEmpty());
+            QVERIFY(f.item("timelineDelete")->isEnabled());
+            if (useKeyboard) QTest::keyClick(&f.view, Qt::Key_Delete);
+            else {
+                auto* button = f.item("timelineDelete");
+                QTest::mouseClick(&f.view, Qt::LeftButton, Qt::NoModifier,
+                    button->mapToScene({button->width()/2, button->height()/2}).toPoint());
+            }
+            QCOMPARE(f.timeline.keyframes().size(), remaining);
+            QCOMPARE(doc->selectedMediaIds(), selectedIds);
+            QCOMPARE(f.timeline.selectedClipId(), clipId);
+            QCOMPARE(f.timeline.activeTrackIndex(), activeRow);
+            QVERIFY(f.timeline.selectedKeyframeId().isEmpty());
+            QVERIFY(!f.item("timelineDelete")->isEnabled());
+            const auto after = doc->serializeProjectState();
+            QTest::keyClick(&f.view, Qt::Key_Backspace);
+            f.timeline.deleteSelected();
+            QCOMPARE(doc->serializeProjectState(), after);
+        }
+        QCOMPARE(selectionChanges.count(), 0);
+        QVERIFY(f.item("timelinePlaceKeyframe")->isEnabled());
+        QCOMPARE(doc->media().size(), 2);
     }
 
     void zoomAnchorsButtonsWheelAndShortcutsToHead()
@@ -884,6 +955,7 @@ private slots:
         QVERIFY(selectionMatches());
         f.timeline.placeKeyframe();
         QVERIFY(!f.timeline.selectedKeyframeId().isEmpty());
+        const auto selectedKey = f.timeline.selectedKeyframeId();
         QVERIFY(selectionMatches());
         f.timeline.copySelected();
         auto clipboard = [] {
@@ -892,7 +964,7 @@ private slots:
         };
         QCOMPARE(clipboard().value("kind").toString(), QString("keyframe"));
         f.timeline.selectClip(first->timelineTrack().clip.id);
-        QVERIFY(f.timeline.selectedKeyframeId().isEmpty());
+        QCOMPARE(f.timeline.selectedKeyframeId(), selectedKey);
         QVERIFY(selectionMatches());
         f.timeline.copySelected();
         QCOMPARE(clipboard().value("kind").toString(), QString("clip"));

@@ -228,6 +228,7 @@ Item {
     QtObject {
         id: fakeSession
         property bool hasProject: true
+        property bool hasCanvasMedia: host.testMediaCount > 0
         property bool actionPending: false
         property int remoteSceneActionTone: 0
         property int testSceneActionTone: 0
@@ -777,7 +778,7 @@ void MediaOverlayTest::mediaPanelVisibilityAnchorInteractionAndScroll()
     QVERIFY(QTest::qWaitForWindowActive(&window));
     harness->setSize(window.size());
     QCoreApplication::processEvents();
-    QVERIFY(panel->isVisible());
+    QVERIFY(!panel->isVisible());
     QCOMPARE(list->height(), 0.0);
 
     QVariantList rows;
@@ -875,13 +876,16 @@ void MediaOverlayTest::mediaCountTracksRealCanvasInsertions()
     harness->setSize(window.size());
     QCoreApplication::processEvents();
     QCOMPARE(session.mediaCount(), 0);
-    QVERIFY(panel->isVisible());
-    QVERIFY(host->document()->addText(QPointF(100, 100)));
+    QVERIFY(!panel->isVisible());
+    auto* text = host->document()->addText(QPointF(100, 100));
+    QVERIFY(text);
     QCOMPARE(session.mediaCount(), 0);
     QCOMPARE(countChanged.count(), 0);
     QTRY_VERIFY(panel->isVisible());
     QCOMPARE(qRound(panel->x() + panel->width()), window.width() - 16);
     QCOMPARE(qRound(panel->y() + panel->height()), window.height() - 16);
+    QVERIFY(host->document()->removeMedia(text->mediaId()));
+    QTRY_VERIFY(!panel->isVisible());
 }
 
 void MediaOverlayTest::typedCapabilitiesGuardDirectCppInvocations()
@@ -1393,9 +1397,9 @@ void MediaOverlayTest::unavailableActionsStayClickableAndExplainWhy()
         QVERIFY(!host->remoteSceneLaunched());
     };
 
-    // Empty projects retain the action buttons and explain the missing media.
-    clickUnavailable(upload, "Add media to the project first");
-    clickUnavailable(remote, "Add media to the project first");
+    // Empty projects hide the entire panel, including both action buttons.
+    QVERIFY(!upload->isVisible());
+    QVERIFY(!remote->isVisible());
     QVERIFY(host->document()->addText({100, 100}, "Scene content"));
     clickUnavailable(upload, "Launch a remote session first");
     clickUnavailable(remote, "No target screens available");
