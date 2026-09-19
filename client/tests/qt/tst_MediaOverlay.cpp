@@ -452,9 +452,20 @@ Item {
     id: host
     required property var externalSession
     property int canvasPrimaryPressCount: 0
+    property int canvasWheelCount: 0
 
     Item {
         anchors.fill: parent
+
+        MouseArea {
+            anchors.fill: parent
+            acceptedButtons: Qt.NoButton
+            scrollGestureEnabled: true
+            onWheel: wheel => {
+                host.canvasWheelCount += 1
+                wheel.accepted = true
+            }
+        }
 
         PointHandler {
             target: null
@@ -1998,7 +2009,7 @@ void MediaOverlayTest::mediaSettingsElementBindings()
     QVERIFY(elementPage);
     QVERIFY(!findVisualItem(harness.get(), QStringLiteral("sceneSettingsTab")));
     QVERIFY(!findVisualItem(harness.get(), QStringLiteral("sceneSettingsPage")));
-    QVERIFY(findVisualItem(harness.get(), QStringLiteral("elementSettingsTitle")));
+    QVERIFY(!findVisualItem(harness.get(), QStringLiteral("elementSettingsTitle")));
 
     window.show();
     QVERIFY(QTest::qWaitForWindowExposed(&window));
@@ -2030,6 +2041,8 @@ void MediaOverlayTest::mediaSettingsElementBindings()
     auto* scrollBar = findVisualItem(harness.get(), QStringLiteral("settingsOverlayScrollBar"));
     QVERIFY(contentFlick);
     QVERIFY(scrollBar);
+    QCOMPARE(contentFlick->y(), 1.0);
+    QCOMPARE(contentFlick->height(), panel->height() - 2);
     for (const auto* name : {"opacityCheck", "volumeCheck", "textColorCheck", "highlightCheck",
              "textBorderWidthCheck", "textBorderColorCheck", "fontWeightCheck", "underlineCheck",
              "italicCheck", "uppercaseCheck"})
@@ -2043,6 +2056,58 @@ void MediaOverlayTest::mediaSettingsElementBindings()
     harness->setSize(window.size());
     QTRY_VERIFY(contentFlick->property("overflowing").toBool());
     QVERIFY(scrollBar->isVisible());
+    ulong wheelTimestamp = 0;
+    const auto wheel = [&](QPointF localPoint, QPoint pixels, QPoint angles,
+                           Qt::KeyboardModifiers modifiers = Qt::NoModifier,
+                           Qt::ScrollPhase phase = Qt::NoScrollPhase) {
+        auto* deviceState = QPointingDevicePrivate::get(const_cast<QPointingDevice*>(QPointingDevice::primaryPointingDevice()));
+        const auto originalType = deviceState->deviceType;
+        const auto restoreDevice = qScopeGuard([&] { deviceState->deviceType = originalType; });
+        deviceState->deviceType = !pixels.isNull() || phase != Qt::NoScrollPhase
+            ? QInputDevice::DeviceType::TouchPad : QInputDevice::DeviceType::Mouse;
+        const auto point = panel->mapToScene(localPoint);
+        QWheelEvent event(point, window.mapToGlobal(point.toPoint()), pixels, angles,
+            Qt::NoButton, modifiers, phase, false);
+        event.setTimestamp(wheelTimestamp += 16);
+        QCoreApplication::sendEvent(&window, &event);
+    };
+    const auto isolatedWheel = [&] {
+        return harness->property("canvasWheelCount").toInt() == 0;
+    };
+    const QPointF inside(panel->width()/2, panel->height()/2);
+    wheel(inside, {}, {0, -120});
+    QTRY_VERIFY(contentFlick->property("contentY").toReal() > 0);
+    wheel(inside, {0, -30}, {}, Qt::NoModifier, Qt::ScrollBegin);
+    wheel(inside, {0, -30}, {}, Qt::NoModifier, Qt::ScrollUpdate);
+    wheel(inside, {}, {}, Qt::NoModifier, Qt::ScrollEnd);
+    QVERIFY(isolatedWheel());
+    QVERIFY(QMetaObject::invokeMethod(contentFlick, "cancelFlick"));
+    const qreal scrollMaximum = contentFlick->property("contentHeight").toReal() - contentFlick->height();
+    for (const int direction : {-1, 1}) {
+        contentFlick->setProperty("contentY", direction < 0 ? scrollMaximum : 0.0);
+        for (auto modifiers : {Qt::NoModifier, Qt::ControlModifier, Qt::AltModifier, Qt::ShiftModifier}) {
+            wheel(inside, {}, {0, direction * 120}, modifiers);
+            wheel(inside, {0, direction * 30}, {}, modifiers, Qt::ScrollBegin);
+            wheel(inside, {0, direction * 30}, {}, modifiers, Qt::ScrollUpdate);
+            wheel(inside, {0, direction * 30}, {}, modifiers, Qt::ScrollMomentum);
+            wheel(inside, {}, {}, modifiers, Qt::ScrollEnd);
+            wheel(inside, {direction * 30, 0}, {}, modifiers);
+            QVERIFY(isolatedWheel());
+        }
+    }
+    // The border and blank padding also belong to the overlay.
+    wheel({0.5, panel->height()/2}, {0, -30}, {});
+    QVERIFY(isolatedWheel());
+    QVERIFY(QMetaObject::invokeMethod(contentFlick, "cancelFlick"));
+    contentFlick->setProperty("contentY", 0.0);
+    const auto overflowArtifacts = qEnvironmentVariable("MOUFFETTE_OVERLAY_ARTIFACT_DIR");
+    if (!overflowArtifacts.isEmpty()) {
+        QVERIFY(QDir().mkpath(overflowArtifacts));
+        QTest::mouseMove(&window, scrollBar->mapToScene({scrollBar->width()/2, scrollBar->height()/2}).toPoint());
+        QTest::qWait(250);
+        QVERIFY(window.grabWindow().save(QDir(overflowArtifacts).filePath(
+            dark ? "settings-scrollbar-dark.png" : "settings-scrollbar-light.png")));
+    }
 
     window.resize(640, 800);
     harness->setSize(window.size());
@@ -2054,6 +2119,9 @@ void MediaOverlayTest::mediaSettingsElementBindings()
         QVERIFY(qAbs(contentFlick->property("contentHeight").toReal()
                      - contentFlick->height()) <= 0.5);
         QVERIFY(!scrollBar->isVisible());
+        wheel({panel->width()/2, panel->height()/2}, {}, {0, -120});
+        wheel({panel->width()/2, panel->height()/2}, {0, -30}, {}, Qt::ControlModifier);
+        QVERIFY(isolatedWheel());
     } else {
         QVERIFY(contentFlick->property("contentHeight").toReal() > contentFlick->height());
         QVERIFY(scrollBar->isVisible());
@@ -2079,7 +2147,7 @@ void MediaOverlayTest::mediaSettingsElementBindings()
     QVERIFY(opacityField);
     QVERIFY(textBorderWidthCheck);
     QVERIFY(textBorderWidthField);
-    if (contentFits) QTRY_COMPARE(scrollBar->opacity(), 0.0);
+    if (contentFits) QVERIFY(!scrollBar->isVisible());
     QVERIFY(!opacityField->property("cursorVisible").isValid());
     QCOMPARE(opacityCheck->property("checkedColor").value<QColor>(),
              themeColor(engine, "controlSelectionBackground"));

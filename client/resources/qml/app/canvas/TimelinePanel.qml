@@ -456,13 +456,6 @@ FocusScope {
                         enabled: root.editable
                         onClicked: { root.focusTrack(); root.timeline.removeStop() }
                     }
-                    Text {
-                        height: Theme.controlHeight
-                        visible: !!root.timeline && root.timeline.hasDraft
-                        text: "Unsaved draft · place a keyframe to keep changes"
-                        color: Theme.warningText; font.pixelSize: Theme.controlFontSize
-                        verticalAlignment: Text.AlignVCenter
-                    }
                 }
                 Row {
                     id: layoutActions

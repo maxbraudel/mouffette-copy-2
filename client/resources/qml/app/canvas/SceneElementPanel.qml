@@ -16,7 +16,7 @@ Rectangle {
                                                ? settings.mediaId : ""
     property int editGeneration: 0
     readonly property real activePageHeight: elementPage.height
-    readonly property real desiredHeight: 42 + activePageHeight
+    readonly property real desiredHeight: 2 + activePageHeight
 
     objectName: "sceneElementPanel"
     visible: !!session && session.settingsVisible
@@ -36,13 +36,15 @@ Rectangle {
         contentFlick.contentY = 0
     }
 
-    // Keep blank areas of the floating overlay from passing clicks through to
-    // the canvas. Controls declared below still receive their events first.
+    // Consume events rejected by the content, including wheel events at the
+    // scroll limits or when everything fits. They must never reach the canvas.
     MouseArea {
         anchors.fill: parent
         acceptedButtons: Qt.AllButtons
         hoverEnabled: true
+        scrollGestureEnabled: true
         onPressed: root.forceActiveFocus()
+        onWheel: wheel => { wheel.accepted = true }
     }
 
 
@@ -453,75 +455,25 @@ Rectangle {
         }
     }
 
-    Text {
-        objectName: "elementSettingsTitle"
-        anchors.left: parent.left
-        anchors.right: parent.right
-        height: 40
-        text: "Element"
-        color: Theme.overlayText
-        font.pixelSize: 14
-        font.bold: true
-        verticalAlignment: Text.AlignVCenter
-        horizontalAlignment: Text.AlignHCenter
-    }
-
-
-    Rectangle {
-        anchors.left: parent.left
-        anchors.right: parent.right
-        anchors.leftMargin: 1
-        anchors.rightMargin: 1
-        y: 40
-        height: 1
-        color: Theme.overlayBorder
-    }
-
     Flickable {
         id: contentFlick
         objectName: "settingsContentFlick"
         x: 1
-        y: 41
+        y: 1
         width: Math.max(0, root.width - 2)
-        height: Math.max(0, root.height - 42)
+        height: Math.max(0, root.height - 2)
         contentWidth: width
         contentHeight: root.activePageHeight
         boundsBehavior: Flickable.StopAtBounds
         readonly property bool overflowing: contentHeight > height + 0.5
         interactive: overflowing
         clip: true
-        onMovementStarted: settingsScrollBar.reveal()
 
         ScrollBar.vertical: ScrollBar {
-            id: settingsScrollBar
-
-            property bool recentlyActive: false
-
-            function reveal() {
-                recentlyActive = true
-                hideTimer.restart()
-            }
-
             objectName: "settingsOverlayScrollBar"
             policy: ScrollBar.AsNeeded
-            width: 8
             visible: contentFlick.overflowing
-            opacity: recentlyActive || hovered || pressed ? 1.0 : 0.0
-            onPressedChanged: if (pressed) reveal()
-            contentItem: Rectangle {
-                implicitWidth: 8
-                implicitHeight: 24
-                radius: 4
-                color: settingsScrollBar.pressed ? Theme.scrollbarPressed
-                     : settingsScrollBar.hovered ? Theme.scrollbarHover : Theme.scrollbar
-            }
-            background: Item {}
-
-            Timer {
-                id: hideTimer
-                interval: UiTiming.scrollbarHideDelayMs
-                onTriggered: settingsScrollBar.recentlyActive = false
-            }
+            background: null
         }
 
 

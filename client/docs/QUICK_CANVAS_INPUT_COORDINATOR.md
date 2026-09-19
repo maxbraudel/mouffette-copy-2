@@ -19,6 +19,12 @@ Live drag/resize geometry is temporary presentation state, not a second committe
 model. Selection-only updates must not cancel pending content publication: it can
 contain a text edit, style change, fit-to-text resize or newly created item.
 
+The Settings overlay consumes pointer and wheel events within its bounds,
+including scroll-limit, momentum and modifier-wheel events rejected by its
+Flickable. These events cannot pan/zoom the canvas or scale selected media, even
+when the settings content fits without scrolling. The panel has no fixed title
+band and uses the same native Qt Quick scrollbar styling as the timeline.
+
 ## Selection transforms and scene locking
 
 A press on an already selected media preserves the selection and promotes it to
