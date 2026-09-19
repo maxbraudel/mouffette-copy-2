@@ -156,6 +156,43 @@ private slots:
         manager.release("second");
         QVERIFY(manager.assets().isEmpty());
     }
+    void memoryCategoriesSumWithoutDoubleCountingAndClearOnEviction() {
+        QTemporaryDir directory;
+        MediaResidencyManager manager;
+        manager.setMemorySnapshotForTesting(memory());
+        const auto path = image(directory, "large.png", 512, qRgb(10, 20, 30));
+        manager.acquire("image", path);
+        manager.acquire("duplicate", path);
+        manager.acquire("video", QString::fromUtf8(TEST_VIDEO_FILE));
+        QTRY_VERIFY_WITH_TIMEOUT(manager.ready("image") && manager.ready("duplicate") && manager.ready("video"), 10000);
+        QCOMPARE(manager.assets().size(), 2);
+        const auto picture = manager.asset("image");
+        const auto video = manager.asset("video");
+        const quint64 imagePixels = picture->image.sizeInBytes();
+        const quint64 imageThumbnails = picture->thumbnails.first().image.sizeInBytes() + sizeof(ResidentThumbnail);
+        const auto summary = manager.summary();
+        QCOMPARE(summary.value("imageBytes").toULongLong(), imagePixels);
+        QCOMPARE(summary.value("thumbnailBytes").toULongLong(), imageThumbnails + video->thumbnailBytes);
+        QCOMPARE(summary.value("videoBytes").toULongLong(), quint64(video->compressedVideo.capacity()));
+        QCOMPARE(summary.value("posterBytes").toULongLong(), video->posterBytes);
+        quint64 total = 0;
+        for (const auto* category : {"videoBytes", "imageBytes", "posterBytes", "thumbnailBytes"}) {
+            quint64 rows = 0;
+            for (const auto& value : manager.assets()) rows += value.toMap().value(category).toULongLong();
+            QCOMPARE(rows, summary.value(category).toULongLong());
+            total += rows;
+        }
+        QCOMPARE(summary.value("mediaBytes").toULongLong(), total);
+        manager.release("duplicate");
+        QCOMPARE(manager.summary().value("mediaBytes").toULongLong(), total);
+        manager.setMemorySnapshotForTesting(memory(0));
+        QTRY_VERIFY(!manager.ready("image") && !manager.ready("video"));
+        QCOMPARE(manager.summary().value("mediaBytes").toULongLong(), quint64(0));
+        for (const auto& value : manager.assets()) {
+            for (const auto* category : {"videoBytes", "imageBytes", "posterBytes", "thumbnailBytes"})
+                QCOMPARE(value.toMap().value(category).toULongLong(), quint64(0));
+        }
+    }
     void compressedVideoAccountingAndAtomicPlaybackAdmission() {
         MediaResidencyManager manager;
         manager.setMemorySnapshotForTesting(memory());
@@ -169,6 +206,9 @@ private slots:
                 // Actual retained bytes must not include the decoder scratch.
                 QVERIFY(row.value("residentBytes").toULongLong()
                     <= row.value("estimatedBytes").toULongLong() + 65536);
+                QCOMPARE(row.value("residentBytes").toULongLong(),
+                    row.value("videoBytes").toULongLong() + row.value("imageBytes").toULongLong()
+                    + row.value("posterBytes").toULongLong() + row.value("thumbnailBytes").toULongLong());
             }
         });
         manager.acquire("first", QString::fromUtf8(TEST_VIDEO_FILE));
@@ -179,6 +219,10 @@ private slots:
         QCOMPARE(asset, manager.asset("second"));
         QVERIFY(!asset->compressedVideo.isEmpty());
         QCOMPARE(manager.summary().value("mediaBytes").toULongLong(), asset->residentBytes);
+        QCOMPARE(manager.summary().value("videoBytes").toULongLong(), quint64(asset->compressedVideo.capacity()));
+        QCOMPARE(manager.summary().value("imageBytes").toULongLong(), quint64(0));
+        QCOMPARE(manager.summary().value("thumbnailBytes").toULongLong(), asset->thumbnailBytes);
+        QCOMPARE(manager.summary().value("posterBytes").toULongLong(), asset->posterBytes);
         QCOMPARE(manager.summary().value("reservedBytes").toULongLong(), quint64(0));
         const quint64 budget = asset->playbackBudgetBytes;
         manager.setMemorySnapshotForTesting(memory(2 * GiB + budget + 1));
@@ -215,6 +259,8 @@ private slots:
         manager.setMemorySnapshotForTesting(memory(548 * MiB + 2 * budget + 1));
         QVERIFY(manager.pinOwners({"video", "video"}, "pair"));
         QCOMPARE(manager.summary().value("pendingPlaybackBudgetBytes").toULongLong(), 2 * budget);
+        QCOMPARE(manager.assets().first().toMap().value("playbackBudgetBytes").toULongLong(), 2 * budget);
+        QCOMPARE(manager.assets().first().toMap().value("pendingPlaybackBudgetBytes").toULongLong(), 2 * budget);
         QVERIFY(asset->reservePlayback());
         QVERIFY(asset->reservePlayback());
         QVERIFY(!asset->reservePlayback());
@@ -223,6 +269,7 @@ private slots:
         // Available RAM now reflects the first player's real allocations.
         manager.setMemorySnapshotForTesting(memory(548 * MiB + budget + 1));
         QCOMPARE(manager.summary().value("pendingPlaybackBudgetBytes").toULongLong(), budget);
+        QCOMPARE(manager.assets().first().toMap().value("pendingPlaybackBudgetBytes").toULongLong(), budget);
         QVERIFY(!asset->reservePlayback()); // The second player is still pending.
         asset->playbackPrepared();
         QCOMPARE(manager.summary().value("pendingPlaybackBudgetBytes").toULongLong(), quint64(0));

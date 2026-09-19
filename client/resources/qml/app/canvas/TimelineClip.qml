@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import Mouffette.App
+import Mouffette.Canvas 1.0
 
 Rectangle {
     id: clipItem
@@ -138,6 +139,32 @@ Rectangle {
         ? Math.min(shownDuration, Math.max(0, -shownSourceIn)) : 0
     readonly property real trailingHoldMs: modelData.isVideo
         ? Math.min(shownDuration, Math.max(0, shownSourceIn + shownDuration - modelData.actualSourceDurationMs)) : 0
+    readonly property bool hasThumbnails: !!thumbnailLoader.item && thumbnailLoader.item.hasThumbnails
+    Loader {
+        id: thumbnailLoader
+        objectName: "timelineThumbnailLoader"
+        anchors.fill: parent
+        anchors.margins: 2
+        // Keep interaction delegates alive, but allocate graphics only for
+        // clips intersecting the two-dimensional viewport.
+        active: panel.visible && panel.expanded && !!clipItem.modelData.thumbnailOwnerId && clipItem.width > 4
+            && clipItem.x < panel.visibleEndX && clipItem.x + clipItem.width > panel.visibleStartX
+            && clipItem.y < panel.visibleTrackBottom && clipItem.y + clipItem.height > panel.visibleTrackTop
+        sourceComponent: TimelineThumbnailItem {
+            objectName: "timelineThumbnails"
+            ownerId: clipItem.modelData.thumbnailOwnerId
+            sourceInMs: clipItem.shownSourceIn
+            pixelsPerMs: panel.pixelsPerMs
+            visibleLeft: panel.visibleStartX - clipItem.x - 2
+            visibleRight: panel.visibleEndX - clipItem.x - 2
+        }
+    }
+    Rectangle {
+        anchors.fill: thumbnailLoader
+        visible: clipItem.hasThumbnails
+        color: clipItem.selected ? Theme.controlSelectionBackground : "black"
+        opacity: clipItem.selected ? 0.22 : 0.1
+    }
     HoldRegion {
         objectName: "timelineClipLeadingHold"
         width: clipItem.leadingHoldMs * panel.pixelsPerMs
@@ -163,6 +190,13 @@ Rectangle {
         height: parent.height
         x: leftBound + Math.max(0, rightBound - leftBound - width) / 2
         visible: clipItem.interactive && width > 0
+        Rectangle {
+            x: -4; y: (parent.height - height) / 2
+            width: parent.width + 8; height: Math.min(parent.height - 4, 18)
+            radius: 3
+            color: "#bc101318"
+            visible: clipItem.hasThumbnails
+        }
         Text {
             id: clipTitle
             objectName: "timelineClipTitle"
@@ -170,7 +204,7 @@ Rectangle {
             height: parent.height
             text: clipItem.modelData.mediaName
             textFormat: Text.PlainText
-            font.pixelSize: 10; color: Theme.overlayText
+            font.pixelSize: 10; color: clipItem.hasThumbnails ? "#ffffff" : Theme.overlayText
             verticalAlignment: Text.AlignVCenter; elide: Text.ElideRight
         }
     }

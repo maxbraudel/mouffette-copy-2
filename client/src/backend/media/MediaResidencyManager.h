@@ -85,7 +85,7 @@ private:
     void evict(const EntryPtr& entry);
     bool protectedEntry(const EntryPtr& entry) const;
     quint64 reserveBytes() const;
-    quint64 residentBytes() const;
+    int pinnedPlayerCount(const EntryPtr& entry) const;
     quint64 playbackBudgetBytes() const;
     quint64 pendingPlaybackBudgetBytes() const;
     quint64 reservedBudgetBytes() const;

@@ -39,12 +39,20 @@ changes are retained while it is pending, and the player receives its asset only
 after its audio output exists. Deleting an occurrence discards its pending callback.
 Hashing, validation and complete decoding run outside the GUI thread.
 Images retain decoded pixels. Videos retain the **exact original compressed MP4**
-(no transcoding) and one native-format poster frame, shared across occurrences.
+(no transcoding), one native-format poster frame and bounded timeline thumbnails,
+shared across occurrences.
 Validation still decodes every video frame and the selected audio stream through
-EOF, including delayed frames/audio drain, but discards the decoded data immediately.
+EOF, including delayed frames/audio drain, retaining only the poster and sampled
+small thumbnails. Images retain one small thumbnail (sharing pixels for tiny sources).
 The decoder reads the in-memory bytes it hashes; source mutation invalidates the job.
-No partial or corrupt video is ready. Preparation cost is file size plus one poster
-and bounded codec scratch, independent of duration/FPS except for compressed size.
+No partial or corrupt video is ready. Preparation cost is file size plus one poster,
+at most 96 thumbnails fitting 192 × 108 pixels (under 8 MiB), and bounded codec scratch.
+Thumbnails are produced during the existing worker validation pass, with actual
+timestamps, sample aspect ratio and rotation. The first and final frames are retained;
+sampling becomes sparser for longer videos, including when duration metadata is missing.
+Their storage is included in residency admission and reported RAM. Timeline rendering
+never decodes or opens a file, starts a player, or pins an asset. Eviction/release removes
+its thumbnails; zoom and scrolling reuse small textures for the visible tiles only.
 
 `ResidentVideoPlayer` supplies a seekable, read-only `QBuffer` to Qt's streaming
 player. Every occurrence shares the MP4 allocation but has independent playback
@@ -115,6 +123,23 @@ preparation reservations show only the remainder beyond those retained bytes.
 Opaque platform decoder/GPU memory appears in process/system measurements, not as
 fictional retained media allocations. Errors are reported there
 and through notifications, not overlays on loading media.
+
+The stored-media total is broken down into original compressed video data
+(`videoBytes`), decoded image pixels (`imageBytes`), full-size first video frames
+(`posterBytes`), and small timeline previews (`thumbnailBytes`). These disjoint
+categories sum to `mediaBytes` globally and `residentBytes` per asset, including
+during background loading. Reused files are counted once; a tiny image that shares
+pixels with its thumbnail counts those pixels under images, with only the extra
+thumbnail bookkeeping counted under thumbnails. Eviction, failed loading and
+owner release remove the corresponding allocations from the breakdown.
+
+Playback is displayed separately as an estimate, with its still-pending preparation
+reserve below it. Per-asset player estimates include both active players and scene
+slots awaiting a player, using the same calculation as the global total. They are
+never added to the stored-media total or presented as measured playback RAM.
+The popup uses one scrollable area for the summary and media list, with category
+cards adapting to narrow windows. Small allocations use KiB or bytes instead of
+rounding down to zero MiB.
 
 ## Remote protocol
 

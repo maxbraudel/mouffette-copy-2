@@ -77,6 +77,63 @@ class TimelineControllerTest final : public QObject
 {
     Q_OBJECT
 private slots:
+    void thumbnailsFollowResidencyViewportAndTrimPreview()
+    {
+        TimelineFixture f; QVERIFY(f.initialize());
+        QTemporaryDir temporary;
+        const auto path = temporary.filePath("thumbnail.png");
+        QImage image(120, 80, QImage::Format_RGB32); image.fill(Qt::cyan); QVERIFY(image.save(path));
+        auto* doc = f.host->document();
+        doc->setMediaResidencySuspended(true);
+        auto* media = doc->addPreparedFile(path, image.size(), false, {}); QVERIFY(media);
+        auto* clip = f.item("timelineClip"); QVERIFY(clip);
+        QVERIFY(!clip->property("hasThumbnails").toBool());
+        QVERIFY(timelineItems(clip, "timelineThumbnails").isEmpty());
+        doc->setMediaResidencySuspended(false);
+        QTRY_VERIFY(media->residencyReady());
+        QTRY_VERIFY(clip->property("hasThumbnails").toBool());
+        auto* thumbnails = f.item("timelineThumbnails"); QVERIFY(thumbnails);
+        QCOMPARE(thumbnails->property("ownerId").toString(), media->residencyOwnerId());
+        auto* viewport = f.item("timelineClipViewport"); QVERIFY(viewport);
+        const qreal scroll = viewport->property("contentY").toReal();
+        viewport->setProperty("contentY", scroll + 10000);
+        QTRY_VERIFY(timelineItems(clip, "timelineThumbnails").isEmpty());
+        viewport->setProperty("contentY", scroll);
+        QTRY_VERIFY(clip->property("hasThumbnails").toBool());
+        doc->setMediaResidencySuspended(true);
+        QTRY_VERIFY(!clip->property("hasThumbnails").toBool());
+        doc->setMediaResidencySuspended(false);
+        QTRY_VERIFY(clip->property("hasThumbnails").toBool());
+        QVERIFY(doc->removeMedia(media->mediaId()));
+        auto* text = doc->addText({}, "No thumbnails on text"); QVERIFY(text);
+        clip = f.item("timelineClip"); QVERIFY(clip);
+        QVERIFY(!clip->property("hasThumbnails").toBool());
+        QVERIFY(timelineItems(clip, "timelineThumbnails").isEmpty());
+        QVERIFY(doc->removeMedia(text->mediaId()));
+        auto* video = doc->addPreparedFile(QString::fromUtf8(TEST_VIDEO_FILE), {320, 180}, true, {}); QVERIFY(video);
+        QTRY_VERIFY_WITH_TIMEOUT(video->residencyReady(), 15000);
+        clip = f.item("timelineClip"); QVERIFY(clip);
+        QTRY_VERIFY(clip->property("hasThumbnails").toBool());
+        thumbnails = f.item("timelineThumbnails"); QVERIFY(thumbnails);
+        // The same source offset used by playback/hold regions drives an uncommitted trim.
+        const qreal initial = clip->property("shownSourceIn").toReal();
+        clip->setProperty("initialStart", 0);
+        clip->setProperty("previewStart", 100);
+        clip->setProperty("previewEnd", 1000);
+        clip->setProperty("previewTrack", clip->property("modelData").toMap().value("displayTrackIndex"));
+        clip->setProperty("editEdge", -1);
+        clip->setProperty("dragging", true);
+        QCOMPARE(thumbnails->property("sourceInMs").toReal(), initial + 100);
+        clip->setProperty("dragging", false);
+        QCOMPARE(thumbnails->property("sourceInMs").toReal(), initial);
+        f.view.rootObject()->setProperty("viewDurationMs", 1500);
+        const auto screenshot = qEnvironmentVariable("MOUFFETTE_TIMELINE_SCREENSHOT");
+        if (!screenshot.isEmpty()) {
+            QTest::qWait(100);
+            QVERIFY(f.view.grabWindow().save(screenshot));
+        }
+    }
+
     void minimumTrackRangeSurvivesEditsAndExtendsAtOccupiedEdges_data()
     {
         QTest::addColumn<int>("above");

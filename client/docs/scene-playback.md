@@ -166,9 +166,23 @@ font, plus 12 px padding on each side and a 1 px separator. Clip track names fol
 the clips' vertical scroll; the Keyframes header stays fixed. Header clicks are
 informational and wheel events navigate the same timeline. Track backgrounds do
 not highlight the active paste destination. Clips fill the entire track height
-without vertical insets. Only the media name is shown, centered in the intersection
+without vertical insets. The media name is centered in the intersection
 of its clip with the visible time viewport, including during drag and resize.
-Long names elide to the available width. Invisible resize zones straddle edges
+Long names elide to the available width. Resident image/video clips show a thumbnail
+strip inside the border; image tiles repeat, video tiles sample source time,
+and text clips keep their plain background. Tiles keep the media aspect ratio,
+clamped between 1:2 and 2.4:1 with centered cropping for extreme formats, never
+stretching pixels. Tile height follows the track; time zoom adds/removes tiles.
+The label gets a dark translucent backing over thumbnails. Sampling follows trim
+previews and source offsets, including first/last-frame holds. Long videos use a
+bounded representative sample set, so very close zoom can repeat a sample.
+Only strips intersecting the visible time/track viewport are instantiated, and
+only visible tiles have scene-graph nodes/textures. Repeated tiles share a texture
+within a strip; thumbnails share resident storage between media occurrences.
+Collapsed/hidden panels release the strips. See [media residency](MEDIA_RESIDENCY.md)
+for worker generation, storage limits and eviction.
+
+Invisible resize zones straddle edges
 equally inside and outside the clip when no joint handle is present, with a horizontal double-arrow cursor. Each
 zone stays a fixed number of logical viewport pixels wide, independently of time
 zoom or clip duration (`MOUFFETTE_TIMELINE_CLIP_RESIZE_HANDLE_WIDTH_PX`, default 8).

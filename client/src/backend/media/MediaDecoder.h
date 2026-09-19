@@ -30,6 +30,7 @@ public:
         std::function<bool(quint64)> reserve;
         // Retained allocations only, excluding projected growth and scratch.
         std::function<void(quint64)> allocated;
+        std::function<void(const ResidentMediaMemory&)> allocatedBreakdown;
         std::function<void(double)> progress;
     };
 

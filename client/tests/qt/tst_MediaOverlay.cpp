@@ -73,6 +73,7 @@ private slots:
     void uploadActionLocksBeforeDispatchAndRecovers();
     void unavailableActionsStayClickableAndExplainWhy();
     void toolbarToolsAndGlobalMemoryUsage();
+    void memoryBreakdownIsClearAndScrollable();
     void scenePlaybackUnloadsEditorOverlays_data();
     void scenePlaybackUnloadsEditorOverlays();
     void mediaSettingsElementBindings_data();
@@ -511,6 +512,85 @@ Item {
 void MediaOverlayTest::initTestCase()
 {
     registerCanvasQmlTypes();
+}
+
+void MediaOverlayTest::memoryBreakdownIsClearAndScrollable()
+{
+    QTemporaryDir directory;
+    QImage image(512, 512, QImage::Format_RGBA8888); image.fill(Qt::cyan);
+    const auto path = directory.filePath("Picture.png"); QVERIFY(image.save(path));
+    auto& manager = MediaResidencyManager::instance();
+    manager.acquire("memory-popup-image", path);
+    manager.acquire("memory-popup-video", QFINDTESTDATA("../fixtures/resident-timeline.mp4"));
+    const auto cleanup = qScopeGuard([&] {
+        manager.release("memory-popup-image"); manager.release("memory-popup-video");
+    });
+    QTRY_VERIFY_WITH_TIMEOUT(manager.ready("memory-popup-image") && manager.ready("memory-popup-video"), 10000);
+    QQmlEngine engine;
+    QQuickWindow window;
+    window.resize(760, 700);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    QQmlComponent component(&engine, QUrl(QStringLiteral(
+        "qrc:/qt/qml/Mouffette/App/resources/qml/app/dialogs/MemoryUsagePopup.qml")));
+    std::unique_ptr<QObject> popup(component.createWithInitialProperties({
+        {QStringLiteral("parent"), QVariant::fromValue(window.contentItem())}
+    }));
+    QVERIFY2(popup, qPrintable(component.errorString()));
+    QVERIFY(QMetaObject::invokeMethod(popup.get(), "open"));
+    QTRY_VERIFY(popup->property("opened").toBool());
+    auto* list = findVisualItem(window.contentItem(), "memoryAssetList"); QVERIFY(list);
+    auto* amount = findVisualItem(window.contentItem(), "memoryAmount_imageBytes"); QVERIFY(amount);
+    QCOMPARE(amount->property("text").toString(), QStringLiteral("1.0 MiB"));
+    for (const auto* category : {"videoBytes", "imageBytes", "posterBytes", "thumbnailBytes"}) {
+        auto* card = findVisualItem(window.contentItem(), QStringLiteral("memoryCategory_") + category);
+        QVERIFY(card && card->width() > 0 && card->height() > 0);
+        QVERIFY(card->mapToItem(list, {card->width(), 0}).x() <= list->width() + 0.5);
+    }
+    auto* playback = findVisualItem(window.contentItem(), "memoryPlaybackEstimate"); QVERIFY(playback);
+    QCOMPARE(playback->property("text").toString(), QStringLiteral("0 B"));
+    const auto asset = manager.asset("memory-popup-video");
+    QVERIFY(asset->reservePlayback());
+    const auto releasePlayer = qScopeGuard([&] { asset->releasePlayback(false); });
+    QTRY_VERIFY(playback->property("text").toString() != QStringLiteral("0 B"));
+    const auto totals = popup->property("usage").toMap();
+    QCOMPARE(totals.value("mediaBytes").toULongLong(),
+        totals.value("videoBytes").toULongLong() + totals.value("imageBytes").toULongLong()
+        + totals.value("posterBytes").toULongLong() + totals.value("thumbnailBytes").toULongLong());
+    const auto capture = [&](const QString& name) {
+        const auto output = qEnvironmentVariable("MOUFFETTE_OVERLAY_ARTIFACT_DIR");
+        if (output.isEmpty()) return;
+        QVERIFY(QDir().mkpath(output));
+        QTest::qWait(100);
+        QSignalSpy frames(&window, &QQuickWindow::frameSwapped);
+        window.update(); QTRY_VERIFY(!frames.isEmpty());
+        QVERIFY(window.grabWindow().save(QDir(output).filePath(name)));
+    };
+    capture("memory-breakdown-wide.png");
+    QVERIFY(QMetaObject::invokeMethod(list, "positionViewAtEnd"));
+    QTRY_VERIFY(findVisualItem(window.contentItem(), "memoryAssetBreakdown"));
+    auto* details = findVisualItem(window.contentItem(), "memoryAssetBreakdown");
+    QVERIFY(details->property("text").toString().contains("Thumbnails"));
+    QVERIFY(details->property("text").toString().contains("Stored total"));
+    capture("memory-breakdown-assets.png");
+    window.resize(420, 360);
+    QTRY_VERIFY(list->width() < 400);
+    QTRY_VERIFY(list->property("contentHeight").toReal() > list->height());
+    auto* first = findVisualItem(window.contentItem(), "memoryCategory_videoBytes");
+    auto* third = findVisualItem(window.contentItem(), "memoryCategory_posterBytes");
+    QVERIFY(first && third);
+    QTRY_VERIFY(third->y() > first->y()); // Two-column layout on narrow windows.
+    QVERIFY(QMetaObject::invokeMethod(popup.get(), "close"));
+    QTRY_VERIFY(!popup->property("opened").toBool());
+    QVERIFY(QMetaObject::invokeMethod(popup.get(), "open"));
+    QTRY_VERIFY(popup->property("opened").toBool());
+    auto* totalLabel = findVisualItem(window.contentItem(), "memoryStoredTotal");
+    QVERIFY(totalLabel);
+    QTest::qWait(150); // Let the resized header and model refresh finish laying out.
+    QTRY_VERIFY(qAbs(totalLabel->mapToItem(list, {0, 0}).y()) < 1);
+    capture("memory-breakdown-narrow.png");
+    QVERIFY(QMetaObject::invokeMethod(popup.get(), "close"));
+    QTRY_VERIFY(!popup->property("opened").toBool());
 }
 
 void MediaOverlayTest::segmentedStatusFillReachesBothEdges_data()
@@ -1769,8 +1849,10 @@ void MediaOverlayTest::toolbarToolsAndGlobalMemoryUsage()
     const QPoint memoryCenter = memory->mapToScene({memory->width() / 2, memory->height() / 2}).toPoint();
     QTest::mouseClick(appWindow, Qt::LeftButton, Qt::NoModifier, memoryCenter);
     QTRY_VERIFY(memory->property("checked").toBool());
+    // ListView creates and lays out its summary header when the popup opens.
+    QTRY_VERIFY(findVisualItem(appWindow->contentItem(), QStringLiteral("memoryDistributionBar")));
     auto* bar = findVisualItem(appWindow->contentItem(), QStringLiteral("memoryDistributionBar"));
-    QVERIFY(bar && bar->isVisible() && bar->width() > 400);
+    QTRY_VERIFY(bar->isVisible() && bar->width() > 400);
     auto* assets = findVisualItem(appWindow->contentItem(), QStringLiteral("memoryAssetList"));
     QVERIFY(assets && assets->property("count").toInt() >= 1);
     const QString artifactDir = qEnvironmentVariable("MOUFFETTE_OVERLAY_ARTIFACT_DIR");

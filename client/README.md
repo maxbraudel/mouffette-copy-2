@@ -172,8 +172,9 @@ opens centered at 90% of the available screen width and height. See
 
 ## Media memory
 
-Images and videos are completely decoded before they become available. Videos
-retain every frame and their decoded audio in RAM. The RAM button beside Settings
+Images and videos are completely validated before they become available. Videos
+retain their original compressed bytes, a poster and bounded timeline thumbnails
+in RAM; playback uses independent bounded decoder queues. The RAM button beside Settings
 shows loading, memory use and pressure-driven eviction. See
 [media residency](docs/MEDIA_RESIDENCY.md) for the memory policy, playback contract
 and protocol v6 deployment requirements.

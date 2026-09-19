@@ -8,6 +8,7 @@
 #include <QFileInfo>
 #include <QFutureWatcher>
 #include <QPointer>
+#include <QMutex>
 #include <QtConcurrent/QtConcurrentRun>
 #include <algorithm>
 #include <limits>
@@ -71,6 +72,21 @@ struct MediaResidencyManager::Entry {
     std::atomic<quint64> allocated{0};
     quint64 generation = 0;
     bool requiresHealthySamples = false;
+    bool video = false;
+    mutable QMutex allocationMutex;
+    ResidentMediaMemory allocation;
+    // Readers are on the GUI thread. Publish the worker's categories as one
+    // snapshot so the RAM page never mixes counters from different frames.
+    ResidentMediaMemory storedMemory() const {
+        if (data) return data->memoryBreakdown();
+        QMutexLocker lock(&allocationMutex);
+        return allocation;
+    }
+    void setAllocation(const ResidentMediaMemory& memory) {
+        QMutexLocker lock(&allocationMutex);
+        allocation = memory;
+        allocated.store(memory.totalBytes());
+    }
 };
 
 MediaResidencyManager& MediaResidencyManager::instance() {
@@ -215,18 +231,17 @@ quint64 MediaResidencyManager::reserveBytes() const
         + (m_memory.totalBytes % 100) * m_reservePercent / 100;
     return std::max(quint64(m_reserveMinMiB) * MiB, percentage);
 }
-quint64 MediaResidencyManager::residentBytes() const {
-    quint64 bytes = 0;
-    for (const auto& e : m_entries) bytes += e->data ? e->data->residentBytes : e->allocated.load();
-    return bytes;
+int MediaResidencyManager::pinnedPlayerCount(const EntryPtr& entry) const {
+    int count = 0;
+    for (const auto& owners : m_pins)
+        for (const auto& id : owners) if (entry->owners.contains(id)) ++count;
+    return count;
 }
 quint64 MediaResidencyManager::playbackBudgetBytes() const {
     quint64 bytes = 0;
     for (const auto& e : m_entries) {
         if (!e->data || !e->data->video) continue;
-        int pinnedPlayers = 0;
-        for (const auto& owners : m_pins)
-            for (const auto& id : owners) if (e->owners.contains(id)) ++pinnedPlayers;
+        const int pinnedPlayers = pinnedPlayerCount(e);
         bytes += e->data->playbackBudgetBytes * quint64(std::max(e->activePlayers, pinnedPlayers));
     }
     return bytes;
@@ -241,9 +256,7 @@ quint64 MediaResidencyManager::pendingPlaybackBudgetBytes() const {
     quint64 bytes = 0;
     for (const auto& e : m_entries) {
         if (!e->data || !e->data->video) continue;
-        int pinnedPlayers = 0;
-        for (const auto& owners : m_pins)
-            for (const auto& id : owners) if (e->owners.contains(id)) ++pinnedPlayers;
+        const int pinnedPlayers = pinnedPlayerCount(e);
         // A first decoded frame commits the player's allocations to the OS
         // measurement. Keep only unopened scene slots and still-priming players
         // as future commitments; charging prepared players again double-counts
@@ -345,6 +358,7 @@ void MediaResidencyManager::release(const QString& ownerId) {
         m_entries.removeAll(e);
         QTimer::singleShot(0, this, &MediaResidencyManager::sampleNow);
     }
+    emit ownerChanged(ownerId);
     emit changed();
 }
 bool MediaResidencyManager::hasBackgroundWorkForPath(const QString& path) const {
@@ -419,6 +433,7 @@ void MediaResidencyManager::startProbe(const EntryPtr& e) {
         }
         e->hash = result.hash;
         e->estimated = result.probe.estimatedBytes;
+        e->video = result.probe.video;
         e->scratch = std::max({DecodeScratch, result.probe.scratchBytes, result.probe.playbackBudgetBytes});
         // Merge complete content identities, never merely paths or filenames.
         for (const auto other : m_entries) {
@@ -505,7 +520,7 @@ void MediaResidencyManager::evict(const EntryPtr& e) {
     // destruction is never mistaken for immediately available physical RAM.
     publish(e);
     e->data.reset();
-    e->allocated.store(0);
+    e->setAllocation({});
     e->activePlayers = 0;
     e->pendingPlayers = 0;
     emit changed();
@@ -594,7 +609,7 @@ void MediaResidencyManager::startDecode(const EntryPtr& e, quint64 allowance) {
         m_jobs.remove(watcher);
         finishBackgroundWork(path);
         m_decoding = false;
-        e->reserved = 0; e->allocated.store(0);
+        e->reserved = 0; e->setAllocation({});
         if (e->generation != generation || e->owners.isEmpty()) { schedule(); return; }
         if (e->cancelled->load() || result.error == QLatin1String("memory_unavailable")) {
             e->state = QStringLiteral("waiting_for_memory");
@@ -694,7 +709,7 @@ void MediaResidencyManager::startDecode(const EntryPtr& e, quint64 allowance) {
             e->budgeted.store(bytes);
             return true;
         };
-        callbacks.allocated = [e](quint64 bytes) { e->allocated.store(bytes); };
+        callbacks.allocatedBreakdown = [e](const ResidentMediaMemory& memory) { e->setAllocation(memory); };
         callbacks.progress = [self, e, generation](double progress) {
             if (!self) return;
             QMetaObject::invokeMethod(self, [self, e, generation, progress]() {
@@ -857,7 +872,12 @@ void MediaResidencyManager::clearRemoteStates(const QString& target) {
 }
 QVariantMap MediaResidencyManager::summary() const {
     quint64 reserved = 0;
-    for (const auto& e : m_entries) reserved += e->reserved - std::min(e->reserved, e->allocated.load());
+    ResidentMediaMemory memory;
+    for (const auto& e : m_entries) {
+        const auto stored = e->storedMemory();
+        memory += stored;
+        reserved += e->reserved - std::min(e->reserved, stored.totalBytes());
+    }
     const quint64 available = std::min(m_memory.availableBytes, m_memory.totalBytes);
     const quint64 process = std::min(m_memory.processBytes, m_memory.totalBytes - available);
     const int pressure = pressureLevel();
@@ -865,7 +885,11 @@ QVariantMap MediaResidencyManager::summary() const {
         {QStringLiteral("availableBytes"), QVariant::fromValue(available)},
         {QStringLiteral("processBytes"), QVariant::fromValue(process)},
         {QStringLiteral("otherBytes"), QVariant::fromValue(m_memory.totalBytes - available - process)},
-        {QStringLiteral("mediaBytes"), QVariant::fromValue(residentBytes())},
+        {QStringLiteral("mediaBytes"), QVariant::fromValue(memory.totalBytes())},
+        {QStringLiteral("videoBytes"), QVariant::fromValue(memory.videoBytes)},
+        {QStringLiteral("imageBytes"), QVariant::fromValue(memory.imageBytes)},
+        {QStringLiteral("posterBytes"), QVariant::fromValue(memory.posterBytes)},
+        {QStringLiteral("thumbnailBytes"), QVariant::fromValue(memory.thumbnailBytes)},
         {QStringLiteral("reservedBytes"), QVariant::fromValue(reserved)},
         {QStringLiteral("playbackBudgetBytes"), QVariant::fromValue(playbackBudgetBytes())},
         {QStringLiteral("pendingPlaybackBudgetBytes"), QVariant::fromValue(pendingPlaybackBudgetBytes())},
@@ -883,6 +907,10 @@ QVariantList MediaResidencyManager::assets() const {
     });
     QVariantList rows;
     for (const auto& e : entries) {
+        const auto memory = e->storedMemory();
+        const int pinnedPlayers = pinnedPlayerCount(e);
+        const quint64 playerBudget = e->data ? e->data->playbackBudgetBytes : 0;
+        const int pendingPlayers = e->pendingPlayers + std::max(0, pinnedPlayers - e->activePlayers);
         auto owners = e->owners.values(); std::sort(owners.begin(), owners.end());
         QVariantList remote;
         const auto values = m_remoteStates.value(e->hash);
@@ -891,10 +919,17 @@ QVariantList MediaResidencyManager::assets() const {
             {QStringLiteral("assetId"), e->hash}, {QStringLiteral("displayName"), QFileInfo(e->path).fileName()},
             {QStringLiteral("sourcePath"), e->path}, {QStringLiteral("state"), state(owners.value(0))},
             {QStringLiteral("progress"), e->progress}, {QStringLiteral("error"), errorString(owners.value(0))},
-            {QStringLiteral("residentBytes"), QVariant::fromValue(e->data ? e->data->residentBytes : e->allocated.load())},
+            {QStringLiteral("residentBytes"), QVariant::fromValue(memory.totalBytes())},
+            {QStringLiteral("videoBytes"), QVariant::fromValue(memory.videoBytes)},
+            {QStringLiteral("imageBytes"), QVariant::fromValue(memory.imageBytes)},
+            {QStringLiteral("posterBytes"), QVariant::fromValue(memory.posterBytes)},
+            {QStringLiteral("thumbnailBytes"), QVariant::fromValue(memory.thumbnailBytes)},
+            {QStringLiteral("isVideo"), e->video},
             {QStringLiteral("estimatedBytes"), QVariant::fromValue(e->estimated)},
             {QStringLiteral("preparationBudgetBytes"), QVariant::fromValue(e->estimated + e->scratch)},
-            {QStringLiteral("playbackBudgetBytes"), QVariant::fromValue(e->data ? e->data->playbackBudgetBytes * quint64(e->activePlayers) : 0)},
+            {QStringLiteral("reservedBytes"), QVariant::fromValue(e->reserved - std::min(e->reserved, memory.totalBytes()))},
+            {QStringLiteral("playbackBudgetBytes"), QVariant::fromValue(playerBudget * quint64(std::max(e->activePlayers, pinnedPlayers)))},
+            {QStringLiteral("pendingPlaybackBudgetBytes"), QVariant::fromValue(playerBudget * quint64(pendingPlayers))},
             {QStringLiteral("activePlayers"), e->activePlayers},
             {QStringLiteral("occurrences"), owners.size()}, {QStringLiteral("owners"), owners},
             {QStringLiteral("protected"), protectedEntry(e)}, {QStringLiteral("remoteStates"), remote}});

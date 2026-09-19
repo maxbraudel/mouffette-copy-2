@@ -10,6 +10,7 @@
 #include <QImageReader>
 #include <QImageIOHandler>
 #include <QVideoFrameFormat>
+#include <QTransform>
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -269,7 +270,13 @@ struct DecoderJob {
     std::shared_ptr<ResidentMediaAsset> asset = std::make_shared<ResidentMediaAsset>();
     qint64 lastVideoTimestampUs = 0;
     qint64 lastVideoDurationUs = 0;
-    void publishAllocation() { if (callbacks.allocated) callbacks.allocated(asset->residentBytes); }
+    qint64 thumbnailIntervalUs = MediaThumbnails::MinimumIntervalUs;
+    FramePtr lastThumbnailFrame;
+    std::unique_ptr<SwsContext, SwsDeleter> thumbnailScaler;
+    void publishAllocation() {
+        if (callbacks.allocated) callbacks.allocated(asset->residentBytes);
+        if (callbacks.allocatedBreakdown) callbacks.allocatedBreakdown(asset->memoryBreakdown());
+    }
     bool check(quint64 additional = 0) {
         if (callbacks.cancelled && callbacks.cancelled()) { error = QStringLiteral("cancelled"); return false; }
         if (additional > std::numeric_limits<quint64>::max() - asset->residentBytes
@@ -280,6 +287,60 @@ struct DecoderJob {
         return true;
     }
 };
+
+quint64 thumbnailBytes(const ResidentThumbnail& frame) {
+    return quint64(frame.image.sizeInBytes()) + sizeof(ResidentThumbnail);
+}
+
+bool storeThumbnail(DecoderJob& job, AVFormatContext* format, AVStream* stream,
+                    AVFrame* source, bool finalFrame = false) {
+    auto& frames = job.asset->thumbnails;
+    const qint64 timestamp = job.lastVideoTimestampUs;
+    if (!frames.isEmpty() && (timestamp <= frames.last().timestampUs
+        || (!finalFrame && timestamp - frames.last().timestampUs < job.thumbnailIntervalUs))) return true;
+    // Leave one slot for the exact final frame. Bad/missing duration metadata
+    // cannot make storage grow: progressively thin the samples in that case.
+    if (!finalFrame && frames.size() >= MediaThumbnails::MaxCount - 1) {
+        for (int i = frames.size() - 1; i > 0; --i) {
+            if (i % 2) {
+                job.asset->residentBytes -= thumbnailBytes(frames[i]);
+                job.asset->thumbnailBytes -= thumbnailBytes(frames[i]);
+                frames.removeAt(i);
+            }
+        }
+        job.thumbnailIntervalUs *= 2;
+    }
+    const int rotation = rotationFor(stream);
+    QSize bounds(MediaThumbnails::Width, MediaThumbnails::Height);
+    if (rotation % 180) bounds.transpose();
+    const QSize display = unrotatedDisplaySize(format, stream, source);
+    const QSize size = display.boundedTo(display.scaled(bounds, Qt::KeepAspectRatio)).expandedTo(QSize(1, 1));
+    const quint64 bytes = quint64(size.width()) * size.height() * 4 + sizeof(ResidentThumbnail);
+    if (!job.check(bytes)) return false;
+    QImage image(size, QImage::Format_RGBA8888);
+    if (image.isNull()) { job.error = QStringLiteral("memory_unavailable"); return false; }
+    job.thumbnailScaler.reset(sws_getCachedContext(job.thumbnailScaler.release(), source->width, source->height,
+        static_cast<AVPixelFormat>(source->format), size.width(), size.height(), AV_PIX_FMT_RGBA,
+        SWS_BILINEAR, nullptr, nullptr, nullptr));
+    auto* scaler = job.thumbnailScaler.get();
+    if (!scaler) { job.error = QStringLiteral("Unsupported thumbnail conversion"); return false; }
+    const int* coefficients = sws_getCoefficients(source->colorspace == AVCOL_SPC_BT709
+        ? SWS_CS_ITU709 : source->colorspace == AVCOL_SPC_BT2020_NCL ? SWS_CS_BT2020 : SWS_CS_DEFAULT);
+    sws_setColorspaceDetails(scaler, coefficients, source->color_range == AVCOL_RANGE_JPEG,
+                            coefficients, 1, 0, 1 << 16, 1 << 16);
+    uint8_t* planes[4] = {image.bits(), nullptr, nullptr, nullptr};
+    int strides[4] = {int(image.bytesPerLine()), 0, 0, 0};
+    if (sws_scale(scaler, source->data, source->linesize, 0, source->height, planes, strides) != size.height()) {
+        job.error = QStringLiteral("Thumbnail conversion failed"); return false;
+    }
+    if (rotation) image = image.transformed(QTransform().rotate(rotation));
+    if (image.isNull()) { job.error = QStringLiteral("memory_unavailable"); return false; }
+    frames.append({std::move(image), timestamp});
+    job.asset->residentBytes += thumbnailBytes(frames.last());
+    job.asset->thumbnailBytes += thumbnailBytes(frames.last());
+    job.publishAllocation();
+    return true;
+}
 
 bool storeFrame(DecoderJob& job, AVFormatContext* format, AVStream* stream, AVFrame* source,
                 qint64 originUs, qint64 fallbackDurationUs) {
@@ -292,6 +353,13 @@ bool storeFrame(DecoderJob& job, AVFormatContext* format, AVStream* stream, AVFr
         ? av_rescale_q(source->duration, stream->time_base, microseconds) : fallbackDurationUs;
     job.lastVideoTimestampUs = std::max<qint64>(0, timestamp);
     job.lastVideoDurationUs = std::max<qint64>(1, duration);
+    if (!storeThumbnail(job, format, stream, source)) return false;
+    if (!job.lastThumbnailFrame) job.lastThumbnailFrame.reset(av_frame_alloc());
+    if (!job.lastThumbnailFrame) { job.error = QStringLiteral("memory_unavailable"); return false; }
+    av_frame_unref(job.lastThumbnailFrame.get());
+    if (av_frame_ref(job.lastThumbnailFrame.get(), source) < 0) {
+        job.error = QStringLiteral("memory_unavailable"); return false;
+    }
     if (job.asset->videoFrameCount++ > 0) return job.check();
     AVPixelFormat pixel = static_cast<AVPixelFormat>(source->format);
     auto qtPixel = qtPixelFormat(pixel);
@@ -342,6 +410,7 @@ bool storeFrame(DecoderJob& job, AVFormatContext* format, AVStream* stream, AVFr
     frame.setRotation(static_cast<QtVideo::Rotation>(rotationFor(stream)));
     job.asset->firstFrame = {std::move(frame), job.lastVideoTimestampUs, job.lastVideoDurationUs};
     job.asset->residentBytes += bytes;
+    job.asset->posterBytes = bytes;
     job.publishAllocation();
     return true;
 }
@@ -442,7 +511,8 @@ MediaDecoder::Probe MediaDecoder::probe(const QString& path) {
         reader.setAutoTransform(true);
         result.displaySize = reader.size();
         if (reader.transformation() & QImageIOHandler::TransformationRotate90) result.displaySize.transpose();
-        result.estimatedBytes = quint64(result.displaySize.width()) * result.displaySize.height() * 4;
+        result.estimatedBytes = quint64(result.displaySize.width()) * result.displaySize.height() * 4
+            + MediaThumbnails::Width * MediaThumbnails::Height * 4 + sizeof(ResidentThumbnail);
         result.scratchBytes = std::max<quint64>(64 * MiB, result.estimatedBytes * 4);
         return result;
     }
@@ -472,7 +542,7 @@ MediaDecoder::Probe MediaDecoder::probe(const QString& path) {
     // Qt's streaming decoder has bounded frame/packet queues. Opaque codec/GPU
     // allocations remain estimates; process RSS is measured separately.
     result.playbackBudgetBytes = saturatedBytes(32 * MiB + frameBytes * 24 + pixels * 4 * 3);
-    result.estimatedBytes = saturatedBytes(bytes);
+    result.estimatedBytes = saturatedBytes(bytes + MediaThumbnails::MaxBytes);
     return result;
 }
 
@@ -508,10 +578,22 @@ std::shared_ptr<ResidentMediaAsset> MediaDecoder::decode(
             if (job.asset->image.isNull()) { job.error = QStringLiteral("Image conversion failed"); return fail(); }
             job.asset->displaySize = job.asset->image.size();
             job.asset->residentBytes = job.asset->image.sizeInBytes();
+            QImage thumbnail = job.asset->image.scaled(
+                job.asset->image.size().boundedTo(QSize(MediaThumbnails::Width, MediaThumbnails::Height)),
+                Qt::KeepAspectRatio, Qt::SmoothTransformation);
+            if (thumbnail.isNull()) { job.error = QStringLiteral("memory_unavailable"); return fail(); }
+            job.asset->thumbnails.append({std::move(thumbnail), 0});
+            // Small images can share their original allocation.
+            if (job.asset->thumbnails.first().image.cacheKey() != job.asset->image.cacheKey())
+                job.asset->thumbnailBytes = job.asset->thumbnails.first().image.sizeInBytes();
+            job.asset->thumbnailBytes += sizeof(ResidentThumbnail);
+            job.asset->residentBytes += job.asset->thumbnailBytes;
             job.publishAllocation();
         } else {
             job.scratch = metadata.scratchBytes;
             job.asset->playbackBudgetBytes = metadata.playbackBudgetBytes;
+            job.thumbnailIntervalUs = std::max(MediaThumbnails::MinimumIntervalUs,
+                metadata.durationUs / (MediaThumbnails::MaxCount - 2));
             if (sourceBytes <= 0 || quint64(sourceBytes) > quint64(std::numeric_limits<qsizetype>::max())
                 || !job.check(quint64(sourceBytes))) return fail();
             QFile source(path);
@@ -683,6 +765,8 @@ std::shared_ptr<ResidentMediaAsset> MediaDecoder::decode(
                 }
             }
             if (!job.asset->videoFrameCount) { job.error = QStringLiteral("The video decoded no frames"); return fail(); }
+            if (!storeThumbnail(job, format.get(), videoStream, job.lastThumbnailFrame.get(), true)) return fail();
+            job.lastThumbnailFrame.reset();
             if (audio && !job.asset->audioSampleCount) { job.error = QStringLiteral("The audio track decoded no samples"); return fail(); }
             // The container's edit lists trim decoder preroll and AAC padding.
             // Use the same playable duration as Qt, not the untrimmed PCM tail.

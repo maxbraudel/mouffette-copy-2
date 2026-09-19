@@ -22,6 +22,8 @@ FocusScope {
     readonly property real rulerHeight: timeline ? timeline.rulerHeightPx : 28
     readonly property real visibleStartX: trackViewport.contentX
     readonly property real visibleEndX: trackViewport.contentX + trackViewport.width
+    readonly property real visibleTrackTop: clipViewport.contentY
+    readonly property real visibleTrackBottom: clipViewport.contentY + clipViewport.height
     readonly property real clipHeight: timeline ? timeline.clipTrackHeightPx : 48
     readonly property real keyHeight: 32
     readonly property int firstTrackIndex: timeline ? timeline.firstTrackIndex : 0

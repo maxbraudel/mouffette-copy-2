@@ -24,7 +24,7 @@ namespace {
 // Generate a bounded, reproducible MP4 with delayed video frames and an AAC
 // tail. Tests need neither the repository's large sample nor an ffmpeg CLI.
 bool writeVideo(const QString& path, bool rotated = false, bool variableRate = false,
-                int videoDelayFrames = 0, int audioFrames = 23, int audioTrimSamples = 0) {
+                int videoDelayFrames = 0, int audioFrames = 23, int audioTrimSamples = 0, int frameCount = 12) {
     AVFormatContext* format = nullptr;
     AVCodecContext* video = nullptr;
     AVCodecContext* audio = nullptr;
@@ -98,7 +98,7 @@ bool writeVideo(const QString& path, bool rotated = false, bool variableRate = f
     frame->width = video->width;
     frame->height = video->height;
     if (av_frame_get_buffer(frame, 32) < 0) return false;
-    for (int i = 0; i < 12; ++i) {
+    for (int i = 0; i < frameCount; ++i) {
         if (av_frame_make_writable(frame) < 0) return false;
         for (int y = 0; y < frame->height; ++y)
             std::memset(frame->data[0] + y * frame->linesize[0], 32 + i * 15, frame->width);
@@ -155,6 +155,33 @@ bool corruptLastVideoPacket(const QString& path, AVMediaType mediaType = AVMEDIA
 class ResidentMediaTest final : public QObject {
     Q_OBJECT
 private slots:
+    void thumbnailStorageIsBoundedAndIncludesEndpoints() {
+        QTemporaryDir directory;
+        const auto path = directory.filePath("long.mp4");
+        QVERIFY(writeVideo(path, false, false, 0, 23, 0, 600));
+        QString error;
+        const auto asset = MediaDecoder::decode(path, {}, &error);
+        QVERIFY2(asset, qPrintable(error));
+        QVERIFY(asset->thumbnails.size() > 50);
+        QVERIFY(asset->thumbnails.size() <= MediaThumbnails::MaxCount);
+        QCOMPARE(asset->thumbnails.first().timestampUs, qint64(0));
+        QCOMPARE(asset->thumbnails.last().timestampUs, qint64(599 * 40000));
+        quint64 bytes = 0;
+        for (const auto& thumbnail : asset->thumbnails) {
+            bytes += thumbnail.image.sizeInBytes() + sizeof(ResidentThumbnail);
+            QVERIFY(thumbnail.image.width() <= MediaThumbnails::Width);
+            QVERIFY(thumbnail.image.height() <= MediaThumbnails::Height);
+        }
+        QVERIFY(bytes <= MediaThumbnails::MaxBytes);
+        QVERIFY(asset->residentBytes >= bytes + quint64(asset->compressedVideo.size()));
+        const auto memory = asset->memoryBreakdown();
+        QCOMPARE(memory.videoBytes, quint64(asset->compressedVideo.capacity()));
+        QCOMPARE(memory.imageBytes, quint64(0));
+        QCOMPARE(memory.thumbnailBytes, bytes);
+        QVERIFY(memory.posterBytes > 0);
+        QCOMPARE(memory.totalBytes(), asset->residentBytes);
+    }
+
     void imageDecodeAndReservations() {
         QTemporaryDir directory;
         QVERIFY(directory.isValid());
@@ -181,7 +208,14 @@ private slots:
         QVERIFY2(asset, qPrintable(error));
         QCOMPARE(asset->image, source);
         QCOMPARE(asset->sha256.size(), 64);
-        QCOMPARE(asset->residentBytes, quint64(source.sizeInBytes()));
+        QCOMPARE(asset->thumbnails.size(), 1);
+        QCOMPARE(asset->thumbnails.first().image, source);
+        QCOMPARE(asset->residentBytes, quint64(source.sizeInBytes()) + sizeof(ResidentThumbnail));
+        const auto memory = asset->memoryBreakdown();
+        QCOMPARE(memory.imageBytes, quint64(source.sizeInBytes()));
+        QCOMPARE(memory.thumbnailBytes, quint64(sizeof(ResidentThumbnail))); // Pixels are shared with the image.
+        QCOMPARE(memory.videoBytes, quint64(0));
+        QCOMPARE(memory.posterBytes, quint64(0));
         QVERIFY(largestReservation > asset->residentBytes);
         QCOMPARE(lastProgress, 1.0);
         QVERIFY(QFile::remove(path));
@@ -262,7 +296,17 @@ private slots:
         QFile original(path);
         QVERIFY(original.open(QIODevice::ReadOnly));
         QCOMPARE(asset->compressedVideo, original.readAll());
-        QVERIFY(asset->residentBytes < quint64(asset->compressedVideo.size()) + 8192);
+        quint64 thumbnailStorage = 0;
+        for (const auto& thumbnail : asset->thumbnails)
+            thumbnailStorage += thumbnail.image.sizeInBytes() + sizeof(ResidentThumbnail);
+        QVERIFY(asset->residentBytes < quint64(asset->compressedVideo.size()) + 8192 + thumbnailStorage);
+        QVERIFY(asset->thumbnails.size() >= 3);
+        QCOMPARE(asset->thumbnails.first().timestampUs, qint64(0));
+        QCOMPARE(asset->thumbnails.last().timestampUs, qint64(440000)); // Includes delayed final B-frame.
+        QVERIFY(asset->thumbnails.first().image.pixelColor(20, 20)
+                != asset->thumbnails.last().image.pixelColor(20, 20));
+        for (int i = 1; i < asset->thumbnails.size(); ++i)
+            QVERIFY(asset->thumbnails[i].timestampUs > asset->thumbnails[i - 1].timestampUs);
         QVideoFrame first = asset->firstFrame.frame;
         QCOMPARE(first.pixelFormat(), QVideoFrameFormat::Format_YUV420P);
         QVERIFY(!first.map(QVideoFrame::WriteOnly));
@@ -285,12 +329,18 @@ private slots:
         QVERIFY2(asset, qPrintable(error));
         QCOMPARE(asset->videoFrameCount, quint64(921));
         QCOMPARE(asset->compressedVideo.size(), QFileInfo(path).size());
-        QVERIFY(asset->residentBytes < quint64(QFileInfo(path).size()) + 4 * 1024 * 1024);
+        QVERIFY(asset->residentBytes < quint64(QFileInfo(path).size()) + 4 * 1024 * 1024 + MediaThumbnails::MaxBytes);
+        QVERIFY(asset->thumbnails.size() > 50);
+        QVERIFY(asset->thumbnails.size() <= MediaThumbnails::MaxCount);
+        for (const auto& thumbnail : asset->thumbnails) {
+            QVERIFY(thumbnail.image.width() <= MediaThumbnails::Width);
+            QVERIFY(thumbnail.image.height() <= MediaThumbnails::Height);
+        }
         QCOMPARE(retained, asset->residentBytes);
         QVERIFY(peakBudget < quint64(QFileInfo(path).size()) + 128 * 1024 * 1024);
         QVERIFY(peakBudget > retained);
         const auto probe = MediaDecoder::probe(path);
-        QVERIFY(probe.estimatedBytes < 20 * 1024 * 1024);
+        QVERIFY(probe.estimatedBytes < 20 * 1024 * 1024 + MediaThumbnails::MaxBytes);
         qInfo() << "1080p retained bytes:" << retained << "preparation budget:" << peakBudget;
         // Exact original bitstream, shared between independent occurrences.
         QVideoSink sink;
@@ -435,6 +485,10 @@ private slots:
         QCOMPARE(asset->displaySize, probe.displaySize);
         QCOMPARE(asset->firstFrame.frame.size(), QSize(128, 48));
         QVERIFY(asset->firstFrame.frame.rotation() != QtVideo::Rotation::None);
+        QVERIFY(!asset->thumbnails.isEmpty());
+        const QSize thumbnail = asset->thumbnails.first().image.size();
+        QVERIFY(thumbnail.height() <= MediaThumbnails::Height);
+        QVERIFY(qAbs(qreal(thumbnail.width()) / thumbnail.height() - 48.0 / 128) < 0.02);
     }
 
     void playbackSurvivesSourceRemovalAndRetainsEvictedCursor() {

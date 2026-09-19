@@ -2,6 +2,7 @@
 
 #include "frontend/rendering/canvas/TextEditHelper.h"
 #include "frontend/rendering/canvas/TextOutlineItem.h"
+#include "frontend/rendering/canvas/TimelineThumbnailItem.h"
 #include "frontend/rendering/remote/RemoteVideoFrameItem.h"
 #include "backend/config/AppConfig.h"
 #include "backend/media/MediaResidencyManager.h"
@@ -25,6 +26,7 @@ void registerCanvasQmlTypes() {
             });
         qmlRegisterType<TextOutlineItem>("Mouffette.Canvas", 1, 0, "TextOutlineItem");
         qmlRegisterType<RemoteVideoFrameItem>("Mouffette.Canvas", 1, 0, "RemoteVideoFrameItem");
+        qmlRegisterType<TimelineThumbnailItem>("Mouffette.Canvas", 1, 0, "TimelineThumbnailItem");
         qmlRegisterSingletonType<TextEditHelper>(
             "Mouffette.Canvas", 1, 0, "TextEditHelper",
             [](QQmlEngine*, QJSEngine*) -> QObject* { return new TextEditHelper(); });

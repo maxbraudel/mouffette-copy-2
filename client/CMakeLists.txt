@@ -231,6 +231,7 @@ set(SOURCES
     # Rendering - Remote
     src/frontend/rendering/remote/RemoteSceneController.cpp
     src/frontend/rendering/remote/RemoteVideoFrameItem.cpp
+    src/frontend/rendering/canvas/TimelineThumbnailItem.cpp
     src/shared/rendering/MediaFrameSource.cpp
 
     # Protocol v4 scene lifecycle
@@ -378,6 +379,7 @@ set(HEADERS
     # Rendering - Remote
     src/frontend/rendering/remote/RemoteSceneController.h
     src/frontend/rendering/remote/RemoteVideoFrameItem.h
+    src/frontend/rendering/canvas/TimelineThumbnailItem.h
 
     # Protocol v3 scene lifecycle
     src/backend/network/RemoteSessionCoordinator.h
@@ -885,13 +887,16 @@ if(BUILD_TESTING)
 
     add_executable(tst_MediaFrameItem
         tests/qt/tst_MediaFrameItem.cpp
+        src/frontend/rendering/canvas/TimelineThumbnailItem.cpp
+        src/frontend/rendering/canvas/TimelineThumbnailItem.h
         src/frontend/rendering/remote/RemoteVideoFrameItem.cpp
         src/frontend/rendering/remote/RemoteVideoFrameItem.h
         src/shared/rendering/MediaFrameSource.cpp
         src/shared/rendering/MediaFrameSource.h
     )
     target_include_directories(tst_MediaFrameItem PRIVATE src)
-    target_link_libraries(tst_MediaFrameItem PRIVATE Qt6::Quick Qt6::GuiPrivate Qt6::Test)
+    target_link_libraries(tst_MediaFrameItem PRIVATE MouffetteResidentMedia Qt6::Quick Qt6::GuiPrivate Qt6::Test)
+    target_compile_definitions(tst_MediaFrameItem PRIVATE TEST_VIDEO_FILE="${CMAKE_SOURCE_DIR}/tests/fixtures/resident-timeline.mp4")
     add_test(NAME MediaFrameItem COMMAND tst_MediaFrameItem)
 
     add_executable(tst_TextOutlineItem
@@ -935,6 +940,7 @@ if(BUILD_TESTING)
     add_executable(tst_CanvasInteraction
         tests/qt/tst_CanvasInteraction.cpp
         src/frontend/rendering/canvas/CanvasQmlTypes.cpp
+        src/frontend/rendering/canvas/TimelineThumbnailItem.cpp
         src/frontend/rendering/canvas/MediaListModel.cpp
         src/frontend/rendering/canvas/TextOutlineItem.cpp
         src/frontend/rendering/canvas/TextEditHelper.cpp
