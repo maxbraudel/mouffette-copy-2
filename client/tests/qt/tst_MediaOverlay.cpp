@@ -882,6 +882,13 @@ void MediaOverlayTest::mediaCountTracksRealCanvasInsertions()
     QCOMPARE(session.mediaCount(), 0);
     QCOMPARE(countChanged.count(), 0);
     QTRY_VERIFY(panel->isVisible());
+    auto* upload = findVisualItem(panel, "uploadAction");
+    auto* remote = findVisualItem(panel, "remoteSceneAction");
+    QVERIFY(upload && remote);
+    QVERIFY(!upload->isVisible());
+    QVERIFY(remote->isVisible());
+    QCOMPARE(panel->height(), remote->height() + 1);
+    QCOMPARE(remote->property("bottomRadius"), panel->property("radius"));
     QCOMPARE(qRound(panel->x() + panel->width()), window.width() - 16);
     QCOMPARE(qRound(panel->y() + panel->height()), window.height() - 16);
     QVERIFY(host->document()->removeMedia(text->mediaId()));
@@ -1401,6 +1408,14 @@ void MediaOverlayTest::unavailableActionsStayClickableAndExplainWhy()
     QVERIFY(!upload->isVisible());
     QVERIFY(!remote->isVisible());
     QVERIFY(host->document()->addText({100, 100}, "Scene content"));
+    QVERIFY(!upload->isVisible());
+    const auto imagePath = temporary.filePath("uploadable.png");
+    QImage image(32, 32, QImage::Format_ARGB32_Premultiplied);
+    image.fill(Qt::darkCyan);
+    QVERIFY(image.save(imagePath));
+    auto* photo = host->document()->addPreparedFile(imagePath, image.size(), false, {0, 0});
+    QVERIFY(photo);
+    QTRY_VERIFY(photo->residencyReady());
     clickUnavailable(upload, "Launch a remote session first");
     clickUnavailable(remote, "No target screens available");
     host->setScreens({ScreenInfo(0, 800, 600, 0, 0, true)});

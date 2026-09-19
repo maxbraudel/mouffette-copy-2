@@ -11,7 +11,8 @@ Rectangle {
     required property var session
     readonly property var mediaModel: session ? session.mediaModel : null
     readonly property int mediaCount: session ? session.mediaCount : 0
-    readonly property int actionAreaHeight: (Theme.overlayButtonHeight + 1) * 2
+    readonly property bool showUploadAction: mediaCount > 0
+    readonly property int actionAreaHeight: (Theme.overlayButtonHeight + 1) * (showUploadAction ? 2 : 1)
     property real mediaNaturalWidth: 0
     property real maximumHeight: parent ? Math.max(0, parent.height - 32) : implicitHeight
 
@@ -34,7 +35,7 @@ Rectangle {
 
     visible: session && session.hasProject && session.hasCanvasMedia
     implicitWidth: Math.max(200, mediaNaturalWidth, remoteButton.implicitWidth,
-                            uploadButton.implicitWidth)
+                            showUploadAction ? uploadButton.implicitWidth : 0)
     width: Math.min(implicitWidth, 420, parent ? Math.max(0, parent.width * 0.5) : 420)
     implicitHeight: mediaColumn.height + actionAreaHeight
     height: Math.min(implicitHeight, maximumHeight)
@@ -250,12 +251,17 @@ Rectangle {
                 busy: tone === OverlayActionButton.Uploading && !root.session.actionPending
                 enabled: !!root.session
                 unavailableReason: root.session ? root.session.remoteSceneUnavailableReason : ""
+                bottomRadius: root.showUploadAction ? 0 : Theme.overlayRadius
                 onClicked: root.session.toggleRemoteScene()
             }
-            Rectangle { width: parent.width; height: 1; color: Theme.overlayBorder }
+            Rectangle {
+                visible: root.showUploadAction
+                width: parent.width; height: 1; color: Theme.overlayBorder
+            }
             OverlayActionButton {
                 id: uploadButton
                 objectName: "uploadAction"
+                visible: root.showUploadAction
                 width: actions.width
                 text: root.session ? root.session.uploadActionText : "Upload"
                 textVariants: ["Upload", "Unload", "Preparing…", "Uploading…",

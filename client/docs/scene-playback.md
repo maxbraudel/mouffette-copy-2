@@ -211,7 +211,8 @@ intervals within each track, source intervals, track indices and payload limits.
 
 The entire overlay, including Upload and Launch Remote Scene, is hidden while the
 canvas has no media instances. Adding content (including text) shows it; removing
-the final instance hides it again.
+the final instance hides it again. Upload and its separator appear only when an
+image or video source is present; text-only canvases retain the remote scene action.
 
 The overlay lists only referenced image/video sources, grouped by SHA-256 identity
 with canonical paths as a temporary identity while hashing. It excludes text and
