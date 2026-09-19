@@ -173,7 +173,7 @@ equally inside and outside the clip when no joint handle is present, with a hori
 zone stays a fixed number of logical viewport pixels wide, independently of time
 zoom or clip duration (`MOUFFETTE_TIMELINE_CLIP_RESIZE_HANDLE_WIDTH_PX`, default 8).
 Below `MOUFFETTE_TIMELINE_CLIP_MIN_RESIZE_WIDTH_PX` pixels of displayed clip width
-(default 24; 0 disables this threshold), the whole clip and both edge
+(default 24; 0 disables this threshold), the clip body and both ordinary edge
 zones move the clip instead, using the hand cursor. Zooming in restores resizing.
 An edit already in progress keeps its original mode when crossing this threshold.
 At a junction, a separate handle is centered on the exact shared boundary.

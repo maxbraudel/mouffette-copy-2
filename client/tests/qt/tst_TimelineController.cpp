@@ -2005,7 +2005,9 @@ private slots:
         for (const bool selectLeft : {true, false}) {
             f.timeline.selectClip((selectLeft ? leftTrack : rightTrack).clip.id);
             // Sweep across the ordinary and joint handles without pressing.
-            for (const qreal offset : {-outsideOffset, -normalOffset, -1.0, 0.0, 1.0, normalOffset, outsideOffset}) {
+            for (const qreal offset : {-outsideOffset, -(jointWidth/2 + width - 1), -normalOffset,
+                                      -(jointWidth/2 + 1), -1.0, 0.0, 1.0, jointWidth/2 + 1,
+                                      normalOffset, jointWidth/2 + width - 1, outsideOffset}) {
                 QTest::mouseMove(&f.view, origin + QPoint(qRound(offset), 0));
                 QTRY_COMPARE(f.view.cursor().shape(), qAbs(offset) > width + jointWidth / 2 ? Qt::OpenHandCursor
                     : qAbs(offset) < jointWidth / 2 ? Qt::SplitHCursor : Qt::SizeHorCursor);
@@ -2086,11 +2088,23 @@ private slots:
         QTest::mouseMove(&f.view, from);
         QTRY_COMPARE(f.view.cursor().shape(), available ? Qt::SplitHCursor
             : individual ? Qt::SizeHorCursor : Qt::OpenHandCursor);
-        QTest::mouseClick(&f.view, Qt::LeftButton, Qt::NoModifier, from);
+        QTest::mousePress(&f.view, Qt::LeftButton, Qt::NoModifier, from);
         QCOMPARE(clip->property("editRolling").toBool(), available);
         QCOMPARE(clip->property("editEdge").toInt(), available || individual ? 1 : 0);
-        QCOMPARE(left->timelineTrack().toJson(), leftTrack.toJson());
-        QCOMPARE(right->timelineTrack().toJson(), rightTrack.toJson());
+        if (available && rightSlots > 1) {
+            f.movePointer(from + QPoint(20, 0));
+            QVERIFY(joint->isVisible());
+            QVERIFY(clip->property("dragging").toBool());
+            QTest::mouseRelease(&f.view, Qt::LeftButton, Qt::NoModifier, from + QPoint(20, 0));
+            const auto delta = qMin(10, rightSlots - 1);
+            QCOMPARE(left->timelineTrack().clip.durationSlots, leftSlots + delta);
+            QCOMPARE(right->timelineTrack().clip.durationSlots, rightSlots - delta);
+            QCOMPARE(left->timelineTrack().clip.endSlot(), right->timelineTrack().clip.startSlot);
+        } else {
+            QTest::mouseRelease(&f.view, Qt::LeftButton, Qt::NoModifier, from);
+            QCOMPARE(left->timelineTrack().toJson(), leftTrack.toJson());
+            QCOMPARE(right->timelineTrack().toJson(), rightTrack.toJson());
+        }
     }
 
     void jointResizeSnappingIgnoresBothParticipants()

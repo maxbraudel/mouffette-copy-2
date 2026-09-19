@@ -33,7 +33,7 @@ Production inherits these values unless explicitly overridden in `.env.productio
 
 Clip edge hit zones keep their configured width in logical viewport pixels at
 every zoom level. Below the independently configured minimum displayed clip
-width, the entire clip and its edge zones move the clip instead of resizing it.
+width, the clip body and its ordinary edge zones move the clip instead of resizing it.
 A separate joint handle is centered on each exact clip junction. The ordinary
 handles sit immediately to its left and right, retaining their full configured
 width with no overlap between the three zones. The widths are independent; the
