@@ -222,17 +222,20 @@ FocusScope {
     onExpandedChanged: {
         if (!expanded && activeDrag) {
             if (activeDrag.isClipDrag) activeDrag.cancelEdit()
+            else if (activeDrag === scrubber) scrubber.finishScrub(false)
             else { activeDrag.dragging = false; endDrag() }
         }
     }
     onFirstTrackIndexChanged: Qt.callLater(scrollTracks, 0)
     onLastTrackIndexChanged: Qt.callLater(scrollTracks, 0)
     onTimelineChanged: {
+        if (scrubber && scrubber.dragTimeline) scrubber.finishScrub(false)
         viewDurationMs = timeline ? Math.min(maximumMs, timeline.initialViewDurationMs) : 15000
         trackViewport.contentX = 0
         clipViewport.contentY = (root.clipHeight - clipViewport.height) / 2
         endDrag(); shiftHeld = false; controlHeld = false
     }
+    onVisibleChanged: if (!visible && scrubber && scrubber.dragTimeline) scrubber.finishScrub(false)
     Keys.onPressed: event => {
         if (event.key === Qt.Key_Shift) { shiftHeld = true; event.accepted = true }
         else if (event.key === controlKey) { controlHeld = true; event.accepted = true }
@@ -246,6 +249,7 @@ FocusScope {
         function onActiveChanged() {
             if (root.Window.window && !root.Window.window.active) {
                 if (root.activeDrag && root.activeDrag.isClipDrag) root.activeDrag.cancelEdit()
+                if (scrubber.dragTimeline) scrubber.finishScrub(false)
                 root.shiftHeld = false; root.controlHeld = false
             }
         }
@@ -695,8 +699,17 @@ FocusScope {
                     objectName: "timelineScrubber"
                     property bool dragging: false
                     property real rawMs: 0
+                    property var dragTimeline: null
+                    function finishScrub(resume) {
+                        var owner = dragTimeline
+                        dragTimeline = null
+                        dragging = false
+                        if (owner) owner.endScrub(resume)
+                        root.endDrag()
+                    }
+                    Component.onDestruction: if (dragTimeline) dragTimeline.endScrub(false)
                     function refreshPreview() {
-                        if (dragging) root.timeline.seek(root.snapTime(rawMs, "", 0))
+                        if (dragging && dragTimeline) dragTimeline.seek(root.snapTime(rawMs, "", 0))
                     }
                     function updatePosition(mouse) {
                         rawMs = (mouse.x - 12) / root.pixelsPerMs
@@ -710,15 +723,19 @@ FocusScope {
                     enabled: !!root.timeline && !root.timeline.remoteActive
                     onPressed: mouse => {
                         root.focusTrack()
+                        dragTimeline = root.timeline
+                        dragTimeline.beginScrub()
                         dragging = true; root.activeDrag = scrubber
                         updatePosition(mouse)
                     }
                     onPositionChanged: mouse => { if (pressed && dragging) updatePosition(mouse) }
                     onReleased: mouse => {
-                        if (dragging) updatePosition(mouse)
-                        dragging = false; root.endDrag()
+                        if (dragging) {
+                            updatePosition(mouse)
+                            finishScrub(true)
+                        }
                     }
-                    onCanceled: { dragging = false; root.endDrag() }
+                    onCanceled: finishScrub(false)
                 }
                 MouseArea {
                     y: clipViewport.y

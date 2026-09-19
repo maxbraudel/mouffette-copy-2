@@ -963,9 +963,70 @@ qreal QuickCanvasHost::timelineNowMs() const
 
 void QuickCanvasHost::timelineSeek(qreal positionMs)
 {
-    if (m_sceneLaunching || m_sceneLaunched || m_sceneStopping || m_timelinePlaying) return;
+    if (m_sceneLaunching || m_sceneLaunched || m_sceneStopping || m_timelineRemote) return;
     const auto& grid = m_document->timelineSettings();
-    applyTimeline(grid.timeMs(grid.nearestSlot(positionMs)), false, true);
+    const qreal target = grid.timeMs(grid.nearestSlot(positionMs));
+    if (m_timelineScrubbing) {
+        applyTimeline(target, false, true);
+        return;
+    }
+    if (m_timelinePlaying) {
+        // Keep the running presentation and its RAM reservations. Rebase the
+        // clock so the next tick advances from the seek, including backwards.
+        const qreal stop = timelineStopMs();
+        m_timelineAnchorPositionMs = std::min(target, stop);
+        m_timelineClock.restart();
+        applyTimeline(m_timelineAnchorPositionMs, m_timelineAnchorPositionMs < stop, true);
+        if (m_timelineAnchorPositionMs >= stop) advanceTimeline();
+        return;
+    }
+    // A seek can also arrive while Play is preparing the initial video frames.
+    // Replace that preparation without cancelling the user's playback request.
+    const bool preparing = m_testSceneLaunched && m_videoPreparation;
+    if (preparing) {
+        delete m_videoPreparation.data();
+        m_videoPreparation = nullptr;
+        m_localVideosPrepared = false;
+    }
+    applyTimeline(target, false, true);
+    if (preparing) resumeLocalTimeline();
+}
+
+void QuickCanvasHost::timelineBeginScrub()
+{
+    if (m_timelineScrubbing || m_sceneLaunching || m_sceneLaunched
+        || m_sceneStopping || m_timelineRemote) return;
+    m_timelineScrubbing = true;
+    m_timelinePlaying = false;
+    m_timelineTimer.stop();
+    if (m_videoPreparation) delete m_videoPreparation.data();
+    m_videoPreparation = nullptr;
+    m_localVideosPrepared = false;
+    // Freeze and silence playback while keeping its presentation, edit lock
+    // and resident media reservations until the pointer is released.
+    applyTimeline(timelinePositionMs(), false, true);
+}
+
+void QuickCanvasHost::timelineEndScrub(bool resume)
+{
+    if (!m_timelineScrubbing) return;
+    m_timelineScrubbing = false;
+    if (!m_testSceneLaunched) return;
+    if (resume) resumeLocalTimeline();
+    else timelinePause();
+}
+
+void QuickCanvasHost::resumeLocalTimeline()
+{
+    m_document->setEditsLocked(true);
+    if (m_timelineScrubbing) return;
+    prepareSceneVideos([this] {
+        if (m_testSceneLaunched && !m_timelineScrubbing) {
+            if (m_sceneContext) startTimelineClock();
+            else beginScenePresentation(false);
+        }
+        publishActionState();
+    });
 }
 
 void QuickCanvasHost::timelinePlay()
@@ -982,10 +1043,7 @@ void QuickCanvasHost::timelinePlay()
     }
     m_testSceneLaunched = true;
     m_runningSceneDefinition = m_document->serializeSceneState();
-    prepareSceneVideos([this] {
-        if (m_testSceneLaunched) beginScenePresentation(false);
-        publishActionState();
-    });
+    resumeLocalTimeline();
     publishActionState();
     emit timelineTransportChanged();
 }
@@ -1092,8 +1150,13 @@ void QuickCanvasHost::beginScenePresentation(bool remote)
         }
     }
     m_timelineRemote = remote;
-    m_timelineAnchorPositionMs = remote ? 0 : timelinePositionMs();
-    if (remote && m_webSocket && m_remoteStartServerMs >= 0) {
+    startTimelineClock();
+}
+
+void QuickCanvasHost::startTimelineClock()
+{
+    m_timelineAnchorPositionMs = m_timelineRemote ? 0 : timelinePositionMs();
+    if (m_timelineRemote && m_webSocket && m_remoteStartServerMs >= 0) {
         const qint64 now = m_webSocket->estimatedServerMonotonicMs();
         if (now >= 0) m_timelineAnchorPositionMs = std::max<qint64>(0, now - m_remoteStartServerMs);
     }
@@ -1103,13 +1166,14 @@ void QuickCanvasHost::beginScenePresentation(bool remote)
     applyTimeline(std::min(now, timelineStopMs()), now < timelineStopMs(), true);
     m_timelineTimer.start();
     if (now >= timelineStopMs()) advanceTimeline();
-    if (remote && m_timelinePlaying) emit localScenePresentationRequested(m_sceneRevision);
+    if (m_timelineRemote && m_timelinePlaying) emit localScenePresentationRequested(m_sceneRevision);
     emit timelineTransportChanged();
 }
 
 void QuickCanvasHost::stopScenePresentation()
 {
     const qreal stoppedAt = std::min(timelineNowMs(), timelineStopMs());
+    m_timelineScrubbing = false;
     m_timelinePlaying = false;
     m_timelineTimer.stop();
     if (m_videoPreparation) delete m_videoPreparation.data();

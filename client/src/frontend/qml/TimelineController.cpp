@@ -100,7 +100,10 @@ TimelineController::TimelineController(QObject* parent) : QObject(parent), m_cli
 void TimelineController::setHost(QuickCanvasHost* host)
 {
     if (m_host == host) return;
-    if (m_host) disconnect(m_host, nullptr, this, nullptr);
+    if (m_host) {
+        m_host->timelineEndScrub(false);
+        disconnect(m_host, nullptr, this, nullptr);
+    }
     if (m_document) {
         disconnect(m_document, nullptr, this, nullptr);
         for (auto* media : m_document->media()) disconnect(media, nullptr, this, nullptr);
@@ -363,7 +366,6 @@ void TimelineController::seek(qreal timeMs)
 {
     if (!m_host || remoteActive()) return;
     m_host->controller()->discardPendingEdits();
-    if (playing()) m_host->timelinePause();
     m_host->timelineSeek(gridTime(timeMs));
     m_error.clear();
     emit transportChanged();
@@ -374,6 +376,16 @@ void TimelineController::togglePlayback()
     m_host->controller()->discardPendingEdits();
     if (playing()) m_host->timelinePause(); else m_host->timelinePlay();
     emit transportChanged();
+}
+void TimelineController::beginScrub()
+{
+    if (!m_host || remoteActive()) return;
+    m_host->controller()->discardPendingEdits();
+    m_host->timelineBeginScrub();
+}
+void TimelineController::endScrub(bool resume)
+{
+    if (m_host) m_host->timelineEndScrub(resume);
 }
 void TimelineController::goToStart() { seek(0); }
 void TimelineController::goToEnd() { seek(effectiveEndMs()); }

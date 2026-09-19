@@ -2518,6 +2518,121 @@ private slots:
         QCOMPARE(document->serializeProjectState(), saved);
     }
 
+    void activeSeeksKeepRunningFromTheNewPosition()
+    {
+        std::unique_ptr<QuickCanvasHost> host(QuickCanvasHost::create());
+        QVERIFY(host); host->setProjectEditingEnabled(true);
+        auto* doc = host->document();
+        QVERIFY(doc->addText({}, "Seek while playing"));
+        auto settings = doc->timelineSettings();
+        settings.stopSlot = settings.nearestSlot(10000);
+        QVERIFY(doc->setTimelineSettings(settings));
+        TimelineController timeline; timeline.setHost(host.get());
+        const auto saved = doc->serializeProjectState();
+        QSignalSpy writes(doc, &CanvasDocument::documentChanged);
+        timeline.togglePlayback();
+        QTRY_VERIFY(host->timelinePlaying());
+        QSignalSpy locks(doc, &CanvasDocument::editsLockedChanged);
+        for (qreal target : {6000.0, 1000.0, 4000.0}) {
+            timeline.seek(target);
+            QVERIFY(timeline.playing());
+            QVERIFY(doc->editsLocked());
+            QCOMPARE(doc->timelinePositionMs(), target);
+            QTRY_VERIFY(doc->timelinePositionMs() > target + 50);
+            QVERIFY(doc->timelinePositionMs() < target + 1000);
+        }
+        timeline.goToStart();
+        QVERIFY(timeline.playing());
+        QCOMPARE(timeline.positionSlot(), 0);
+        QTRY_VERIFY(doc->timelinePositionMs() > 50);
+        QVERIFY(doc->timelinePositionMs() < 1000);
+        QCOMPARE(locks.count(), 0);
+        timeline.goToEnd();
+        QVERIFY(!timeline.playing());
+        QVERIFY(!doc->editsLocked());
+        QCOMPARE(doc->timelinePositionMs(), 10000);
+        timeline.seek(2000);
+        QTest::qWait(80);
+        QVERIFY(!timeline.playing());
+        QCOMPARE(doc->timelinePositionMs(), 2000);
+        QCOMPARE(writes.count(), 0);
+        QCOMPARE(doc->serializeProjectState(), saved);
+    }
+
+    void rulerSeekingPreservesPlaybackState_data()
+    {
+        QTest::addColumn<bool>("playing");
+        QTest::newRow("paused") << false;
+        QTest::newRow("playing") << true;
+    }
+
+    void rulerSeekingPreservesPlaybackState()
+    {
+        QFETCH(bool, playing);
+        TimelineFixture f; QVERIFY(f.initialize());
+        f.view.requestActivate(); QVERIFY(QTest::qWaitForWindowActive(&f.view));
+        if (playing) {
+            f.timeline.togglePlayback();
+            QTRY_VERIFY(f.host->timelinePlaying());
+        }
+        auto* tracks = f.item("timelineTracks"); QVERIFY(tracks);
+        const auto pointAt = [&](int x) { return tracks->mapToScene({qreal(x), 10}).toPoint(); };
+        const qreal clicked = f.timeline.gridTime(f.timeAt(300));
+        QTest::mouseClick(&f.view, Qt::LeftButton, Qt::NoModifier, pointAt(300));
+        QCOMPARE(f.timeline.playing(), playing);
+        QVERIFY(qAbs(f.timeline.positionMs() - clicked) < 100);
+        QTest::mousePress(&f.view, Qt::LeftButton, Qt::NoModifier, pointAt(350));
+        const qreal pressed = f.timeline.gridTime(f.timeAt(350));
+        QTest::qWait(120);
+        QCOMPARE(f.host->timelinePositionMs(), pressed);
+        QVERIFY(!f.host->timelinePlaying());
+        f.movePointer(pointAt(150));
+        const qreal dragged = f.timeline.gridTime(f.timeAt(150));
+        QTest::qWait(120);
+        QCOMPARE(f.host->timelinePositionMs(), dragged);
+        QCOMPARE(f.timeline.playing(), playing);
+        QTest::mouseRelease(&f.view, Qt::LeftButton, Qt::NoModifier, pointAt(150));
+        QCOMPARE(f.timeline.playing(), playing);
+        if (playing) {
+            QTRY_VERIFY(f.timeline.positionMs() > dragged + 100);
+            QVERIFY(f.timeline.positionMs() < dragged + 1000);
+            f.timeline.togglePlayback();
+        } else {
+            QTest::qWait(100);
+            QCOMPARE(f.timeline.positionMs(), dragged);
+        }
+    }
+
+    void cancelledScrubDoesNotResumePlayback_data()
+    {
+        QTest::addColumn<bool>("explicitPause");
+        QTest::newRow("panel-collapsed") << false;
+        QTest::newRow("pause-while-held") << true;
+    }
+
+    void cancelledScrubDoesNotResumePlayback()
+    {
+        QFETCH(bool, explicitPause);
+        TimelineFixture f; QVERIFY(f.initialize());
+        f.view.requestActivate(); QVERIFY(QTest::qWaitForWindowActive(&f.view));
+        f.timeline.togglePlayback();
+        QTRY_VERIFY(f.host->timelinePlaying());
+        auto* tracks = f.item("timelineTracks"); QVERIFY(tracks);
+        const auto point = tracks->mapToScene({300, 10}).toPoint();
+        QTest::mousePress(&f.view, Qt::LeftButton, Qt::NoModifier, point);
+        QVERIFY(!f.host->timelinePlaying());
+        QVERIFY(f.timeline.playing());
+        if (explicitPause) f.timeline.togglePlayback();
+        else f.view.rootObject()->setProperty("expanded", false);
+        QVERIFY(!f.timeline.playing());
+        QVERIFY(!f.host->document()->editsLocked());
+        QTest::mouseRelease(&f.view, Qt::LeftButton, Qt::NoModifier, point);
+        const auto stoppedAt = f.host->timelinePositionMs();
+        QTest::qWait(120);
+        QVERIFY(!f.timeline.playing());
+        QCOMPARE(f.host->timelinePositionMs(), stoppedAt);
+    }
+
     void seeksUseNearestSlotsAndContinuousTransportDoesNotSave()
     {
         std::unique_ptr<QuickCanvasHost> host(QuickCanvasHost::create());

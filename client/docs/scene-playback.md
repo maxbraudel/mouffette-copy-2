@@ -128,6 +128,14 @@ the clip entry frame before activation. Paused, absent and held samples stay sil
 
 Play resumes at the head; at or past the effective end it restarts at zero. Pause
 returns to the beginning of the started slot, silently reseeks video and unlocks authoring.
+Seeking during local playback continues from the new slot, including backward
+jumps and Return to start. On the ruler, pressing the left mouse button freezes
+the clock and silences audio; the image follows the pointer while held. Release
+resumes from the chosen slot only if playback was active before the gesture.
+The presentation, playback reservations and edit lock stay in place throughout
+the gesture. Cancelling the gesture or explicitly pausing leaves playback paused.
+Seeking during initial video preparation updates the pending start position. A
+paused seek stays paused; reaching or releasing at/past Stop ends the preview there.
 Local preview also runs on an empty project. Space toggles Play/Pause from the
 canvas or timeline, except while entering text.
 Manual placement chooses the nearest slot (ties go forward). An optional Stop marker defines the

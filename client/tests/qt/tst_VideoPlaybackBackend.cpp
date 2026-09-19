@@ -251,6 +251,83 @@ private slots:
         QVERIFY(video->audioOutput()->isMuted());
     }
 
+    void timelineSeeksKeepVideoPlaybackAndReservations_data()
+    {
+        QTest::addColumn<bool>("duringPreparation");
+        QTest::addColumn<bool>("scrubbing");
+        QTest::newRow("running") << false << false;
+        QTest::newRow("preparing") << true << false;
+        QTest::newRow("scrub-running") << false << true;
+        QTest::newRow("scrub-preparing") << true << true;
+    }
+
+    void timelineSeeksKeepVideoPlaybackAndReservations()
+    {
+        QFETCH(bool, duringPreparation);
+        QFETCH(bool, scrubbing);
+        std::unique_ptr<QuickCanvasHost> host(QuickCanvasHost::create());
+        QVERIFY(host); host->setProjectEditingEnabled(true);
+        auto* doc = host->document();
+        auto* video = doc->addPreparedFile(videoFixture(), {160, 90}, true, {});
+        QVERIFY(video);
+        QTRY_VERIFY_WITH_TIMEOUT(video->residencyReady() && video->audioOutput(), 5000);
+        auto track = video->timelineTrack();
+        track.clip.startSlot = 90; // Timeline 3–9 s, starting at source 1 s.
+        track.clip.durationSlots = 180;
+        track.clip.sourceStartSlot = 30;
+        video->setTimelineTrack(track);
+        video->setMuted(false);
+        video->setVolume(0); // Exercise mute state without audible test playback.
+        host->timelineSeek(4000);
+        const auto saved = doc->serializeProjectState();
+        host->timelinePlay();
+        QVERIFY(host->testSceneLaunched());
+        if (duringPreparation) QVERIFY(!host->timelinePlaying());
+        else QTRY_VERIFY_WITH_TIMEOUT(host->timelinePlaying(), 5000);
+        QSignalSpy locks(doc, &CanvasDocument::editsLockedChanged);
+        const auto playbackBudget = MediaResidencyManager::instance().summary().value("playbackBudgetBytes");
+        QVERIFY(playbackBudget.toULongLong() > 0);
+        if (scrubbing) host->timelineBeginScrub();
+        // Rapid requests include a gap after the clip while start frames may
+        // still be preparing. Only the last requested position should win.
+        host->timelineSeek(10000);
+        host->timelineSeek(6000);
+        QVERIFY(host->testSceneLaunched());
+        if (scrubbing) {
+            QTest::qWait(150);
+            QCOMPARE(doc->timelinePositionMs(), 6000);
+            QVERIFY(!host->timelinePlaying());
+            QVERIFY(!video->isPlaying());
+            QVERIFY(video->audioOutput()->isMuted());
+            QVERIFY(doc->editsLocked());
+            QCOMPARE(MediaResidencyManager::instance().summary().value("playbackBudgetBytes"), playbackBudget);
+            host->timelineEndScrub();
+        }
+        QTRY_VERIFY_WITH_TIMEOUT(host->timelinePlaying() && video->isPlaying(), 5000);
+        QVERIFY(doc->timelinePositionMs() >= 6000 && doc->timelinePositionMs() < 7000);
+        const auto followsTimeline = [&] {
+            return qAbs(video->positionMs() - (doc->timelinePositionMs() - 2000)) < 300;
+        };
+        QTRY_VERIFY(followsTimeline());
+        QVERIFY(!video->audioOutput()->isMuted());
+        host->timelineSeek(1000);
+        QVERIFY(host->timelinePlaying());
+        QVERIFY(!video->clipActive());
+        QVERIFY(!video->isPlaying());
+        QVERIFY(video->audioOutput()->isMuted());
+        host->timelineSeek(5000);
+        QTRY_VERIFY(video->isPlaying() && followsTimeline());
+        QVERIFY(!video->audioOutput()->isMuted());
+        QTRY_VERIFY(doc->timelinePositionMs() > 5100);
+        QVERIFY(doc->timelinePositionMs() < 6000);
+        QCOMPARE(locks.count(), 0);
+        QCOMPARE(MediaResidencyManager::instance().summary().value("playbackBudgetBytes"), playbackBudget);
+        host->timelinePause();
+        QVERIFY(video->audioOutput()->isMuted());
+        QVERIFY(!video->isPlaying());
+        QCOMPARE(doc->serializeProjectState(), saved);
+    }
+
     void timelineAudioUsesKeyframesAndSilencesPausedPreview()
     {
         std::unique_ptr<QuickCanvasHost> host(QuickCanvasHost::create());

@@ -70,6 +70,8 @@ public:
     void timelinePlay();
     void timelinePause();
     void timelineSeek(qreal positionMs);
+    void timelineBeginScrub();
+    void timelineEndScrub(bool resume = true);
     qreal timelinePositionMs() const;
     bool timelinePlaying() const { return m_timelinePlaying; }
 
@@ -99,6 +101,8 @@ private:
     void reportFirstFramePresented();
     bool deferSceneTimeoutDuringRecovery();
     void beginScenePresentation(bool remote);
+    void resumeLocalTimeline();
+    void startTimelineClock();
     void stopScenePresentation();
     void startPresentationBarrier();
     void cancelPresentationBarrier();
@@ -159,6 +163,7 @@ private:
     qreal m_timelineAnchorPositionMs = 0;
     qint64 m_remoteStartServerMs = -1;
     bool m_timelinePlaying = false;
+    bool m_timelineScrubbing = false;
     bool m_timelineRemote = false;
     QHash<QString, QString> m_timelineClipIds;
     QHash<QString, bool> m_timelineVideoPlaying;

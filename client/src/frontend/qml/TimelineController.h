@@ -107,6 +107,8 @@ public:
     int initialViewDurationMs() const;
 
     Q_INVOKABLE void seek(qreal timeMs);
+    Q_INVOKABLE void beginScrub();
+    Q_INVOKABLE void endScrub(bool resume = true);
     Q_INVOKABLE void togglePlayback();
     Q_INVOKABLE void goToStart();
     Q_INVOKABLE void goToEnd();
