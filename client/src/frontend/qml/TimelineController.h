@@ -130,6 +130,7 @@ signals:
     void transportChanged();
     void tracksChanged();
     void revealTrack(int row);
+    void revealPlayhead();
 
 private:
     enum class SelectionArea { Clips, Keyframes };

@@ -99,7 +99,10 @@ source associations are established before removed instances release theirs.
 The scene retains its 512-instance and 8 MiB payload limits; a rejected edit has
 no partial effect. Timeline clipboard snapshots contain the full instance and
 source path, stay scoped to their project, and create new identities at the head
-on the active track. Paste truncates at scene end. A lane click selects the target
+on the active track. Paste truncates at scene end. After a successful clip paste,
+the head advances to the new clip's actual end and scrolls into view, allowing
+successive pastes to append clips. Keyframe pastes keep the current position.
+A lane click selects the target
 track; without one the leading empty row is used. Canvas paste keeps the copied
 times and moves the group to a new block above existing tracks, preserving gaps
 and relative order; cross-project canvas paste requires matching cadence.

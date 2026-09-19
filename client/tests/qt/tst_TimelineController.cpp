@@ -2094,7 +2094,9 @@ private slots:
         timeline.copySelected();
         timeline.seek(1429);
         QVERIFY(timeline.canPaste());
+        const auto pasteSlot = timeline.positionSlot();
         timeline.paste();
+        QCOMPARE(timeline.positionSlot(), pasteSlot);
         QCOMPARE(media->timelineTrack().keyframes.size(), 2);
         timeline.moveKeyframe(timeline.selectedKeyframeId(), 713);
         QCOMPARE(media->timelineTrack().keyframes.size(), 1);
@@ -2419,6 +2421,73 @@ private slots:
         QCOMPARE(media->text(), QStringLiteral("Keep text"));
     }
 
+    void repeatedClipPastesAdvanceTheHeadAndStayAdjacent()
+    {
+        TimelineFixture f; QVERIFY(f.initialize());
+        auto* doc = f.host->document();
+        auto* original = doc->addText({}, "Paste me"); QVERIFY(original);
+        auto track = original->timelineTrack();
+        track.clip.startSlot = 31; track.clip.durationSlots = 61;
+        original->setTimelineTrack(track);
+        f.timeline.selectClip(track.clip.id); f.timeline.copySelected();
+        const auto& grid = doc->timelineSettings();
+        f.timeline.seek(grid.timeMs(200));
+        f.view.rootObject()->setProperty("viewDurationMs", grid.timeMs(90));
+        f.view.requestActivate(); QVERIFY(QTest::qWaitForWindowActive(&f.view));
+        f.view.rootObject()->forceActiveFocus();
+        QSignalSpy writes(doc, &CanvasDocument::documentChanged);
+        for (int i = 0; i < 3; ++i) {
+            const qint64 pasteStart = f.timeline.positionSlot();
+            QVERIFY(f.timeline.canPaste());
+            if (i == 1) QTest::keyClick(&f.view, Qt::Key_V, Qt::ControlModifier);
+            else {
+                auto* button = f.item("timelinePaste"); QVERIFY(button);
+                QTest::mouseClick(&f.view, Qt::LeftButton, Qt::NoModifier,
+                    button->mapToScene({button->width()/2, button->height()/2}).toPoint());
+            }
+            QCOMPARE(doc->media().size(), i + 2);
+            auto* pasted = doc->primarySelectedMedia(); QVERIFY(pasted && pasted != original);
+            QCOMPARE(pasted->timelineTrack().clip.startSlot, pasteStart);
+            QCOMPARE(pasted->timelineTrack().clip.durationSlots, 61);
+            QCOMPARE(f.timeline.positionSlot(), pasteStart + 61);
+            QCOMPARE(f.timeline.positionSlot(), pasted->timelineTrack().clip.endSlot());
+            QCOMPARE(f.timeline.selectedClipId(), pasted->timelineTrack().clip.id);
+            QCOMPARE(writes.count(), i + 1); // Seeking adds no persistent edit.
+            auto* viewport = f.item("timelineTracks");
+            const auto x = f.item("timelinePlayhead")->mapToItem(viewport, {0, 0}).x();
+            QVERIFY(x >= 0 && x < viewport->width());
+        }
+        QCOMPARE(original->timelineTrack().toJson(), track.toJson());
+    }
+
+    void failedClipPasteKeepsTheHeadInPlace()
+    {
+        std::unique_ptr<QuickCanvasHost> host(QuickCanvasHost::create()); QVERIFY(host);
+        host->setProjectEditingEnabled(true);
+        TimelineController timeline; timeline.setHost(host.get());
+        auto* doc = host->document();
+        auto* media = doc->addText({}, "Clip"); QVERIFY(media);
+        timeline.selectClip(media->timelineTrack().clip.id); timeline.copySelected();
+        timeline.seek(7000);
+        auto copy = QJsonDocument::fromJson(QGuiApplication::clipboard()->mimeData()
+            ->data("application/x-mouffette-timeline-v6")).object();
+        auto snapshot = copy.value("media").toObject();
+        auto track = snapshot.value("timeline").toObject();
+        auto clip = track.value("clip").toObject(); clip.insert("durationSlots", 0);
+        track.insert("clip", clip); snapshot.insert("timeline", track); copy.insert("media", snapshot);
+        auto* mime = new QMimeData;
+        mime->setData("application/x-mouffette-timeline-v6", QJsonDocument(copy).toJson());
+        QGuiApplication::clipboard()->setMimeData(mime);
+        const auto saved = doc->serializeProjectState();
+        QSignalSpy writes(doc, &CanvasDocument::documentChanged);
+        QSignalSpy reveal(&timeline, &TimelineController::revealPlayhead);
+        QVERIFY(timeline.canPaste()); timeline.paste();
+        QVERIFY(!timeline.errorText().isEmpty());
+        QCOMPARE(timeline.positionMs(), 7000.0);
+        QCOMPARE(doc->serializeProjectState(), saved);
+        QCOMPARE(writes.count(), 0); QCOMPARE(reveal.count(), 0);
+    }
+
     void clipPasteTruncatesAndOverwritesWithoutMovingKeys()
     {
         MediaResidencyManager::instance().setMemorySnapshotForTesting(
@@ -2449,6 +2518,8 @@ private slots:
         auto* pasted = host->document()->primarySelectedMedia(); QVERIFY(pasted && pasted != media);
         QCOMPARE(pasted->timelineTrack().clip.durationSlots, 22);
         QCOMPARE(pasted->timelineTrack().clip.endSlot(), 75);
+        QCOMPARE(timeline.positionSlot(), 75);
+        QVERIFY(!timeline.canPaste());
         QCOMPARE(pasted->timelineTrack().keyframes.first().slot, 0);
         QVERIFY(pasted->timelineTrack().keyframes.first().id != key);
         QCOMPARE(media->timelineTrack().keyframes.first().id, key);

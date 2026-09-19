@@ -217,6 +217,7 @@ FocusScope {
     Connections {
         target: root.timeline
         function onTransportChanged() { root.followHead() }
+        function onRevealPlayhead() { root.revealHead() }
         function onRevealTrack(row) {
             if (root.activeDrag || !root.timeline || root.timeline.activeTrackIndex !== row) return
             var top = (root.firstTrackIndex + row) * root.clipHeight

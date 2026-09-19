@@ -533,6 +533,8 @@ void TimelineController::paste()
             m_activeTrackIndex = m_document->timelineRow(media->timelineTrack().trackIndex);
             m_keyframeId.clear();
             m_selectionArea = SelectionArea::Clips;
+            seek(grid().timeMs(media->timelineTrack().clip.endSlot()));
+            emit revealPlayhead();
         }
     }
     reevaluate();
