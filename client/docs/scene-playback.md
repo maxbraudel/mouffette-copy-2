@@ -129,6 +129,12 @@ The timeline stays below the canvas during preparation, preview and remote
 playback. Its transport row shows the current time and frame on the left, centered
 playback buttons, and the project maximum time and frame on the right. Both readouts
 use monospace digits padded to the project maximum, independently of the Stop marker.
+During remote preparation, playback and stopping, the playhead line and cap use
+the disabled-button gray. Ruler dragging and all seek commands are blocked until
+the remote scene ends; the playhead continues to follow the scene's position.
+Manual navigation is also locked: wheel/trackpad scrolling, scrollbars, zoom and
+fit controls remain disabled until the scene ends. Automatic playhead following
+continues during remote playback.
 Editing actions align left and zoom/fit align right within one scrollable row.
 The gap between them shrinks as the window narrows. If the full labels no longer
 fit, all buttons in the row switch to icons with tooltips. If the icons still do

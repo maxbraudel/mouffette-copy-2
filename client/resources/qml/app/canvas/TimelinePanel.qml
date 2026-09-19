@@ -14,6 +14,7 @@ FocusScope {
     property real bottomCornerRadius: 0
     readonly property var timeline: session ? session.timeline : null
     readonly property bool editable: !!timeline && timeline.editable
+    readonly property bool navigationEnabled: !!timeline && !timeline.remoteActive
     readonly property real maximumMs: timeline ? timeline.maxDurationMs : 180000
     property real viewDurationMs: timeline ? Math.min(maximumMs, timeline.initialViewDurationMs) : 15000
     readonly property real pixelsPerMs: Math.max(1, trackViewport.width - 24) / Math.max(1, viewDurationMs)
@@ -102,6 +103,7 @@ FocusScope {
             clipViewport.contentY + delta))
     }
     function autoScrollClip(drag, elapsedMs) {
+        if (!navigationEnabled) return
         // Bound catch-up after a stalled frame so the clip never jumps ahead.
         var step = (timeline ? timeline.autoScrollSpeedPxPerSecond : 96)
             * Math.max(0, Math.min(50, elapsedMs)) / 1000
@@ -117,6 +119,7 @@ FocusScope {
         trackViewport.contentX = Math.max(0, Math.min(trackViewport.contentWidth - trackViewport.width, x))
     }
     function zoomAround(factor, timeMs, anchorX) {
+        if (!navigationEnabled) return
         viewDurationMs = Math.max(100, Math.min(maximumMs, viewDurationMs * factor))
         scrollTo(timeMs * pixelsPerMs + 12 - anchorX)
     }
@@ -127,7 +130,7 @@ FocusScope {
             headX >= 0 && headX <= trackViewport.width ? headX : trackViewport.width / 2)
     }
     function handleWheel(wheel) {
-        if (!timeline || activeDrag) { wheel.accepted = true; return }
+        if (!navigationEnabled || activeDrag) { wheel.accepted = true; return }
         var precise = wheel.pixelDelta.x !== 0 || wheel.pixelDelta.y !== 0
         var dx = precise ? wheel.pixelDelta.x : wheel.angleDelta.x / 8
         var dy = precise ? wheel.pixelDelta.y : wheel.angleDelta.y / 8
@@ -321,7 +324,6 @@ FocusScope {
             spacing: transportViewport.gap
             readonly property real textWidth: startButton.textWidth + playButton.textWidth
                 + endButton.textWidth + spacing * 2
-                + (remoteStopButton.visible ? remoteStopButton.textWidth + spacing : 0)
             TimelineButton {
                 id: startButton
                 objectName: "timelineGoToStart"
@@ -354,18 +356,6 @@ FocusScope {
                 Accessible.name: "Go to scene end"
                 enabled: !!root.timeline && !root.timeline.remoteActive
                 onClicked: { root.focusTrack(); root.timeline.goToEnd() }
-            }
-            TimelineButton {
-                id: remoteStopButton
-                objectName: "timelineStopRemote"
-                text: "Stop remote scene"
-                iconSource: "qrc:/icons/icons/stop.svg"
-                iconOnly: transportViewport.compactButtons
-                destructive: true
-                visible: !!root.timeline && root.timeline.remoteActive
-                enabled: !!root.session
-                Accessible.description: root.session ? (root.session.remoteSceneUnavailableReason || "") : ""
-                onClicked: root.session.toggleRemoteScene()
             }
         }
     }
@@ -486,7 +476,7 @@ FocusScope {
                         objectName: "timelineZoomOut"
                         text: "Zoom out"
                         iconSource: "qrc:/icons/icons/timeline/zoom-out.svg"
-                        enabled: !!root.timeline
+                        enabled: root.navigationEnabled
                         onClicked: root.zoom(2)
                     }
                     TimelineEditButton {
@@ -494,7 +484,7 @@ FocusScope {
                         objectName: "timelineZoomIn"
                         text: "Zoom in"
                         iconSource: "qrc:/icons/icons/timeline/zoom-in.svg"
-                        enabled: !!root.timeline
+                        enabled: root.navigationEnabled
                         onClicked: root.zoom(0.5)
                     }
                     TimelineEditButton {
@@ -502,7 +492,7 @@ FocusScope {
                         objectName: "timelineFitDuration"
                         text: "Fit duration"
                         iconSource: "qrc:/icons/icons/timeline/fit.svg"
-                        enabled: !!root.timeline
+                        enabled: root.navigationEnabled
                         onClicked: { root.viewDurationMs = root.maximumMs; trackViewport.contentX = 0 }
                     }
                 }
@@ -513,6 +503,7 @@ FocusScope {
                 cursorShape: undefined
                 scrollGestureEnabled: true
                 onWheel: wheel => {
+                    if (!root.navigationEnabled) { wheel.accepted = true; return }
                     var precise = wheel.pixelDelta.x !== 0 || wheel.pixelDelta.y !== 0
                     var dx = precise ? wheel.pixelDelta.x : wheel.angleDelta.x / 8
                     var dy = precise ? wheel.pixelDelta.y : wheel.angleDelta.y / 8
@@ -636,6 +627,8 @@ FocusScope {
             boundsBehavior: Flickable.StopAtBounds
             interactive: false
             ScrollBar.horizontal: ScrollBar {
+                objectName: "timelineHorizontalScrollBar"
+                enabled: root.navigationEnabled
                 policy: ScrollBar.AlwaysOn
                 z: 1
                 background: null
@@ -798,12 +791,13 @@ FocusScope {
                     Component.onCompleted: contentY = (root.clipHeight - height) / 2
                     ScrollBar {
                         objectName: "timelineVerticalScrollBar"
+                        enabled: root.navigationEnabled
                         orientation: Qt.Vertical
                         height: parent.height
                         readonly property real extent: clipViewport.topMargin + clipViewport.contentHeight + clipViewport.bottomMargin
                         size: Math.min(1, height / Math.max(1, extent))
                         position: (clipViewport.contentY + clipViewport.topMargin) / Math.max(1, extent)
-                        onPositionChanged: if (pressed) clipViewport.contentY = position * extent - clipViewport.topMargin
+                        onPositionChanged: if (root.navigationEnabled && pressed) clipViewport.contentY = position * extent - clipViewport.topMargin
                         active: hovered || pressed
                         x: root.visibleStartX + trackViewport.width - width
                         anchors.right: undefined
@@ -854,10 +848,12 @@ FocusScope {
                     color: "#44000000"
                 }
                 Rectangle {
+                    id: playhead
                     objectName: "timelinePlayhead"
                     x: 12 + (root.timeline ? root.timeline.positionMs : 0) * root.pixelsPerMs
                     width: 1; height: timelineContent.height
-                    color: Theme.accent
+                    enabled: !!root.timeline && !root.timeline.remoteActive
+                    color: enabled ? Theme.accent : Theme.disabledText
                     Shape {
                         id: playheadCap
                         objectName: "timelinePlayheadCap"
@@ -868,7 +864,7 @@ FocusScope {
                         antialiasing: true
                         ShapePath {
                             strokeWidth: -1
-                            fillColor: Theme.accent
+                            fillColor: playhead.color
                             startX: 0; startY: 0
                             PathLine { x: playheadCap.width; y: 0 }
                             PathLine { x: playheadCap.width; y: playheadCap.height - 5 }
@@ -957,7 +953,7 @@ FocusScope {
         autoRepeat: false
     }
     component TimelineZoomShortcut: Shortcut {
-        enabled: root.expanded && !!root.timeline && !root.textInputFocused && (root.activeFocus || trackInput.containsMouse)
+        enabled: root.expanded && root.navigationEnabled && !root.textInputFocused && (root.activeFocus || trackInput.containsMouse)
         context: Qt.WindowShortcut
         autoRepeat: true
     }

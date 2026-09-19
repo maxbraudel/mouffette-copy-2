@@ -7,6 +7,8 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QQuickWindow>
+#include <QQuickView>
+#include <QQuickItem>
 #include <QScopeGuard>
 #include <QElapsedTimer>
 #include <QTemporaryDir>
@@ -26,6 +28,7 @@
 #include "frontend/rendering/canvas/QuickCanvasHost.h"
 #include "frontend/rendering/canvas/MediaListModel.h"
 #include "frontend/qml/ClientWorkspaceViewModel.h"
+#include "frontend/qml/TimelineController.h"
 #include "frontend/rendering/remote/RemoteSceneController.h"
 
 class RemoteSceneLifecycleTest final : public QObject
@@ -41,6 +44,84 @@ private slots:
     void cleanupTestCase()
     {
         MediaResidencyManager::instance().clearMemorySnapshotForTesting();
+    }
+    void remoteTimelineLocksManualNavigation_data()
+    {
+        QTest::addColumn<QString>("phase");
+        for (const char* phase : {"launching", "playing", "stopping"})
+            QTest::newRow(phase) << QString::fromLatin1(phase);
+    }
+    void remoteTimelineLocksManualNavigation()
+    {
+        QFETCH(QString, phase);
+        std::unique_ptr<QuickCanvasHost> host(QuickCanvasHost::create()); QVERIFY(host);
+        host->setProjectEditingEnabled(true);
+        TimelineController timeline;
+        timeline.setHost(host.get());
+        timeline.seek(7000);
+        QQuickView view;
+        view.setResizeMode(QQuickView::SizeRootObjectToView);
+        view.resize(1100, 240);
+        view.setInitialProperties({{"session", QVariantMap{{"timeline", QVariant::fromValue<QObject*>(&timeline)}}}});
+        view.setSource(QUrl("qrc:/qt/qml/Mouffette/App/resources/qml/app/canvas/TimelinePanel.qml"));
+        QCOMPARE(view.status(), QQuickView::Ready);
+        view.show(); QVERIFY(QTest::qWaitForWindowExposed(&view));
+        auto* root = view.rootObject();
+        auto* tracks = root->findChild<QQuickItem*>("timelineTracks"); QVERIFY(tracks);
+        auto* clips = root->findChild<QQuickItem*>("timelineClipViewport"); QVERIFY(clips);
+        auto* headers = root->findChild<QQuickItem*>("timelineTrackHeaders"); QVERIFY(headers);
+        tracks->setProperty("contentX", 200.0);
+        clips->setProperty("contentY", 0.0);
+        const auto wheel = [&](QPoint point, QPoint pixels, QPoint angles, Qt::KeyboardModifiers modifiers = Qt::NoModifier) {
+            QWheelEvent event(point, view.mapToGlobal(point), pixels, angles, Qt::NoButton,
+                modifiers, Qt::NoScrollPhase, false);
+            QCoreApplication::sendEvent(&view, &event);
+        };
+        host->m_sceneLaunching = phase == "launching";
+        host->m_sceneLaunched = phase == "playing";
+        host->m_sceneStopping = phase == "stopping";
+        host->publishActionState();
+        QVERIFY(timeline.remoteActive());
+        const auto duration = root->property("viewDurationMs");
+        const auto position = timeline.positionMs();
+        for (const auto point : {tracks->mapToScene({100, 10}).toPoint(),
+                                tracks->mapToScene({100, 45}).toPoint(),
+                                tracks->mapToScene({100, 90}).toPoint(),
+                                headers->mapToScene({10, 90}).toPoint()}) {
+            wheel(point, {}, {0, -120});
+            wheel(point, {-40, -40}, {});
+            wheel(point, {}, {0, -120}, Qt::ShiftModifier);
+            wheel(point, {}, {0, -120}, Qt::ControlModifier);
+        }
+        for (const auto* name : {"timelineHorizontalScrollBar", "timelineVerticalScrollBar",
+                                 "timelineZoomIn", "timelineZoomOut", "timelineFitDuration"}) {
+            auto* control = root->findChild<QQuickItem*>(name); QVERIFY(control);
+            QVERIFY(!control->isEnabled());
+            const auto from = control->mapToScene({control->width()/2, control->height()/2}).toPoint();
+            auto to = from;
+            if (control->objectName() == "timelineHorizontalScrollBar") to.rx() -= 30;
+            if (control->objectName() == "timelineVerticalScrollBar") to.ry() -= 15;
+            QTest::mousePress(&view, Qt::LeftButton, Qt::NoModifier, from);
+            QTest::mouseMove(&view, to);
+            QTest::mouseRelease(&view, Qt::LeftButton, Qt::NoModifier, to);
+        }
+        QCOMPARE(tracks->property("contentX").toReal(), 200.0);
+        QCOMPARE(clips->property("contentY").toReal(), 0.0);
+        QCOMPARE(root->property("viewDurationMs"), duration);
+        QCOMPARE(timeline.positionMs(), position);
+        // Remote clock updates must still bring the playhead into view.
+        host->document()->setTimelinePosition(90000);
+        host->publishActionState();
+        QVERIFY(tracks->property("contentX").toReal() > 200);
+        host->m_sceneLaunching = host->m_sceneLaunched = host->m_sceneStopping = false;
+        host->publishActionState();
+        const auto previousX = tracks->property("contentX").toReal();
+        wheel(tracks->mapToScene({100, 90}).toPoint(), {-40, -40}, {});
+        QCOMPARE(tracks->property("contentX").toReal(), previousX + 40);
+        QCOMPARE(clips->property("contentY").toReal(), 40.0);
+        QVERIFY(root->findChild<QQuickItem*>("timelineHorizontalScrollBar")->isEnabled());
+        QVERIFY(root->findChild<QQuickItem*>("timelineVerticalScrollBar")->isEnabled());
+        QVERIFY(root->findChild<QQuickItem*>("timelineZoomIn")->isEnabled());
     }
     void transportTimeoutPreservesSessionUntilItsFixedRecoveryProofDeadline()
     {
