@@ -258,6 +258,12 @@ snapshots remain session-generation-bound and sequenced. Durable upload completi
 is separate from background media readiness. Remote PREPARE pins ready data and
 prepares requested start cursors; stale readiness cannot launch a partial scene.
 The receiver renders native shared planes without an RGBA image per video frame.
+After a transient transport degradation, the client reconciles session state and
+the server replays outstanding scene barriers. Repeated PREPARE preserves primed
+players, RAM pins and the preparation deadline; recovery cannot substitute an
+editing preview for the original start frame or revive an expired scene. This
+recovery path requires the corresponding client and server changes; see
+[scene run delivery](../../server/README.md#scene-runs).
 
 Qt 6.11.2 and linked avformat/avcodec/avutil/swscale/swresample are required. Native
 package scripts retain the pinned Qt multimedia plugin for device support and the

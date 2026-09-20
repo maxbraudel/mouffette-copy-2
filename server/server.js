@@ -1390,6 +1390,10 @@ class MouffetteServer {
     reconcileSceneAfterRecovery(session) {
         const run = this.sceneRuns.getForSession(session.remoteSessionId);
         if (!run || !this.remoteSessions.commandReady(session)) return;
+        // Reconciliation can arrive before the next periodic timeout sweep.
+        // Never replay preparation after its original authoritative deadline.
+        if ([SCENE_PHASES.PREPARING, SCENE_PHASES.PREPARED, SCENE_PHASES.ARMED].includes(run.phase)
+            && this.monotonicNow() >= run.prepareDeadlineServerMonotonicMs) return;
         if (run.phase === SCENE_PHASES.PREPARING) {
             this.sendToEndpoint(run.ownerEndpointId, this.scenePayload(run, 'prepare_progress', {
                 aggregate: true, replay: true, percent: 0, stage: 'accepted',
@@ -2833,6 +2837,7 @@ class MouffetteServer {
             if (tombstone) candidates.set(id, tombstone);
         }
         const sessions = [];
+        const sceneSessions = [];
         const encode = (session, type, extra = {}) => ({
             ...this.remoteSessionPayload(session, type, client.endpointId),
             connectionGeneration: client.connectionGeneration,
@@ -2862,14 +2867,25 @@ class MouffetteServer {
                     snapshotSequence: session.snapshotSequence || 1,
                     snapshot: session.latestTargetSnapshot?.snapshot || session.initialSnapshot,
                 }));
+            const localGeneration = isOwner
+                ? session.ownerConnectionGeneration : session.targetConnectionGeneration;
+            if (localGeneration === client.connectionGeneration
+                && this.remoteSessions.commandReady(session)) sceneSessions.push(session);
         }
         this.metrics.increment('remote_session_reconcile_total');
         const visibleIds = new Set(sessions.map(session => session.remoteSessionId));
-        this.sendToEndpoint(client.endpointId, {
+        const delivered = this.sendToEndpoint(client.endpointId, {
             type: 'remote_session_reconciled', requestId: message.requestId,
             sessions, complete: true,
             absentSessionIds: [...requested].filter(id => !visibleIds.has(id)),
         });
+        // A client-only degradation can discard PREPARE/PREPARED/COMMIT
+        // without changing server session state. Re-send the outstanding
+        // barrier after the state response, even when no applied-state ACK
+        // transition remains. Delivery is not a preparation acknowledgement.
+        if (delivered) {
+            for (const session of sceneSessions) this.reconcileSceneAfterRecovery(session);
+        }
     }
 
     sendRemoteSessionError(clientId, errorMessage, code, message = {}, targetEndpointId) {

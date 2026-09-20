@@ -202,10 +202,21 @@ SHA-256(canonical JSON { manifest, revision, scene })
 Every manifest asset must be present in the exact session generation inventory.
 If an asset is missing, the owner receives a correlated
 `scene_asset_not_validated` error before a run is created. Once the run is
-registered and the preparation request has reached the target, the server sends
+registered and the preparation request has been queued for the target, the server sends
 the owner an aggregate `prepare_progress` acknowledgement with
 `stage: "accepted"`; the owner waits for this barrier before reporting its own
 progress or readiness.
+This acceptance confirms server admission, not the target's media readiness.
+
+After a client leaves the degraded transport state, it requests session
+reconciliation even if the generation and revision did not change. The server
+sends authoritative session state first, then replays the outstanding scene
+barrier for command-ready sessions on the same bound transport/runtime. This
+recovers a `scene_prepare` discarded locally while heartbeats were late, after
+the owner had already received `stage: "accepted"`. Replays retain the original
+scene, preparation deadline, and any committed start time. An already prepared
+receiver keeps its primed media and render graph; expired or terminal runs do
+not restart.
 
 Both endpoints then send `prepared` with a complete checklist and `armed` with
 clock uncertainty no greater than the advertised policy. Uncertainty is the

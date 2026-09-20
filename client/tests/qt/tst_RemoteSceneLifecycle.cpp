@@ -1082,13 +1082,15 @@ private slots:
         QTest::addColumn<int>("startMs");
         QTest::addColumn<bool>("visible");
         QTest::addColumn<bool>("offscreen");
-        QTest::newRow("text") << false << 0 << 0 << true << false;
-        QTest::newRow("cached-image") << true << 0 << 0 << true << false;
-        QTest::newRow("cached-video") << false << 1 << 0 << true << false;
-        QTest::newRow("cached-video-seek") << false << 1 << 1234 << true << false;
-        QTest::newRow("hidden-cached-video") << false << 1 << 1234 << false << false;
-        QTest::newRow("offscreen-cached-video") << false << 1 << 1234 << true << true;
-        QTest::newRow("mixed-shared-video") << true << 2 << 1234 << true << false;
+        QTest::addColumn<bool>("interruptPrepare");
+        QTest::newRow("text") << false << 0 << 0 << true << false << false;
+        QTest::newRow("cached-image") << true << 0 << 0 << true << false << false;
+        QTest::newRow("cached-video") << false << 1 << 0 << true << false << false;
+        QTest::newRow("cached-video-seek") << false << 1 << 1234 << true << false << false;
+        QTest::newRow("hidden-cached-video") << false << 1 << 1234 << false << false << false;
+        QTest::newRow("offscreen-cached-video") << false << 1 << 1234 << true << true << false;
+        QTest::newRow("mixed-shared-video") << true << 2 << 1234 << true << false << false;
+        QTest::newRow("cached-video-seek-recovery") << false << 1 << 1234 << true << false << true;
     }
 
     void targetKeepsThePrepareDeadlineUntilCommit()
@@ -1098,6 +1100,7 @@ private slots:
         QFETCH(int, startMs);
         QFETCH(bool, visible);
         QFETCH(bool, offscreen);
+        QFETCH(bool, interruptPrepare);
         QTemporaryDir directory;
         QVERIFY(directory.isValid());
         QWebSocketServer server(QStringLiteral("target-prepare-deadline-test"),
@@ -1115,6 +1118,9 @@ private slots:
         QJsonObject startedMessage;
         QList<qint64> presentedTimestamps;
         QJsonObject fixtureSessionState;
+        QJsonObject pendingPrepare;
+        bool acknowledgeHeartbeats = true;
+        int reconciliationCount = 0;
         auto send = [&](QWebSocket* socket, QJsonObject message) {
             message.insert(QStringLiteral("protocolVersion"), WebSocketClient::ProtocolVersion);
             if (message.contains(QStringLiteral("remoteSessionId"))) {
@@ -1179,11 +1185,24 @@ private slots:
                         {"resumeToken", "target-deadline-token"}, {"phase", "Active"}
                     });
                 } else if (type == QLatin1String("heartbeat")) {
+                    if (!acknowledgeHeartbeats) return;
                     send(socket, {{"type", "heartbeat_ack"}, {"connectionGeneration", 1},
                                   {"sequence", message.value("sequence")},
                                   {"clientMonotonicMs", message.value("clientMonotonicMs")},
                                   {"serverMonotonicMs", message.value("clientMonotonicMs")},
                                   {"serverEpochMs", 1}});
+                } else if (type == QLatin1String("remote_session_reconcile")) {
+                    ++reconciliationCount;
+                    auto state = fixtureSessionState;
+                    state.insert("type", "remote_session_resumed");
+                    send(socket, {{"type", "remote_session_reconciled"},
+                                  {"requestId", message.value("requestId")},
+                                  {"complete", true}, {"sessions", QJsonArray{state}},
+                                  {"absentSessionIds", QJsonArray{}}});
+                    // Mirror the real server: apply authoritative session state
+                    // before replaying an unacknowledged PREPARE.
+                    if (!pendingPrepare.isEmpty() && successfulPreparedCount == 0)
+                        send(socket, pendingPrepare);
                 } else if (type == QLatin1String("prepared")) {
                     if (message.value(QStringLiteral("success")).toBool()) {
                         ++successfulPreparedCount;
@@ -1292,7 +1311,41 @@ private slots:
         prepare.insert(QStringLiteral("scene"), scene);
         QElapsedTimer preparationTime;
         preparationTime.start();
+        QSignalSpy prepareReceived(&client, &WebSocketClient::scenePrepareReceived);
+        QSignalSpy reconciled(&client, &WebSocketClient::reconciliationCompleted);
+        if (interruptPrepare) {
+            // Settle the welcome reconciliation, then create a client-only
+            // degradation. The server's session generation/revision stays valid.
+            QTRY_VERIFY_WITH_TIMEOUT(reconciliationCount > 0, 3000);
+            QTRY_VERIFY_WITH_TIMEOUT(client.canIssueSessionCommands("target-deadline-session"), 3000);
+            reconciled.clear();
+            QVERIFY(client.reconcileRemoteSessions());
+            QTRY_VERIFY_WITH_TIMEOUT(!reconciled.isEmpty(), 3000);
+            // A second request immediately after completion is inside the
+            // cooldown. It must be coalesced and eventually sent, not lost.
+            const int beforeCooldown = reconciliationCount;
+            reconciled.clear();
+            QVERIFY(client.reconcileRemoteSessions());
+            QTRY_VERIFY_WITH_TIMEOUT(reconciliationCount > beforeCooldown, 3000);
+            QTRY_VERIFY_WITH_TIMEOUT(!reconciled.isEmpty(), 3000);
+            acknowledgeHeartbeats = false;
+            QTRY_COMPARE_WITH_TIMEOUT(client.getConnectionStatus(), QStringLiteral("Degraded"), 2000);
+        }
+        pendingPrepare = prepare;
         send(peer, prepare);
+        if (interruptPrepare) {
+            // Delivery on the socket must not bypass the degraded authority
+            // gate. A fresh heartbeat must request reconciliation on its own.
+            QTest::qWait(100);
+            QCOMPARE(prepareReceived.count(), 0);
+            QCOMPARE(controller.findChildren<ResidentVideoPlayer*>().size(), 0);
+            QCOMPARE(successfulPreparedCount, 0);
+            const int previousReconciliations = reconciliationCount;
+            reconciled.clear();
+            acknowledgeHeartbeats = true;
+            QTRY_VERIFY_WITH_TIMEOUT(reconciliationCount > previousReconciliations, 3000);
+            QTRY_VERIFY_WITH_TIMEOUT(!reconciled.isEmpty(), 3000);
+        }
 
         QTRY_COMPARE_WITH_TIMEOUT(controller.findChildren<ResidentVideoPlayer*>().size(), videoCount, 3000);
         for (auto* player : controller.findChildren<ResidentVideoPlayer*>()) {
@@ -1303,6 +1356,15 @@ private slots:
         qInfo() << "Cached scene prepared in" << preparationTime.elapsed() << "ms";
         QCOMPARE(failedPreparedCount, 0);
         QVERIFY(!preparedChecklist.isEmpty());
+        // A repeated PREPARE must preserve the exact primed players and the
+        // original deadline, even when only one party has acknowledged it.
+        const auto primedPlayers = controller.findChildren<ResidentVideoPlayer*>();
+        const auto prepareDeadline = client.sceneRunCoordinator()->run(runId).prepareDeadlineEpochMs;
+        const auto previousPrepareCount = prepareReceived.count();
+        send(peer, prepare);
+        QTRY_VERIFY_WITH_TIMEOUT(prepareReceived.count() > previousPrepareCount, 3000);
+        QCOMPARE(controller.findChildren<ResidentVideoPlayer*>(), primedPlayers);
+        QCOMPARE(client.sceneRunCoordinator()->run(runId).prepareDeadlineEpochMs, prepareDeadline);
         QCOMPARE(preparedChecklist.size(), SceneRunCoordinator::createLocalChecklist(scene).size());
         for (const auto& stage : preparedChecklist)
             QVERIFY(stage.toObject().value(QStringLiteral("ready")).toBool());

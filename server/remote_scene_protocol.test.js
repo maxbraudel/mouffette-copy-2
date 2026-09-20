@@ -900,6 +900,95 @@ console.log('scene protocol v12 tests passed');
     assert.equal(messages(target, 'error').at(-1).code, 'protocol_version_mismatch');
 }
 
+// A receiver can locally reject PREPARE while its heartbeat is late, without
+// the server observing a disconnect or changing the session revision. Reconcile
+// must deliver authoritative state followed by the outstanding scene barrier.
+{
+    let now = 100000;
+    const server = new MouffetteServer({ port: 0, monotonicNow: () => now,
+        epochNow: () => now, protocolLogger: () => {}, metricLogger: () => {} });
+    const owner = addClient(server, 'reconcile-owner', 'A');
+    const target = addClient(server, 'reconcile-target', 'B');
+    const session = server.remoteSessions.open({ ownerEndpointId: 'A', targetEndpointId: 'B',
+        ownerRuntimeId: 'runtime-A', targetRuntimeId: 'runtime-B',
+        ownerConnectionGeneration: 1, targetConnectionGeneration: 1 }).session;
+    session.serverBootId = server.serverBootId;
+    server.sessionAssets.set(session.remoteSessionId, new Map([[asset.assetId,
+        { ...asset, remoteSessionId: session.remoteSessionId, generation: session.generation,
+            ownerEndpointId: 'A', targetEndpointId: 'B', uploadId: 'reconcile-upload' }]]));
+    server.handleMessage('reconcile-target', envelope(session, { type: 'media_residency', sequence: 1,
+        assets: [{ assetId: asset.assetId, sha256: asset.sha256, state: 'ready', progress: 1, error: '' }] }));
+    const prepare = { type: 'scene_prepare', sceneRunId: 'reconcile-run', revision: 1,
+        digest: computeSceneDigest(1, [asset], scene), manifest: [asset], scene };
+    server.handleMessage('reconcile-owner', envelope(session, prepare));
+    assert.equal(messages(owner, 'prepare_progress').at(-1).stage, 'accepted');
+    const original = messages(target, 'scene_prepare').at(-1);
+    assert.ok(original);
+    const run = server.sceneRuns.get(prepare.sceneRunId);
+    const deadline = run.prepareDeadlineServerMonotonicMs;
+    const revision = session.stateRevision;
+    const reconcile = () => server.handleMessage('reconcile-target', envelope(session, {
+        type: 'remote_session_reconcile', requestId: crypto.randomUUID(),
+        connectionGeneration: server.clients.get('reconcile-target').connectionGeneration,
+        sessions: [{ remoteSessionId: session.remoteSessionId,
+            generation: session.generation, stateRevision: session.stateRevision }],
+    }));
+    target.messages.length = 0; // Simulate discarding the first PREPARE locally.
+    now += 100;
+    reconcile();
+    assert.deepEqual(target.messages.map(message => message.type),
+        ['remote_session_reconciled', 'scene_prepare']);
+    const replay = messages(target, 'scene_prepare').at(-1);
+    for (const key of ['remoteSessionId', 'generation', 'sceneRunId', 'revision', 'digest', 'manifest', 'scene'])
+        assert.deepEqual(replay[key], original[key], `replay preserves ${key}`);
+    assert.equal(session.stateRevision, revision);
+    assert.equal(run.prepareDeadlineServerMonotonicMs, deadline);
+    assert.equal(run.preparedEndpoints.size, 0, 'socket delivery never means prepared');
+
+    const targetClient = server.clients.get('reconcile-target');
+    for (const [object, key, value] of [
+        [session, 'requiresAppliedAck', true],
+        [targetClient, 'connectionGeneration', 2],
+        [targetClient, 'runtimeId', 'replacement-runtime'],
+    ]) {
+        const previous = object[key];
+        object[key] = value;
+        target.messages.length = 0;
+        reconcile();
+        assert.equal(messages(target, 'scene_prepare').length, 0,
+            `reconciliation must not bypass ${key}`);
+        object[key] = previous;
+    }
+
+    server.handleMessage('reconcile-target', envelope(session, { type: 'prepared',
+        sceneRunId: run.sceneRunId, revision: run.revision, digest: run.digest,
+        success: true, checklist }));
+    target.messages.length = 0;
+    reconcile();
+    assert.equal(messages(target, 'scene_prepare').length, 0, 'primed target is not prepared again');
+    server.handleMessage('reconcile-owner', envelope(session, { type: 'prepared',
+        sceneRunId: run.sceneRunId, revision: run.revision, digest: run.digest,
+        success: true, checklist }));
+    target.messages.length = 0;
+    reconcile();
+    assert.deepEqual(target.messages.map(message => message.type),
+        ['remote_session_reconciled', 'prepared']);
+    assert.equal(messages(target, 'prepared').at(-1).allPrepared, true);
+    assert.equal(run.prepareDeadlineServerMonotonicMs, deadline);
+
+    now = deadline; // Exercise the boundary before the periodic sweep runs.
+    target.messages.length = 0;
+    reconcile();
+    assert.deepEqual(target.messages.map(message => message.type), ['remote_session_reconciled']);
+    assert.equal(run.phase, SCENE_PHASES.PREPARED);
+    assert.equal(run.prepareDeadlineServerMonotonicMs, deadline);
+
+    server.sceneRuns.stop(run.sceneRunId, 'test_cleanup');
+    target.messages.length = 0;
+    reconcile();
+    assert.equal(target.messages.some(message => ['scene_prepare', 'prepared', 'commit'].includes(message.type)), false);
+}
+
 // Offscreen media still belongs to the scene and requires residency, with no render spans.
 {
     const server = new MouffetteServer({ port: 0, metricLogger: () => {} });

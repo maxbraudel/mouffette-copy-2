@@ -1387,7 +1387,15 @@ bool WebSocketClient::reconcileRemoteSessions()
     if (!isConnected() || m_endpointDraining) return false;
     if (!m_reconcileRequestId.isEmpty() && m_pendingControl.contains(m_reconcileRequestId)) return true;
     const qint64 now = suspendInclusiveNowMs();
-    if (m_reconcileSentAtMs >= 0 && now - m_reconcileSentAtMs < AppConfig::instance().controlRequestRetryMs()) return false;
+    const qint64 retryDelay = AppConfig::instance().controlRequestRetryMs();
+    if (m_reconcileSentAtMs >= 0 && now - m_reconcileSentAtMs < retryDelay) {
+        // Coalesce requests during the cooldown without losing a recovery
+        // detected just after the previous reconciliation completed.
+        m_controlRetries.schedule(QStringLiteral("reconcile-next"),
+            retryDelay - (now - m_reconcileSentAtMs), [this] { reconcileRemoteSessions(); });
+        return true;
+    }
+    m_controlRetries.cancel(QStringLiteral("reconcile-next"));
     if (m_reconcileRequestId.isEmpty())
         m_reconcileRequestId = QUuid::createUuid().toString(QUuid::WithoutBraces);
     QJsonArray sessions;
@@ -2420,6 +2428,7 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
             m_lastRttMs = rtt;
             m_lastHeartbeatAckMs = suspendInclusiveNowMs();
             m_transportRecoveryDeadlineMs = -1;
+            const bool recoveredTransport = m_degraded;
             if (m_degraded) {
                 m_degraded = false;
                 emit transportHealthChanged(false);
@@ -2490,6 +2499,11 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
             m_serverClockAnchorMs = serverAt + rtt;
             m_localClockAnchorMs = suspendInclusiveNowMs();
             refreshSessionProofs(message);
+            // This endpoint may have rejected scene commands while degraded
+            // even if the server never observed an interruption. Recover the
+            // authoritative barriers after refreshing the clock and proofs;
+            // unchanged session generations still need their missing commands.
+            if (recoveredTransport) reconcileRemoteSessions();
             emit heartbeatSampleReceived(sequence, rtt, offset, uncertainty);
         }
     }
