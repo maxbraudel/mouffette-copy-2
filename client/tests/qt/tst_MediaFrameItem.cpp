@@ -4,6 +4,7 @@
 #include "backend/media/DecodeScheduler.h"
 #include "backend/media/MediaDecoder.h"
 #include "shared/rendering/SharedVideoNode.h"
+#include "../fixtures/ThumbnailVideoFixture.h"
 
 #include <QGuiApplication>
 #include <QQuickRenderControl>
@@ -182,19 +183,33 @@ class ObservedThumbnailItem final : public TimelineThumbnailItem {
 public:
     using TimelineThumbnailItem::TimelineThumbnailItem;
     QList<QRectF> quads;
+    QList<QRectF> sources;
+    QList<QRectF> cellRects;
+    QList<quintptr> cellTextures;
     QList<quintptr> quadTextures;
     QSet<quintptr> textures;
     QList<QSize> textureSizes;
 protected:
     QSGNode* updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData* data) override {
         auto* node = TimelineThumbnailItem::updatePaintNode(oldNode, data);
-        quads.clear(); quadTextures.clear(); textures.clear(); textureSizes.clear();
+        quads.clear(); sources.clear(); cellRects.clear(); cellTextures.clear();
+        quadTextures.clear(); textures.clear(); textureSizes.clear();
         for (auto* child = node ? node->firstChild() : nullptr; child; child = child->nextSibling()) {
-            auto* quad = static_cast<QSGImageNode*>(child);
-            quads.append(quad->rect());
-            quadTextures.append(reinterpret_cast<quintptr>(quad->texture()));
-            textures.insert(reinterpret_cast<quintptr>(quad->texture()));
-            textureSizes.append(quad->texture()->textureSize());
+            QRectF cell;
+            quintptr identity = 0;
+            const auto observe = [&](QSGImageNode* quad) {
+                quads.append(quad->rect()); sources.append(quad->sourceRect());
+                identity = reinterpret_cast<quintptr>(quad->texture());
+                quadTextures.append(identity); textures.insert(identity);
+                textureSizes.append(quad->texture()->textureSize());
+                cell = cell.united(quad->rect());
+            };
+            // Observe logical cells separately from repeated quads. Accept the
+            // previous flat graph too so the regression can run against it.
+            if (auto* quad = dynamic_cast<QSGImageNode*>(child)) observe(quad);
+            else for (auto* image = child->firstChild(); image; image = image->nextSibling())
+                observe(static_cast<QSGImageNode*>(image));
+            if (!cell.isEmpty()) { cellRects.append(cell); cellTextures.append(identity); }
         }
         return node;
     }
@@ -212,12 +227,12 @@ bool coversViewport(const ObservedThumbnailItem* item, qreal left, qreal right) 
 QHash<qint64, quintptr> sourceTextureIdentities(const ObservedThumbnailItem* item) {
     QHash<qint64, quintptr> result;
     const qreal left = std::max(qreal(0), item->visibleLeft());
-    for (int i = 0; i < item->quads.size(); ++i) {
+    for (int i = 0; i < item->cellRects.size(); ++i) {
         // The first visible cell may be cropped; the other left edges are the
         // source grid anchors, independently of zoom, trim and viewport offset.
-        if (item->quads[i].left() <= left + .001) continue;
-        const auto time = qRound64((item->sourceInMs() + item->quads[i].left() / item->pixelsPerMs()) * 1000);
-        result.insert(time, item->quadTextures[i]);
+        if (item->cellRects[i].left() <= left + .001) continue;
+        const auto time = qRound64((item->sourceInMs() + item->cellRects[i].left() / item->pixelsPerMs()) * 1000);
+        result.insert(time, item->cellTextures[i]);
     }
     return result;
 }
@@ -443,6 +458,76 @@ private slots:
             QVERIFY(coversViewport(scene.item, 0, 240));
             QVERIFY(qAbs(scene.item->quads.first().width() / scale - step) < .001);
         }
+    }
+
+    void videoFilmstripKeepsVerticalFramingDuringZoom_data() {
+        QTest::addColumn<QSize>("size");
+        QTest::addColumn<qreal>("dpr");
+        for (qreal dpr : {1., 2.}) {
+            QTest::newRow(qPrintable(QStringLiteral("landscape-%1").arg(dpr))) << QSize(192, 108) << dpr;
+            QTest::newRow(qPrintable(QStringLiteral("portrait-%1").arg(dpr))) << QSize(108, 192) << dpr;
+            QTest::newRow(qPrintable(QStringLiteral("panorama-%1").arg(dpr))) << QSize(192, 48) << dpr;
+            QTest::newRow(qPrintable(QStringLiteral("narrow-%1").arg(dpr))) << QSize(24, 192) << dpr;
+        }
+    }
+
+    void videoFilmstripKeepsVerticalFramingDuringZoom() {
+        QFETCH(QSize, size);
+        QFETCH(qreal, dpr);
+        QTemporaryDir temporary;
+        const auto path = temporary.filePath("framing.mp4");
+        QVERIFY(writeThumbnailVideoFixture(path, size));
+        auto& manager = MediaResidencyManager::instance();
+        const QString owner = "thumbnail-vertical-framing";
+        manager.acquire(owner, path);
+        const auto cleanup = qScopeGuard([&] { manager.release(owner); });
+        QTRY_VERIFY_WITH_TIMEOUT(manager.ready(owner), 15000);
+
+        Scene<ObservedThumbnailItem> scene(dpr);
+        scene.item->setSize({1200, 44});
+        scene.item->setVisibleRight(240);
+        scene.item->setSourceInMs(-10000); // First-frame hold uses the real video layout.
+        scene.item->setOwnerId(owner);
+        const qreal naturalWidth = 44. * size.width() / size.height();
+        scene.item->setPixelsPerMs(naturalWidth / 1000.);
+        QVERIFY(scene.initialize());
+        const qreal factors[] = {.85, 1.05, 1.25, 1.55, 1.59, 1.61, 2., 1.6, 1.2, .64, .42, .65};
+        bool sawRepeatedCell = false;
+        for (int frame = 0; frame < 36; ++frame) {
+            const qreal left = (frame * 37) % 900;
+            scene.item->setPixelsPerMs(naturalWidth * factors[frame % 12] / 1000.);
+            scene.item->setSourceInMs(-10000 + (frame % 3) * 137);
+            scene.item->setVisibleLeft(left);
+            scene.item->setVisibleRight(left + 240);
+            scene.camera->setX(-left);
+            const auto rendered = scene.render();
+            QVERIFY(!rendered.isNull());
+            QVERIFY(coversViewport(scene.item, left, left + 240));
+            sawRepeatedCell |= scene.item->quads.size() > scene.item->cellRects.size();
+            for (int i = 0; i < scene.item->quads.size(); ++i) {
+                const auto source = scene.item->sources[i];
+                const auto target = scene.item->quads[i];
+                const auto texture = scene.item->textureSizes[i];
+                // Every row remains visible; magnification never follows zoom.
+                QCOMPARE(source.top(), qreal(0));
+                QCOMPARE(source.height(), qreal(texture.height()));
+                QVERIFY(source.left() >= -1e-6);
+                QVERIFY(source.right() <= texture.width() + 1e-6);
+                QVERIFY(qAbs(target.width() / source.width() - target.height() / source.height()) < 1e-6);
+            }
+            // Actual GPU pixels, including atlas boundaries and Retina: dark
+            // top and bright bottom bands must survive every intermediate frame.
+            for (int x : {2, 13, 47, 109, 191, 237}) {
+                const QColor top = rendered.pixelColor(qRound(x * dpr), qRound(2 * dpr));
+                const QColor bottom = rendered.pixelColor(qRound(x * dpr), qRound(41 * dpr));
+                QVERIFY2(top.red() < 70 && top.green() < 70 && top.blue() < 70,
+                         qPrintable(QStringLiteral("top band lost at frame %1, x %2").arg(frame).arg(x)));
+                QVERIFY2(bottom.red() > 200 && bottom.green() > 200 && bottom.blue() > 200,
+                         qPrintable(QStringLiteral("bottom band lost at frame %1, x %2").arg(frame).arg(x)));
+            }
+            QCoreApplication::processEvents();
+        }
+        if (size.width() <= size.height() * 2.4) QVERIFY(sawRepeatedCell);
     }
 
     void videoFilmstripCoversEveryFrameOfZoomScrollAndTrim() {

@@ -236,7 +236,12 @@ QSGNode* TimelineThumbnailItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNod
     auto* child = node->firstChild();
     for (const auto& tile : m_tiles) {
         if (!tile.image || tile.image->isNull()) continue;
+        const qreal start = std::max(tile.x, left), end = std::min(tile.x + tile.width, right);
+        if (end <= start) continue;
         const auto& image = *tile.image;
+        const qreal scale = height() / image.height();
+        const qreal imageWidth = image.width() * scale;
+        if (!std::isfinite(imageWidth) || imageWidth <= 0) continue;
         const auto key = image.cacheKey();
         if (!node->textures.contains(key)) {
             auto texture = sharedImageTexture(window(), image);
@@ -244,18 +249,47 @@ QSGNode* TimelineThumbnailItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNod
             node->textures.insert(key, std::move(texture));
         }
         used.insert(key);
-        auto* quad = static_cast<QSGImageNode*>(child);
-        const bool append = !quad;
-        if (!quad) { quad = window()->createImageNode(); quad->setFiltering(QSGTexture::Linear); }
-        quad->setTexture(node->textures.value(key).get());
-        const qreal scale = std::max(tile.width / image.width(), height() / image.height());
-        const qreal start = std::max(tile.x, left), end = std::min(tile.x + tile.width, right);
-        const qreal sourceX = (image.width() - tile.width / scale) / 2;
-        const qreal sourceY = (image.height() - height() / scale) / 2;
-        quad->setSourceRect({sourceX + (start - tile.x) / scale, sourceY, (end - start) / scale, height() / scale});
-        quad->setRect({start, 0, end - start, height()});
-        if (append) node->appendChildNode(quad);
-        child = quad->nextSibling();
+        auto* cell = child;
+        if (!cell) { cell = new QSGNode; node->appendChildNode(cell); }
+        auto* imageChild = cell->firstChild();
+        const auto paintImage = [&](qreal imageLeft, qreal quadLeft, qreal quadRight) {
+            auto* quad = static_cast<QSGImageNode*>(imageChild);
+            if (!quad) {
+                quad = window()->createImageNode();
+                quad->setFiltering(QSGTexture::Linear);
+                cell->appendChildNode(quad);
+            }
+            quad->setTexture(node->textures.value(key).get());
+            // Keep all UVs inside this image, including when it shares an atlas.
+            const qreal sourceLeft = std::clamp((quadLeft - imageLeft) / scale, qreal(0), qreal(image.width()));
+            const qreal sourceRight = std::clamp((quadRight - imageLeft) / scale, sourceLeft, qreal(image.width()));
+            quad->setSourceRect({sourceLeft, 0, sourceRight - sourceLeft, qreal(image.height())});
+            quad->setRect({quadLeft, 0, quadRight - quadLeft, height()});
+            imageChild = quad->nextSibling();
+        };
+        // Zoom changes the source-time cell width, never the image's vertical
+        // scale. Narrow cells crop horizontally; wide cells repeat the image.
+        if (tile.width <= imageWidth) {
+            paintImage(tile.x - (imageWidth - tile.width) / 2, start, end);
+        } else {
+            // Anchor repetitions to the complete cell, and skip those outside
+            // the viewport so work depends only on the visible strip.
+            qreal repeat = std::floor((start - tile.x) / imageWidth);
+            qreal quadLeft = start;
+            while (quadLeft < end) {
+                const qreal imageLeft = tile.x + repeat * imageWidth;
+                const qreal quadRight = std::min(tile.x + (repeat + 1) * imageWidth, end);
+                if (quadRight <= quadLeft) break;
+                paintImage(imageLeft, quadLeft, quadRight);
+                quadLeft = quadRight;
+                ++repeat;
+            }
+        }
+        while (imageChild) {
+            auto* next = imageChild->nextSibling();
+            cell->removeChildNode(imageChild); delete imageChild; imageChild = next;
+        }
+        child = cell->nextSibling();
     }
     while (child) { auto* next = child->nextSibling(); node->removeChildNode(child); delete child; child = next; }
     for (auto it = node->textures.begin(); it != node->textures.end();) {

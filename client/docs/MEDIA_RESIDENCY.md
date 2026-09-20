@@ -157,6 +157,12 @@ viewport boundaries without squeezing an edge thumbnail. Variable-frame-rate
 selection maps the nominal cell time to the frame index without moving the cell
 to that frame's presentation timestamp.
 
+Thumbnail magnification depends only on the strip height, never on the temporal
+cell width. Narrow cells crop horizontally; wider cells repeat the same sample
+in bounded image quads. Zoom therefore reveals/repeats horizontal content without
+enlarging it vertically or cutting off its top and bottom. Each cell owns a reused
+node group, and all source rectangles stay inside their texture, including atlases.
+
 Visible thumbnails are requested before the one-viewport margin on either side.
 Useful subscriptions survive scroll and zoom. Existing displayed images remain
 pinned until their replacements arrive, with the nearest available image from
