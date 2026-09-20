@@ -60,6 +60,13 @@ struct TimelineFixture {
         QMouseEvent event(QEvent::MouseMove, point, view.mapToGlobal(point), Qt::NoButton, Qt::LeftButton, modifiers);
         QCoreApplication::sendEvent(&view, &event);
     }
+    void setMagnetEnabled(bool enabled)
+    {
+        auto* button = item("timelineMagnet");
+        if (button && button->property("checked").toBool() != enabled)
+            QTest::mouseClick(&view, Qt::LeftButton, Qt::NoModifier,
+                button->mapToScene({button->width()/2, button->height()/2}).toPoint());
+    }
     qreal scroll() const { return item("timelineTracks")->property("contentX").toReal(); }
     qreal scale() const { return view.rootObject()->property("pixelsPerMs").toReal(); }
     qreal timeAt(qreal x) const { return (scroll() + x - 12) / scale(); }
@@ -337,7 +344,7 @@ private slots:
             return false;
         };
         for (const auto* name : {"timelinePlaceKeyframe", "timelineCopy", "timelinePaste",
-                                 "timelineDelete", "timelinePlaceStop", "timelineRemoveStop"}) {
+                                 "timelineDelete", "timelinePlaceStop", "timelineRemoveStop", "timelineMagnet"}) {
             auto* button = f.item(name);
             QVERIFY(button);
             QVERIFY(belongsTo(button, edit));
@@ -379,7 +386,7 @@ private slots:
             QCOMPARE(edit->height(), play->height());
             for (const auto* name : {"timelinePlaceKeyframe", "timelineCopy", "timelinePaste",
                                      "timelineDelete", "timelinePlaceStop", "timelineRemoveStop",
-                                     "timelineZoomOut", "timelineZoomIn", "timelineFitDuration"}) {
+                                     "timelineMagnet", "timelineZoomOut", "timelineZoomIn", "timelineFitDuration"}) {
                 QTRY_COMPARE(f.item(name)->property("iconOnly").toBool(), width < 1440);
             }
             if (width == 540)
@@ -572,20 +579,82 @@ private slots:
         QCOMPARE(f.host->serializeProjectState(), saved);
     }
 
-    void rulerShiftSnapsToClipEdges_data()
+    void markersUseMagnetAndShift_data()
     {
-        QTest::addColumn<double>("viewDuration");
-        QTest::addColumn<double>("edgeMs");
-        for (double duration : {8000.0, 15000.0})
-            for (double edge : {3000.0, 6000.0})
-                QTest::newRow(qPrintable(QString("zoom-%1-edge-%2").arg(duration).arg(edge))) << duration << edge;
+        QTest::addColumn<bool>("magnet");
+        QTest::addColumn<bool>("keyframe");
+        for (bool magnet : {true, false}) for (bool keyframe : {true, false})
+            QTest::newRow(qPrintable(QString("magnet-%1-keyframe-%2").arg(magnet).arg(keyframe)))
+                << magnet << keyframe;
     }
 
-    void rulerShiftSnapsToClipEdges()
+    void markersUseMagnetAndShift()
     {
-        QFETCH(double, viewDuration); QFETCH(double, edgeMs);
+        QFETCH(bool, magnet); QFETCH(bool, keyframe);
+        TimelineFixture f; QVERIFY(f.initialize());
+        auto* doc = f.host->document();
+        auto* media = doc->addText({}, "Marker snap target"); QVERIFY(media);
+        auto track = media->timelineTrack();
+        track.clip.startSlot = 90; track.clip.durationSlots = 90;
+        track.keyframes = {{"moving-key", 30, media->authorElementState()}};
+        media->setTimelineTrack(track);
+        doc->select(media->mediaId());
+        f.timeline.setStopTime(5000);
+        const auto saved = doc->serializeProjectState();
+        QSignalSpy writes(doc, &CanvasDocument::documentChanged);
+        // Toggle both ways through the real button; this is an editor preference.
+        QVERIFY(f.item("timelineMagnet")->property("checked").toBool());
+        f.setMagnetEnabled(false);
+        f.setMagnetEnabled(true);
+        f.setMagnetEnabled(magnet);
+        QCOMPARE(f.item("timelineMagnet")->property("checked").toBool(), magnet);
+        QCOMPARE(doc->serializeProjectState(), saved);
+        QCOMPARE(writes.count(), 0);
+        auto* marker = f.item(keyframe ? "timelineKeyframe" : "timelineStopMarker"); QVERIFY(marker);
+        const auto from = marker->mapToScene({marker->width()/2,
+            keyframe ? marker->height()/2 : 10}).toPoint();
+        const qreal initial = keyframe ? 1000 : 5000;
+        const auto to = from + QPoint(qRound((3000 - initial) * f.scale()) + 5, 0);
+        const auto modifiers = magnet ? Qt::NoModifier : Qt::ShiftModifier;
+        QTest::mousePress(&f.view, Qt::LeftButton, modifiers, from);
+        f.movePointer(to, modifiers);
+        QVERIFY(marker->property("dragging").toBool());
+        QCOMPARE(marker->property("previewMs").toReal(), 3000.0);
+        QCOMPARE(f.view.rootObject()->property("snapGuideMs").toReal(), 3000.0);
+        if (magnet) QTest::keyPress(&f.view, Qt::Key_Shift);
+        else QTest::keyRelease(&f.view, Qt::Key_Shift);
+        QVERIFY(marker->property("previewMs").toReal() != 3000.0);
+        QCOMPARE(f.view.rootObject()->property("snapGuideMs").toReal(), -1.0);
+        if (magnet) QTest::keyRelease(&f.view, Qt::Key_Shift);
+        else QTest::keyPress(&f.view, Qt::Key_Shift);
+        QCOMPARE(marker->property("previewMs").toReal(), 3000.0);
+        QTest::mouseRelease(&f.view, Qt::LeftButton, modifiers, to);
+        QTest::keyRelease(&f.view, Qt::Key_Shift);
+        if (keyframe) QCOMPARE(media->timelineTrack().keyframes.first().slot, 90);
+        else QCOMPARE(f.timeline.stopTimeMs(), 3000.0);
+        QCOMPARE(writes.count(), 1);
+        QCOMPARE(f.view.rootObject()->property("snapGuideMs").toReal(), -1.0);
+    }
+
+    void rulerMagnetSnapsToClipEdges_data()
+    {
+        QTest::addColumn<bool>("magnet");
+        QTest::addColumn<double>("viewDuration");
+        QTest::addColumn<double>("edgeMs");
+        for (bool magnet : {true, false}) for (double duration : {8000.0, 15000.0})
+            for (double edge : {3000.0, 6000.0})
+                QTest::newRow(qPrintable(QString("magnet-%1-zoom-%2-edge-%3").arg(magnet).arg(duration).arg(edge))) << magnet << duration << edge;
+    }
+
+    void rulerMagnetSnapsToClipEdges()
+    {
+        QFETCH(bool, magnet); QFETCH(double, viewDuration); QFETCH(double, edgeMs);
         TimelineFixture f; QVERIFY(f.initialize());
         f.view.requestActivate(); QVERIFY(QTest::qWaitForWindowActive(&f.view));
+        QVERIFY(f.item("timelineMagnet")->property("checked").toBool());
+        f.setMagnetEnabled(magnet);
+        QCOMPARE(f.item("timelineMagnet")->property("checked").toBool(), magnet);
+        const auto snapModifiers = magnet ? Qt::NoModifier : Qt::ShiftModifier;
         auto* doc = f.host->document();
         auto* media = doc->addText({}, "Snap target"); QVERIFY(media);
         auto track = media->timelineTrack();
@@ -600,22 +669,24 @@ private slots:
         QVERIFY(rawTime != edgeMs);
         const auto saved = doc->serializeProjectState();
         QSignalSpy writes(doc, &CanvasDocument::documentChanged);
-        QTest::mousePress(&f.view, Qt::LeftButton, Qt::ShiftModifier, point);
+        QTest::mousePress(&f.view, Qt::LeftButton, snapModifiers, point);
         QCOMPARE(f.timeline.positionMs(), edgeMs);
         QCOMPARE(f.view.rootObject()->property("snapGuideMs").toReal(), edgeMs);
         // Pressing/releasing Shift updates a held scrub without moving the pointer.
-        QTest::keyRelease(&f.view, Qt::Key_Shift);
+        if (magnet) QTest::keyPress(&f.view, Qt::Key_Shift);
+        else QTest::keyRelease(&f.view, Qt::Key_Shift);
         QCOMPARE(f.timeline.positionMs(), rawTime);
         QCOMPARE(f.view.rootObject()->property("snapGuideMs").toReal(), -1.0);
-        QTest::keyPress(&f.view, Qt::Key_Shift);
+        if (magnet) QTest::keyRelease(&f.view, Qt::Key_Shift);
+        else QTest::keyPress(&f.view, Qt::Key_Shift);
         QCOMPARE(f.timeline.positionMs(), edgeMs);
         const auto farPoint = point + QPoint(30, 0);
-        f.movePointer(farPoint, Qt::ShiftModifier);
+        f.movePointer(farPoint, snapModifiers);
         QCOMPARE(f.timeline.positionMs(), f.timeline.gridTime(f.timeAt(localX + 30)));
         QCOMPARE(f.view.rootObject()->property("snapGuideMs").toReal(), -1.0);
-        f.movePointer(point, Qt::ShiftModifier);
+        f.movePointer(point, snapModifiers);
         QCOMPARE(f.timeline.positionMs(), edgeMs);
-        QTest::mouseRelease(&f.view, Qt::LeftButton, Qt::ShiftModifier, point);
+        QTest::mouseRelease(&f.view, Qt::LeftButton, snapModifiers, point);
         QTest::keyRelease(&f.view, Qt::Key_Shift);
         QCOMPARE(f.view.rootObject()->property("snapGuideMs").toReal(), -1.0);
         QVERIFY(!f.item("timelineScrubber")->property("dragging").toBool());
@@ -2199,6 +2270,7 @@ private slots:
             if (item->isVisible()) joint = item;
         QVERIFY(joint);
         f.view.requestActivate(); QVERIFY(QTest::qWaitForWindowActive(&f.view));
+        f.setMagnetEnabled(false);
         f.timeline.selectClip(rightTrack.clip.id);
         const auto from = joint->mapToScene({joint->width()/2, joint->height()/2}).toPoint();
         QSignalSpy writes(doc, &CanvasDocument::documentChanged);
@@ -2771,27 +2843,39 @@ private slots:
         QCOMPARE(timeline.snapTime(5, 1, {}, 2000, true).value("timeMs").toReal(), 0.0);
     }
 
-    void clipShiftSnapsToPlayhead_data()
+    void clipMagnetSnapsToPlayhead_data()
     {
+        QTest::addColumn<bool>("magnet");
         QTest::addColumn<int>("edge");
         QTest::addColumn<bool>("snapEnd");
         QTest::addColumn<int>("durationSlots");
         QTest::addColumn<int>("rate");
-        for (int rate : {24, 30, 60, 240}) for (int duration : {59, 60, 61, 91}) {
-            const auto suffix = QString("%1-slots-%2-fps").arg(duration).arg(rate);
-            QTest::newRow(qPrintable("move-start-" + suffix)) << 0 << false << duration << rate;
-            QTest::newRow(qPrintable("move-end-" + suffix)) << 0 << true << duration << rate;
-            QTest::newRow(qPrintable("trim-start-" + suffix)) << -1 << false << duration << rate;
-            QTest::newRow(qPrintable("trim-end-" + suffix)) << 1 << true << duration << rate;
+        for (bool magnet : {true, false}) for (int rate : {24, 30, 60, 240}) for (int duration : {59, 60, 61, 91}) {
+            const auto suffix = QString("magnet-%1-%2-slots-%3-fps").arg(magnet).arg(duration).arg(rate);
+            QTest::newRow(qPrintable("move-start-" + suffix)) << magnet << 0 << false << duration << rate;
+            QTest::newRow(qPrintable("move-end-" + suffix)) << magnet << 0 << true << duration << rate;
+            QTest::newRow(qPrintable("trim-start-" + suffix)) << magnet << -1 << false << duration << rate;
+            QTest::newRow(qPrintable("trim-end-" + suffix)) << magnet << 1 << true << duration << rate;
         }
     }
 
-    void clipShiftSnapsToPlayhead()
+    void clipMagnetSnapsToPlayhead()
     {
-        QFETCH(int, edge); QFETCH(bool, snapEnd);
+        QFETCH(bool, magnet); QFETCH(int, edge); QFETCH(bool, snapEnd);
         QFETCH(int, durationSlots);
         QFETCH(int, rate);
         TimelineFixture f; QVERIFY(f.initialize());
+        f.setMagnetEnabled(magnet);
+        const auto freeModifiers = magnet ? Qt::ShiftModifier : Qt::NoModifier;
+        const auto snapModifiers = magnet ? Qt::NoModifier : Qt::ShiftModifier;
+        const auto enableSnap = [&] {
+            if (magnet) QTest::keyRelease(&f.view, Qt::Key_Shift);
+            else QTest::keyPress(&f.view, Qt::Key_Shift);
+        };
+        const auto disableSnap = [&] {
+            if (magnet) QTest::keyPress(&f.view, Qt::Key_Shift);
+            else QTest::keyRelease(&f.view, Qt::Key_Shift);
+        };
         auto* doc = f.host->document();
         auto settings = doc->timelineSettings(); settings.slotsPerSecond = rate;
         QVERIFY(doc->setTimelineSettings(settings));
@@ -2814,13 +2898,13 @@ private slots:
         const auto to = from + QPoint(qRound((desired - (edge > 0 ? initialEnd : initialStart)) * f.scale()) + 5, 0);
         const auto saved = doc->serializeProjectState();
         QSignalSpy writes(doc, &CanvasDocument::documentChanged);
-        QTest::mousePress(&f.view, Qt::LeftButton, Qt::NoModifier, from);
-        f.movePointer(to);
+        QTest::mousePress(&f.view, Qt::LeftButton, freeModifiers, from);
+        f.movePointer(to, freeModifiers);
         QVERIFY(clip->property("dragging").toBool());
         const auto snappedEdge = snapEnd ? "shownEnd" : "shownStart";
         const qreal unsnapped = clip->property(snappedEdge).toReal();
         QVERIFY(unsnapped != head);
-        QTest::keyPress(&f.view, Qt::Key_Shift);
+        enableSnap();
         QCOMPARE(clip->property(snappedEdge).toReal(), head);
         QCOMPARE(f.view.rootObject()->property("snapGuideMs").toReal(), head);
         QCOMPARE(f.view.rootObject()->property("snapGuideLabel").toString(), QStringLiteral("Playhead"));
@@ -2829,11 +2913,11 @@ private slots:
         QCOMPARE(f.item("timelineSnapGuideLabel")->property("text").toString(), QStringLiteral("Playhead"));
         QCOMPARE(f.timeline.positionMs(), head);
         QCOMPARE(doc->serializeProjectState(), saved); QCOMPARE(writes.count(), 0);
-        QTest::keyRelease(&f.view, Qt::Key_Shift);
+        disableSnap();
         QCOMPARE(clip->property(snappedEdge).toReal(), unsnapped);
         QCOMPARE(f.view.rootObject()->property("snapGuideMs").toReal(), -1.0);
-        QTest::keyPress(&f.view, Qt::Key_Shift);
-        QTest::mouseRelease(&f.view, Qt::LeftButton, Qt::ShiftModifier, to);
+        enableSnap();
+        QTest::mouseRelease(&f.view, Qt::LeftButton, snapModifiers, to);
         QTest::keyRelease(&f.view, Qt::Key_Shift);
         const auto& result = media->timelineTrack().clip;
         QCOMPARE(doc->timelineSettings().timeMs(snapEnd ? result.endSlot() : result.startSlot), head);
@@ -2942,24 +3026,23 @@ private slots:
         const auto from = handle->mapToScene({handle->width()/2, handle->height()/2}).toPoint();
         const auto to = from + QPoint(qRound((head - grid.timeMs(edge > 0 ? 91 : 30)) * f.scale()) + 5, 0);
         const auto saved = doc->serializeProjectState();
-        QTest::mousePress(&f.view, Qt::LeftButton, Qt::ShiftModifier, from);
-        f.movePointer(to, Qt::ShiftModifier);
+        QTest::mousePress(&f.view, Qt::LeftButton, Qt::NoModifier, from);
+        f.movePointer(to, Qt::NoModifier);
         QVERIFY(clip->property("dragging").toBool());
         QVERIFY(clip->property(edge > 0 ? "shownEnd" : "shownStart").toReal() != head);
         QCOMPARE(f.view.rootObject()->property("snapGuideMs").toReal(), -1.0);
         QVERIFY(!f.item("timelineSnapGuideLabel")->isVisible());
         if (edge == 0) {
             const auto controlKey = Qt::Key(f.view.rootObject()->property("controlKey").toInt());
-            QTest::keyPress(&f.view, controlKey, Qt::ShiftModifier);
+            QTest::keyPress(&f.view, controlKey, Qt::NoModifier);
             QCOMPARE(clip->property("shownStart").toReal(), head);
             QCOMPARE(f.view.rootObject()->property("snapGuideMs").toReal(), head);
             QVERIFY(f.item("timelineSnapGuideLabel")->isVisible());
-            QTest::keyRelease(&f.view, controlKey, Qt::ShiftModifier);
+            QTest::keyRelease(&f.view, controlKey, Qt::NoModifier);
             QCOMPARE(f.view.rootObject()->property("snapGuideMs").toReal(), -1.0);
         }
         QVERIFY(QMetaObject::invokeMethod(clip, "cancelEdit"));
-        QTest::mouseRelease(&f.view, Qt::LeftButton, Qt::ShiftModifier, to);
-        QTest::keyRelease(&f.view, Qt::Key_Shift);
+        QTest::mouseRelease(&f.view, Qt::LeftButton, Qt::NoModifier, to);
         QVERIFY(!f.item("timelineSnapGuideLabel")->isVisible());
         QCOMPARE(doc->serializeProjectState(), saved);
     }

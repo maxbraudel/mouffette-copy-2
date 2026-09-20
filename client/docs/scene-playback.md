@@ -86,7 +86,7 @@ including at a shared boundary instead of rolling the two clips together.
 Pressing/releasing it refreshes the preview immediately, including with a stationary
 pointer; releasing it over an overlap restores an allowed placement. On macOS this
 is Control, not Command (Qt maps physical Control to `MetaModifier`/`Key_Meta`).
-Shift snapping remains independent, and collision constraints take priority.
+Magnetic snapping remains independent, and collision constraints take priority.
 Timeline paste retains overwrite without requiring this modifier.
 
 Overwrite affects only the arrival interval on the target track. A covered
@@ -213,7 +213,7 @@ joint gesture retains its handle and mode even when one clip becomes very short.
 These dimensions remain fixed in viewport pixels. Cursor feedback
 follows the chosen mode throughout the drag, including outside the viewport;
 holding Control temporarily uses the independent overwrite cursor.
-While rolling, Shift snapping excludes the clip boundaries of both edited clips,
+While rolling, magnetic snapping excludes the clip boundaries of both edited clips,
 including their original shared boundary. Other clips, stationary keyframes and
 the playhead remain snap targets.
 Overlapping zones belong to the nearest clip body, independently of selection
@@ -235,11 +235,14 @@ selection, including when the selected instance is absent at the new playhead.
 Clicking empty clip-track content clears instance selection and chooses the paste
 destination. Clicking empty keyframe content only clears the selected keyframe;
 the selected instances and their displayed keys remain. The header column does neither.
-Shift temporarily snaps against all keys and clip boundaries, including when
-scrubbing the playhead on the ruler. Moving or resizing a clip also snaps its edges
+The timeline Magnet button is enabled by default: dragging snaps against all keys
+and clip boundaries, including when scrubbing the playhead on the ruler. Holding
+Shift temporarily disables snapping. With Magnet off, placement is free and
+holding Shift temporarily enables snapping. This also applies to keyframes and
+the Stop marker. Moving or resizing a clip also snaps its edges
 to the playhead, using the same pixel threshold and guide; the ruler never snaps to
 its own playhead position. Pressing or releasing Shift updates a held drag
-even without pointer movement. Releasing it restores ordinary grid alignment. The ruler groups grid
+even without pointer movement. Releasing it restores the Magnet button’s mode. The ruler groups grid
 lines when zoomed out; it never changes the actual slot size. Left/right arrows
 move one slot when the timeline has focus; the transport displays the current slot.
 Shift+Left/Right jumps to the nearest clip start or end strictly in that direction

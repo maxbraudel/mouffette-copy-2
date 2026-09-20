@@ -43,6 +43,8 @@ FocusScope {
     readonly property real gridStep: gridStride * slotMs
     readonly property real tickStep: Math.max(1, Math.ceil(80 / (gridStep * pixelsPerMs))) * gridStep
     property bool shiftHeld: false
+    property bool magnetEnabled: true
+    readonly property bool snappingEnabled: magnetEnabled !== shiftHeld
     property bool controlHeld: false
     // Qt maps the physical macOS Control key to Meta, and Command to Control.
     readonly property int controlModifier: Qt.platform.os === "osx" ? Qt.MetaModifier : Qt.ControlModifier
@@ -89,7 +91,7 @@ FocusScope {
     function focusTrack() { root.forceActiveFocus() }
     function clampTime(ms) { return timeline ? timeline.gridTime(ms) : 0 }
     function snapResult(ms, excludeId, duration, includePlayhead, rollingEdge) {
-        if (!shiftHeld || !timeline) return { timeMs: clampTime(ms), snapped: false }
+        if (!snappingEnabled || !timeline) return { timeMs: clampTime(ms), snapped: false }
         return timeline.snapTime(ms, pixelsPerMs, excludeId || "", duration || 0, !!includePlayhead, rollingEdge || 0)
     }
     function showSnapGuide(result) {
@@ -217,7 +219,7 @@ FocusScope {
         timeline.seekClipBoundary(direction)
         if (timeline.positionSlot !== previousSlot) revealHead()
     }
-    onShiftHeldChanged: if (activeDrag) activeDrag.refreshPreview()
+    onSnappingEnabledChanged: if (activeDrag) activeDrag.refreshPreview()
     onControlHeldChanged: if (activeDrag && activeDrag.isClipDrag) activeDrag.refreshPreview()
     onExpandedChanged: {
         if (!expanded && activeDrag) {
@@ -527,6 +529,23 @@ FocusScope {
                     anchors.rightMargin: actionViewport.contentPadding
                     height: Theme.controlHeight
                     spacing: transportViewport.gap
+                    TimelineEditButton {
+                        objectName: "timelineMagnet"
+                        text: "Magnet"
+                        iconSource: "qrc:/icons/icons/timeline/magnet.svg"
+                        checkable: true
+                        checked: root.magnetEnabled
+                        primary: checked
+                        enabled: root.navigationEnabled
+                        Accessible.name: "Timeline snapping"
+                        Accessible.description: ToolTip.text
+                        ToolTip.visible: hovered || visualFocus
+                        ToolTip.text: checked
+                            ? "Snapping on — hold Shift for free placement"
+                            : "Snapping off — hold Shift to snap"
+                        onToggled: root.magnetEnabled = checked
+                        onClicked: root.focusTrack()
+                    }
                     TimelineEditButton {
                         id: zoomOutButton
                         objectName: "timelineZoomOut"
