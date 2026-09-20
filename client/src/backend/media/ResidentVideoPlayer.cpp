@@ -5,11 +5,23 @@
 #include <QBuffer>
 #include <QVariant>
 #include <QVideoSink>
+#include <QThreadPool>
+#include <QtConcurrent/QtConcurrentRun>
 #include <algorithm>
 #include <utility>
 
 namespace {
 constexpr int PreparationTimeoutMs = 5000;
+QThreadPool& scrubPool() {
+    static QThreadPool pool;
+    static const bool initialized = [] {
+        pool.setMaxThreadCount(2);
+        pool.setExpiryTimeout(1000);
+        return true;
+    }();
+    Q_UNUSED(initialized);
+    return pool;
+}
 class PresentationFrameBuffer final : public QAbstractVideoBuffer {
 public:
     explicit PresentationFrameBuffer(QVideoFrame source) : m_source(std::move(source)) {}
@@ -38,6 +50,12 @@ private:
 
 
 ResidentVideoPlayer::ResidentVideoPlayer(QObject* parent) : QObject(parent) {
+    // Keep the newest pointer target, with at most one seek per 16 ms window.
+    // Do not restart this timer on movement: continuous drags must still render.
+    m_scrubTimer.setSingleShot(true);
+    m_scrubTimer.setTimerType(Qt::PreciseTimer);
+    m_scrubTimer.setInterval(16);
+    connect(&m_scrubTimer, &QTimer::timeout, this, &ResidentVideoPlayer::flushScrubSeek);
     m_preparationTimer.setSingleShot(true);
     connect(&m_preparationTimer, &QTimer::timeout, this, [this] {
         if (preparedAt(m_positionMs)) return;
@@ -80,9 +98,15 @@ void ResidentVideoPlayer::releasePlayer() {
     m_decodeSink.reset();
     m_source.reset();
     m_loading = false;
+    m_scrubTimer.stop();
+    m_scrubPending = false;
     m_preparationTimer.stop();
     m_positionTimer.stop();
     m_frame = {};
+    ++m_scrubGeneration;
+    m_scrubFrame = {};
+    m_scrubFrameIndex = -1;
+    m_awaitingOriginal = false;
     if (m_videoSink) m_videoSink->setVideoFrame({});
     if (releaseReservation) releaseReservation(wasPrepared);
 }
@@ -172,11 +196,17 @@ bool ResidentVideoPlayer::ensurePlayer(bool reportFailure) {
         m_frame = frame;
         if (preparedAt(m_positionMs) || isPlaying()) m_preparationTimer.stop();
         const QPointer<ResidentVideoPlayer> self(this);
-        if (m_videoSink) m_videoSink->setVideoFrame(frame);
+        // Native frames must not replace the responsive proxy with an old seek.
+        if (!(m_scrubbing && hasScrubProxy()) && (!m_awaitingOriginal || preparedAt(m_positionMs))) {
+            m_awaitingOriginal = false;
+            m_scrubFrame = {};
+            m_scrubFrameIndex = -1;
+            if (m_videoSink) m_videoSink->setVideoFrame(frame);
+        }
         if (self && native && native == m_player.get()) emit frameReady(frame.startTime() / 1000);
     });
     connect(m_player.get(), &QMediaPlayer::positionChanged, this, [this](qint64 value) {
-        if (m_loading || !m_asset || m_positionMs == value) return;
+        if (m_loading || m_scrubbing || m_awaitingOriginal || !m_asset || m_positionMs == value) return;
         m_positionMs = value;
         emit positionChanged(value);
     });
@@ -251,7 +281,7 @@ QVideoFrame ResidentVideoPlayer::preparedFrame(qint64 positionMs) const {
 void ResidentVideoPlayer::watchPreparation() {
     // Playback may legitimately traverse a long audio-only interval. The
     // image deadline applies to source loading and paused preparation only.
-    if (!m_asset || preparedAt(m_positionMs)
+    if (!m_asset || (m_scrubbing && hasScrubProxy()) || preparedAt(m_positionMs)
         || (!m_loading && m_requestedState == QMediaPlayer::PlayingState)) {
         m_preparationTimer.stop();
         return;
@@ -268,7 +298,8 @@ void ResidentVideoPlayer::prepare(qint64 positionMs) {
 }
 void ResidentVideoPlayer::presentPoster() {
     if (!m_asset || !m_videoSink) return;
-    if (m_frame.isValid()) m_videoSink->setVideoFrame(m_frame);
+    if (m_scrubFrame.isValid()) m_videoSink->setVideoFrame(m_scrubFrame);
+    else if (m_frame.isValid()) m_videoSink->setVideoFrame(m_frame);
     else if (m_positionMs == 0) m_videoSink->setVideoFrame(presentationFrame(m_asset->firstFrame.frame));
 }
 void ResidentVideoPlayer::setLoops(int loops) {
@@ -334,6 +365,7 @@ void ResidentVideoPlayer::fail(QMediaPlayer::Error error, const QString& message
     emit errorOccurred(error, message);
 }
 void ResidentVideoPlayer::play() {
+    setScrubbing(false);
     if (!m_asset) return;
     if (m_error != QMediaPlayer::NoError) releasePlayer();
     if (m_positionMs >= duration()) setPosition(0);
@@ -352,6 +384,7 @@ void ResidentVideoPlayer::pause() {
     setState(m_requestedState);
 }
 void ResidentVideoPlayer::stop() {
+    setScrubbing(false);
     m_requestedState = QMediaPlayer::StoppedState;
     if (m_player && !m_loading) m_player->stop();
     setState(m_requestedState);
@@ -363,10 +396,18 @@ void ResidentVideoPlayer::setPosition(qint64 value) {
     if (m_asset) value = std::min(value, duration());
     const bool changed = value != m_positionMs;
     m_positionMs = value;
-    if (m_asset && (m_player || value > 0)) {
+    if (m_scrubbing && hasScrubProxy()) {
+        m_scrubPending = true;
+        requestScrubFrame();
+    } else if (m_asset && (m_player || value > 0)) {
         if (ensurePlayer() && !m_loading && changed) {
-            watchPreparation();
-            m_player->setPosition(value);
+            if (m_scrubbing) {
+                m_scrubPending = true;
+                if (!m_scrubTimer.isActive()) m_scrubTimer.start();
+            } else {
+                watchPreparation();
+                m_player->setPosition(value);
+            }
             // Qt does not produce a new frame for a stopped native player.
             // Keep paused scrubbing functional after Stop/EndOfMedia as well.
             if (m_player->playbackState() == QMediaPlayer::StoppedState)
@@ -375,4 +416,79 @@ void ResidentVideoPlayer::setPosition(qint64 value) {
     }
     if (changed) emit positionChanged(m_positionMs);
     if (!m_player) presentPoster();
+}
+
+bool ResidentVideoPlayer::hasScrubProxy() const {
+    return m_asset && !m_asset->scrubFrames.empty();
+}
+
+void ResidentVideoPlayer::setScrubbing(bool enabled) {
+    if (m_scrubbing == enabled) return;
+    ++m_scrubGeneration; // reject a completion from a previous gesture
+    m_scrubbing = enabled;
+    if (enabled) {
+        if (hasScrubProxy()) {
+            m_preparationTimer.stop();
+            m_awaitingOriginal = false;
+        }
+        return;
+    }
+    m_awaitingOriginal = m_scrubFrame.isValid();
+    // The last source cursor is exact, even if no timer/worker has run yet.
+    flushScrubSeek();
+    if (preparedAt(m_positionMs)) {
+        m_awaitingOriginal = false;
+        m_scrubFrame = {};
+        m_scrubFrameIndex = -1;
+        if (m_videoSink) m_videoSink->setVideoFrame(m_frame);
+    }
+}
+
+void ResidentVideoPlayer::flushScrubSeek() {
+    m_scrubTimer.stop();
+    if (m_scrubbing && hasScrubProxy()) { requestScrubFrame(); return; }
+    if (!std::exchange(m_scrubPending, false) || !m_asset) return;
+    if (!ensurePlayer() || m_loading) return; // source initialization reads the latest cursor
+    watchPreparation();
+    m_player->setPosition(m_positionMs);
+    if (m_player->playbackState() == QMediaPlayer::StoppedState)
+        m_player->pause();
+}
+
+void ResidentVideoPlayer::requestScrubFrame() {
+    if (!m_scrubbing || !hasScrubProxy() || m_scrubDecode) return;
+    const auto& frames = m_asset->scrubFrames;
+    const qint64 targetUs = m_positionMs * 1000;
+    auto it = std::upper_bound(frames.begin(), frames.end(), targetUs,
+        [](qint64 target, const ResidentScrubFrame& frame) { return target < frame.timestampUs; });
+    if (it != frames.begin()) --it; // first-frame hold before delayed video; last-frame hold at end
+    const auto index = qint64(it - frames.begin());
+    if (index == m_scrubFrameIndex) return;
+    auto* worker = new QFutureWatcher<QImage>(this);
+    m_scrubDecode = worker;
+    const quint64 generation = m_scrubGeneration;
+    const qint64 start = it->timestampUs;
+    const qint64 end = it + 1 == frames.end() ? start + it->durationUs : (it + 1)->timestampUs;
+    connect(worker, &QFutureWatcher<QImage>::finished, this, [this, worker, generation, index, start, end] {
+        const QImage image = worker->result();
+        worker->deleteLater();
+        m_scrubDecode = nullptr;
+        if (generation == m_scrubGeneration && m_scrubbing && hasScrubProxy() && !image.isNull()) {
+            m_scrubFrame = QVideoFrame(image);
+            m_scrubFrame.setStartTime(start);
+            m_scrubFrame.setEndTime(end);
+            m_scrubFrameIndex = index;
+            const QPointer<ResidentVideoPlayer> self(this);
+            if (m_videoSink) m_videoSink->setVideoFrame(m_scrubFrame);
+            if (!self) return;
+        }
+        // A single in-flight decode and the current cursor replace an unbounded
+        // request queue. Publish completed work during motion, then catch up.
+        if (!image.isNull()) requestScrubFrame();
+    });
+    // Copy only this compressed image, not the entire asset: eviction and teardown
+    // can reclaim the video while this short, isolated job finishes.
+    worker->setFuture(QtConcurrent::run(&scrubPool(), [jpeg = it->jpeg] {
+        return QImage::fromData(jpeg, "JPEG");
+    }));
 }

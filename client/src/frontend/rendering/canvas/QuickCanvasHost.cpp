@@ -1014,6 +1014,8 @@ void QuickCanvasHost::timelineEndScrub(bool resume)
 {
     if (!m_timelineScrubbing) return;
     m_timelineScrubbing = false;
+    for (CanvasMedia* media : m_document->media())
+        if (media->isVideo() && media->player()) media->player()->setScrubbing(false);
     if (!m_testSceneLaunched) return;
     if (resume) resumeLocalTimeline();
     else timelinePause();
@@ -1068,6 +1070,7 @@ void QuickCanvasHost::applyTimeline(qreal positionMs, bool playing, bool forceSe
     const qint64 clock = MouffetteClock::nowMs();
     for (CanvasMedia* media : m_document->media()) {
         if (!media->isVideo() || !media->player()) continue;
+        media->player()->setScrubbing(m_timelineScrubbing);
         auto* player = media->player();
         const auto track = m_document->timelinePresentationTrack(media);
         const auto sample = SceneTimeline::evaluateVideo(track, time, player->duration(), m_document->timelineSettings());

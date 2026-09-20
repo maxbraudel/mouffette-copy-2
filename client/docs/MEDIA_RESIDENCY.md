@@ -39,20 +39,45 @@ changes are retained while it is pending, and the player receives its asset only
 after its audio output exists. Deleting an occurrence discards its pending callback.
 Hashing, validation and complete decoding run outside the GUI thread.
 Images retain decoded pixels. Videos retain the **exact original compressed MP4**
-(no transcoding), one native-format poster frame and bounded timeline thumbnails,
+(unchanged), one native-format poster frame, bounded timeline thumbnails and
+an optional editing proxy,
 shared across occurrences.
 Validation still decodes every video frame and the selected audio stream through
-EOF, including delayed frames/audio drain, retaining only the poster and sampled
-small thumbnails. Images retain one small thumbnail (sharing pixels for tiny sources).
+EOF, including delayed frames/audio drain, retaining the poster, sampled small thumbnails and independently compressed
+editing images. Images retain one small thumbnail (sharing pixels for tiny sources).
 The decoder reads the in-memory bytes it hashes; source mutation invalidates the job.
 No partial or corrupt video is ready. Preparation cost is file size plus one poster,
-at most 96 thumbnails fitting 192 × 108 pixels (under 8 MiB), and bounded codec scratch.
+at most 96 thumbnails fitting 192 × 108 pixels (under 8 MiB), an optional proxy
+(up to 64 MiB), and bounded codec/conversion scratch.
 Thumbnails are produced during the existing worker validation pass, with actual
 timestamps, sample aspect ratio and rotation. The first and final frames are retained;
 sampling becomes sparser for longer videos, including when duration metadata is missing.
 Their storage is included in residency admission and reported RAM. Timeline rendering
 never decodes or opens a file, starts a player, or pins an asset. Eviction/release removes
 its thumbnails; zoom and scrolling reuse small textures for the visible tiles only.
+
+Editing proxies retain one JPEG (quality 80, fitting 640 × 360) per decoded source
+frame, with its real PTS, sample aspect ratio and rotation. They are generated in
+the existing worker validation pass, shared with the immutable asset, included in
+admission before growth, and released on eviction. The complete proxy, including
+index capacity, is capped at 64 MiB. If this cap is exceeded, the entire proxy is
+discarded and native seeking remains available. HDR, alpha, non-monotonic video
+PTS and unavailable JPEG conversion also retain the original seek path. No sparse
+thumbnail sequence is passed off as a continuous video, and no temporary proxy
+files or external transcoding process are used.
+
+During an editor playhead drag, a dedicated two-thread pool decompresses a single
+proxy image per player at a time. Pointer events replace the target instead of
+queuing seeks; a completion presents its image and immediately follows the latest
+target. Only that JPEG is captured by the worker, so retiring an asset does not
+retain the full source until the job completes. Gesture/source generations fence
+stale results. The preview keeps at most a displayed image and one in-flight
+image per player, within the player's existing rendering/scratch budget. Native
+frames cannot overwrite the proxy during the drag. Release requests the exact
+original and keeps the preview until that original frame arrives. Proxy frames
+never satisfy `preparedFrame` or emit native `frameReady`; scene preparation,
+playback, audio, remote output and the saved project continue to use the original.
+The 16 ms native-seek coalescer remains the fallback when no proxy is available.
 
 `ResidentVideoPlayer` supplies a seekable, read-only `QBuffer` to Qt's streaming
 player. Every occurrence shares the MP4 allocation but has independent playback
@@ -126,7 +151,8 @@ and through notifications, not overlays on loading media.
 
 The stored-media total is broken down into original compressed video data
 (`videoBytes`), decoded image pixels (`imageBytes`), full-size first video frames
-(`posterBytes`), and small timeline previews (`thumbnailBytes`). These disjoint
+(`posterBytes`), small timeline previews (`thumbnailBytes`), and compressed editing
+images with their index (`scrubProxyBytes`). These disjoint
 categories sum to `mediaBytes` globally and `residentBytes` per asset, including
 during background loading. Reused files are counted once; a tiny image that shares
 pixels with its thumbnail counts those pixels under images, with only the extra

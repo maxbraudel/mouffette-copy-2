@@ -11,6 +11,7 @@
 #include <QTemporaryDir>
 #include <QVideoSink>
 #include <QtTest>
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 
@@ -182,6 +183,114 @@ private slots:
         QCOMPARE(memory.totalBytes(), asset->residentBytes);
     }
 
+    void scrubProxyPreservesEveryFrameAndCanBeDiscarded() {
+        QTemporaryDir directory;
+        const auto path = directory.filePath("rotated-vfr.mp4");
+        QVERIFY(writeVideo(path, true, true, 2));
+        QString error;
+        const auto asset = MediaDecoder::decode(path, {}, &error);
+        QVERIFY2(asset, qPrintable(error));
+        QCOMPARE(asset->scrubFrames.size(), size_t(asset->videoFrameCount));
+        QVERIFY(asset->scrubProxyBytes > 0 && asset->scrubProxyBytes <= MediaScrubProxy::MaxBytes);
+        quint64 bytes = asset->scrubFrames.capacity() * sizeof(ResidentScrubFrame);
+        qint64 previous = -1;
+        for (const auto& frame : asset->scrubFrames) {
+            QVERIFY(frame.timestampUs > previous);
+            previous = frame.timestampUs;
+            bytes += frame.jpeg.capacity();
+            const QImage image = QImage::fromData(frame.jpeg, "JPEG");
+            QCOMPARE(image.size(), asset->displaySize); // SAR and rotation baked into proxy
+        }
+        QCOMPARE(bytes, asset->scrubProxyBytes);
+        QCOMPARE(asset->memoryBreakdown().scrubProxyBytes, bytes);
+        QCOMPARE(asset->memoryBreakdown().totalBytes(), asset->residentBytes);
+        // A low cap must remove the complete partial cache, preserving the original.
+        const auto limited = MediaDecoder::decode(path, {}, &error, bytes / 2);
+        QVERIFY2(limited, qPrintable(error));
+        QVERIFY(limited->scrubFrames.empty());
+        QCOMPARE(limited->scrubProxyBytes, quint64(0));
+        QCOMPARE(limited->compressedVideo, asset->compressedVideo);
+        QCOMPARE(limited->memoryBreakdown().totalBytes(), limited->residentBytes);
+    }
+
+    void scrubProxyLatencyAndExactRelease() {
+        const QString path = QString::fromUtf8(TEST_SAMPLE_VIDEO_FILE);
+        if (!QFile::exists(path)) QSKIP("Optional repository sample is not installed");
+        QElapsedTimer loading;
+        loading.start();
+        QString error;
+        const auto asset = MediaDecoder::decode(path, {}, &error);
+        QVERIFY2(asset, qPrintable(error));
+        qInfo() << "Proxy preparation including full validation (ms):" << loading.elapsed()
+                << "proxy bytes:" << asset->scrubProxyBytes;
+        QVERIFY(!asset->scrubFrames.empty());
+        QVideoSink sink;
+        ResidentVideoPlayer player;
+        player.setVideoSink(&sink);
+        player.setAsset(asset);
+        player.prepare(0);
+        QTRY_VERIFY_WITH_TIMEOUT(player.preparedAt(0), 10000);
+        QTest::qWait(50);
+        const QList<qint64> targets = {2678, 789, 12345, 20000, 1200, 28000, 600, 17890, 10000, 5000};
+        QList<qint64> nativeUs, proxyUs;
+        auto await = [&](auto ready, QList<qint64>& samples, QElapsedTimer& clock) {
+            while (!ready() && clock.elapsed() < 5000) QTest::qWait(1);
+            samples.append(clock.nsecsElapsed() / 1000);
+            return ready();
+        };
+        for (qint64 target : targets) {
+            QElapsedTimer clock; clock.start();
+            player.setPosition(target);
+            QVERIFY(await([&] { return player.preparedAt(target); }, nativeUs, clock));
+        }
+        QSignalSpy nativeFrames(&player, &ResidentVideoPlayer::frameReady);
+        player.setScrubbing(true);
+        for (qint64 target : targets) {
+            QElapsedTimer clock; clock.start();
+            player.setPosition(target);
+            QVERIFY(await([&] {
+                const auto frame = sink.videoFrame();
+                return frame.startTime() <= target * 1000 && frame.endTime() > target * 1000
+                    && frame.size().width() <= MediaScrubProxy::Width;
+            }, proxyUs, clock));
+        }
+        QCOMPARE(nativeFrames.count(), 0); // zero expensive original seeks during motion
+        std::sort(nativeUs.begin(), nativeUs.end());
+        std::sort(proxyUs.begin(), proxyUs.end());
+        qInfo() << "1080p random seek latency in us: native median/max" << nativeUs[5] << nativeUs.last()
+                << "proxy median/max" << proxyUs[5] << proxyUs.last();
+        QSignalSpy previews(&sink, &QVideoSink::videoFrameChanged);
+        int moves = 0;
+        QTimer drag;
+        drag.setTimerType(Qt::PreciseTimer);
+        drag.setInterval(16);
+        connect(&drag, &QTimer::timeout, &player, [&] {
+            player.setPosition((++moves * 367) % 29000);
+        });
+        drag.start();
+        QTest::qWait(1000);
+        drag.stop();
+        QVERIFY(previews.count() > 1);
+        QCOMPARE(nativeFrames.count(), 0);
+        qInfo() << "One-second continuous drag: pointer targets" << moves
+                << "presented proxy frames" << previews.count();
+        // Rapid reverse/forward requests, then release before the worker completes.
+        player.setPosition(21000);
+        player.setPosition(1500);
+        player.setScrubbing(false);
+        QTRY_VERIFY_WITH_TIMEOUT(player.preparedAt(1500), 5000);
+        QCOMPARE(sink.videoFrame().size(), asset->firstFrame.frame.size());
+        QTest::qWait(100);
+        QCOMPARE(sink.videoFrame().size(), asset->firstFrame.frame.size());
+        QVERIFY(!player.isPlaying());
+        // Deleting an asset while a JPEG is in flight cannot republish its image.
+        player.setScrubbing(true);
+        player.setPosition(21000);
+        player.clearAsset();
+        QTest::qWait(50);
+        QVERIFY(!sink.videoFrame().isValid());
+    }
+
     void imageDecodeAndReservations() {
         QTemporaryDir directory;
         QVERIFY(directory.isValid());
@@ -299,7 +408,7 @@ private slots:
         quint64 thumbnailStorage = 0;
         for (const auto& thumbnail : asset->thumbnails)
             thumbnailStorage += thumbnail.image.sizeInBytes() + sizeof(ResidentThumbnail);
-        QVERIFY(asset->residentBytes < quint64(asset->compressedVideo.size()) + 8192 + thumbnailStorage);
+        QVERIFY(asset->residentBytes < quint64(asset->compressedVideo.size()) + 8192 + thumbnailStorage + asset->scrubProxyBytes);
         QVERIFY(asset->thumbnails.size() >= 3);
         QCOMPARE(asset->thumbnails.first().timestampUs, qint64(0));
         QCOMPARE(asset->thumbnails.last().timestampUs, qint64(440000)); // Includes delayed final B-frame.
@@ -329,7 +438,7 @@ private slots:
         QVERIFY2(asset, qPrintable(error));
         QCOMPARE(asset->videoFrameCount, quint64(921));
         QCOMPARE(asset->compressedVideo.size(), QFileInfo(path).size());
-        QVERIFY(asset->residentBytes < quint64(QFileInfo(path).size()) + 4 * 1024 * 1024 + MediaThumbnails::MaxBytes);
+        QVERIFY(asset->residentBytes < quint64(QFileInfo(path).size()) + 4 * 1024 * 1024 + MediaThumbnails::MaxBytes + asset->scrubProxyBytes);
         QVERIFY(asset->thumbnails.size() > 50);
         QVERIFY(asset->thumbnails.size() <= MediaThumbnails::MaxCount);
         for (const auto& thumbnail : asset->thumbnails) {
@@ -337,10 +446,10 @@ private slots:
             QVERIFY(thumbnail.image.height() <= MediaThumbnails::Height);
         }
         QCOMPARE(retained, asset->residentBytes);
-        QVERIFY(peakBudget < quint64(QFileInfo(path).size()) + 128 * 1024 * 1024);
+        QVERIFY(peakBudget < quint64(QFileInfo(path).size()) + 128 * 1024 * 1024 + asset->scrubProxyBytes);
         QVERIFY(peakBudget > retained);
         const auto probe = MediaDecoder::probe(path);
-        QVERIFY(probe.estimatedBytes < 20 * 1024 * 1024 + MediaThumbnails::MaxBytes);
+        QVERIFY(probe.estimatedBytes < 20 * 1024 * 1024 + MediaThumbnails::MaxBytes + MediaScrubProxy::MaxBytes);
         qInfo() << "1080p retained bytes:" << retained << "preparation budget:" << peakBudget;
         // Exact original bitstream, shared between independent occurrences.
         QVideoSink sink;

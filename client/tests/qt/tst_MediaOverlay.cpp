@@ -542,7 +542,7 @@ void MediaOverlayTest::memoryBreakdownIsClearAndScrollable()
     auto* list = findVisualItem(window.contentItem(), "memoryAssetList"); QVERIFY(list);
     auto* amount = findVisualItem(window.contentItem(), "memoryAmount_imageBytes"); QVERIFY(amount);
     QCOMPARE(amount->property("text").toString(), QStringLiteral("1.0 MiB"));
-    for (const auto* category : {"videoBytes", "imageBytes", "posterBytes", "thumbnailBytes"}) {
+    for (const auto* category : {"videoBytes", "imageBytes", "posterBytes", "thumbnailBytes", "scrubProxyBytes"}) {
         auto* card = findVisualItem(window.contentItem(), QStringLiteral("memoryCategory_") + category);
         QVERIFY(card && card->width() > 0 && card->height() > 0);
         QVERIFY(card->mapToItem(list, {card->width(), 0}).x() <= list->width() + 0.5);
@@ -556,7 +556,8 @@ void MediaOverlayTest::memoryBreakdownIsClearAndScrollable()
     const auto totals = popup->property("usage").toMap();
     QCOMPARE(totals.value("mediaBytes").toULongLong(),
         totals.value("videoBytes").toULongLong() + totals.value("imageBytes").toULongLong()
-        + totals.value("posterBytes").toULongLong() + totals.value("thumbnailBytes").toULongLong());
+        + totals.value("posterBytes").toULongLong() + totals.value("thumbnailBytes").toULongLong()
+        + totals.value("scrubProxyBytes").toULongLong());
     const auto capture = [&](const QString& name) {
         const auto output = qEnvironmentVariable("MOUFFETTE_OVERLAY_ARTIFACT_DIR");
         if (output.isEmpty()) return;

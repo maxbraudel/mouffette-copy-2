@@ -176,7 +176,7 @@ private slots:
         QCOMPARE(summary.value("videoBytes").toULongLong(), quint64(video->compressedVideo.capacity()));
         QCOMPARE(summary.value("posterBytes").toULongLong(), video->posterBytes);
         quint64 total = 0;
-        for (const auto* category : {"videoBytes", "imageBytes", "posterBytes", "thumbnailBytes"}) {
+        for (const auto* category : {"videoBytes", "imageBytes", "posterBytes", "thumbnailBytes", "scrubProxyBytes"}) {
             quint64 rows = 0;
             for (const auto& value : manager.assets()) rows += value.toMap().value(category).toULongLong();
             QCOMPARE(rows, summary.value(category).toULongLong());
@@ -189,7 +189,7 @@ private slots:
         QTRY_VERIFY(!manager.ready("image") && !manager.ready("video"));
         QCOMPARE(manager.summary().value("mediaBytes").toULongLong(), quint64(0));
         for (const auto& value : manager.assets()) {
-            for (const auto* category : {"videoBytes", "imageBytes", "posterBytes", "thumbnailBytes"})
+            for (const auto* category : {"videoBytes", "imageBytes", "posterBytes", "thumbnailBytes", "scrubProxyBytes"})
                 QCOMPARE(value.toMap().value(category).toULongLong(), quint64(0));
         }
     }
@@ -208,7 +208,8 @@ private slots:
                     <= row.value("estimatedBytes").toULongLong() + 65536);
                 QCOMPARE(row.value("residentBytes").toULongLong(),
                     row.value("videoBytes").toULongLong() + row.value("imageBytes").toULongLong()
-                    + row.value("posterBytes").toULongLong() + row.value("thumbnailBytes").toULongLong());
+                    + row.value("posterBytes").toULongLong() + row.value("thumbnailBytes").toULongLong()
+                    + row.value("scrubProxyBytes").toULongLong());
             }
         });
         manager.acquire("first", QString::fromUtf8(TEST_VIDEO_FILE));

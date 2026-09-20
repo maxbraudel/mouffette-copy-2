@@ -890,6 +890,7 @@ QVariantMap MediaResidencyManager::summary() const {
         {QStringLiteral("imageBytes"), QVariant::fromValue(memory.imageBytes)},
         {QStringLiteral("posterBytes"), QVariant::fromValue(memory.posterBytes)},
         {QStringLiteral("thumbnailBytes"), QVariant::fromValue(memory.thumbnailBytes)},
+        {QStringLiteral("scrubProxyBytes"), QVariant::fromValue(memory.scrubProxyBytes)},
         {QStringLiteral("reservedBytes"), QVariant::fromValue(reserved)},
         {QStringLiteral("playbackBudgetBytes"), QVariant::fromValue(playbackBudgetBytes())},
         {QStringLiteral("pendingPlaybackBudgetBytes"), QVariant::fromValue(pendingPlaybackBudgetBytes())},
@@ -924,9 +925,12 @@ QVariantList MediaResidencyManager::assets() const {
             {QStringLiteral("imageBytes"), QVariant::fromValue(memory.imageBytes)},
             {QStringLiteral("posterBytes"), QVariant::fromValue(memory.posterBytes)},
             {QStringLiteral("thumbnailBytes"), QVariant::fromValue(memory.thumbnailBytes)},
+            {QStringLiteral("scrubProxyBytes"), QVariant::fromValue(memory.scrubProxyBytes)},
             {QStringLiteral("isVideo"), e->video},
-            {QStringLiteral("estimatedBytes"), QVariant::fromValue(e->estimated)},
-            {QStringLiteral("preparationBudgetBytes"), QVariant::fromValue(e->estimated + e->scratch)},
+            // Compressed proxy size depends on content; the probe is an estimate.
+            // Never display a final-size estimate below the bytes already owned.
+            {QStringLiteral("estimatedBytes"), QVariant::fromValue(std::max(e->estimated, memory.totalBytes()))},
+            {QStringLiteral("preparationBudgetBytes"), QVariant::fromValue(std::max(e->estimated, memory.totalBytes()) + e->scratch)},
             {QStringLiteral("reservedBytes"), QVariant::fromValue(e->reserved - std::min(e->reserved, memory.totalBytes()))},
             {QStringLiteral("playbackBudgetBytes"), QVariant::fromValue(playerBudget * quint64(std::max(e->activePlayers, pinnedPlayers)))},
             {QStringLiteral("pendingPlaybackBudgetBytes"), QVariant::fromValue(playerBudget * quint64(pendingPlayers))},

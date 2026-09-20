@@ -2,6 +2,7 @@
 
 #include "backend/media/ResidentMediaAsset.h"
 #include <QMediaPlayer>
+#include <QFutureWatcher>
 #include <QObject>
 #include <QPointer>
 #include <QTimer>
@@ -34,6 +35,7 @@ public:
     // Returns an invalid frame while loading, on error, or for another cursor.
     QVideoFrame preparedFrame(qint64 positionMs) const;
     void prepare(qint64 positionMs); // prime a paused native frame asynchronously
+    void setScrubbing(bool enabled); // independent-frame proxy; exact original on release
     void clearAsset(); // retain the occurrence's cursor for later re-residency
     // Fresh Qt presentation/cache identity, shared immutable CPU planes. Never
     // call toImage() on a long-lived asset frame: Qt caches that RGBA conversion.
@@ -85,6 +87,9 @@ private:
     void setStatus(QMediaPlayer::MediaStatus status);
     void fail(QMediaPlayer::Error error, const QString& message);
     void watchPreparation();
+    void flushScrubSeek();
+    void requestScrubFrame();
+    bool hasScrubProxy() const;
 
     std::shared_ptr<const ResidentMediaAsset> m_asset;
     QPointer<QAudioOutput> m_audioOutput;
@@ -94,6 +99,14 @@ private:
     std::unique_ptr<QMediaPlayer> m_player;
     std::unique_ptr<QVideoSink> m_decodeSink;
     QVideoFrame m_frame;
+    QVideoFrame m_scrubFrame;
+    QFutureWatcher<QImage>* m_scrubDecode = nullptr;
+    quint64 m_scrubGeneration = 0;
+    qint64 m_scrubFrameIndex = -1;
+    bool m_awaitingOriginal = false;
+    QTimer m_scrubTimer;
+    bool m_scrubbing = false;
+    bool m_scrubPending = false;
     QTimer m_positionTimer;
     QTimer m_preparationTimer;
     qint64 m_positionMs = 0;

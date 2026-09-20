@@ -2,6 +2,7 @@
 #include "backend/domain/media/MediaFilePolicy.h"
 
 #include <QAbstractVideoBuffer>
+#include <QBuffer>
 #include <QCryptographicHash>
 #include <QDateTime>
 #include <QElapsedTimer>
@@ -271,6 +272,9 @@ struct DecoderJob {
     qint64 lastVideoTimestampUs = 0;
     qint64 lastVideoDurationUs = 0;
     qint64 thumbnailIntervalUs = MediaThumbnails::MinimumIntervalUs;
+    quint64 scrubProxyLimit = MediaScrubProxy::MaxBytes;
+    bool scrubProxyDisabled = false;
+    std::unique_ptr<SwsContext, SwsDeleter> scrubScaler;
     FramePtr lastThumbnailFrame;
     std::unique_ptr<SwsContext, SwsDeleter> thumbnailScaler;
     void publishAllocation() {
@@ -342,6 +346,72 @@ bool storeThumbnail(DecoderJob& job, AVFormatContext* format, AVStream* stream,
     return true;
 }
 
+// Build the editing proxy in the validation pass, before the source frame is
+// released. If the cap is reached, discard the whole proxy: never silently
+// substitute sparse images for an entire continuous video.
+void discardScrubProxy(DecoderJob& job) {
+    job.asset->residentBytes -= job.asset->scrubProxyBytes;
+    job.asset->scrubProxyBytes = 0;
+    std::vector<ResidentScrubFrame>().swap(job.asset->scrubFrames);
+    job.scrubProxyDisabled = true;
+    job.scrubScaler.reset();
+    job.publishAllocation();
+}
+
+bool storeScrubFrame(DecoderJob& job, AVFormatContext* format, AVStream* stream, AVFrame* source) {
+    if (job.scrubProxyDisabled) return true;
+    const auto* pixel = av_pix_fmt_desc_get(static_cast<AVPixelFormat>(source->format));
+    // JPEG cannot preserve alpha or HDR. Those sources keep the original path.
+    if (!job.scrubProxyLimit || (pixel && (pixel->flags & AV_PIX_FMT_FLAG_ALPHA))
+        || source->color_trc == AVCOL_TRC_SMPTE2084 || source->color_trc == AVCOL_TRC_ARIB_STD_B67) {
+        discardScrubProxy(job);
+        return true;
+    }
+    auto& frames = job.asset->scrubFrames;
+    if (!frames.empty() && job.lastVideoTimestampUs <= frames.back().timestampUs) {
+        discardScrubProxy(job);
+        return true;
+    }
+    const int rotation = rotationFor(stream);
+    QSize bounds(MediaScrubProxy::Width, MediaScrubProxy::Height);
+    if (rotation % 180) bounds.transpose();
+    const QSize display = unrotatedDisplaySize(format, stream, source);
+    const QSize size = display.boundedTo(display.scaled(bounds, Qt::KeepAspectRatio)).expandedTo(QSize(1, 1));
+    if (!job.check()) return false; // conversion/JPEG working memory is in scratch
+    QImage image(size, QImage::Format_RGB888);
+    if (image.isNull()) { job.error = QStringLiteral("memory_unavailable"); return false; }
+    job.scrubScaler.reset(sws_getCachedContext(job.scrubScaler.release(), source->width, source->height,
+        static_cast<AVPixelFormat>(source->format), size.width(), size.height(), AV_PIX_FMT_RGB24,
+        SWS_FAST_BILINEAR, nullptr, nullptr, nullptr));
+    if (!job.scrubScaler) { discardScrubProxy(job); return true; }
+    const int* coefficients = sws_getCoefficients(source->colorspace == AVCOL_SPC_BT709
+        ? SWS_CS_ITU709 : source->colorspace == AVCOL_SPC_BT2020_NCL ? SWS_CS_BT2020 : SWS_CS_DEFAULT);
+    sws_setColorspaceDetails(job.scrubScaler.get(), coefficients, source->color_range == AVCOL_RANGE_JPEG,
+                            coefficients, 1, 0, 1 << 16, 1 << 16);
+    uint8_t* planes[4] = {image.bits(), nullptr, nullptr, nullptr};
+    int strides[4] = {int(image.bytesPerLine()), 0, 0, 0};
+    if (sws_scale(job.scrubScaler.get(), source->data, source->linesize, 0, source->height, planes, strides)
+        != size.height()) { discardScrubProxy(job); return true; }
+    if (rotation) image = image.transformed(QTransform().rotate(rotation));
+    QByteArray jpeg;
+    QBuffer buffer(&jpeg);
+    if (!image.save(&buffer, "JPEG", 80)) { discardScrubProxy(job); return true; }
+    const size_t capacity = frames.size() == frames.capacity()
+        ? std::max<size_t>(32, frames.capacity() * 2) : frames.capacity();
+    const quint64 growth = (capacity - frames.capacity()) * sizeof(ResidentScrubFrame) + jpeg.capacity();
+    if (growth > job.scrubProxyLimit - std::min(job.scrubProxyLimit, job.asset->scrubProxyBytes)) {
+        discardScrubProxy(job);
+        return true;
+    }
+    if (!job.check(growth)) return false;
+    if (capacity != frames.capacity()) frames.reserve(capacity);
+    frames.push_back({std::move(jpeg), job.lastVideoTimestampUs, job.lastVideoDurationUs});
+    job.asset->scrubProxyBytes += growth;
+    job.asset->residentBytes += growth;
+    job.publishAllocation();
+    return true;
+}
+
 bool storeFrame(DecoderJob& job, AVFormatContext* format, AVStream* stream, AVFrame* source,
                 qint64 originUs, qint64 fallbackDurationUs) {
     const QSize target = unrotatedDisplaySize(format, stream, source);
@@ -353,7 +423,7 @@ bool storeFrame(DecoderJob& job, AVFormatContext* format, AVStream* stream, AVFr
         ? av_rescale_q(source->duration, stream->time_base, microseconds) : fallbackDurationUs;
     job.lastVideoTimestampUs = std::max<qint64>(0, timestamp);
     job.lastVideoDurationUs = std::max<qint64>(1, duration);
-    if (!storeThumbnail(job, format, stream, source)) return false;
+    if (!storeThumbnail(job, format, stream, source) || !storeScrubFrame(job, format, stream, source)) return false;
     if (!job.lastThumbnailFrame) job.lastThumbnailFrame.reset(av_frame_alloc());
     if (!job.lastThumbnailFrame) { job.error = QStringLiteral("memory_unavailable"); return false; }
     av_frame_unref(job.lastThumbnailFrame.get());
@@ -538,17 +608,24 @@ MediaDecoder::Probe MediaDecoder::probe(const QString& path) {
         + sizeof(CpuFrameBuffer) + QtFrameBookkeepingBytes;
     // Single-thread validation: bounded codec reference surfaces, conversion,
     // packets and stream metadata. No multiplication by duration or frame count.
-    result.scratchBytes = saturatedBytes(16 * MiB + frameBytes * 18 + pixels * 4 * 2);
+    result.scratchBytes = saturatedBytes(24 * MiB + frameBytes * 18 + pixels * 4 * 2);
     // Qt's streaming decoder has bounded frame/packet queues. Opaque codec/GPU
     // allocations remain estimates; process RSS is measured separately.
     result.playbackBudgetBytes = saturatedBytes(32 * MiB + frameBytes * 24 + pixels * 4 * 3);
-    result.estimatedBytes = saturatedBytes(bytes + MediaThumbnails::MaxBytes);
+    const AVRational rate = av_guess_frame_rate(format.get(), stream, nullptr);
+    const double fps = rate.num > 0 && rate.den > 0 ? av_q2d(rate) : 30.0;
+    const long double proxyFrames = std::max<qint64>(0, result.durationUs) / 1000000.0L * fps;
+    const long double proxyEstimate = proxyFrames * (std::min<long double>(pixels,
+        MediaScrubProxy::Width * MediaScrubProxy::Height) * 0.25 + sizeof(ResidentScrubFrame) * 2);
+    result.estimatedBytes = saturatedBytes(bytes + MediaThumbnails::MaxBytes
+        + std::min<long double>(MediaScrubProxy::MaxBytes, proxyEstimate));
     return result;
 }
 
 std::shared_ptr<ResidentMediaAsset> MediaDecoder::decode(
-    const QString& path, const DecodeCallbacks& callbacks, QString* error) {
+    const QString& path, const DecodeCallbacks& callbacks, QString* error, quint64 scrubProxyLimit) {
     DecoderJob job{callbacks};
+    job.scrubProxyLimit = std::min(scrubProxyLimit, MediaScrubProxy::MaxBytes);
     auto fail = [&]() -> std::shared_ptr<ResidentMediaAsset> {
         if (error) *error = job.error.isEmpty() ? QStringLiteral("Media decoding failed") : job.error;
         return {};

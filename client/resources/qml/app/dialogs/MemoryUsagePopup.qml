@@ -89,7 +89,7 @@ Popup {
                 }
                 GridLayout {
                     Layout.fillWidth: true
-                    columns: width >= 560 ? 4 : 2
+                    columns: width >= 680 ? 5 : 2
                     uniformCellWidths: true
                     columnSpacing: 8; rowSpacing: 8
                     Repeater {
@@ -97,7 +97,8 @@ Popup {
                             {key: "videoBytes", label: "Video data", detail: "Original compressed video"},
                             {key: "imageBytes", label: "Images", detail: "Decoded image pixels"},
                             {key: "posterBytes", label: "Video preview frames", detail: "Full-size first frames"},
-                            {key: "thumbnailBytes", label: "Timeline thumbnails", detail: "Small clip previews"}
+                            {key: "thumbnailBytes", label: "Timeline thumbnails", detail: "Small clip previews"},
+                            {key: "scrubProxyBytes", label: "Scrubbing previews", detail: "Compressed editing images"}
                         ]
                         delegate: Rectangle {
                             required property var modelData
@@ -290,6 +291,7 @@ Popup {
                                     + " · Preview frame " + root.bytes(modelData.posterBytes)
                                 : "Image pixels " + root.bytes(modelData.imageBytes))
                                 + " · Thumbnails " + root.bytes(modelData.thumbnailBytes)
+                                + (modelData.isVideo ? " · Scrubbing " + root.bytes(modelData.scrubProxyBytes) : "")
                                 + "\nStored total " + root.bytes(modelData.residentBytes)
                                 + (modelData.isVideo ? " · Playback estimate " + root.bytes(modelData.playbackBudgetBytes) : "")
                             color: Theme.text; font.pixelSize: 11

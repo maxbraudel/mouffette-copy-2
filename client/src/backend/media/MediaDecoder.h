@@ -41,5 +41,5 @@ public:
     static Probe probe(const QString& path);
     static std::shared_ptr<ResidentMediaAsset> decode(
         const QString& path, const DecodeCallbacks& callbacks = {},
-        QString* error = nullptr);
+        QString* error = nullptr, quint64 scrubProxyLimit = MediaScrubProxy::MaxBytes);
 };

@@ -154,6 +154,35 @@ private slots:
             QVERIFY(state[0].value<QMediaPlayer::PlaybackState>() != QMediaPlayer::PlayingState);
     }
 
+    void scrubbingPresentsDuringDragAndSettlesOnRelease()
+    {
+        CanvasDocument document;
+        auto* video = document.addPreparedFile(videoFixture(), QSize(160, 90), true, {});
+        QVERIFY(video && video->player());
+        auto* player = video->player();
+        QTRY_VERIFY_WITH_TIMEOUT(video->residencyReady(), 10000);
+        video->setPositionMs(500);
+        QTRY_VERIFY_WITH_TIMEOUT(player->preparedAt(500), 10000);
+        QSignalSpy frames(video->videoSink(), &QVideoSink::videoFrameChanged);
+        player->setScrubbing(true);
+        // A burst retains one decode in flight and the latest source cursor.
+        for (qint64 target = 600; target <= 1600; target += 10)
+            player->setPosition(target);
+        QCOMPARE(player->position(), qint64(1600));
+        QTRY_VERIFY_WITH_TIMEOUT(video->videoSink()->videoFrame().startTime() <= 1600000
+            && video->videoSink()->videoFrame().endTime() > 1600000, 10000);
+        QVERIFY(!player->preparedAt(1600)); // the proxy is never an exact native preparation
+        QVERIFY(!frames.isEmpty()); // preview arrives before releasing the pointer
+        QCOMPARE(player->position(), qint64(1600));
+        player->setPosition(789);
+        player->setScrubbing(false); // discard pending proxy work and request the original
+        QTRY_VERIFY_WITH_TIMEOUT(player->preparedAt(789), 10000);
+        QCOMPARE(player->position(), qint64(789));
+        QVERIFY(!player->isPlaying());
+        QTest::qWait(50);
+        QVERIFY(player->preparedAt(789));
+    }
+
     void seekAfterPauseAndSourceReload()
     {
         CanvasDocument document;

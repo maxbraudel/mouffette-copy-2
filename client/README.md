@@ -162,6 +162,14 @@ Dragging or trimming a timeline clip previews its provisional timing in the
 canvas immediately, including video seeking and track order. The saved clip
 changes only on release; cancelling the gesture restores the original preview.
 
+While dragging the playhead, video previews use an independently compressed image
+for every source frame (up to 640 × 360), generated during background validation.
+A bounded worker pool decodes only the current requested image; each player keeps
+one request in flight and the latest cursor. Release seeks the exact original,
+and playback uses the original video. The shared proxy is capped at 64 MiB per
+asset and reported separately in the RAM popup. Sources exceeding that cap, HDR
+and alpha video retain native seeking; no sparse preview is substituted.
+
 ## Usage
 
 1. **Start the Server**: Make sure the Mouffette server is running on `localhost:8080`
@@ -185,7 +193,8 @@ opens centered at 90% of the available screen width and height. See
 ## Media memory
 
 Images and videos are completely validated before they become available. Videos
-retain their original compressed bytes, a poster and bounded timeline thumbnails
+retain their original compressed bytes, a poster, bounded timeline thumbnails and
+optional compressed editing proxies
 in RAM; playback uses independent bounded decoder queues. The RAM button beside Settings
 shows loading, memory use and pressure-driven eviction. See
 [media residency](docs/MEDIA_RESIDENCY.md) for the memory policy, playback contract
