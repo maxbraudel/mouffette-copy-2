@@ -45,9 +45,9 @@ void UploadEventHandler::uploadWorkspace(const QString& workspaceEndpointId, boo
     auto& upload = session->upload;
 
     if (uploadManager->isBusy()) {
-        if (uploadManager->isUploading()
-            && m_mainWindow->activeUploadWorkspaceEndpointId() == session->targetEndpointId
-            && uploadManager->canRequestCancel()) {
+        if (uploadManager->canRequestCancel()) {
+            if (upload.automaticUploadTimer) upload.automaticUploadTimer->stop();
+            ++upload.automaticUploadCancellationGeneration;
             uploadManager->requestCancel();
         } else if (m_mainWindow->activeUploadWorkspaceEndpointId() != session->targetEndpointId) {
             TOAST_WARNING("Another client upload is currently in progress. Please wait for it to finish.");
@@ -134,7 +134,8 @@ void UploadEventHandler::uploadWorkspace(const QString& workspaceEndpointId, boo
         currentFileIds.insert(fileId);
         fileManager->associateFileWithProject(fileId, session->projectId);
 
-        const bool alreadyOnTarget = fileManager->isFileUploadedToClient(fileId, targetClientId);
+        const bool alreadyOnTarget = fileManager->isFileUploadedToClient(fileId, targetClientId)
+            && uploadManager->remoteMediaReady(targetClientId, fileId);
         if (!processedFileIds.contains(fileId) && !alreadyOnTarget) {
             UploadFileInfo info;
             info.fileId = fileId;

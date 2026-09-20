@@ -2191,7 +2191,8 @@ class MouffetteServer {
         // inventory; scene admission still requires committed sessionAssets.
         for (const upload of this.uploads.values()) {
             if (upload.remoteSessionId !== session.remoteSessionId || !upload.awaitingTargetValidation) continue;
-            for (const asset of upload.assets) inventory.set(asset.assetId, asset);
+            for (const asset of upload.assets) inventory.set(asset.assetId,
+                { ...asset, uploadId: upload.uploadId });
         }
         const states = new Set(['analysing', 'queued', 'decoding', 'ready',
             'waiting_for_memory', 'capacity_insufficient', 'error']);
@@ -2207,6 +2208,7 @@ class MouffetteServer {
         for (const asset of message.assets) {
             const stored = isPlainObject(asset) && inventory.get(asset.assetId);
             if (!stored || seen.has(asset.assetId) || asset.sha256 !== stored.sha256
+                || (asset.uploadId !== undefined && asset.uploadId !== stored.uploadId)
                 || !states.has(asset.state) || !Number.isFinite(asset.progress)
                 || asset.progress < 0 || asset.progress > 1
                 || typeof asset.error !== 'string' || asset.error.length > 1024) {
@@ -4072,10 +4074,16 @@ class MouffetteServer {
                     'The source asset was removed while its upload was active');
             }
         }
+        this.createAssetRemoval(session, owner, stored, message.removalId,
+            typeof message.reason === 'string'
+                ? message.reason.slice(0, 128) : 'source_removed');
+    }
+
+    createAssetRemoval(session, owner, stored, removalId, reason) {
         const now = Date.now();
         const removal = {
             protocolVersion: this.protocolVersion,
-            removalId: message.removalId,
+            removalId,
             remoteSessionId: session.remoteSessionId,
             generation: session.generation,
             acceptedGeneration: session.generation,
@@ -4090,8 +4098,7 @@ class MouffetteServer {
             sha256: stored.sha256,
             fileId: stored.fileId,
             extension: stored.extension,
-            reason: typeof message.reason === 'string'
-                ? message.reason.slice(0, 128) : 'source_removed',
+            reason,
             phase: 'accepted',
             waitingForSceneRunId: null,
             dispatchAttempts: 0,
@@ -4101,6 +4108,7 @@ class MouffetteServer {
         };
         this.pendingAssetRemovals.set(removal.removalId, removal);
         this.dispatchAssetRemoval(removal);
+        return removal;
     }
 
     handleUploadRemoved(targetId, message) {
@@ -4661,8 +4669,10 @@ class MouffetteServer {
 
     handleUploadAbort(senderId, message) {
         const validated = this.validateUploadParty(senderId, message, 'owner', true);
+        if (!validated.ok || !this.isValidOpaqueId(message.uploadId)) return;
         const upload = this.uploads.get(message.uploadId);
-        if (!validated.ok || !upload || upload.protocolVersion !== this.protocolVersion
+        if (!upload) return this.abortCompletedUpload(validated, message);
+        if (upload.protocolVersion !== this.protocolVersion
             || upload.remoteSessionId !== message.remoteSessionId) return;
         this.sendToEndpoint(upload.targetEndpointId,
             this.uploadPayload(upload, 'upload_abort', {
@@ -4673,6 +4683,58 @@ class MouffetteServer {
         this.removeUpload(upload);
         this.sendToEndpoint(upload.ownerEndpointId,
             this.uploadPayload(upload, 'upload_aborted', { success: true }));
+    }
+
+    abortCompletedUpload({ client: owner, session }, message) {
+        // Cancellation may overtake the final ACK on the two transports, or
+        // arrive while the receiver is decoding the already validated files.
+        // Keep using durable asset removal so renderer/residency readers are
+        // released before disk cleanup is committed.
+        const terminal = this.uploadTombstones.get(message.uploadId);
+        const matchesTerminal = terminal
+            && terminal.remoteSessionId === session.remoteSessionId
+            && terminal.ownerEndpointId === owner.endpointId
+            && terminal.targetEndpointId === session.targetEndpointId;
+        const assets = [...(this.sessionAssets.get(session.remoteSessionId)?.values() || [])]
+            .filter(asset => asset.uploadId === message.uploadId
+                && asset.generation === session.generation
+                && asset.ownerEndpointId === owner.endpointId
+                && asset.targetEndpointId === session.targetEndpointId);
+        if (terminal && !matchesTerminal) return;
+
+        const result = {
+            ...(matchesTerminal ? terminal : {}),
+            uploadId: message.uploadId,
+            remoteSessionId: session.remoteSessionId,
+            generation: session.generation,
+            ownerEndpointId: owner.endpointId,
+            targetEndpointId: session.targetEndpointId,
+            ownerRuntimeId: owner.runtimeId,
+            ownerConnectionGeneration: owner.connectionGeneration,
+        };
+        // Reserve even an unseen ID: abort on control may beat upload_start on
+        // data. A queued start must not recreate a batch after its cancellation.
+        // Invalidate completed upload replay before any removal ACK can arrive.
+        this.rememberUploadResult(result, 'aborted');
+        for (const asset of assets) {
+            const pending = [...this.pendingAssetRemovals.values()].find(removal =>
+                removal.remoteSessionId === session.remoteSessionId
+                    && removal.assetId === asset.assetId);
+            if (pending) {
+                this.dispatchAssetRemoval(pending, true);
+                continue;
+            }
+            if (this.pendingAssetRemovals.size >= this.MAX_PENDING_REMOVALS) {
+                this.terminateSessionAfterAssetRemovalFailure(
+                    result, 'upload_cancel_cleanup_capacity');
+                return;
+            }
+            this.createAssetRemoval(session, owner, asset, uuidv4(),
+                typeof message.reason === 'string'
+                    ? message.reason.slice(0, 128) : 'owner_abort');
+        }
+        this.sendToEndpoint(owner.endpointId,
+            this.uploadPayload(result, 'upload_aborted', { success: true }));
     }
 
     handleUploadAbortAcknowledgement(targetId, message) {

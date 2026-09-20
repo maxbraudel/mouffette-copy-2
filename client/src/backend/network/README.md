@@ -16,6 +16,14 @@ credit begins at 64 KiB and the relay adjusts it within 32–256 KiB across uplo
 Progress acknowledges durable offsets using deltas. Start, resume and final
 validation exchange full inventories.
 
+An upload remains active through remote RAM loading. The overlay shows
+`Uploading (x/n)` followed by `Loading in ram (x/n)`; the RAM counter includes
+both successful and failed attempts. `Unload` is available only when every
+current source is ready remotely. Failed sources can be retried with `Upload`.
+Hovering an active upload shows a red `Cancel` action. Cancellation stops local
+work immediately and removes this batch's staging, validated files and RAM
+residency on the target, including an abort crossing the final transfer ACK.
+
 RemoteCacheStore owns `cache/Uploads`, including session metadata, durable asset
 manifests, cleanup intents, tombstones and `.retained`. Its metadata schema
 aliases `StorageVersions::ReceivedMedia` (version 2). Bootstrap preserves current

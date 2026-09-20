@@ -347,7 +347,10 @@ QString ClientWorkspaceViewModel::uploadActionText() const
                   .arg(m_uploadFilesCompleted).arg(m_uploadFilesTotal)
                   .arg(m_uploadPercent)
             : QStringLiteral("Uploading…");
-    case UploadState::Finalizing: return QStringLiteral("Finalizing…");
+    case UploadState::Finalizing:
+    case UploadState::LoadingInRam:
+        return QStringLiteral("Loading in ram (%1/%2)")
+            .arg(m_uploadManager->ramFilesCompleted()).arg(m_uploadManager->ramFilesTotal());
     case UploadState::Cancelling: return QStringLiteral("Cancelling…");
     case UploadState::Uploaded: return QStringLiteral("Unload");
     case UploadState::Removing: return QStringLiteral("Removing…");
@@ -363,6 +366,9 @@ QUrl ClientWorkspaceViewModel::uploadActionIcon() const
     case UploadState::Uploaded:
     case UploadState::Removing: return QUrl(QStringLiteral("qrc:/icons/icons/delete.svg"));
     case UploadState::Uploading:
+    case UploadState::Preparing:
+    case UploadState::Finalizing:
+    case UploadState::LoadingInRam:
     case UploadState::Cancelling: return QUrl(QStringLiteral("qrc:/icons/icons/stop.svg"));
     default: return QUrl(QStringLiteral("qrc:/icons/icons/upload.svg"));
     }
@@ -370,12 +376,13 @@ QUrl ClientWorkspaceViewModel::uploadActionIcon() const
 
 ClientWorkspaceViewModel::UploadState ClientWorkspaceViewModel::uploadState() const
 {
-    if (!hasProject() || !m_uploadManager || !remoteCommandsEnabled()) {
+    if (!hasProject() || !m_uploadManager) {
         return UploadState::Unavailable;
     }
     const bool activeForSession = uploadBelongsToSession();
     if (activeForSession) {
         if (m_uploadManager->isCancelling()) return UploadState::Cancelling;
+        if (m_uploadManager->isLoadingInRam()) return UploadState::LoadingInRam;
         if (m_uploadManager->isFinalizing()) return UploadState::Finalizing;
         const auto state = m_uploadManager->outgoingState();
         if (state == UploadManager::OutgoingState::AwaitingTargetReady
@@ -385,6 +392,7 @@ ClientWorkspaceViewModel::UploadState ClientWorkspaceViewModel::uploadState() co
         }
         if (m_uploadManager->isUploading()) return UploadState::Uploading;
     }
+    if (!remoteCommandsEnabled()) return UploadState::Unavailable;
     if (m_uploadManager->isRemoving() && activeForSession) {
         return UploadState::Removing;
     }
@@ -408,14 +416,22 @@ bool ClientWorkspaceViewModel::uploadBelongsToSession() const
 {
     // Workspace IDs are persistent identities; transport endpoint IDs change
     // on reconnect and must never be compared to a workspace ID.
-    return m_uploadManager && m_uploadManager->activeWorkspaceEndpointId() == m_workspaceEndpointId;
+    return m_uploadManager && m_uploadManager->targetClientId() == m_workspaceEndpointId
+        && (!m_uploadManager->currentUploadId().isEmpty()
+            || m_uploadManager->activeWorkspaceEndpointId() == m_workspaceEndpointId);
 }
 
 bool ClientWorkspaceViewModel::uploadActionEnabled() const
 {
     const UploadState state = uploadState();
     return !m_actionPending && m_uploadAction && (state == UploadState::Ready
-        || state == UploadState::Uploaded || state == UploadState::Uploading);
+        || state == UploadState::Uploaded || uploadCancelAvailable());
+}
+
+bool ClientWorkspaceViewModel::uploadCancelAvailable() const
+{
+    return hasProject() && m_uploadAction && uploadBelongsToSession()
+        && m_uploadManager->canRequestCancel();
 }
 
 QString ClientWorkspaceViewModel::uploadUnavailableReason() const
@@ -426,7 +442,7 @@ QString ClientWorkspaceViewModel::uploadUnavailableReason() const
     // Cancellation remains available during upload, even if the last local
     // media was removed after the transfer started.
     if (m_uploadAction && (state == UploadState::Ready || state == UploadState::Uploaded
-                          || state == UploadState::Uploading)) return {};
+                          || uploadCancelAvailable())) return {};
     if (m_canvas->enumerateMediaItems().isEmpty()) {
         return QStringLiteral("Add media to the project first");
     }
@@ -441,6 +457,7 @@ QString ClientWorkspaceViewModel::uploadUnavailableReason() const
             ? QStringLiteral("The upload is paused while the remote computer reconnects")
             : QStringLiteral("The upload is being prepared. Please wait");
     case UploadState::Finalizing: return QStringLiteral("The upload is being finalized. Please wait");
+    case UploadState::LoadingInRam: return QStringLiteral("Media are loading into remote RAM. Please wait");
     case UploadState::Cancelling: return QStringLiteral("The upload cancellation is in progress. Please wait");
     case UploadState::Removing: return QStringLiteral("Remote media are being removed. Please wait");
     case UploadState::Unavailable: return QStringLiteral("Another media transfer is in progress. Wait for it to finish");
@@ -455,6 +472,7 @@ int ClientWorkspaceViewModel::uploadActionTone() const
     case UploadState::Preparing:
     case UploadState::Uploading:
     case UploadState::Finalizing:
+    case UploadState::LoadingInRam:
     case UploadState::Cancelling: return UploadingTone;
     default: return NormalTone;
     }
@@ -594,6 +612,12 @@ void ClientWorkspaceViewModel::triggerUploadAction()
     }
     const QString reason = uploadUnavailableReason();
     if (!reason.isEmpty()) { TOAST_INFO(reason); return; }
+    // Cancellation must stop work on this click and cannot turn into Unload
+    // if a queued progress notification completes the batch meanwhile.
+    if (uploadCancelAvailable()) {
+        m_uploadAction();
+        return;
+    }
     const UploadState requestedState = uploadState();
     dispatchAction([this, requestedState] {
         const QString reason = uploadUnavailableReason();

@@ -4376,14 +4376,15 @@ bool ApplicationRuntime::hasUnuploadedFilesForTarget(const QString& targetClient
     }
 
     for (CanvasMedia* media : canvas->enumerateMediaItems()) {
-        if (!media) {
+        if (!media || media->isText()) {
             continue;
         }
         const QString fileId = media->fileId();
         if (fileId.isEmpty()) {
-            continue;
+            return true;
         }
-        if (!m_fileManager->isFileUploadedToClient(fileId, targetClientId)) {
+        if (!m_fileManager->isFileUploadedToClient(fileId, targetClientId)
+            || !m_uploadManager || !m_uploadManager->remoteMediaReady(targetClientId, fileId)) {
             return true;
         }
     }

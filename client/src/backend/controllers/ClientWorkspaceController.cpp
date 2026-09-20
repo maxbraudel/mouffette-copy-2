@@ -171,6 +171,7 @@ void ClientWorkspaceController::configureWorkspace(ClientWorkspace* workspace) {
                     });
         }
         auto* autoUploadTimer = new QTimer(workspace->canvas);
+        workspace->upload.automaticUploadTimer = autoUploadTimer;
         autoUploadTimer->setSingleShot(true);
         autoUploadTimer->setInterval(350);
         connect(autoUploadTimer, &QTimer::timeout, m_runtime,
@@ -204,11 +205,17 @@ void ClientWorkspaceController::configureWorkspace(ClientWorkspace* workspace) {
                         emit m_runtime->getUploadManager()->uiStateChanged();
                     }
                     if (mediaItem && !mediaItem->isText()) {
+                        const quint64 cancellationGeneration = changedWorkspace
+                            ? changedWorkspace->upload.automaticUploadCancellationGeneration : 0;
                         connect(mediaItem, &CanvasMedia::identityReady, autoUploadTimer,
-                                [this, autoUploadTimer](const QString&) {
+                                [this, autoUploadTimer, targetEndpointId,
+                                 cancellationGeneration](const QString&) {
                             if (m_runtime->getUploadManager())
                                 emit m_runtime->getUploadManager()->uiStateChanged();
-                            if (m_runtime->getAutoUploadImportedMedia()) autoUploadTimer->start();
+                            const auto* current = findWorkspace(targetEndpointId);
+                            if (current && current->upload.automaticUploadCancellationGeneration
+                                    == cancellationGeneration
+                                && m_runtime->getAutoUploadImportedMedia()) autoUploadTimer->start();
                         });
                         if (!mediaItem->fileId().isEmpty()
                             && m_runtime->getAutoUploadImportedMedia()) autoUploadTimer->start();

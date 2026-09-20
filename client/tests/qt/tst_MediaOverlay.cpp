@@ -71,6 +71,7 @@ private slots:
     void sourceAssociationsCommitAtomically();
     void timelineFragmentsPreserveSourceReferences();
     void uploadActionLocksBeforeDispatchAndRecovers();
+    void uploadCancelHoverTracksBothPhases();
     void unavailableActionsStayClickableAndExplainWhy();
     void toolbarToolsAndGlobalMemoryUsage();
     void memoryBreakdownIsClearAndScrollable();
@@ -246,11 +247,13 @@ Item {
         property url uploadActionIcon: "qrc:/icons/icons/upload.svg"
         property int uploadActionTone: 0
         property bool uploadActionEnabled: true
+        property bool uploadCancelAvailable: false
+        property int uploadActionCalls: 0
         property string uploadUnavailableReason: ""
         function selectMedia(mediaId, additive) { host.selectionCalls += 1 }
         function toggleRemoteScene() {}
         function toggleTestScene() {}
-        function triggerUploadAction() {}
+        function triggerUploadAction() { uploadActionCalls += 1 }
     }
 
     MediaListPanel {
@@ -781,15 +784,62 @@ void MediaOverlayTest::mediaPanelWidthSurvivesActionAndUploadTransitions()
         QCOMPARE(panel->implicitWidth(), initialWidth);
     }
     for (const auto& label : {"Preparing…", "Uploading…", "Uploading (0/10) 0%",
-                              "Uploading (10/10) 100%", "Finalizing…", "Cancelling…",
+                              "Uploading (10/10) 100%", "Loading in ram (0/10)",
+                              "Loading in ram (10/10)", "Cancel", "Cancelling…",
                               "Removing…", "Unload", "Upload"}) {
-        const bool progress = QString::fromUtf8(label).startsWith("Uploading (");
+        const bool progress = QString::fromUtf8(label).startsWith("Uploading (")
+            || QString::fromUtf8(label).startsWith("Loading in ram (");
         session->setProperty("uploadActionText", QString::fromUtf8(label));
         session->setProperty("uploadActionTone", progress ? 1 : 0);
         QCOMPARE(upload->implicitWidth(), uploadWidth);
         QCOMPARE(panel->implicitWidth(), initialWidth);
         QCOMPARE(panel->x(), initialLeft);
     }
+}
+
+void MediaOverlayTest::uploadCancelHoverTracksBothPhases()
+{
+    QQmlEngine engine;
+    QQuickWindow window;
+    window.resize(600, 350);
+    MediaListModel model;
+    QString error;
+    std::unique_ptr<QQuickItem> harness(createMediaPanelHarness(engine, window, &model, &error));
+    QVERIFY2(harness, qPrintable(error));
+    harness->setSize(window.size());
+    harness->setProperty("testMediaCount", 10);
+    auto* session = harness->property("session").value<QObject*>();
+    auto* button = findVisualItem(harness.get(), "uploadAction");
+    QVERIFY(session && button);
+    session->setProperty("uploadActionTone", 1);
+    session->setProperty("uploadCancelAvailable", true);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    int clicks = 0;
+    for (const auto& label : {"Uploading (2/10) 20%", "Loading in ram (3/10)"}) {
+        session->setProperty("uploadActionText", label);
+        QTest::mouseMove(&window, {1, 1});
+        QTRY_COMPARE(button->property("text").toString(), QString::fromUtf8(label));
+        QCOMPARE(button->property("foregroundColor").value<QColor>(), themeColor(engine, "brandBlue"));
+        const qreal originalWidth = button->implicitWidth();
+        const QPoint center = button->mapToScene(QPointF(button->width() / 2, button->height() / 2)).toPoint();
+        QTest::mouseMove(&window, center);
+        QTRY_VERIFY(button->property("showingCancel").toBool());
+        QCOMPARE(button->property("text").toString(), QStringLiteral("Cancel"));
+        QCOMPARE(button->property("foregroundColor").value<QColor>(), themeColor(engine, "errorText"));
+        QCOMPARE(button->property("backgroundColor").value<QColor>(), themeColor(engine, "destructiveHover"));
+        QCOMPARE(button->implicitWidth(), originalWidth);
+        QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier, center);
+        QCOMPARE(session->property("uploadActionCalls").toInt(), ++clicks);
+        QTest::mouseMove(&window, {1, 1});
+        QTRY_COMPARE(button->property("text").toString(), QString::fromUtf8(label));
+    }
+    session->setProperty("uploadCancelAvailable", false);
+    session->setProperty("uploadActionText", "Unload");
+    session->setProperty("uploadActionTone", 2);
+    QTest::mouseMove(&window, button->mapToScene(QPointF(button->width() / 2, button->height() / 2)).toPoint());
+    QVERIFY(!button->property("showingCancel").toBool());
+    QCOMPARE(button->property("text").toString(), QStringLiteral("Unload"));
 }
 
 void MediaOverlayTest::emptyScreenHintStaysBehindMediaAndCenteredInViewport()

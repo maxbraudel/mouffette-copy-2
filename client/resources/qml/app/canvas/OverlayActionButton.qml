@@ -11,6 +11,8 @@ AbstractButton {
     property int tone: OverlayActionButton.Normal
     // Busy acknowledgements retain their blue fill while clicks explain the wait.
     property bool busy: false
+    property bool cancelOnHover: false
+    readonly property bool showingCancel: cancelOnHover && enabled && hovered
     property bool monospace: false
     property real bottomRadius: 0
     property string unavailableReason: ""
@@ -21,6 +23,7 @@ AbstractButton {
     property alias monospaceTextVariants: monospaceMetrics.textVariants
     readonly property bool dimmed: !enabled && !busy
     readonly property color foregroundColor: dimmed ? Theme.overlayDisabledText
+        : showingCancel ? Theme.errorText
         : tone === OverlayActionButton.Uploading ? Theme.brandBlue
         : tone === OverlayActionButton.Uploaded ? Theme.mediaUploaded
         : tone === OverlayActionButton.Remote || tone === OverlayActionButton.Test
@@ -28,6 +31,8 @@ AbstractButton {
         : Theme.overlayText
     readonly property color backgroundColor: {
         if (dimmed) return Theme.overlayDisabledBackground
+        if (showingCancel)
+            return down ? Theme.destructivePressed : Theme.destructiveHover
         if (tone === OverlayActionButton.Uploading)
             return enabled && down ? Theme.primaryPressed
                  : enabled && hovered ? Theme.primaryHover : Theme.primaryBackground

@@ -138,15 +138,37 @@ void UploadSignalConnector::connectAllSignals(
                 : session->lastClientInfo.getDisplayText();
             publishTerminalUploadNotification(
                 uploadId, NotificationSeverity::Success,
-                QStringLiteral("Upload completed successfully to %1").arg(label));
+                QStringLiteral("Media uploaded and loaded into RAM on %1").arg(label));
             session->upload.remoteFilesPresent = true;
             session->knownRemoteFileIds.unite(session->upload.fileIds);
             mainWindow->clearUploadTracking(*session);
         } else {
             publishTerminalUploadNotification(
                 uploadId, NotificationSeverity::Success,
-                QStringLiteral("Upload completed successfully"));
+                QStringLiteral("Media uploaded and loaded into RAM"));
         }
+    });
+
+    connect(uploadManager, &UploadManager::uploadRamFailed, mainWindow,
+            [mainWindow, uploadManager](const QString& uploadId, int failedFiles) {
+        if (auto* session = mainWindow->workspaceForUploadId(uploadId)) {
+            for (const QString& fileId : session->upload.fileIds) {
+                const bool ready = uploadManager->remoteMediaReady(session->targetEndpointId, fileId);
+                if (ready) session->knownRemoteFileIds.insert(fileId);
+                else session->knownRemoteFileIds.remove(fileId);
+                for (CanvasMedia* item : currentMediaForSource(session, fileId)) {
+                    if (ready) item->setUploadUploaded();
+                    else item->setUploadNotUploaded();
+                }
+            }
+            session->upload.remoteFilesPresent = !session->knownRemoteFileIds.isEmpty();
+            mainWindow->clearUploadTracking(*session);
+        }
+        publishTerminalUploadNotification(
+            uploadId, NotificationSeverity::Error,
+            QStringLiteral("%1 media could not be loaded into remote RAM. Click Upload to retry.")
+                .arg(failedFiles),
+            AppConfig::instance().toastErrorDurationMs());
     });
 
     connect(uploadManager, &UploadManager::uploadCancelled, mainWindow,
@@ -162,7 +184,7 @@ void UploadSignalConnector::connectAllSignals(
         }
         publishTerminalUploadNotification(
             uploadId, NotificationSeverity::Warning,
-            QStringLiteral("Upload cancelled; incomplete remote data is being cleaned automatically"));
+            QStringLiteral("Upload cancelled; remote data is being removed"));
     });
 
     // Signal: the target rejected the transfer. Roll back only this batch; files

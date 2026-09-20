@@ -88,6 +88,7 @@ public:
         AwaitingTargetReady,
         Streaming,
         AwaitingValidation,
+        LoadingInRam,
         Suspended,
         Cancelling
     };
@@ -139,6 +140,9 @@ public:
     bool isUploading() const;
     bool isCancelling() const;
     bool isFinalizing() const;
+    bool isLoadingInRam() const;
+    int ramFilesCompleted() const;
+    int ramFilesTotal() const;
     bool isRemoving() const {
         return !m_pendingAssetRemovals.isEmpty();
     }
@@ -151,7 +155,7 @@ public:
     int activeOutgoingTransferCount() const;
     UploadScheduler* uploadScheduler() const { return m_uploadScheduler; }
 
-    // Starts a new/incremental upload. Cancellation is an explicit guarded action.
+    // Starts a new/incremental upload. Cancellation is a separate explicit action.
     bool toggleUpload(const QVector<UploadFileInfo>& files);
     void requestCancel();
     // Explicit user action: remove every validated asset owned by this
@@ -217,6 +221,7 @@ signals:
     // Carries the immutable transfer identity so terminal UI/history events
     // remain correlated even after the runtime transfer state is cleared.
     void uploadFinished(const QString& uploadId);
+    void uploadRamFailed(const QString& uploadId, int failedFiles);
     void uploadReidentified(const QString& previousUploadId, const QString& uploadId, const QString& targetEndpointId);
     void uploadCancelled(const QString& uploadId);
     void uploadRejected(const QString& uploadId, const QString& reason);
@@ -283,6 +288,27 @@ private:
         QStringList localFileIds;
         qint64 size = 0;
     };
+
+    struct OutgoingRamBatch {
+        QString targetEndpointId;
+        QString remoteSessionId;
+        QString uploadId;
+        quint64 generation = 0;
+        QVector<OutgoingAsset> assets;
+        QSet<QString> settledAssets;
+        QSet<QString> failedAssets;
+    };
+    QHash<QString, OutgoingRamBatch> m_outgoingRamByTarget;
+    QHash<QString, QString> m_pendingUploadAborts; // uploadId -> RemoteSession
+    QHash<QString, QSet<QString>> m_cancelledRemoteAssets; // RemoteSession -> digest
+    void beginRamLoading(const QString& targetEndpointId, const QString& remoteSessionId,
+                         quint64 generation, const QString& uploadId,
+                         const QVector<OutgoingAsset>& assets);
+    void updateRamLoading(const QString& remoteSessionId);
+    void sendOrQueueUploadAbort(const QString& remoteSessionId, quint64 generation,
+                               const QString& uploadId);
+    void cancelRamLoading(const QString& targetEndpointId);
+    bool discardCompletedIncomingUpload(const QJsonObject& message);
 
     struct PendingAssetRemoval {
         QString removalId;
@@ -474,6 +500,7 @@ private:
         QString assetId;
         QString sha256;
         QString path;
+        QString uploadId;
     };
     QHash<QString, ResidentIncomingAsset> m_residentIncoming;
     QHash<QString, quint64> m_residencySequences;
@@ -490,6 +517,7 @@ private:
     QHash<QString, int> m_validationReadersByUpload;
     QHash<QString, bool> m_deferredIncomingDiscards;
     QHash<QString, QJsonObject> m_deferredIncomingAborts;
+    QSet<QString> m_pendingCompletedIncomingAborts;
     QHash<QString, QJsonObject> m_deferredIncomingRemovals;
 
     QPointer<WebSocketClient> m_ws;

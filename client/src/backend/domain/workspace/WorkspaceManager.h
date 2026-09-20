@@ -4,6 +4,7 @@
 #include <QHash>
 #include <QList>
 #include <QObject>
+#include <QPointer>
 #include <QSet>
 #include <QString>
 #include <QTimer>
@@ -40,6 +41,8 @@ public:
         QSet<QString> knownRemoteFileIds;
 
         struct UploadTracking {
+            QPointer<QTimer> automaticUploadTimer;
+            quint64 automaticUploadCancellationGeneration = 0;
             // Track sources, never occurrence pointers: timeline edits can replace instances mid-transfer.
             QSet<QString> fileIds;
             QStringList currentUploadFileOrder;

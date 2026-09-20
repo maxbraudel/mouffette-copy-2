@@ -112,6 +112,54 @@ function messages(ws, type) {
     return ws.messages.filter(message => message.type === type);
 }
 
+// The owner can cancel after the transport completed, while RAM decoding is
+// still running. Only that batch is unloaded, through the durable cleanup path.
+for (const forgetUploadResult of [false, true]) {
+    const context = setup();
+    const previous = { ...context.asset, assetId: 'previous-asset',
+        uploadId: 'previous-upload', sha256: 'b'.repeat(64), fileId: 'b'.repeat(64) };
+    const inventory = context.server.sessionAssets.get(context.session.remoteSessionId);
+    inventory.set(previous.assetId, previous);
+    if (forgetUploadResult) context.server.uploadTombstones.clear();
+    const abort = () => envelope(context, {
+        type: 'upload_abort', uploadId: context.asset.uploadId, reason: 'User cancelled',
+    });
+
+    context.server.handleMessage('attacker-connection', abort());
+    context.server.handleMessage('owner-connection', {
+        ...abort(), generation: context.session.generation + 1,
+    });
+    assert.equal(context.server.pendingAssetRemovals.size, 0,
+        'only the current authenticated owner can cancel decoded media');
+
+    context.server.handleMessage('owner-connection', abort());
+    const removal = messages(context.target, 'upload_remove').at(-1);
+    assert.equal(removal.assetId, context.asset.assetId);
+    assert.equal(removal.uploadId, context.asset.uploadId);
+    assert.equal(removal.connectionGeneration, 1);
+    assert.equal(removal.reason, 'User cancelled');
+    assert.equal(context.server.pendingAssetRemovals.size, 1);
+    assert.equal(context.server.uploadTombstones.get(context.asset.uploadId).status, 'aborted',
+        'a replay cannot resurrect a cancelled batch while cleanup is pending');
+    assert.equal(messages(context.owner, 'upload_aborted').at(-1).success, true);
+    assert.equal(inventory.has(context.asset.assetId), true,
+        'the target still owes its durable cleanup commit');
+
+    context.server.handleMessage('owner-connection', abort());
+    assert.equal(context.server.pendingAssetRemovals.size, 1,
+        'repeated cancel must reuse the same cleanup obligation');
+    assert.equal(messages(context.target, 'upload_remove').at(-1).removalId,
+        removal.removalId);
+
+    context.server.handleMessage('target-connection', removalAck(context, removal));
+    assert.equal(inventory.has(context.asset.assetId), false);
+    assert.equal(inventory.has(previous.assetId), true,
+        'earlier completed incremental uploads must survive cancellation');
+    context.server.handleMessage('owner-connection', abort());
+    assert.equal(context.server.pendingAssetRemovals.size, 0);
+    assert.equal(messages(context.owner, 'upload_aborted').at(-1).connectionGeneration, 1);
+}
+
 // upload_remove is an owner -> target command. Its top-level generation is
 // therefore A's source transport, never B's recipient transport.
 {

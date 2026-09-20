@@ -37,7 +37,7 @@ Rectangle {
     implicitWidth: Math.max(200, mediaNaturalWidth, remoteButton.implicitWidth,
                             showUploadAction ? uploadButton.implicitWidth : 0)
     width: Math.min(implicitWidth, 420, parent ? Math.max(0, parent.width * 0.5) : 420)
-    implicitHeight: mediaColumn.height + actionAreaHeight
+    implicitHeight: (mediaCount > 0 ? mediaColumn.height : 0) + actionAreaHeight
     height: Math.min(implicitHeight, maximumHeight)
     radius: Theme.overlayRadius
     color: Theme.overlayBackground
@@ -95,7 +95,9 @@ Rectangle {
                         required property var modelData
                         readonly property bool textMedia: mediaType === "text"
                         readonly property bool uploadedAndCached: uploadState === "uploaded" && !!modelData.remoteCached
-                        readonly property bool awaitingRemoteCache: uploadState === "uploaded" && !uploadedAndCached
+                        readonly property bool awaitingRemoteCache: !uploadedAndCached
+                            && (uploadState === "uploaded"
+                                || (uploadState === "uploading" && modelData.uploadProgress >= 100))
                         readonly property bool showProgress: uploadState === "uploading" || awaitingRemoteCache
                         readonly property string statusText: uploadedAndCached ? "Uploaded and Cached"
                             : uploadState === "uploaded" ? "Uploaded" : "Not uploaded"
@@ -116,8 +118,8 @@ Rectangle {
                         focusPolicy: Qt.NoFocus
                         onImplicitWidthChanged: Qt.callLater(root.measureMediaWidth)
                         Accessible.name: displayName
-                        Accessible.description: (textMedia ? "" : (uploadState === "uploading" ? "Uploading"
-                            : awaitingRemoteCache ? "Uploaded, preparing remote cache" : statusText) + ", ") + detailsText
+                        Accessible.description: (textMedia ? "" : (awaitingRemoteCache ? "Loading in RAM"
+                            : uploadState === "uploading" ? "Uploading" : statusText) + ", ") + detailsText
                         background: Rectangle {
                             color: "transparent"
                         }
@@ -264,19 +266,23 @@ Rectangle {
                 objectName: "uploadAction"
                 visible: root.showUploadAction
                 width: actions.width
-                text: root.session ? root.session.uploadActionText : "Upload"
-                iconSource: root.session ? root.session.uploadActionIcon : "qrc:/icons/icons/upload.svg"
+                cancelOnHover: !!root.session && root.session.uploadCancelAvailable
+                    && !root.session.actionPending
+                text: showingCancel ? "Cancel" : root.session ? root.session.uploadActionText : "Upload"
+                iconSource: showingCancel ? "qrc:/icons/icons/stop.svg"
+                    : root.session ? root.session.uploadActionIcon : "qrc:/icons/icons/upload.svg"
                 textVariants: ["Upload", "Unload", "Preparing…", "Uploading…",
-                               "Finalizing…", "Cancelling…", "Removing…"]
+                               "Cancel", "Cancelling…", "Removing…"]
                 // Reserve upload counters from the number of unique sources. Keep all
                 // counter digits before upload starts, in its progress font.
                 monospaceTextVariants: {
                     var digits = "9".repeat(String(Math.max(1, root.mediaCount)).length)
-                    return ["Uploading (" + digits + "/" + digits + ") 100%"]
+                    return ["Uploading (" + digits + "/" + digits + ") 100%",
+                            "Loading in ram (" + digits + "/" + digits + ")"]
                 }
                 tone: root.session ? root.session.uploadActionTone : OverlayActionButton.Normal
                 busy: tone === OverlayActionButton.Uploading && !root.session.actionPending
-                monospace: busy && root.session.uploadActionEnabled
+                monospace: busy && !showingCancel
                 enabled: !!root.session
                 unavailableReason: root.session ? root.session.uploadUnavailableReason : ""
                 bottomRadius: Theme.overlayRadius

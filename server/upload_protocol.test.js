@@ -99,6 +99,70 @@ function startUpload(context, uploadId, asset = file(), transport = socket()) {
 
 const uploadId = 'upload-1';
 
+// Control can deliver an immediate cancellation before the data-channel start.
+// Remember that intent so the late start never allocates a remote file.
+{
+    const context = setup();
+    context.server.handleMessage('owner-connection', envelope(context.session, {
+        type: 'upload_abort', uploadId,
+    }));
+    startUpload(context, uploadId);
+    assert.equal(context.server.uploads.has(uploadId), false);
+    assert.equal(context.server.uploadTombstones.get(uploadId).status, 'aborted');
+    assert.equal(messages(context.target.ws, 'upload_start').length, 0);
+    assert.equal(messages(context.owner.ws, 'upload_aborted').at(-1).success, true);
+    assert.equal(messages(context.owner.ws, 'upload_rejected').at(-1).code,
+        'upload_id_reused');
+}
+
+// Abort remains terminal when the target's final validation crosses the owner
+// cancellation on separate transports. No late ACK may recreate inventory.
+{
+    const context = setup();
+    const transport = startUpload(context, uploadId);
+    context.server.handleMessage('target-connection', envelope(context.session, {
+        type: 'upload_ready', uploadId, assets: [assetState()],
+    }));
+    context.server.handleMessage('owner-connection', envelope(context.session, {
+        type: 'upload_chunk', uploadId, assetId: 'asset-1',
+        offset: 0, size: 128, sha256: 'a'.repeat(64),
+        data: Buffer.alloc(128).toString('base64'),
+    }), transport);
+    context.server.handleMessage('target-connection', envelope(context.session, {
+        type: 'upload_progress', uploadId, assets: [assetState(file(), 128)],
+    }));
+    context.server.handleMessage('owner-connection', envelope(context.session, {
+        type: 'upload_complete', uploadId, assets: [assetState(file(), 128)],
+    }), transport);
+    const residency = { assetId: file().assetId, sha256: file().sha256,
+        uploadId, state: 'decoding', progress: 0.5, error: '' };
+    context.server.handleMessage('target-connection', envelope(context.session, {
+        type: 'media_residency', sequence: 1, assets: [residency],
+    }));
+    assert.equal(messages(context.owner.ws, 'media_residency').at(-1)
+        .assets[0].uploadId, uploadId,
+    'RAM progress keeps its upload attempt identity even before final validation');
+    context.server.handleMessage('target-connection', envelope(context.session, {
+        type: 'media_residency', sequence: 2,
+        assets: [{ ...residency, uploadId: 'previous-attempt' }],
+    }));
+    assert.equal(messages(context.target.ws, 'error').at(-1).code,
+        'invalid_media_residency');
+    assert.equal(context.session.mediaResidency.sequence, 1,
+        'stale decode results cannot overwrite the active upload attempt');
+    context.server.handleMessage('owner-connection', envelope(context.session, {
+        type: 'upload_abort', uploadId,
+    }));
+    context.server.handleMessage('target-connection', envelope(context.session, {
+        type: 'upload_finished', uploadId, assets: [assetState(file(), 128)],
+    }));
+    assert.equal(context.server.uploads.has(uploadId), false);
+    assert.equal(context.server.uploadTombstones.get(uploadId).status, 'aborted');
+    assert.equal(context.server.sessionAssets.has(context.session.remoteSessionId), false);
+    assert.equal(messages(context.target.ws, 'upload_abort').length, 1);
+    assert.equal(messages(context.owner.ws, 'upload_finished').length, 0);
+}
+
 // Eight transfers share one adaptive recipient window capped at 256 KiB. Further senders
 // wait before target allocation and are granted fairly when a slot is released.
 {

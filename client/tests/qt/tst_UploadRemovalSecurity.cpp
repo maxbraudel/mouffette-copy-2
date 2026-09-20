@@ -153,6 +153,7 @@ private slots:
     void interruptedUploadRemovesOnlyPartialStagingAndCanRetry();
     void scopedUploadTeardownQuarantinesAndDropsMappings();
     void completedUploadAckIsReplayableAndInventoryBound();
+    void promotedUploadCancellationRemovesDiskAndRam();
     void receiverAcceptsRealWebpUpload();
     void receiverReportsDecodeFailureSeparatelyFromUploadCompletion();
     void terminalCleanupWaitsForBackgroundValidationReaders_data();
@@ -164,6 +165,7 @@ private slots:
     void receiverAdvertisementFailsClosedWhenCacheCannotInitialize();
     void receiverAdvertisementRetriesUncommittedLogicalQuarantine();
     void duplicateUploadClickIsIgnoredBeforeExplicitCancellation();
+    void uploadCompletionWaitsForDurableAck_data();
     void uploadCompletionWaitsForDurableAck();
     void queuedWriterCancellationNeverAcknowledgesStaleBytes();
     void protocolRunsTwoOutgoingSessionsConcurrently();
@@ -1000,6 +1002,89 @@ void UploadRemovalSecurityTest::completedUploadAckIsReplayableAndInventoryBound(
              QStringLiteral("upload_rejected"), 5000);
 }
 
+void UploadRemovalSecurityTest::promotedUploadCancellationRemovesDiskAndRam()
+{
+    QTemporaryDir cache;
+    QVERIFY(cache.isValid());
+    FileManager files;
+    UploadManager uploads(&files, nullptr, cache.path());
+    const QString sender(43, QLatin1Char('A'));
+    const QString session = QStringLiteral("90909090-1111-4111-8111-111111111111");
+    const QString uploadId = QStringLiteral("cancel-after-promotion");
+    const QString assetId = QStringLiteral("promoted-asset");
+    const RemoteCacheStore::Scope scope{sender, session, 1};
+    QImage image(512, 512, QImage::Format_ARGB32_Premultiplied);
+    image.fill(Qt::darkMagenta);
+    QByteArray bytes;
+    QBuffer buffer(&bytes);
+    QVERIFY(buffer.open(QIODevice::WriteOnly));
+    QVERIFY(image.save(&buffer, "PNG"));
+    const QString digest = QString::fromLatin1(
+        QCryptographicHash::hash(bytes, QCryptographicHash::Sha256).toHex());
+    const QString owner = UploadManager::residencyOwnerId(session, 1, digest);
+    auto command = [&](const QString& type) {
+        return QJsonObject{{"type", type}, {"protocolVersion", 12},
+            {"connectionGeneration", 3}, {"generation", 1},
+            {"ownerEndpointId", sender}, {"remoteSessionId", session},
+            {"uploadId", uploadId}};
+    };
+    QSignalSpy replies(&uploads, &UploadManager::uploadProtocolResponseReady);
+    QString promotedPath;
+    connect(&uploads, &UploadManager::uploadProtocolResponseReady, &uploads,
+            [&](const QJsonObject& response) {
+        if (response.value("type") != QLatin1String("upload_finished")) return;
+        promotedPath = files.getReceivedFilePath(scope, digest);
+        QVERIFY(!promotedPath.isEmpty());
+        QVERIFY(QFileInfo::exists(promotedPath));
+        // Cancellation is scoped to the authenticated original sender and connection.
+        QJsonObject foreign = command(QStringLiteral("upload_abort"));
+        foreign.insert("ownerEndpointId", QString(43, QLatin1Char('B')));
+        deliverIncoming(uploads, foreign);
+        QJsonObject stale = command(QStringLiteral("upload_abort"));
+        stale.insert("connectionGeneration", 2);
+        deliverIncoming(uploads, stale);
+        QCOMPARE(files.getReceivedFilePath(scope, digest), promotedPath);
+        QVERIFY(QFileInfo::exists(promotedPath));
+        // Reproduce the control/data-channel race: promotion already succeeded,
+        // while the sender has not received its final transfer acknowledgment.
+        deliverIncoming(uploads, command(QStringLiteral("upload_abort")));
+    });
+    QJsonObject start = command(QStringLiteral("upload_start"));
+    start.insert("files", QJsonArray{QJsonObject{{"assetId", assetId},
+        {"fileId", digest}, {"sha256", digest}, {"name", "cancel.png"},
+        {"extension", "png"}, {"size", bytes.size()},
+        {"mediaIds", QJsonArray{QStringLiteral("promoted-media")}}}});
+    deliverIncoming(uploads, start);
+    QJsonObject chunk = command(QStringLiteral("upload_chunk"));
+    chunk.insert("assetId", assetId);
+    chunk.insert("offset", 0);
+    chunk.insert("size", bytes.size());
+    chunk.insert("sha256", digest);
+    chunk.insert("data", QString::fromLatin1(bytes.toBase64()));
+    deliverIncoming(uploads, chunk);
+    QTRY_VERIFY_WITH_TIMEOUT(uploads.incomingFileReadersSettled(), 5000);
+    QJsonObject complete = command(QStringLiteral("upload_complete"));
+    complete.insert("assets", QJsonArray{QJsonObject{{"assetId", assetId},
+        {"offset", bytes.size()}, {"size", bytes.size()}, {"sha256", digest}}});
+    deliverIncoming(uploads, complete);
+    auto abortAckCount = [&] {
+        return std::count_if(replies.cbegin(), replies.cend(), [](const QList<QVariant>& row) {
+            return row.first().toJsonObject().value("type") == QLatin1String("upload_abort_ack");
+        });
+    };
+    QTRY_COMPARE_WITH_TIMEOUT(abortAckCount(), 1, 5000);
+    QVERIFY(!promotedPath.isEmpty());
+    QVERIFY(!QFileInfo::exists(promotedPath));
+    QVERIFY(files.getReceivedFilePath(scope, digest).isEmpty());
+    QVERIFY(!MediaResidencyManager::instance().asset(owner));
+    QVERIFY(!MediaResidencyManager::instance().ready(owner));
+    QVERIFY(uploads.incomingFileReadersSettled({session}));
+    QVERIFY(uploads.remoteCacheStore()->acceptsCommands(scope));
+    // Retrying cancellation acknowledges the already-clean result.
+    deliverIncoming(uploads, command(QStringLiteral("upload_abort")));
+    QCOMPARE(abortAckCount(), 2);
+}
+
 void UploadRemovalSecurityTest::receiverAcceptsRealWebpUpload()
 {
     QFile source(QString::fromUtf8(TEST_WEBP_FILE));
@@ -1560,17 +1645,33 @@ void UploadRemovalSecurityTest::duplicateUploadClickIsIgnoredBeforeExplicitCance
     QTRY_COMPARE_WITH_TIMEOUT(uploads.outgoingState(), UploadManager::OutgoingState::AwaitingTargetReady, 5000);
     QVERIFY(!uploads.toggleUpload(QVector<UploadFileInfo>{info}));
     QTRY_COMPARE_WITH_TIMEOUT(uploads.outgoingState(), UploadManager::OutgoingState::AwaitingTargetReady, 5000);
+    QSignalSpy cancelled(&uploads, &UploadManager::uploadCancelled);
+    QVERIFY(uploads.canRequestCancel());
     uploads.requestCancel();
-    QTRY_COMPARE_WITH_TIMEOUT(uploads.outgoingState(), UploadManager::OutgoingState::AwaitingTargetReady, 5000);
-
-    QTest::qWait(1050);
+    QCOMPARE(uploads.outgoingState(), UploadManager::OutgoingState::Idle);
+    QCOMPARE(cancelled.count(), 1);
+    QVERIFY(!uploads.isBusy());
+    QVERIFY(uploads.currentUploadId().isEmpty());
     uploads.requestCancel();
-    QCOMPARE(uploads.outgoingState(), UploadManager::OutgoingState::Cancelling);
+    QCOMPARE(cancelled.count(), 1);
     socket.disconnect();
+}
+
+void UploadRemovalSecurityTest::uploadCompletionWaitsForDurableAck_data()
+{
+    QTest::addColumn<QString>("outcome");
+    QTest::addColumn<int>("assetCount");
+    QTest::newRow("one-ready") << QStringLiteral("ready") << 1;
+    QTest::newRow("all-ready") << QStringLiteral("ready") << 2;
+    QTest::newRow("mixed-failure") << QStringLiteral("failed") << 2;
+    QTest::newRow("insufficient-ram") << QStringLiteral("capacity_insufficient") << 2;
+    QTest::newRow("cancel-during-ram") << QStringLiteral("cancelled") << 2;
 }
 
 void UploadRemovalSecurityTest::uploadCompletionWaitsForDurableAck()
 {
+    QFETCH(QString, outcome);
+    QFETCH(int, assetCount);
     QWebSocketServer server(QStringLiteral("upload-durable-barrier-test"),
                             QWebSocketServer::NonSecureMode);
     QVERIFY(server.listen(QHostAddress::LocalHost, 0));
@@ -1694,10 +1795,23 @@ void UploadRemovalSecurityTest::uploadCompletionWaitsForDurableAck()
         QStringLiteral("png"), QFileInfo(sourcePath).size()
     };
 
+    QVector<UploadFileInfo> uploadFiles{file};
+    if (assetCount > 1) {
+        const QString secondPath = QDir(sources.path()).filePath(QStringLiteral("durable-second.png"));
+        image.fill(Qt::yellow);
+        QVERIFY(image.save(secondPath));
+        const QString secondFileId = files.getOrCreateFileId(secondPath);
+        const QString secondMediaId = QStringLiteral("30303030-5555-4666-8777-888899990000");
+        QVERIFY(secondFileId != fileId);
+        files.associateMediaWithFile(secondMediaId, secondFileId);
+        uploadFiles.append({secondFileId, secondMediaId, secondPath,
+            QStringLiteral("durable-second.png"), QStringLiteral("png"), QFileInfo(secondPath).size()});
+    }
+
     UploadManager uploads(&files);
     uploads.setWebSocketClient(&socket);
     uploads.setTargetClientId(targetEndpointId);
-    QVERIFY(uploads.toggleUpload({file}));
+    QVERIFY(uploads.toggleUpload(uploadFiles));
     QTRY_VERIFY_WITH_TIMEOUT(std::any_of(
         clientMessages.cbegin(), clientMessages.cend(), [](const QJsonObject& message) {
             return message.value("type").toString() == QLatin1String("upload_start");
@@ -1708,18 +1822,29 @@ void UploadRemovalSecurityTest::uploadCompletionWaitsForDurableAck()
         });
     QVERIFY(startIt != clientMessages.cend());
     const QString uploadId = startIt->value("uploadId").toString();
-    const QJsonObject manifest = startIt->value("files").toArray().at(0).toObject();
-    const QJsonObject zeroState{
-        {"assetId", manifest.value("assetId")}, {"offset", 0},
-        {"size", manifest.value("size")}, {"sha256", manifest.value("sha256")},
-    };
+    const QJsonArray manifests = startIt->value("files").toArray();
+    QCOMPARE(manifests.size(), assetCount);
+    QJsonArray zeroStates;
+    QJsonArray fullStates;
+    qint64 totalBytes = 0;
+    for (const auto& value : manifests) {
+        const auto manifest = value.toObject();
+        QJsonObject state{
+            {"assetId", manifest.value("assetId")}, {"offset", 0},
+            {"size", manifest.value("size")}, {"sha256", manifest.value("sha256")},
+        };
+        zeroStates.append(state);
+        state.insert("offset", manifest.value("size"));
+        fullStates.append(state);
+        totalBytes += manifest.value("size").toInteger();
+    }
     QJsonObject ready{{"type", "upload_ready"}, {"uploadId", uploadId}};
-    ready.insert("assets", QJsonArray{zeroState});
+    ready.insert("assets", zeroStates);
     sendServerMessage(ready);
-    QTRY_VERIFY_WITH_TIMEOUT(std::any_of(
+    QTRY_VERIFY_WITH_TIMEOUT(std::count_if(
         clientMessages.cbegin(), clientMessages.cend(), [](const QJsonObject& message) {
             return message.value("type").toString() == QLatin1String("upload_chunk");
-        }), 1000);
+        }) >= assetCount, 1000);
 
     QCOMPARE(uploads.sourceUploadStatus(targetEndpointId, fileId).state,
              UploadManager::SourceUploadStatus::Uploading);
@@ -1733,14 +1858,11 @@ void UploadRemovalSecurityTest::uploadCompletionWaitsForDurableAck()
             return message.value("type").toString() == QLatin1String("upload_complete");
         }));
 
-    QJsonObject fullState = zeroState;
-    fullState.insert("offset", manifest.value("size"));
     QJsonObject progress{
         {"type", "upload_progress"}, {"uploadId", uploadId},
-        {"durableBytes", manifest.value("size")},
-        {"totalSize", manifest.value("size")},
+        {"durableBytes", totalBytes}, {"totalSize", totalBytes},
     };
-    progress.insert("assets", QJsonArray{fullState});
+    progress.insert("assets", fullStates);
     sendServerMessage(progress);
     QTRY_VERIFY_WITH_TIMEOUT(std::any_of(
         clientMessages.cbegin(), clientMessages.cend(), [](const QJsonObject& message) {
@@ -1748,11 +1870,107 @@ void UploadRemovalSecurityTest::uploadCompletionWaitsForDurableAck()
         }), 1000);
 
     QSignalSpy uploadFinished(&uploads, &UploadManager::uploadFinished);
+    QSignalSpy ramFailed(&uploads, &UploadManager::uploadRamFailed);
+    QSignalSpy cancelled(&uploads, &UploadManager::uploadCancelled);
     QJsonObject finished{{"type", "upload_finished"}, {"uploadId", uploadId}};
-    finished.insert("assets", QJsonArray{fullState});
+    finished.insert("assets", fullStates);
     sendServerMessage(finished);
+    QTRY_VERIFY_WITH_TIMEOUT(uploads.isLoadingInRam(), 1000);
+    QCOMPARE(uploadFinished.count(), 0);
+    QVERIFY(uploads.isBusy());
+    QVERIFY(uploads.canRequestCancel());
+    QCOMPARE(uploads.ramFilesCompleted(), 0);
+    QCOMPARE(uploads.ramFilesTotal(), assetCount);
+    for (const auto& source : uploadFiles) {
+        QVERIFY(!files.isFileUploadedToClient(source.fileId, targetEndpointId));
+        QCOMPARE(uploads.sourceUploadStatus(targetEndpointId, source.fileId).state,
+                 UploadManager::SourceUploadStatus::Uploading);
+    }
+
+    auto residencyRow = [&](int index, const QString& state) {
+        const auto manifest = manifests.at(index).toObject();
+        return QJsonObject{{"assetId", manifest.value("assetId")}, {"uploadId", uploadId},
+            {"sha256", manifest.value("sha256")}, {"state", state},
+            {"progress", state == QLatin1String("ready") ? 1 : 0},
+            {"error", state == QLatin1String("failed") ? QStringLiteral("decode failed") : QString()}};
+    };
+    const bool expectRamFailure = outcome == QLatin1String("failed")
+        || outcome == QLatin1String("capacity_insufficient");
+    const QString firstState = expectRamFailure ? outcome : QStringLiteral("ready");
+    sendServerMessage({{"type", "media_residency"}, {"sequence", 1},
+        {"assets", QJsonArray{residencyRow(0, firstState)}}});
+    if (assetCount > 1) {
+        QTRY_COMPARE_WITH_TIMEOUT(uploads.ramFilesCompleted(), 1, 1000);
+        QVERIFY(uploads.isLoadingInRam());
+        QVERIFY(uploads.isBusy());
+        QCOMPARE(uploadFinished.count(), 0);
+        QCOMPARE(ramFailed.count(), 0); // Every asset must settle, even after one fails.
+        if (outcome == QLatin1String("cancelled")) {
+            uploads.requestCancel();
+            QCOMPARE(cancelled.count(), 1);
+            QCOMPARE(cancelled.first().first().toString(), uploadId);
+            QVERIFY(!uploads.isBusy());
+            QVERIFY(!uploads.isLoadingInRam());
+            QVERIFY(uploads.currentUploadId().isEmpty());
+            for (const auto& source : uploadFiles)
+                QVERIFY(!files.isFileUploadedToClient(source.fileId, targetEndpointId));
+            QTRY_VERIFY_WITH_TIMEOUT(std::any_of(clientMessages.cbegin(), clientMessages.cend(),
+                [&](const QJsonObject& message) {
+                    return message.value("type") == QLatin1String("upload_abort")
+                        && message.value("uploadId").toString() == uploadId;
+                }), 1000);
+            // A report already in flight cannot resurrect the cancelled batch.
+            sendServerMessage({{"type", "media_residency"}, {"sequence", 2},
+                {"assets", QJsonArray{residencyRow(0, "ready"), residencyRow(1, "ready")}}});
+            QTest::qWait(50);
+            QCOMPARE(uploadFinished.count(), 0);
+            QCOMPARE(ramFailed.count(), 0);
+            for (const auto& source : uploadFiles) {
+                QVERIFY(!files.isFileUploadedToClient(source.fileId, targetEndpointId));
+                QCOMPARE(uploads.sourceUploadStatus(targetEndpointId, source.fileId).state,
+                         UploadManager::SourceUploadStatus::NotUploaded);
+            }
+            for (const auto& manifest : manifests)
+                QVERIFY(!uploads.remoteMediaReady(targetEndpointId,
+                    manifest.toObject().value("sha256").toString()));
+            socket.disconnect();
+            return;
+        }
+        // Delta reports must merge with the first terminal asset, including failures.
+        sendServerMessage({{"type", "media_residency"}, {"sequence", 2}, {"delta", true},
+            {"assets", QJsonArray{residencyRow(1, "ready")}}});
+    }
+    if (expectRamFailure) {
+        QTRY_COMPARE_WITH_TIMEOUT(ramFailed.count(), 1, 1000);
+        QCOMPARE(ramFailed.first().first().toString(), uploadId);
+        QCOMPARE(ramFailed.first().at(1).toInt(), 1);
+        QCOMPARE(uploadFinished.count(), 0);
+        QVERIFY(!uploads.isBusy());
+        QVERIFY(!uploads.isLoadingInRam());
+        const QString failedSha = manifests.first().toObject().value("sha256").toString();
+        const QString readySha = manifests.last().toObject().value("sha256").toString();
+        QVERIFY(!uploads.remoteMediaReady(targetEndpointId, failedSha));
+        QVERIFY(uploads.remoteMediaReady(targetEndpointId, readySha));
+        for (const auto& source : uploadFiles) {
+            const bool sourceFailed = source.fileId == failedSha;
+            QCOMPARE(files.isFileUploadedToClient(source.fileId, targetEndpointId), !sourceFailed);
+            QCOMPARE(uploads.sourceUploadStatus(targetEndpointId, source.fileId).state,
+                     sourceFailed ? UploadManager::SourceUploadStatus::NotUploaded
+                                  : UploadManager::SourceUploadStatus::Uploaded);
+        }
+        socket.disconnect();
+        return;
+    }
     QTRY_COMPARE_WITH_TIMEOUT(uploadFinished.count(), 1, 1000);
+    QVERIFY(!uploads.isBusy());
+    QVERIFY(!uploads.isLoadingInRam());
     QVERIFY(uploads.hasActiveUpload());
+    if (assetCount > 1) {
+        for (const auto& source : uploadFiles)
+            QVERIFY(files.isFileUploadedToClient(source.fileId, targetEndpointId));
+        socket.disconnect();
+        return;
+    }
     QVERIFY(files.isFileUploadedToClient(fileId, targetEndpointId));
     QCOMPARE(uploads.sourceUploadStatus(targetEndpointId, fileId).state,
              UploadManager::SourceUploadStatus::Uploaded);

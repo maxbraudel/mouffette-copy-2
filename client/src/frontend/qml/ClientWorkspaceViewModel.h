@@ -57,6 +57,7 @@ class ClientWorkspaceViewModel : public QObject
     Q_PROPERTY(QUrl uploadActionIcon READ uploadActionIcon NOTIFY actionStateChanged)
     Q_PROPERTY(UploadState uploadState READ uploadState NOTIFY actionStateChanged)
     Q_PROPERTY(bool uploadActionEnabled READ uploadActionEnabled NOTIFY actionStateChanged)
+    Q_PROPERTY(bool uploadCancelAvailable READ uploadCancelAvailable NOTIFY actionStateChanged)
     Q_PROPERTY(QString uploadUnavailableReason READ uploadUnavailableReason NOTIFY actionStateChanged)
     Q_PROPERTY(int uploadActionTone READ uploadActionTone NOTIFY actionStateChanged)
 
@@ -69,6 +70,7 @@ public:
         Preparing,
         Uploading,
         Finalizing,
+        LoadingInRam,
         Cancelling,
         Uploaded,
         Removing
@@ -132,6 +134,7 @@ public:
     QUrl uploadActionIcon() const;
     UploadState uploadState() const;
     bool uploadActionEnabled() const;
+    bool uploadCancelAvailable() const;
     QString uploadUnavailableReason() const;
     int uploadActionTone() const;
 
