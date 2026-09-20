@@ -159,8 +159,63 @@ const uploadId = 'upload-1';
     assert.equal(context.server.uploads.has(uploadId), false);
     assert.equal(context.server.uploadTombstones.get(uploadId).status, 'aborted');
     assert.equal(context.server.sessionAssets.has(context.session.remoteSessionId), false);
+    assert.deepEqual(context.session.mediaResidency.assets, [],
+        'cancellation removes early RAM progress for the aborted attempt');
+    assert.equal(context.session.mediaResidency.sequence, 1,
+        'cancellation retains the ordering fence for subsequent attempts');
     assert.equal(messages(context.target.ws, 'upload_abort').length, 1);
     assert.equal(messages(context.owner.ws, 'upload_finished').length, 0);
+}
+
+// Replacing a previously ready file starts a new RAM attempt. Its byte/hash
+// identity alone must not carry readiness across upload attempts, and early
+// control-channel readiness for the new attempt survives its data-channel ACK.
+{
+    const context = setup();
+    const asset = file();
+    context.server.sessionAssets.set(context.session.remoteSessionId, new Map([
+        [asset.assetId, { ...asset, uploadId: 'previous-upload' }],
+    ]));
+    context.server.handleMessage('target-connection', envelope(context.session, {
+        type: 'media_residency', sequence: 1, assets: [{
+            assetId: asset.assetId, sha256: asset.sha256, uploadId: 'previous-upload',
+            state: 'ready', progress: 1, error: '',
+        }],
+    }));
+    assert.equal(context.server.sceneMemoryReady(context.session, [asset]), true);
+    const transport = startUpload(context, 'replacement-upload', asset);
+    assert.equal(context.server.sceneMemoryReady(context.session, [asset]), false,
+        'same asset ID/hash does not prove the replacement is loaded in RAM');
+    context.server.handleMessage('target-connection', envelope(context.session, {
+        type: 'media_residency', sequence: 2, assets: [{
+            assetId: asset.assetId, sha256: asset.sha256, uploadId: 'previous-upload',
+            state: 'ready', progress: 1, error: '',
+        }],
+    }));
+    assert.equal(messages(context.target.ws, 'error').at(-1).code, 'invalid_media_residency');
+    assert.equal(context.server.sceneMemoryReady(context.session, [asset]), false,
+        'a delayed old decode callback cannot restore readiness during replacement');
+    context.server.handleMessage('target-connection', envelope(context.session, {
+        type: 'upload_ready', uploadId: 'replacement-upload',
+        assets: [assetState(asset, asset.size)],
+    }));
+    context.server.handleMessage('owner-connection', envelope(context.session, {
+        type: 'upload_complete', uploadId: 'replacement-upload',
+        assets: [assetState(asset, asset.size)],
+    }), transport);
+    context.server.handleMessage('target-connection', envelope(context.session, {
+        type: 'media_residency', sequence: 2, assets: [{
+            assetId: asset.assetId, sha256: asset.sha256, uploadId: 'replacement-upload',
+            state: 'ready', progress: 1, error: '',
+        }],
+    }));
+    context.server.handleMessage('target-connection', envelope(context.session, {
+        type: 'upload_finished', uploadId: 'replacement-upload',
+        assets: [assetState(asset, asset.size)],
+    }));
+    assert.equal(context.server.uploads.has('replacement-upload'), false);
+    assert.equal(context.server.sceneMemoryReady(context.session, [asset]), true,
+        'committing the exact upload preserves its early RAM readiness');
 }
 
 // Eight transfers share one adaptive recipient window capped at 256 KiB. Further senders
@@ -668,6 +723,79 @@ const uploadId = 'upload-1';
     const abort = messages(context.target.ws, 'upload_abort').at(-1);
     assert.equal(abort.connectionGeneration, 1,
         'the recipient generation must not overwrite the upload owner/source generation');
+}
+
+// A lease expiry while the target decodes a committed file closes every media
+// lifecycle. Late data/control callbacks cannot restore it, and cleanup frees
+// the same owner/target pair for a fresh upload of that exact file.
+for (const state of ['decoding', 'ready']) {
+    const context = setup();
+    const { server, session, owner, target } = context;
+    let now = session.createdAt;
+    server.remoteSessions.now = () => now;
+    const transport = startUpload(context, 'before-timeout');
+    server.handleMessage('target-connection', envelope(session, {
+        type: 'upload_ready', uploadId: 'before-timeout', assets: [assetState(file(), 128)],
+    }));
+    server.handleMessage('owner-connection', envelope(session, {
+        type: 'upload_complete', uploadId: 'before-timeout', assets: [assetState(file(), 128)],
+    }), transport);
+    server.handleMessage('target-connection', envelope(session, {
+        type: 'upload_finished', uploadId: 'before-timeout', assets: [assetState(file(), 128)],
+    }));
+    const residency = {
+        assetId: file().assetId, sha256: file().sha256, uploadId: 'before-timeout',
+        state, progress: state === 'ready' ? 1 : 0.5, error: '',
+    };
+    server.handleMessage('target-connection', envelope(session, {
+        type: 'media_residency', sequence: 1, assets: [residency],
+    }));
+    assert.equal(session.mediaResidency.assets[0].state, state);
+    startUpload(context, 'in-flight-at-timeout', file('other-asset', 'b'.repeat(64), 'other-media'));
+
+    now += server.remoteSessions.leaseTimeoutMs;
+    server.sweepRemoteSessionLeases(now);
+    assert.equal(session.phase, 'CleanupPending');
+    assert.equal(session.mediaResidency, undefined);
+    assert.equal(server.uploads.size, 0);
+    assert.equal(session.activeUploadIds.size, 0);
+    assert.equal(server.recipientUploadWindows.has('B'), false);
+    assert.equal(server.remoteSessions.open({
+        ownerEndpointId: 'A', targetEndpointId: 'B',
+        ownerRuntimeId: 'runtime-A', targetRuntimeId: 'runtime-B',
+    }).error, 'session_cleanup_pending', 'new admission waits for target cleanup proof');
+    const residencyCount = messages(owner.ws, 'media_residency').length;
+    server.handleMessage('target-connection', envelope(session, {
+        type: 'media_residency', sequence: 2,
+        assets: [{ ...residency, state: 'ready', progress: 1 }],
+    }));
+    server.handleMessage('target-connection', envelope(session, {
+        type: 'upload_finished', uploadId: 'in-flight-at-timeout',
+        assets: [assetState(file('other-asset', 'b'.repeat(64), 'other-media'), 128)],
+    }));
+    assert.equal(messages(owner.ws, 'media_residency').length, residencyCount);
+    assert.equal(session.mediaResidency, undefined);
+    assert.equal(server.sessionAssets.get(session.remoteSessionId).size, 1);
+    server.handleMessage('target-connection', envelope(session, {
+        type: 'remote_session_teardown_ack', teardownId: session.teardownId,
+        result: 'committed', sceneStopped: true, uploadsAborted: true,
+        cacheQuarantined: true, removedFileCount: 1,
+    }));
+    assert.equal(session.phase, 'Closed');
+    assert.equal(server.sessionAssets.has(session.remoteSessionId), false);
+    assert.equal(server.uploadTombstones.has('before-timeout'), false);
+    const reopened = server.remoteSessions.open({
+        ownerEndpointId: 'A', targetEndpointId: 'B',
+        ownerRuntimeId: 'runtime-A', targetRuntimeId: 'runtime-B',
+    });
+    assert.equal(reopened.ok, true);
+    context.session = reopened.session;
+    context.session.serverBootId = server.serverBootId;
+    startUpload(context, 'after-timeout');
+    assert.equal(server.uploads.has('after-timeout'), true);
+    assert.equal(messages(target.ws, 'upload_start').at(-1).uploadId, 'after-timeout');
+    assert.equal(server.sceneMemoryReady(context.session, [file()]), false,
+        'a fresh session cannot inherit readiness from its timed-out predecessor');
 }
 
 console.log('upload protocol v12 tests passed');

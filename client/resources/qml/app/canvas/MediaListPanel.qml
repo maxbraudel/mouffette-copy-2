@@ -95,9 +95,10 @@ Rectangle {
                         required property var modelData
                         readonly property bool textMedia: mediaType === "text"
                         readonly property bool uploadedAndCached: uploadState === "uploaded" && !!modelData.remoteCached
+                        // Losing a cache acknowledgement (session close, unload,
+                        // failure) is not evidence of an active RAM load.
                         readonly property bool awaitingRemoteCache: !uploadedAndCached
-                            && (uploadState === "uploaded"
-                                || (uploadState === "uploading" && modelData.uploadProgress >= 100))
+                            && !!modelData.remoteLoadingInRam
                         readonly property bool showProgress: uploadState === "uploading" || awaitingRemoteCache
                         readonly property string statusText: uploadedAndCached ? "Uploaded and Cached"
                             : uploadState === "uploaded" ? "Uploaded" : "Not uploaded"
@@ -184,6 +185,7 @@ Rectangle {
                                             : parent.width * Math.max(0, Math.min(100, row.modelData.uploadProgress || 0)) / 100
                                         color: Theme.mediaProgress
                                         SequentialAnimation on opacity {
+                                            objectName: "mediaCachePulse_" + row.index
                                             running: row.awaitingRemoteCache && progressFill.visible
                                             loops: Animation.Infinite
                                             onRunningChanged: if (!running) progressFill.opacity = 1

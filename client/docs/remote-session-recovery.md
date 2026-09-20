@@ -156,9 +156,12 @@ acknowledgements retry after reconciliation. Before COMMIT, participants refresh
 their clock agreement. After COMMIT, the original decision and schedule remain
 immutable; a start missed beyond the allowed tolerance ends explicitly. STOP and
 cleanup remain possible. At expiration each participant revokes the session
-locally even when the server is unreachable and stops the renderer. Uncancelled
-runtime upload requests may bind to a new authenticated session using new upload
-IDs and retained durable bytes. Recovery of selection never restarts an old scene.
+locally even when the server is unreachable and stops the renderer. Terminal
+cleanup cancels that session's upload requests and RAM waits, clears remote
+inventory, and fences late callbacks. This also applies immediately at the local
+inactivity deadline, before the server confirms CLOSE. A fresh Upload action in
+a new authenticated session may reuse eligible retained bytes. Recovery of
+selection never restarts an old upload or scene.
 
 ## Reconciliation, replay and command fencing
 

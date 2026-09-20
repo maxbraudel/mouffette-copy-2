@@ -120,6 +120,13 @@ for (const forgetUploadResult of [false, true]) {
         uploadId: 'previous-upload', sha256: 'b'.repeat(64), fileId: 'b'.repeat(64) };
     const inventory = context.server.sessionAssets.get(context.session.remoteSessionId);
     inventory.set(previous.assetId, previous);
+    context.server.handleMessage('target-connection', envelope(context, {
+        type: 'media_residency', sequence: 7,
+        assets: [context.asset, previous].map(asset => ({
+            assetId: asset.assetId, sha256: asset.sha256, uploadId: asset.uploadId,
+            state: 'ready', progress: 1, error: '',
+        })),
+    }));
     if (forgetUploadResult) context.server.uploadTombstones.clear();
     const abort = () => envelope(context, {
         type: 'upload_abort', uploadId: context.asset.uploadId, reason: 'User cancelled',
@@ -155,6 +162,12 @@ for (const forgetUploadResult of [false, true]) {
     assert.equal(inventory.has(context.asset.assetId), false);
     assert.equal(inventory.has(previous.assetId), true,
         'earlier completed incremental uploads must survive cancellation');
+    assert.equal(context.server.sceneMemoryReady(context.session, [context.asset]), false,
+        'committed removal also invalidates the old RAM readiness');
+    assert.equal(context.server.sceneMemoryReady(context.session, [previous]), true,
+        'unrelated uploaded media keep their residency');
+    assert.equal(context.session.mediaResidency.sequence, 7,
+        'removal retains the sequence fence against delayed snapshots');
     context.server.handleMessage('owner-connection', abort());
     assert.equal(context.server.pendingAssetRemovals.size, 0);
     assert.equal(messages(context.owner, 'upload_aborted').at(-1).connectionGeneration, 1);

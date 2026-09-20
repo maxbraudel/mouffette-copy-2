@@ -307,11 +307,12 @@ ClientWorkspaceController::workspaceForActiveUpload() {
 
 ClientWorkspaceController::ClientWorkspace*
 ClientWorkspaceController::workspaceForUploadId(const QString& uploadId) {
-    if (!uploadId.isEmpty()) {
-        const QString identity = m_runtime->uploadWorkspaceByUploadId(uploadId);
-        if (!identity.isEmpty()) {
-            if (ClientWorkspace* workspace = findWorkspace(identity)) return workspace;
-        }
-    }
-    return workspaceForActiveUpload();
+    if (uploadId.isEmpty()) return workspaceForActiveUpload();
+    const QString identity = m_runtime->uploadWorkspaceByUploadId(uploadId);
+    if (identity.isEmpty()) return nullptr;
+    ClientWorkspace* workspace = findWorkspace(identity);
+    // A delayed terminal signal from a closed session must not finish or
+    // clear a replacement upload, including one targeting the same workspace.
+    return workspace && workspace->upload.activeUploadId == uploadId
+        ? workspace : nullptr;
 }

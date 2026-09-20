@@ -67,6 +67,7 @@ private slots:
     void mediaActionPalette_data();
     void mediaActionPalette();
     void mediaRowsAndProgress();
+    void mediaRamProgressRequiresActiveOperation();
     void sourceRowsDeduplicateAndKeepEndpointState();
     void sourceAssociationsCommitAtomically();
     void timelineFragmentsPreserveSourceReferences();
@@ -966,10 +967,9 @@ void MediaOverlayTest::mediaPanelVisibilityAnchorInteractionAndScroll()
         auto* progress = findVisualItem(panel, QStringLiteral("mediaProgress_0"));
         auto* fill = findVisualItem(panel, QStringLiteral("mediaProgressFill_0"));
         QVERIFY(status && progress && fill);
-        QTRY_COMPARE(status->isVisible(), cached);
-        QCOMPARE(progress->isVisible(), !cached);
-        if (!cached) QCOMPARE(fill->width(), progress->width());
-        else QCOMPARE(fill->opacity(), 1.0);
+        QTRY_VERIFY(status->isVisible());
+        QVERIFY(!progress->isVisible());
+        QCOMPARE(fill->opacity(), 1.0);
         QTRY_COMPARE(status->property("text").toString(), cached
             ? QStringLiteral("Uploaded and Cached") : QStringLiteral("Uploaded"));
         QCOMPARE(status->property("color").value<QColor>(),
@@ -1298,14 +1298,9 @@ void MediaOverlayTest::mediaRowsAndProgress()
     }
     photo->setUploadUploaded();
     QTRY_COMPARE(fill->width(), progress->width());
-    QVERIFY(progress->isVisible());
-    QVERIFY(!status->isVisible());
-    // Verify both pulse extrema, allowing two full 1400 ms cycles for native
-    // compositor scheduling at either scale factor. A frozen pulse still fails.
-    QTRY_VERIFY_WITH_TIMEOUT(fill->opacity() < 0.6, 3000);
-    if (!artifactDir.isEmpty())
-        QVERIFY(window.grabWindow().save(QDir(artifactDir).filePath(QStringLiteral("media-overlay-caching.png"))));
-    QTRY_VERIFY_WITH_TIMEOUT(fill->opacity() > 0.95, 3000);
+    QVERIFY(!progress->isVisible());
+    QVERIFY(status->isVisible());
+    QCOMPARE(status->property("text").toString(), QStringLiteral("Uploaded"));
     QCOMPARE(row->height(), originalHeight);
     host->document()->select(text->mediaId());
     const QPoint clickPoint = row->mapToScene({row->width() / 2, row->height() / 2}).toPoint();
@@ -1322,6 +1317,75 @@ void MediaOverlayTest::mediaRowsAndProgress()
     host->document()->clear();
     QTRY_VERIFY(!panel->isVisible());
     QTRY_COMPARE(panel->height(), panel->property("actionAreaHeight").toReal());
+}
+
+void MediaOverlayTest::mediaRamProgressRequiresActiveOperation()
+{
+    QQmlEngine engine;
+    QQuickWindow window;
+    window.resize(640, 480);
+    MediaListModel model;
+    QString error;
+    std::unique_ptr<QQuickItem> harness(createMediaPanelHarness(engine, window, &model, &error));
+    QVERIFY2(harness, qPrintable(error));
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    harness->setSize(window.size());
+    harness->setProperty("testMediaCount", 1);
+    QVariantMap source{{"rowKey", "source"}, {"displayName", "Source"},
+                       {"mediaType", "image"}, {"uploadState", "uploaded"},
+                       {"uploadProgress", 100}, {"remoteCached", false}};
+    model.updateFromList({source});
+    auto* row = findVisualItem(harness.get(), "mediaRow_0");
+    auto* status = findVisualItem(harness.get(), "mediaStatus_0");
+    auto* progress = findVisualItem(harness.get(), "mediaProgress_0");
+    auto* fill = findVisualItem(harness.get(), "mediaProgressFill_0");
+    QVERIFY(row && status && progress && fill);
+    auto* pulse = fill->findChild<QObject*>("mediaCachePulse_0");
+    QVERIFY(pulse);
+
+    // An uploaded ledger entry without current cache evidence must stay idle.
+    QVERIFY(status->isVisible());
+    QVERIFY(!progress->isVisible());
+    QVERIFY(!row->property("awaitingRemoteCache").toBool());
+    QVERIFY(!pulse->property("running").toBool());
+    source.insert("remoteLoadingInRam", true);
+    model.updateFromList({source});
+    QTRY_VERIFY(progress->isVisible());
+    QVERIFY(!status->isVisible());
+    QVERIFY(row->property("awaitingRemoteCache").toBool());
+    QCOMPARE(fill->width(), progress->width());
+    QVERIFY(pulse->property("running").toBool());
+
+    // Closing or failing the load stops the pulse even if an uploaded marker
+    // and 100% transfer progress were still published before inventory clears.
+    source.insert("remoteLoadingInRam", false);
+    model.updateFromList({source});
+    QTRY_VERIFY(status->isVisible());
+    QVERIFY(!progress->isVisible());
+    QVERIFY(!pulse->property("running").toBool());
+    QCOMPARE(fill->opacity(), 1.0);
+    source.insert("uploadState", "not_uploaded");
+    source.insert("uploadProgress", 0);
+    model.updateFromList({source});
+    QCOMPARE(status->property("text").toString(), QStringLiteral("Not uploaded"));
+    QVERIFY(!progress->isVisible());
+
+    // A subsequent upload creates a fresh operation and can complete normally.
+    source.insert("uploadState", "uploading");
+    source.insert("uploadProgress", 100);
+    source.insert("remoteLoadingInRam", true);
+    model.updateFromList({source});
+    QVERIFY(progress->isVisible());
+    QVERIFY(row->property("awaitingRemoteCache").toBool());
+    source.insert("uploadState", "uploaded");
+    source.insert("remoteCached", true);
+    source.insert("remoteLoadingInRam", false);
+    model.updateFromList({source});
+    QVERIFY(status->isVisible());
+    QVERIFY(!progress->isVisible());
+    QCOMPARE(status->property("text").toString(), QStringLiteral("Uploaded and Cached"));
+    QCOMPARE(findVisualItem(harness.get(), "mediaRow_0"), row);
 }
 
 void MediaOverlayTest::sourceRowsDeduplicateAndKeepEndpointState()
@@ -1379,6 +1443,8 @@ void MediaOverlayTest::sourceRowsDeduplicateAndKeepEndpointState()
     files.markFileUploadedToClient(fileId, QStringLiteral("endpoint-a"));
     emit uploads.uiStateChanged();
     QCOMPARE(sourceRow(fileId).value(QStringLiteral("uploadState")).toString(), QStringLiteral("uploaded"));
+    QVERIFY(!sourceRow(fileId).value(QStringLiteral("remoteCached")).toBool());
+    QVERIFY(!sourceRow(fileId).value(QStringLiteral("remoteLoadingInRam")).toBool());
     auto* modelB = qobject_cast<MediaListModel*>(sessionB.mediaModel());
     QVERIFY(modelB);
     QCOMPARE(modelB->data(modelB->index(0), MediaListModel::UploadStateRole).toString(), QStringLiteral("not_uploaded"));

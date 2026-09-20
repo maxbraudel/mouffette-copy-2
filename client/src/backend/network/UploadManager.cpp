@@ -760,30 +760,21 @@ void UploadManager::setWebSocketClient(WebSocketClient* client) {
             terminateRemoteSessionUpload(id, QStringLiteral("Remote session recovery expired"));
             beginIncomingFileReaderTeardown({id});
         }));
+    m_webSocketConnections.append(connect(client, &WebSocketClient::remoteSessionAbsent,
+        this, [this](const QString& id, quint64) {
+            terminateRemoteSessionUpload(id, QStringLiteral("session_authoritatively_absent"));
+            beginIncomingFileReaderTeardown({id});
+        }));
     m_webSocketConnections.append(connect(client, &WebSocketClient::sessionsInvalidated,
         this, [this](const QString& reason, const QString&, quint64) {
-            QSet<QString> ids;
-            if (!m_outgoingRemoteSessionId.isEmpty()) ids.insert(m_outgoingRemoteSessionId);
-            for (const auto* transfer : std::as_const(m_parallelOutgoingByUpload))
-                if (transfer) ids.insert(transfer->remoteSessionId);
-            for (const QString& id : ids) terminateRemoteSessionUpload(id, reason);
+            terminateAllRemoteSessionUploads(reason);
             beginTerminalIncomingCleanup(reason);
             emit terminalIncomingCleanupRequired(reason);
         }));
     m_webSocketConnections.append(connect(
         client, &WebSocketClient::leaseExpired,
         this, [this](const QString&, quint64) {
-            QSet<QString> outgoingSessions;
-            if (!m_outgoingRemoteSessionId.isEmpty()) {
-                outgoingSessions.insert(m_outgoingRemoteSessionId);
-            }
-            for (ParallelOutgoingTransfer* transfer : m_parallelOutgoingByUpload) {
-                if (transfer) outgoingSessions.insert(transfer->remoteSessionId);
-            }
-            for (const QString& sessionId : outgoingSessions) {
-                terminateRemoteSessionUpload(
-                    sessionId, QStringLiteral("Remote session lease expired"));
-            }
+            terminateAllRemoteSessionUploads(QStringLiteral("lease_expired"));
             beginTerminalIncomingCleanup(QStringLiteral("lease_expired"));
             emit terminalIncomingCleanupRequired(
                 QStringLiteral("lease_expired"));
@@ -791,6 +782,7 @@ void UploadManager::setWebSocketClient(WebSocketClient* client) {
     m_webSocketConnections.append(connect(
         client, &WebSocketClient::serverRestarted,
         this, [this](const QString&, const QString&) {
+            terminateAllRemoteSessionUploads(QStringLiteral("server_restart"));
             beginTerminalIncomingCleanup(QStringLiteral("server_restart"));
             emit terminalIncomingCleanupRequired(
                 QStringLiteral("server_restart"));
@@ -875,7 +867,8 @@ bool UploadManager::remoteMediaReady(const QString& target, const QString& sha25
 {
     if (!m_ws) return false;
     const auto binding = m_ws->sceneRunCoordinator()->sessionForPeer(target);
-    if (m_cancelledRemoteAssets.value(binding.remoteSessionId).contains(sha256)) return false;
+    if (m_uploadScheduler->isSessionTerminal(binding.remoteSessionId)
+        || m_cancelledRemoteAssets.value(binding.remoteSessionId).contains(sha256)) return false;
     const auto report = m_remoteResidency.value(binding.remoteSessionId);
     if ((binding.phase != QLatin1String("Active") && binding.phase != QLatin1String("Grace")) || report.value(QStringLiteral("generation")).toInteger()
         != binding.generation) return false;
@@ -905,6 +898,7 @@ UploadManager::SourceUploadStatus UploadManager::sourceUploadStatus(
             result.state = ram->settledAssets.contains(asset.assetId)
                 ? SourceUploadStatus::Uploaded : SourceUploadStatus::Uploading;
             result.progress = 100;
+            result.loadingInRam = !ram->settledAssets.contains(asset.assetId);
             return result;
         }
     }
@@ -950,7 +944,7 @@ UploadManager::SourceUploadStatus UploadManager::sourceUploadStatus(
 
 void UploadManager::publishResidency(const QString& sessionId)
 {
-    if (!m_ws || !m_ws->isConnected()) return;
+    if (!m_ws || !m_ws->isConnected() || m_uploadScheduler->isSessionTerminal(sessionId)) return;
     const auto binding = m_ws->sceneRunCoordinator()->sessionById(sessionId);
     if ((!binding.active || !m_ws->canIssueSessionCommands(binding.remoteSessionId)) || binding.targetEndpointId != m_ws->endpointId()) return;
     QJsonArray assets;
@@ -999,6 +993,7 @@ void UploadManager::publishResidency(const QString& sessionId)
 void UploadManager::receiveResidency(const QJsonObject& envelope)
 {
     const QString sessionId = envelope.value(QStringLiteral("remoteSessionId")).toString();
+    if (sessionId.isEmpty() || m_uploadScheduler->isSessionTerminal(sessionId)) return;
     const auto previous = m_remoteResidency.value(sessionId);
     const qint64 generation = envelope.value(QStringLiteral("generation")).toInteger();
     const qint64 sequence = envelope.value(QStringLiteral("sequence")).toInteger();
@@ -1708,13 +1703,20 @@ void UploadManager::forgetRemoteSessionInventory(const QString& remoteSessionId)
     for (const QString& targetId : targets) {
         auto target = m_committedAssetsByTarget.find(targetId);
         if (target == m_committedAssetsByTarget.end()) continue;
+        QSet<QString> removedFileIds;
         for (auto asset = target->begin(); asset != target->end();) {
             if (asset->remoteSessionId == remoteSessionId) {
+                for (const QString& fileId : asset->localFileIds) removedFileIds.insert(fileId);
                 asset = target->erase(asset);
             } else {
                 ++asset;
             }
         }
+        for (const auto& asset : std::as_const(target.value()))
+            for (const QString& fileId : asset.localFileIds) removedFileIds.remove(fileId);
+        if (m_fileManager)
+            for (const QString& fileId : removedFileIds)
+                m_fileManager->unmarkFileUploadedToClient(fileId, targetId);
         if (target->isEmpty()) {
             m_committedAssetsByTarget.erase(target);
             m_remoteInventoryTargets.remove(targetId);
@@ -1861,7 +1863,9 @@ void UploadManager::startVerifiedUpload(const QVector<UploadFileInfo>& files, co
     const RemoteSessionCoordinator::Binding binding = sessions
         ? sessions->outgoingForPeer(m_targetClientId)
         : RemoteSessionCoordinator::Binding();
-    if ((!binding.active || !m_ws->canIssueSessionCommands(binding.remoteSessionId)) || binding.ownerEndpointId != m_ws->endpointId()) {
+    if ((!binding.active || !m_ws->canIssueSessionCommands(binding.remoteSessionId))
+        || binding.ownerEndpointId != m_ws->endpointId()
+        || m_uploadScheduler->isSessionTerminal(binding.remoteSessionId)) {
         m_waitingVerifiedUploads.insert(m_targetClientId, {files, verifiedUploadId});
         emit uiStateChanged();
         return;
@@ -2790,19 +2794,6 @@ void UploadManager::suspendOutgoingForResume(const QString& reason) {
 }
 
 void UploadManager::applyRemoteSessionEnvelope(const QJsonObject& envelope) {
-    const QString residencySession = envelope.value(QStringLiteral("remoteSessionId")).toString();
-    const QString residencyPhase = envelope.value(QStringLiteral("phase")).toString();
-    if (envelope.value(QStringLiteral("type")).toString() == QLatin1String("remote_session_resumed"))
-        m_publishedResidency.remove(residencySession);
-    if (residencyPhase == QLatin1String("Closed") || residencyPhase == QLatin1String("CleanupPending")
-        || residencyPhase == QLatin1String("Terminating")) {
-        m_remoteResidency.remove(residencySession);
-        MediaResidencyManager::instance().clearRemoteStates(
-            envelope.value(QStringLiteral("targetEndpointId")).toString());
-    } else {
-        QTimer::singleShot(0, this, [this, residencySession]() { publishResidency(residencySession); });
-    }
-
     const QString remoteSessionId =
         envelope.value(QStringLiteral("remoteSessionId")).toString();
     if (remoteSessionId.isEmpty()) return;
@@ -2818,13 +2809,19 @@ void UploadManager::applyRemoteSessionEnvelope(const QJsonObject& envelope) {
         || phase == QLatin1String("Terminating")
         || phase == QLatin1String("CleanupPending")
         || phase == QLatin1String("Closed")) {
-        forgetRemoteSessionInventory(remoteSessionId);
         terminateRemoteSessionUpload(
             remoteSessionId,
             envelope.value(QStringLiteral("reason")).toString(
                 QStringLiteral("Remote session closed")));
         return;
     }
+
+    // Local deadline cleanup can precede the server's terminal envelope.
+    // No replayed Active proof may resurrect that retired session.
+    if (m_uploadScheduler->isSessionTerminal(remoteSessionId)) return;
+    if (type == QLatin1String("remote_session_resumed"))
+        m_publishedResidency.remove(remoteSessionId);
+    QTimer::singleShot(0, this, [this, remoteSessionId]() { publishResidency(remoteSessionId); });
 
     const bool active = phase == QLatin1String("Active")
         && (!m_ws || m_ws->canIssueSessionCommands(remoteSessionId));
@@ -2926,53 +2923,6 @@ void UploadManager::applyRemoteSessionEnvelope(const QJsonObject& envelope) {
             QScopedValueRollback<QString> selectedTarget(m_targetClientId, target);
             startVerifiedUpload(waiting.first, waiting.second);
         }
-        if (auto* pending = parallelForTarget(target); pending
-            && pending->state == OutgoingState::Suspended
-            && pending->remoteSessionId != remoteSessionId
-            && m_uploadScheduler->isSessionTerminal(pending->remoteSessionId)) {
-            const QString previousUploadId = pending->uploadId;
-            m_parallelOutgoingByUpload.remove(pending->uploadId);
-            m_parallelUploadBySession.remove(pending->remoteSessionId);
-            for (auto* timer : {pending->pumpTimer, pending->stallTimer, pending->startAckTimer, pending->ackTimer, pending->cancelTimer}) {
-                if (timer) { timer->stop(); timer->deleteLater(); }
-            }
-            pending->remoteSessionId = remoteSessionId;
-            pending->generation = pending->schedulerGeneration = generation;
-            pending->uploadId = QUuid::createUuid().toString(QUuid::WithoutBraces);
-            pending->startAccepted = false;
-            pending->waitingForResume = pending->payloadCompleteSent = false;
-            pending->sentBytes = pending->sentForFile = pending->remoteAcknowledgedBytes = 0;
-            pending->fileIndex = pending->localPercent = pending->remotePercent = 0;
-            pending->durableOffsets.clear();
-            pending->remoteFilePercents.clear();
-            for (const auto& asset : pending->assets) pending->durableOffsets.insert(asset.assetId, 0);
-            setParallelState(pending, OutgoingState::Queued);
-            initializeParallelTimers(pending);
-            m_parallelOutgoingByUpload.insert(pending->uploadId, pending);
-            m_parallelUploadBySession.insert(remoteSessionId, pending->uploadId);
-            emit uploadReidentified(previousUploadId, pending->uploadId, target);
-            m_uploadScheduler->setSessionState(remoteSessionId, UploadScheduler::SessionState::Active);
-            m_uploadScheduler->enqueue({remoteSessionId, generation, pending->uploadId, pending->assets.first().assetId});
-        }
-        if (!m_currentUploadId.isEmpty() && m_uploadTargetClientId == target
-            && m_outgoingState == OutgoingState::Suspended
-            && m_outgoingRemoteSessionId != remoteSessionId
-            && m_uploadScheduler->isSessionTerminal(m_outgoingRemoteSessionId)) {
-            const QString previousUploadId = m_currentUploadId;
-            m_outgoingRemoteSessionId = remoteSessionId;
-            m_outgoingGeneration = m_schedulerGeneration = generation;
-            m_currentUploadId = QUuid::createUuid().toString(QUuid::WithoutBraces);
-            emit uploadReidentified(previousUploadId, m_currentUploadId, target);
-            m_outgoingStartAccepted = m_waitingForResume = m_outgoingPayloadCompleteSent = false;
-            m_sentBytes = m_remoteAcknowledgedBytes = m_outgoingSentForFile = 0;
-            m_outgoingFileIndex = m_outgoingChunkIndex = 0;
-            m_outgoingDurableOffsets.clear();
-            for (const auto& asset : m_outgoingAssets) m_outgoingDurableOffsets.insert(asset.assetId, 0);
-            resetProgressTracking();
-            setOutgoingState(OutgoingState::Queued);
-            m_uploadScheduler->setSessionState(remoteSessionId, UploadScheduler::SessionState::Active);
-            m_uploadScheduler->enqueue({remoteSessionId, generation, m_currentUploadId, m_outgoingAssets.first().assetId});
-        }
     }
     if (m_uploadScheduler) {
         m_uploadScheduler->setSessionState(
@@ -3008,39 +2958,112 @@ void UploadManager::applyRemoteSessionEnvelope(const QJsonObject& envelope) {
     }
 }
 
+void UploadManager::cancelPendingUploadPreparation(const QString& target)
+{
+    const QString waitingId = m_waitingVerifiedUploads.take(target).second;
+    m_pendingUploadVerification.remove(target);
+    m_verifyingFileIdsByTarget.remove(target);
+    if (const auto cancelled = m_uploadVerificationCancellation.take(target))
+        cancelled->store(true);
+    const QString verifyingId = m_verifyingUploadIds.take(target);
+    if (!waitingId.isEmpty()) emit uploadCancelled(waitingId);
+    if (!verifyingId.isEmpty()) emit uploadCancelled(verifyingId);
+}
+
+void UploadManager::terminateAllRemoteSessionUploads(const QString& reason)
+{
+    // A completed transfer no longer occupies a transport/scheduler slot, but
+    // its RAM barrier and validated inventory still belong to the session.
+    QSet<QString> sessions;
+    if (!m_outgoingRemoteSessionId.isEmpty()) sessions.insert(m_outgoingRemoteSessionId);
+    for (const auto* transfer : std::as_const(m_parallelOutgoingByUpload))
+        if (transfer) sessions.insert(transfer->remoteSessionId);
+    for (const auto& batch : std::as_const(m_outgoingRamByTarget))
+        sessions.insert(batch.remoteSessionId);
+    for (const auto& inventory : std::as_const(m_committedAssetsByTarget))
+        for (const auto& asset : inventory) sessions.insert(asset.remoteSessionId);
+    for (auto it = m_remoteResidency.cbegin(); it != m_remoteResidency.cend(); ++it)
+        sessions.insert(it.key());
+    if (m_ws && m_ws->remoteSessionCoordinator())
+        for (const auto& binding : m_ws->remoteSessionCoordinator()->all())
+            if (binding.ownerEndpointId == m_ws->endpointId()) sessions.insert(binding.remoteSessionId);
+    for (const QString& session : sessions) terminateRemoteSessionUpload(session, reason);
+
+    // Preparation can start before a session has an authenticated identity.
+    QSet<QString> pendingTargets;
+    for (const QString& target : m_pendingUploadVerification.keys()) pendingTargets.insert(target);
+    for (const QString& target : m_waitingVerifiedUploads.keys()) pendingTargets.insert(target);
+    for (const QString& target : pendingTargets) cancelPendingUploadPreparation(target);
+    emit uiStateChanged();
+}
+
 void UploadManager::terminateRemoteSessionUpload(
     const QString& remoteSessionId, const QString& reason) {
     if (remoteSessionId.isEmpty()) return;
+    if (!m_uploadScheduler->isSessionTerminal(remoteSessionId)) {
+        NetworkDiagnostics::record(QStringLiteral("upload_session_terminated"), {
+            {"remoteSessionId", remoteSessionId}, {"reason", reason.left(512)}});
+    }
+    // Fence callbacks before emitting terminal signals or retiring transport.
+    m_uploadScheduler->cancelSession(remoteSessionId);
+    m_publishedResidency.remove(remoteSessionId);
+    m_lastResidencyPublication.remove(remoteSessionId);
+    m_pendingResidencyPublications.remove(remoteSessionId);
+    QStringList cancelledUploads;
+    QSet<QString> targets;
+    const auto report = m_remoteResidency.take(remoteSessionId);
+    const QString reportTarget = report.value(QStringLiteral("targetEndpointId")).toString();
+    if (!reportTarget.isEmpty()) targets.insert(reportTarget);
+    if (m_ws && m_ws->remoteSessionCoordinator()) {
+        const auto binding = m_ws->remoteSessionCoordinator()->byId(remoteSessionId);
+        if (binding.ownerEndpointId == m_ws->endpointId()) targets.insert(binding.targetEndpointId);
+    }
+    for (const auto& inventory : std::as_const(m_committedAssetsByTarget))
+        for (const auto& asset : inventory)
+            if (asset.remoteSessionId == remoteSessionId) targets.insert(asset.targetEndpointId);
     for (const auto& target : m_outgoingRamByTarget.keys()) {
         const auto batch = m_outgoingRamByTarget.value(target);
         if (batch.remoteSessionId != remoteSessionId) continue;
+        targets.insert(target);
         m_outgoingRamByTarget.remove(target);
-        for (const auto& asset : batch.assets)
-            for (const auto& fileId : asset.localFileIds)
-                m_fileManager->unmarkFileUploadedToClient(fileId, target);
-        emit uploadRamFailed(batch.uploadId, batch.assets.size());
+        if (m_ws) m_ws->cancelUploadId(batch.uploadId);
+        cancelledUploads.append(batch.uploadId);
     }
     m_cancelledRemoteAssets.remove(remoteSessionId);
     for (const auto& uploadId : m_pendingUploadAborts.keys())
         if (m_pendingUploadAborts.value(uploadId) == remoteSessionId)
             m_pendingUploadAborts.remove(uploadId);
     forgetRemoteSessionInventory(remoteSessionId);
-    // A network session is terminal, but the user's uncancelled upload intent
-    // remains in memory until a new authenticated session can submit it.
     if (auto* transfer = parallelForSession(remoteSessionId)) {
-        suspendParallel(transfer);
+        targets.insert(transfer->targetEndpointId);
+        cancelledUploads.append(transfer->uploadId);
         if (m_ws) m_ws->cancelUploadId(transfer->uploadId);
-        m_remoteInventoryTargets.remove(transfer->targetEndpointId);
-        if (m_fileManager) m_fileManager->unmarkAllForClient(transfer->targetEndpointId);
+        removeParallel(transfer, false, false);
     }
-    if (remoteSessionId == m_outgoingRemoteSessionId && !m_currentUploadId.isEmpty()) {
-        suspendOutgoingForResume(reason);
-        if (m_ws) m_ws->cancelUploadId(m_currentUploadId);
-        m_uploadActive = false;
-        m_remoteInventoryTargets.remove(m_uploadTargetClientId);
-        if (m_fileManager) m_fileManager->unmarkAllForClient(m_uploadTargetClientId);
+    if (remoteSessionId == m_outgoingRemoteSessionId) {
+        targets.insert(m_uploadTargetClientId);
+        const QString uploadId = m_currentUploadId;
+        if (m_ws && !uploadId.isEmpty()) m_ws->cancelUploadId(uploadId);
+        const QString activeWorkspace = m_activeWorkspaceEndpointId;
+        const QString retiredTarget = m_uploadTargetClientId;
+        resetToInitial();
+        if (activeWorkspace != retiredTarget) m_activeWorkspaceEndpointId = activeWorkspace;
+        if (!uploadId.isEmpty()) cancelledUploads.append(uploadId);
     }
-    if (m_uploadScheduler) m_uploadScheduler->cancelSession(remoteSessionId);
+    for (const QString& target : targets) {
+        if (target.isEmpty()) continue;
+        // A delayed terminal acknowledgement for an old session must not
+        // cancel preparation or erase projections of its replacement.
+        const auto binding = m_ws && m_ws->remoteSessionCoordinator()
+            ? m_ws->remoteSessionCoordinator()->outgoingForPeer(target)
+            : RemoteSessionCoordinator::Binding();
+        if (binding.remoteSessionId.isEmpty() || binding.remoteSessionId == remoteSessionId) {
+            cancelPendingUploadPreparation(target);
+            MediaResidencyManager::instance().clearRemoteStates(target);
+        }
+    }
+    m_uploadActive = !m_remoteInventoryTargets.isEmpty();
+    for (const QString& uploadId : cancelledUploads) emit uploadCancelled(uploadId);
     emit uiStateChanged();
 }
 

@@ -116,6 +116,7 @@ void ClientWorkspaceViewModel::refreshSources()
                         {QStringLiteral("sourceSizeBytes"), item->sourceSizeBytes()},
                         {QStringLiteral("uploadState"), QStringLiteral("not_uploaded")},
                         {QStringLiteral("uploadProgress"), 0},
+                        {QStringLiteral("remoteLoadingInRam"), false},
                         {QStringLiteral("remoteCached"), false}};
         if (m_uploadManager) {
             const auto status = m_uploadManager->sourceUploadStatus(m_workspaceEndpointId, fileId);
@@ -123,6 +124,7 @@ void ClientWorkspaceViewModel::refreshSources()
                 ? QStringLiteral("uploaded") : status.state == UploadManager::SourceUploadStatus::Uploading
                     ? QStringLiteral("uploading") : QStringLiteral("not_uploaded");
             row[QStringLiteral("uploadProgress")] = status.progress;
+            row[QStringLiteral("remoteLoadingInRam")] = status.loadingInRam;
             row[QStringLiteral("remoteCached")] = m_uploadManager->remoteMediaReady(m_workspaceEndpointId, fileId);
         } else {
             // Standalone editor hosts have no transfer service. Preserve their

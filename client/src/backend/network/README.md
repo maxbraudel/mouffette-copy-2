@@ -24,14 +24,23 @@ Hovering an active upload shows a red `Cancel` action. Cancellation stops local
 work immediately and removes this batch's staging, validated files and RAM
 residency on the target, including an abort crossing the final transfer ACK.
 
+A terminal session (including local inactivity expiry) synchronously cancels
+its pending verification, queued transfers and remote RAM waits, and clears its
+uploaded-file ledger and residency reports. Late callbacks cannot revive that
+session or affect another target's upload. A temporary interruption keeps its
+resumable transfer while the existing session remains within its recovery budget.
+After terminal cleanup, a new session requires a new Upload action. Media-list
+RAM progress is shown only for an actual pending RAM operation; missing remote
+readiness alone never starts a progress bar. Local project media stay available.
+
 RemoteCacheStore owns `cache/Uploads`, including session metadata, durable asset
 manifests, cleanup intents, tombstones and `.retained`. Its metadata schema
 aliases `StorageVersions::ReceivedMedia` (version 2). Bootstrap preserves current
 cache metadata in a persistent primary profile; legacy manifests are reset.
 The cache store fences obsolete commands, retains eligible bytes for ten minutes
 and validates identity, SHA-256, size and extension before reuse. An imported
-entry keeps its first expiration. Runtime upload requests may bind to a new
-session with a new transfer ID; requests themselves are not persisted.
+entry keeps its first expiration. A new upload request can reuse eligible
+retained bytes in a new session; cancelled requests are not revived or persisted.
 
 `MOUFFETTE_REMOTE_MEDIA_RETENTION_MS=600000` and
 `MOUFFETTE_REMOTE_MEDIA_CACHE_MAX_MIB=10240` configure received-media retention.

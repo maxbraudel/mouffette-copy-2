@@ -852,6 +852,7 @@ ApplicationRuntime::ApplicationRuntime(const RuntimeProfileContext& runtimeProfi
             m_terminalIncomingSessionFilter.insert(sessionId);
             beginTerminalIncomingCacheCleanup(QStringLiteral("session_recovery_expired"));
         } else if (binding.ownerEndpointId == m_webSocketClient->endpointId()) {
+            if (!matchesCurrentOutgoingSession(binding.targetEndpointId, sessionId, generation)) return;
             terminateProjectRemoteSession(binding.targetEndpointId, true,
                                           QStringLiteral("session_recovery_expired"));
         }
@@ -865,8 +866,9 @@ ApplicationRuntime::ApplicationRuntime(const RuntimeProfileContext& runtimeProfi
             beginTerminalIncomingCacheCleanup(QStringLiteral("session_authoritatively_absent"));
         } else if (binding.ownerEndpointId == m_webSocketClient->endpointId()) {
             const QString target = binding.targetEndpointId;
+            if (!matchesCurrentOutgoingSession(target, sessionId, generation)) return;
             if (!finalizePendingOutgoingSessionClose(target, sessionId, generation, false))
-                clearRemoteSessionRuntimeState(target, false);
+                clearRemoteSessionRuntimeState(target, false, sessionId);
             QTimer::singleShot(0, this, &ApplicationRuntime::reconcileForegroundRemoteSession);
         }
     });
@@ -875,7 +877,8 @@ ApplicationRuntime::ApplicationRuntime(const RuntimeProfileContext& runtimeProfi
         // Logical closure does not erase renderer/cache transactions or ACKs.
         if (envelope.value(QStringLiteral("ownerEndpointId")).toString()
             == m_webSocketClient->endpointId()) {
-            clearRemoteSessionRuntimeState(envelope.value(QStringLiteral("targetEndpointId")).toString(), true);
+            clearRemoteSessionRuntimeState(envelope.value(QStringLiteral("targetEndpointId")).toString(), true,
+                envelope.value(QStringLiteral("remoteSessionId")).toString());
         }
     });
     connect(m_webSocketClient, &WebSocketClient::registrationConfirmed, this, &ApplicationRuntime::onRegistrationConfirmed);
@@ -2579,6 +2582,7 @@ void ApplicationRuntime::handleRemoteSessionLeaseState(const QJsonObject& envelo
     quint64 generation = 0;
     readSafePositiveJsonInteger(
         envelope.value(QStringLiteral("generation")), &generation);
+    if (!matchesCurrentOutgoingSession(targetEndpointId, remoteSessionId, generation)) return;
     const bool terminalPhase = phase == QLatin1String("Terminating")
         || phase == QLatin1String("CleanupPending")
         || phase == QLatin1String("Closed");
@@ -2598,7 +2602,7 @@ void ApplicationRuntime::handleRemoteSessionLeaseState(const QJsonObject& envelo
             retryPendingOutgoingSessionClose(
                 targetEndpointId, QStringLiteral("late_session_state"));
         }
-        clearRemoteSessionRuntimeState(targetEndpointId, true);
+        clearRemoteSessionRuntimeState(targetEndpointId, true, remoteSessionId);
         refreshProjectClientList();
         if (m_activeWorkspaceEndpointId == targetEndpointId) {
             m_remoteClientConnected = false;
@@ -2652,13 +2656,15 @@ void ApplicationRuntime::handleRemoteSessionTerminating(const QJsonObject& envel
             envelope.value(QStringLiteral("generation")), &generation)) {
         return;
     }
+    if (ownerEndpointId == m_webSocketClient->endpointId()
+        && !matchesCurrentOutgoingSession(targetEndpointId, remoteSessionId, generation)) return;
     m_locallyTerminatingRemoteSessions.insert(remoteSessionId);
 
     if (ownerEndpointId == m_webSocketClient->endpointId()) {
         rememberPendingOutgoingSessionClose(
             targetEndpointId, remoteSessionId, generation);
         if (m_activeWorkspaceEndpointId == targetEndpointId) m_remoteClientConnected = false;
-        clearRemoteSessionRuntimeState(targetEndpointId, true);
+        clearRemoteSessionRuntimeState(targetEndpointId, true, remoteSessionId);
         if (m_remoteSessionOpenDesiredTargets.contains(targetEndpointId)
             || wantsForegroundRemoteSession(targetEndpointId)) {
             refreshProjectClientList();
@@ -3059,9 +3065,45 @@ void ApplicationRuntime::retryPendingTeardownAcks() {
     }
 }
 
+bool ApplicationRuntime::matchesCurrentOutgoingSession(
+    const QString& targetEndpointId, const QString& remoteSessionId,
+    quint64 generation) const
+{
+    if (targetEndpointId.isEmpty() || remoteSessionId.isEmpty()) return false;
+    const QString knownId = m_currentOutgoingSessionIdByTarget.value(targetEndpointId);
+    if ((!knownId.isEmpty() && knownId != remoteSessionId)
+        || (generation > 0 && knownId == remoteSessionId
+            && m_currentOutgoingSessionGenerationByTarget.value(targetEndpointId) > generation)) return false;
+    const auto binding = m_webSocketClient
+        ? m_webSocketClient->remoteSessionCoordinator()->outgoingForPeer(targetEndpointId)
+        : RemoteSessionCoordinator::Binding();
+    return binding.remoteSessionId.isEmpty()
+        || (binding.remoteSessionId == remoteSessionId
+            && (generation == 0 || binding.generation <= generation));
+}
+
 void ApplicationRuntime::clearRemoteSessionRuntimeState(
     const QString& targetEndpointId,
-    bool teardownPending) {
+    bool teardownPending,
+    const QString& expectedSessionId) {
+    if (!expectedSessionId.isEmpty()
+        && !matchesCurrentOutgoingSession(targetEndpointId, expectedSessionId)) return;
+    // Retire the backend before publishing cleared workspace state. The local
+    // inactivity deadline is terminal even while the server CLOSE is pending;
+    // late transfer/RAM callbacks must not restore its inventory or progress.
+    // Resolve the session by target, never through the selected upload in the UI.
+    if (m_uploadManager) {
+        const auto binding = m_webSocketClient
+            ? m_webSocketClient->remoteSessionCoordinator()->outgoingForPeer(targetEndpointId)
+            : RemoteSessionCoordinator::Binding();
+        const QString remoteSessionId = !expectedSessionId.isEmpty() ? expectedSessionId
+            : !binding.remoteSessionId.isEmpty() ? binding.remoteSessionId
+                                               : m_currentOutgoingSessionIdByTarget.value(targetEndpointId);
+        if (!remoteSessionId.isEmpty()) {
+            m_uploadManager->terminateRemoteSessionUpload(
+                remoteSessionId, QStringLiteral("session_terminal"));
+        }
+    }
     ClientWorkspace* session = m_workspaceManager
         ? m_workspaceManager->findWorkspace(targetEndpointId) : nullptr;
     if (session) {
@@ -3541,9 +3583,6 @@ void ApplicationRuntime::terminateProjectRemoteSession(const QString& targetEndp
         rememberPendingOutgoingSessionClose(
             targetEndpointId, binding.remoteSessionId, binding.generation);
         m_locallyTerminatingRemoteSessions.insert(binding.remoteSessionId);
-        if (m_uploadManager && m_uploadManager->canRequestCancel()) {
-            m_uploadManager->requestCancel();
-        }
         retryPendingOutgoingSessionClose(
             targetEndpointId, reason);
     }

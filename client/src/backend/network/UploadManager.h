@@ -121,6 +121,7 @@ public:
     struct SourceUploadStatus {
         enum State { NotUploaded, Uploading, Uploaded } state = NotUploaded;
         int progress = 0;
+        bool loadingInRam = false;
     };
     SourceUploadStatus sourceUploadStatus(const QString& targetEndpointId,
                                           const QString& fileId) const;
@@ -131,6 +132,10 @@ public:
     void setActiveWorkspaceEndpointId(const QString& identity) { m_activeWorkspaceEndpointId = identity; }
     QString activeWorkspaceEndpointId() const { return m_activeWorkspaceEndpointId; }
     void forceResetForClient(const QString& clientId = QString());
+    // Irreversible session cleanup, including uploads already waiting for RAM.
+    // Transient transport loss uses onConnectionLost() instead.
+    void terminateRemoteSessionUpload(const QString& remoteSessionId,
+                                      const QString& reason);
     
     // Set local client ID for generating directional session IDs
     void setMyClientId(const QString& myClientId) { m_myClientId = myClientId; }
@@ -405,8 +410,8 @@ private:
     void startScheduledUpload(const UploadScheduler::UploadRequest& request);
     bool resumeOutgoingUpload();
     void suspendOutgoingForResume(const QString& reason = QString());
-    void terminateRemoteSessionUpload(const QString& remoteSessionId,
-                                      const QString& reason);
+    void terminateAllRemoteSessionUploads(const QString& reason);
+    void cancelPendingUploadPreparation(const QString& targetEndpointId);
     bool applyAuthoritativeOffsets(const QJsonArray& assets,
                                    bool resetSendCursor,
                                    QString* errorMessage = nullptr);

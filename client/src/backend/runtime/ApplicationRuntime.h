@@ -251,8 +251,12 @@ private:
     void handleRemoteSessionClosed(const QJsonObject& envelope);
     void handleRemoteSessionError(const QJsonObject& envelope);
     void cancelPendingRemoteSessionOpen(const QString& targetEndpointId);
+    bool matchesCurrentOutgoingSession(const QString& targetEndpointId,
+                                       const QString& remoteSessionId,
+                                       quint64 generation = 0) const;
     void clearRemoteSessionRuntimeState(const QString& targetEndpointId,
-                                        bool teardownPending = false);
+                                        bool teardownPending = false,
+                                        const QString& remoteSessionId = QString());
     void clearDeletedProjectFromWorkspace(const QString& targetEndpointId);
     void destroyWorkspaceCanvasIfUnused(const QString& targetEndpointId);
     void updateWorkspaceCapabilities(const QString& targetEndpointId);

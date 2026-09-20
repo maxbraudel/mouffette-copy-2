@@ -2190,9 +2190,14 @@ class MouffetteServer {
         // Buffer authenticated residency for that immutable final-validation
         // inventory; scene admission still requires committed sessionAssets.
         for (const upload of this.uploads.values()) {
-            if (upload.remoteSessionId !== session.remoteSessionId || !upload.awaitingTargetValidation) continue;
-            for (const asset of upload.assets) inventory.set(asset.assetId,
-                { ...asset, uploadId: upload.uploadId });
+            if (upload.remoteSessionId !== session.remoteSessionId) continue;
+            for (const asset of upload.assets) {
+                // Replacement admission retires the old RAM attempt even
+                // while its committed disk inventory is still retained.
+                inventory.delete(asset.assetId);
+                if (upload.awaitingTargetValidation) inventory.set(asset.assetId,
+                    { ...asset, uploadId: upload.uploadId });
+            }
         }
         const states = new Set(['analysing', 'queued', 'decoding', 'ready',
             'waiting_for_memory', 'capacity_insufficient', 'error']);
@@ -2255,6 +2260,15 @@ class MouffetteServer {
         return manifest.every(asset => snapshot.assets.some(state =>
             state.assetId === asset.assetId && state.sha256 === asset.sha256
             && state.state === 'ready'));
+    }
+
+    invalidateMediaResidency(session, assetIds) {
+        if (!session?.mediaResidency) return;
+        const invalidated = new Set(assetIds);
+        // Keep the sequence fence: a delayed snapshot from before removal
+        // must not become fresh just because its assets were unloaded.
+        session.mediaResidency.assets = session.mediaResidency.assets
+            .filter(asset => !invalidated.has(asset.assetId));
     }
 
     handleRemoteSessionSnapshot(targetId, message) {
@@ -2967,6 +2981,8 @@ class MouffetteServer {
     beginRemoteSessionTeardown(session, requestId) {
         if (!session || !session.teardownId || session.teardownDispatchStarted) return false;
         session.teardownDispatchStarted = true;
+        delete session.mediaResidency;
+        delete session.mediaResidencySummary;
         const run = this.sceneRuns.getForSession(session.remoteSessionId);
         if (run) this.initiateSceneStop(run, session.teardownReason || 'session_terminating', true);
         this.abortAssetRemovalsForRemoteSession(
@@ -3649,7 +3665,16 @@ class MouffetteServer {
         if (!upload) return;
         this.uploads.delete(upload.uploadId);
         const session = this.remoteSessions.get(upload.remoteSessionId);
-        if (session) session.activeUploadIds.delete(upload.uploadId);
+        if (session) {
+            session.activeUploadIds.delete(upload.uploadId);
+            const inventory = this.sessionAssets.get(upload.remoteSessionId);
+            // Final validation and RAM progress arrive on separate channels.
+            // Retain early residency only when this exact upload committed;
+            // cancellation/rejection must discard its pending decode state.
+            this.invalidateMediaResidency(session, upload.assets
+                .filter(asset => inventory?.get(asset.assetId)?.uploadId !== upload.uploadId)
+                .map(asset => asset.assetId));
+        }
         this.grantPendingUploadCapacity(upload.targetEndpointId);
         this.publishUploadWindows(upload.targetEndpointId);
         if (![...this.uploads.values()].some(other =>
@@ -3938,6 +3963,8 @@ class MouffetteServer {
             } else {
                 inventory.delete(removal.assetId);
                 if (inventory.size === 0) this.sessionAssets.delete(removal.remoteSessionId);
+                this.invalidateMediaResidency(
+                    this.remoteSessions.get(removal.remoteSessionId), [removal.assetId]);
                 this.invalidateUploadReplayAfterAssetRemoval(removal, now);
             }
         }
@@ -4351,6 +4378,9 @@ class MouffetteServer {
         };
         this.uploads.set(upload.uploadId, upload);
         session.activeUploadIds.add(upload.uploadId);
+        // A new transfer of the same file is a new RAM residency attempt.
+        // Reusing its asset ID/hash cannot inherit readiness from an old one.
+        this.invalidateMediaResidency(session, upload.assets.map(asset => asset.assetId));
         this.grantPendingUploadCapacity(upload.targetEndpointId);
     }
 

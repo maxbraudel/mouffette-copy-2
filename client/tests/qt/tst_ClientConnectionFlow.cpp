@@ -792,6 +792,128 @@ private slots:
         runtime.handleApplicationAboutToQuit();
     }
 
+    void inactiveSessionRetiresOnlyItsOwnUpload_data()
+    {
+        QTest::addColumn<bool>("preparing");
+        QTest::newRow("background-verification") << true;
+        QTest::newRow("awaiting-remote-ack") << false;
+    }
+
+    void inactiveSessionRetiresOnlyItsOwnUpload()
+    {
+        QFETCH(bool, preparing);
+        QTemporaryDir root;
+        QVERIFY(root.isValid());
+        const auto previous = RuntimeProfile::context();
+        const auto restoreProfile = qScopeGuard([previous] { RuntimeProfile::configure(previous); });
+        RuntimeProfileContext context;
+        context.rootPath = root.path();
+        context.persistent = false;
+        RuntimeProfile::configure(context);
+        ApplicationRuntime runtime(context);
+        runtime.setQmlWindowVisible(true);
+        runtime.setPointerInsideControlWindow(true);
+        runtime.getWorkspaceManager()->stopAutomaticTimersForTesting();
+        runtime.getProjectManager()->stopAutomaticTimersForTesting();
+        RemoteSessionTestServer server(runtime.getWebSocketClient()->endpointId());
+        QVERIFY(server.listen());
+        runtime.findChild<ConnectionManager*>()->connectToServer(server.url());
+        QTRY_COMPARE_WITH_TIMEOUT(runtime.localStatusText(), QStringLiteral("CONNECTED"), 2000);
+        const QString targetA = fixtureEndpoint(QLatin1Char('A'));
+        const QString targetB = fixtureEndpoint(QLatin1Char('B'));
+        const QString sessionA = QStringLiteral("inactive-upload-session-a");
+        const QString sessionB = QStringLiteral("inactive-upload-session-b");
+        QVERIFY(server.send({{"type", "client_list"}, {"clients", QJsonArray{
+            onlineClient(targetA, QStringLiteral("Inactive target A")).toJson(),
+            onlineClient(targetB, QStringLiteral("Selected target B")).toJson()}}}));
+        QTRY_COMPARE(runtime.displayClients().size(), 2);
+        for (const auto& target : {targetA, targetB}) {
+            runtime.activateClient(target);
+            QTRY_VERIFY(!server.openCommands.isEmpty()
+                && server.openCommands.last().value("targetEndpointId").toString() == target);
+            QVERIFY(server.sendOpened(target == targetA ? sessionA : sessionB,
+                server.openCommands.last().value("requestId").toString(), target,
+                ScreenInfo(0, 1920, 1080, 0, 0, true), 50));
+            QTRY_VERIFY(runtime.getProjectManager()->hasProjectForTarget(target));
+        }
+        auto* workspaceA = runtime.findWorkspace(targetA);
+        auto* workspaceB = runtime.findWorkspace(targetB);
+        QVERIFY(workspaceA && workspaceB && workspaceA->canvas && workspaceB->canvas);
+        const QString sourcePath = root.filePath(QStringLiteral("inactive-upload.png"));
+        QImage image(32, 32, QImage::Format_ARGB32_Premultiplied);
+        image.fill(Qt::darkCyan);
+        QVERIFY(image.save(sourcePath));
+        auto* mediaA = workspaceA->canvas->document()->addPreparedFile(sourcePath, {32, 32}, false, {});
+        auto* mediaB = workspaceB->canvas->document()->addPreparedFile(sourcePath, {32, 32}, false, {});
+        QVERIFY(mediaA && mediaB);
+        QTRY_VERIFY_WITH_TIMEOUT(mediaA->residencyReady() && mediaB->residencyReady(), 10000);
+        UploadEventHandler handler(&runtime);
+        auto* uploads = runtime.getUploadManager();
+        handler.uploadWorkspace(targetB);
+        QTRY_COMPARE_WITH_TIMEOUT(server.uploadStarts.size(), 1, 5000);
+        const QString uploadB = server.uploadStarts.first().value("uploadId").toString();
+        QCOMPARE(server.uploadStarts.first().value("remoteSessionId").toString(), sessionB);
+        QTest::qWait(AppConfig::instance().uploadActionMinIntervalMs() + 1);
+        handler.uploadWorkspace(targetA);
+        QVERIFY(!workspaceA->upload.activeUploadId.isEmpty());
+        if (!preparing) QTRY_COMPARE_WITH_TIMEOUT(server.uploadStarts.size(), 2, 5000);
+        uploads->setTargetClientId(targetB);
+        QCOMPARE(uploads->currentUploadId(), uploadB);
+
+        const qint64 hiddenAt = QDateTime::currentMSecsSinceEpoch();
+        QVERIFY(runtime.getWorkspaceManager()->setWorkspaceHidden(targetA, hiddenAt));
+        const qint64 deadline = runtime.getWorkspaceManager()->remoteSessionCloseAtMs(targetA);
+        QVERIFY(deadline > hiddenAt);
+        runtime.getWorkspaceManager()->processDeadlines(deadline);
+        QTRY_COMPARE_WITH_TIMEOUT(server.closeCommands.size(), 1, 2000);
+        QCOMPARE(server.closeCommands.first().value("remoteSessionId").toString(), sessionA);
+        QCOMPARE(uploads->currentUploadId(), uploadB);
+        QVERIFY(uploads->isBusy());
+        QCOMPARE(workspaceB->upload.activeUploadId, uploadB);
+        QVERIFY(server.uploadAborts.isEmpty()); // Session CLOSE owns A's teardown.
+        QCOMPARE(uploads->activeOutgoingTransferCount(), 1);
+        uploads->setTargetClientId(targetA);
+        QVERIFY(!uploads->isBusy());
+        QVERIFY(uploads->currentUploadId().isEmpty());
+        QVERIFY(workspaceA->upload.activeUploadId.isEmpty());
+        QVERIFY(workspaceA->knownRemoteFileIds.isEmpty());
+        QVERIFY(!runtime.getFileManager()->isFileUploadedToClient(mediaA->fileId(), targetA));
+        QVERIFY(mediaA->residencyReady() && mediaB->residencyReady());
+        QVERIFY(QFile::exists(sourcePath));
+
+        // A late terminal callback must not be routed to the selected new batch,
+        // including when an obsolete workspace mapping survived its own reset.
+        const QString staleId = QStringLiteral("obsolete-upload");
+        QVERIFY(!runtime.workspaceForUploadId(staleId));
+        runtime.setUploadWorkspaceByUploadId(staleId, targetB);
+        QVERIFY(!runtime.workspaceForUploadId(staleId));
+        uploads->uploadRejected(staleId, QStringLiteral("session_terminal"));
+        QCOMPARE(workspaceB->upload.activeUploadId, uploadB);
+        QVERIFY(workspaceB->upload.fileIds.contains(mediaB->fileId()));
+
+        // The coordinator retains terminal identities for cleanup replays even
+        // when the same target already has a newer active outgoing session.
+        auto* socket = runtime.getWebSocketClient();
+        const QString obsoleteSession = QStringLiteral("obsolete-session-b");
+        QSignalSpy terminating(socket, &WebSocketClient::remoteSessionTerminating);
+        QVERIFY(server.sendTerminating(obsoleteSession, targetB));
+        QTRY_COMPARE_WITH_TIMEOUT(terminating.count(), 1, 2000);
+        const QJsonObject obsolete = terminating.first().first().toJsonObject();
+        socket->remoteSessionLeaseStateChanged(obsolete);
+        socket->remoteSessionLogicallyClosed(obsolete);
+        socket->remoteSessionAbsent(obsoleteSession, 1);
+        socket->remoteSessionRecoveryExpired(obsoleteSession, 1);
+        uploads->setTargetClientId(targetB);
+        QCOMPARE(uploads->currentUploadId(), uploadB);
+        QVERIFY(uploads->isBusy());
+        QVERIFY(!uploads->uploadScheduler()->isSessionTerminal(sessionB));
+        QCOMPARE(runtime.getWorkspaceManager()->remoteSessionState(targetB),
+                 WorkspaceManager::RemoteSessionState::Active);
+        QCOMPARE(workspaceB->upload.activeUploadId, uploadB);
+        QVERIFY(workspaceB->upload.fileIds.contains(mediaB->fileId()));
+        runtime.handleApplicationAboutToQuit();
+    }
+
     void clientListRetainsOnlyProjectsWhenDiscoveryIsUnavailable()
     {
         QTemporaryDir root;

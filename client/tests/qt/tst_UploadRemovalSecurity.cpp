@@ -1666,6 +1666,11 @@ void UploadRemovalSecurityTest::uploadCompletionWaitsForDurableAck_data()
     QTest::newRow("mixed-failure") << QStringLiteral("failed") << 2;
     QTest::newRow("insufficient-ram") << QStringLiteral("capacity_insufficient") << 2;
     QTest::newRow("cancel-during-ram") << QStringLiteral("cancelled") << 2;
+    QTest::newRow("lease-expires-during-ram") << QStringLiteral("lease_expired") << 2;
+    QTest::newRow("session-expires-during-ram") << QStringLiteral("session_expired") << 2;
+    QTest::newRow("session-absent-during-ram") << QStringLiteral("session_absent") << 2;
+    QTest::newRow("sessions-invalidated-during-ram") << QStringLiteral("sessions_invalidated") << 2;
+    QTest::newRow("server-restarts-during-ram") << QStringLiteral("server_restart") << 2;
 }
 
 void UploadRemovalSecurityTest::uploadCompletionWaitsForDurableAck()
@@ -1756,7 +1761,7 @@ void UploadRemovalSecurityTest::uploadCompletionWaitsForDurableAck()
     QVERIFY(peer);
 
     const QString targetEndpointId(43, QLatin1Char('B'));
-    const QString remoteSessionId =
+    QString remoteSessionId =
         QStringLiteral("19191919-2222-4333-8444-555566667788");
     auto sendServerMessage = [&](QJsonObject message) {
         message.insert("protocolVersion", 12);
@@ -1885,6 +1890,7 @@ void UploadRemovalSecurityTest::uploadCompletionWaitsForDurableAck()
         QVERIFY(!files.isFileUploadedToClient(source.fileId, targetEndpointId));
         QCOMPARE(uploads.sourceUploadStatus(targetEndpointId, source.fileId).state,
                  UploadManager::SourceUploadStatus::Uploading);
+        QVERIFY(uploads.sourceUploadStatus(targetEndpointId, source.fileId).loadingInRam);
     }
 
     auto residencyRow = [&](int index, const QString& state) {
@@ -1905,6 +1911,81 @@ void UploadRemovalSecurityTest::uploadCompletionWaitsForDurableAck()
         QVERIFY(uploads.isBusy());
         QCOMPARE(uploadFinished.count(), 0);
         QCOMPARE(ramFailed.count(), 0); // Every asset must settle, even after one fails.
+        const bool terminal = outcome == QLatin1String("lease_expired")
+            || outcome == QLatin1String("session_expired")
+            || outcome == QLatin1String("session_absent")
+            || outcome == QLatin1String("sessions_invalidated")
+            || outcome == QLatin1String("server_restart");
+        if (terminal) {
+            if (outcome == QLatin1String("lease_expired")) emit socket.leaseExpired(bootId, 1);
+            else if (outcome == QLatin1String("session_expired")) emit socket.remoteSessionRecoveryExpired(remoteSessionId, 1);
+            else if (outcome == QLatin1String("session_absent")) emit socket.remoteSessionAbsent(remoteSessionId, 1);
+            else if (outcome == QLatin1String("sessions_invalidated")) emit socket.sessionsInvalidated("user_disabled", bootId, 1);
+            else emit socket.serverRestarted(bootId, QUuid::createUuid().toString(QUuid::WithoutBraces));
+            QCOMPARE(cancelled.count(), 1);
+            QCOMPARE(cancelled.first().first().toString(), uploadId);
+            QVERIFY(!uploads.isBusy());
+            QVERIFY(!uploads.isLoadingInRam());
+            QVERIFY(!uploads.hasActiveUpload());
+            QCOMPARE(uploads.activeOutgoingTransferCount(), 0);
+            for (const auto& source : uploadFiles) {
+                QVERIFY(!files.isFileUploadedToClient(source.fileId, targetEndpointId));
+                QCOMPARE(uploads.sourceUploadStatus(targetEndpointId, source.fileId).state,
+                         UploadManager::SourceUploadStatus::NotUploaded);
+                QVERIFY(!uploads.sourceUploadStatus(targetEndpointId, source.fileId).loadingInRam);
+                QVERIFY(!uploads.remoteMediaReady(targetEndpointId, source.fileId));
+            }
+            // A local deadline may win before the coordinator receives Closed.
+            // Ignore already queued residency even if its binding is still Active.
+            sendServerMessage({{"type", "media_residency"}, {"sequence", 2},
+                {"assets", QJsonArray{residencyRow(0, "ready"), residencyRow(1, "ready")}}});
+            QTest::qWait(50);
+            QCOMPARE(uploadFinished.count(), 0);
+            QCOMPARE(ramFailed.count(), 0);
+            for (const auto& source : uploadFiles)
+                QVERIFY(!uploads.remoteMediaReady(targetEndpointId, source.fileId));
+
+            // Reconnect and explicitly retry the same sources through a fresh
+            // authenticated session. The old terminal identity stays fenced.
+            socket.remoteSessionCoordinator()->remove(remoteSessionId);
+            remoteSessionId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+            sendServerMessage({{"type", "remote_session_opened"}, {"phase", "Active"},
+                {"ownerConnectionGeneration", 1}, {"targetConnectionGeneration", 1},
+                {"resumeToken", "fresh_retry_token"}});
+            QTRY_VERIFY_WITH_TIMEOUT(socket.remoteSessionCoordinator()->forPeer(targetEndpointId).active, 1000);
+            bool retryAccepted = false;
+            QTRY_VERIFY_WITH_TIMEOUT(retryAccepted || (retryAccepted = uploads.toggleUpload(uploadFiles)), 1000);
+            QTRY_VERIFY_WITH_TIMEOUT(std::any_of(clientMessages.cbegin(), clientMessages.cend(),
+                [&](const QJsonObject& message) {
+                    return message.value("type") == QLatin1String("upload_start")
+                        && message.value("remoteSessionId").toString() == remoteSessionId;
+                }), 1000);
+            const QString retriedUploadId = uploads.currentUploadId();
+            QVERIFY(!retriedUploadId.isEmpty());
+            QVERIFY(retriedUploadId != uploadId);
+            sendServerMessage({{"type", "upload_ready"}, {"uploadId", retriedUploadId}, {"assets", fullStates}});
+            QTRY_VERIFY_WITH_TIMEOUT(std::any_of(clientMessages.cbegin(), clientMessages.cend(),
+                [&](const QJsonObject& message) {
+                    return message.value("type") == QLatin1String("upload_complete")
+                        && message.value("uploadId").toString() == retriedUploadId;
+                }), 1000);
+            sendServerMessage({{"type", "upload_finished"}, {"uploadId", retriedUploadId}, {"assets", fullStates}});
+            QTRY_VERIFY_WITH_TIMEOUT(uploads.isLoadingInRam(), 1000);
+            QJsonArray retriedResidency;
+            for (int index = 0; index < assetCount; ++index) {
+                auto row = residencyRow(index, "ready");
+                row.insert("uploadId", retriedUploadId);
+                retriedResidency.append(row);
+            }
+            sendServerMessage({{"type", "media_residency"}, {"sequence", 1}, {"assets", retriedResidency}});
+            QTRY_COMPARE_WITH_TIMEOUT(uploadFinished.count(), 1, 1000);
+            QCOMPARE(uploadFinished.first().first().toString(), retriedUploadId);
+            QVERIFY(!uploads.isBusy());
+            for (const auto& source : uploadFiles)
+                QVERIFY(files.isFileUploadedToClient(source.fileId, targetEndpointId));
+            socket.disconnect();
+            return;
+        }
         if (outcome == QLatin1String("cancelled")) {
             uploads.requestCancel();
             QCOMPARE(cancelled.count(), 1);
@@ -2191,74 +2272,104 @@ void UploadRemovalSecurityTest::protocolRunsTwoOutgoingSessionsConcurrently() {
         }).toJson(QJsonDocument::Compact)));
     };
 
-    // Closing A is session-scoped. It must not route through the transport-loss
-    // path, which would suspend the independent upload to B indefinitely.
+    // Closing A retires its request without touching the independent B slot.
     const QString teardownA = QStringLiteral("cccccccc-3333-4333-8333-666677778888");
     terminalSession(sessionA, targetA, teardownA, false);
-    QTRY_COMPARE_WITH_TIMEOUT(uploads.activeOutgoingTransferCount(), 2, 1000);
-    QTRY_COMPARE_WITH_TIMEOUT(uploads.uploadScheduler()->activeCount(), 1, 1000);
+    QTRY_COMPARE_WITH_TIMEOUT(uploads.activeOutgoingTransferCount(), 1, 1000);
+    QCOMPARE(uploads.uploadScheduler()->activeCount(), 1);
     uploads.setTargetClientId(targetB);
-    QCOMPARE(uploads.outgoingState(),
-             UploadManager::OutgoingState::AwaitingTargetReady);
+    QCOMPARE(uploads.outgoingState(), UploadManager::OutgoingState::AwaitingTargetReady);
+    QCOMPARE(uploads.currentUploadId(), originalUploadB);
     uploads.setTargetClientId(targetA);
-    QCOMPARE(uploads.outgoingState(), UploadManager::OutgoingState::Suspended);
-    QCOMPARE(uploads.currentUploadId(), originalUploadA);
+    QCOMPARE(uploads.outgoingState(), UploadManager::OutgoingState::Idle);
+    QVERIFY(uploads.currentUploadId().isEmpty());
     QVERIFY(uploads.uploadScheduler()->isSessionTerminal(sessionA));
     QVERIFY(!uploads.uploadScheduler()->isUploadActive(sessionA, 1, originalUploadA));
-    QCOMPARE(cancelled.count(), 0);
+    QCOMPARE(cancelled.count(), 1);
+    QCOMPARE(cancelled.first().first().toString(), originalUploadA);
     QCOMPARE(rejected.count(), 0);
 
-    // A new authenticated session reuses the user's exact files while fencing
-    // off the terminal protocol identity. No new user upload action occurs.
+    // Reopening a terminal session never restores a discarded upload intent.
     terminalSession(sessionA, targetA, teardownA, true);
     const QString replacementA = QStringLiteral("dddddddd-2222-4333-8444-555566667788");
     openSession(replacementA, targetA);
-    QTRY_COMPARE_WITH_TIMEOUT(uploadStarts.size(), 3, 1000);
-    QCOMPARE(reidentified.count(), 1);
-    QCOMPARE(reidentified.at(0).at(0).toString(), originalUploadA);
-    const QString replacementUploadA = reidentified.at(0).at(1).toString();
-    QVERIFY(!replacementUploadA.isEmpty());
-    QVERIFY(replacementUploadA != originalUploadA);
-    QCOMPARE(reidentified.at(0).at(2).toString(), targetA);
-    QCOMPARE(uploads.currentUploadId(), replacementUploadA);
-    QCOMPARE(uploadStarts.last().value("remoteSessionId").toString(), replacementA);
-    QCOMPARE(uploadStarts.last().value("uploadId").toString(), replacementUploadA);
-    QCOMPARE(uploadStarts.last().value("files"), originalA.value("files"));
-    QCOMPARE(uploads.activeOutgoingTransferCount(), 2);
-    QCOMPARE(uploads.uploadScheduler()->activeCount(), 2);
+    QTRY_VERIFY_WITH_TIMEOUT(socket.remoteSessionCoordinator()->forPeer(targetA).active, 1000);
+    QTest::qWait(100);
+    QCOMPARE(uploadStarts.size(), 2);
+    QCOMPARE(reidentified.count(), 0);
     QVERIFY(!uploads.uploadScheduler()->setSessionState(sessionA, UploadScheduler::SessionState::Active));
     QCOMPARE(uploads.uploadScheduler()->enqueue({sessionA, 1, originalUploadA,
         originalA.value("files").toArray().first().toObject().value("assetId").toString()}),
         UploadScheduler::EnqueueResult::SessionTerminal);
 
-    // Explicit cancellation removes B's retained runtime request. A later
-    // authenticated session for the same target must remain idle.
+    // A new explicit user action still uploads the same immutable sources.
+    bool retryAcceptedA = false;
+    QTRY_VERIFY_WITH_TIMEOUT(retryAcceptedA || (retryAcceptedA = uploads.toggleUpload({uploadA})), 1000);
+    QTRY_COMPARE_WITH_TIMEOUT(uploadStarts.size(), 3, 1000);
+    const QString replacementUploadA = uploads.currentUploadId();
+    QVERIFY(replacementUploadA != originalUploadA);
+    QCOMPARE(uploadStarts.last().value("remoteSessionId").toString(), replacementA);
+    QCOMPARE(uploadStarts.last().value("files"), originalA.value("files"));
+    QCOMPARE(uploads.activeOutgoingTransferCount(), 2);
+    QCOMPARE(uploads.uploadScheduler()->activeCount(), 2);
+
     const QString teardownB = QStringLiteral("eeeeeeee-3333-4333-8333-666677778888");
     terminalSession(sessionB, targetB, teardownB, false);
     uploads.setTargetClientId(targetB);
-    QTRY_COMPARE_WITH_TIMEOUT(uploads.outgoingState(), UploadManager::OutgoingState::Suspended, 1000);
-    QCOMPARE(uploads.currentUploadId(), originalUploadB);
-    QTRY_VERIFY_WITH_TIMEOUT(uploads.canRequestCancel(), 1000);
-    uploads.requestCancel();
-    QCOMPARE(cancelled.count(), 1);
-    QCOMPARE(cancelled.at(0).at(0).toString(), originalUploadB);
-    QCOMPARE(uploads.activeOutgoingTransferCount(), 1);
-    QCOMPARE(uploads.outgoingState(), UploadManager::OutgoingState::Idle);
+    QTRY_COMPARE_WITH_TIMEOUT(uploads.outgoingState(), UploadManager::OutgoingState::Idle, 1000);
+    QCOMPARE(cancelled.count(), 2);
+    QCOMPARE(cancelled.last().first().toString(), originalUploadB);
     QVERIFY(uploads.currentUploadId().isEmpty());
     terminalSession(sessionB, targetB, teardownB, true);
     const QString replacementB = QStringLiteral("ffffffff-2222-4333-8444-555566667788");
     openSession(replacementB, targetB);
     QTRY_VERIFY_WITH_TIMEOUT(socket.remoteSessionCoordinator()->forPeer(targetB).active, 1000);
-    QCOMPARE(socket.remoteSessionCoordinator()->forPeer(targetB).remoteSessionId, replacementB);
     QTest::qWait(100);
     QCOMPARE(uploadStarts.size(), 3);
-    QCOMPARE(reidentified.count(), 1);
+    QCOMPARE(reidentified.count(), 0);
     QCOMPARE(rejected.count(), 0);
     QCOMPARE(uploads.activeOutgoingTransferCount(), 1);
     QCOMPARE(uploads.uploadScheduler()->activeCount(), 1);
     QVERIFY(uploads.uploadScheduler()->isSessionTerminal(sessionB));
-    QVERIFY(!uploads.uploadScheduler()->setSessionState(sessionB, UploadScheduler::SessionState::Active));
-    QVERIFY(uploads.currentUploadId().isEmpty());
+    uploads.setTargetClientId(targetA);
+    QCOMPARE(uploads.currentUploadId(), replacementUploadA);
+    QCOMPARE(uploads.outgoingState(), UploadManager::OutgoingState::AwaitingTargetReady);
+    // B completes through the parallel path and retains only its RAM barrier.
+    // With no selected target, terminal cleanup must not keep a stale global
+    // "remote files present" flag after retiring the last inventory.
+    uploads.setTargetClientId(targetB);
+    bool retryAcceptedB = false;
+    QTRY_VERIFY_WITH_TIMEOUT(retryAcceptedB || (retryAcceptedB = uploads.toggleUpload({uploadB})), 1000);
+    QTRY_COMPARE_WITH_TIMEOUT(uploadStarts.size(), 4, 1000);
+    const QString finalUploadB = uploads.currentUploadId();
+    QJsonArray fullStatesB;
+    for (const auto& value : uploadStarts.last().value("files").toArray()) {
+        const auto asset = value.toObject();
+        fullStatesB.append(QJsonObject{{"assetId", asset.value("assetId")},
+            {"sha256", asset.value("sha256")}, {"size", asset.value("size")},
+            {"offset", asset.value("size")}});
+    }
+    auto completeB = [&](const QString& type) {
+        sendUploadTestMessage(peer, {{"type", type}, {"protocolVersion", 12},
+            {"serverBootId", bootId}, {"messageId", QUuid::createUuid().toString(QUuid::WithoutBraces)},
+            {"connectionGeneration", 1}, {"remoteSessionId", replacementB}, {"generation", 1},
+            {"ownerEndpointId", socket.endpointId()}, {"targetEndpointId", targetB},
+            {"uploadId", finalUploadB}, {"assets", fullStatesB}});
+    };
+    completeB(QStringLiteral("upload_ready"));
+    QTRY_COMPARE_WITH_TIMEOUT(uploads.outgoingState(), UploadManager::OutgoingState::AwaitingValidation, 1000);
+    completeB(QStringLiteral("upload_finished"));
+    QTRY_VERIFY_WITH_TIMEOUT(uploads.isLoadingInRam(), 1000);
+    uploads.terminateRemoteSessionUpload(replacementA, QStringLiteral("session_inactive"));
+    uploads.setTargetClientId({});
+    QVERIFY(uploads.hasActiveUpload());
+    emit socket.leaseExpired(bootId, 1);
+    QVERIFY(!uploads.hasActiveUpload());
+    QVERIFY(!uploads.isBusy());
+    QCOMPARE(uploads.activeOutgoingTransferCount(), 0);
+    uploads.setTargetClientId(targetB);
+    QVERIFY(!uploads.isLoadingInRam());
+    QVERIFY(!uploads.hasActiveUpload());
     socket.disconnect();
 }
 
