@@ -73,6 +73,11 @@ public:
                                       PlacementMode mode = PlacementMode::Avoid,
                                       TrimMode trimMode = TrimMode::Independent) const;
     QJsonObject timelineMediaSnapshot(const QString& mediaId) const;
+    // Transient authoring presentation; never enters tracks or serialization.
+    void setTimelineClipPreview(const QString& clipId, const ClipPlacement& placement,
+                                int edge, PlacementMode mode, TrimMode trimMode);
+    void clearTimelineClipPreview();
+    SceneTimeline::MediaTrack timelinePresentationTrack(const CanvasMedia* media) const;
     bool moveTimelineClip(const QString& clipId, qint64 startSlot, int trackIndex, QString* error = nullptr,
                           PlacementMode mode = PlacementMode::Avoid);
     bool trimTimelineClip(const QString& clipId, qint64 startSlot, qint64 endSlot, QString* error = nullptr,
@@ -142,6 +147,7 @@ public:
                                 QStringList* skippedMediaIds = nullptr);
 
 signals:
+    void timelinePreviewChanged();
     void mediaAdded(CanvasMedia* media);
     void mediaAboutToBeRemoved(CanvasMedia* media);
     void mediaRemoved(const QString& mediaId);
@@ -199,6 +205,7 @@ private:
     QList<CanvasMedia*> m_media;
     QString m_primarySelectedMediaId;
     QStringList m_selectionActivationOrder;
+    QHash<QString, SceneTimeline::MediaTrack> m_timelinePreviewTracks;
     SceneTimeline::SceneSettings m_timelineSettings;
     qreal m_timelinePositionMs = 0;
     bool m_evaluatingTimeline = false;

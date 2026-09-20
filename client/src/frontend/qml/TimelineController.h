@@ -61,6 +61,7 @@ class TimelineController final : public QObject
 
 public:
     explicit TimelineController(QObject* parent = nullptr);
+    ~TimelineController() override;
     void setHost(QuickCanvasHost* host);
     qreal positionMs() const;
     qreal maxDurationMs() const;
@@ -123,6 +124,9 @@ public:
                                           int edge, qreal lastStartMs, qreal lastEndMs, int lastRow,
                                           bool overwrite, const QVariantMap& snap = QVariantMap(), bool rolling = false) const;
     Q_INVOKABLE void splitClip();
+    Q_INVOKABLE void applyClipPreview(const QString& id, const QVariantMap& preview,
+                                     int edge, bool overwrite, bool rolling);
+    Q_INVOKABLE void clearClipPreview();
     Q_INVOKABLE void deleteSelected();
     Q_INVOKABLE void copySelected();
     Q_INVOKABLE void paste();

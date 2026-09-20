@@ -1139,6 +1139,85 @@ private slots:
         QVERIFY(doc->primarySelectedMedia()->z() > b->z());
     }
 
+    void clipDragUpdatesCanvasBeforeRelease_data()
+    {
+        QTest::addColumn<bool>("cancel");
+        QTest::newRow("commit") << false;
+        QTest::newRow("cancel") << true;
+    }
+
+    void clipDragUpdatesCanvasBeforeRelease()
+    {
+        QFETCH(bool, cancel);
+        TimelineFixture f; QVERIFY(f.initialize());
+        f.view.resize(1100, 400);
+        auto* doc = f.host->document();
+        auto* media = doc->addText({}, "Live clip");
+        QVERIFY(media);
+        const auto id = media->timelineTrack().clip.id;
+        f.timeline.moveClip(id, 3000);
+        f.timeline.seek(1500);
+        f.view.rootObject()->setProperty("viewDurationMs", 6000);
+        f.setMagnetEnabled(false);
+        QTest::qWait(20);
+        QVERIFY(!media->clipActive());
+        auto* clip = f.item("timelineClip"); QVERIFY(clip);
+        const auto saved = doc->serializeSceneState();
+        const auto original = media->timelineTrack().toJson();
+        QSignalSpy writes(doc, &CanvasDocument::documentChanged);
+        const QPoint from = clip->mapToScene({clip->width()/2, clip->height()/2}).toPoint();
+        const QPoint to = from - QPoint(qRound(2000 * f.scale()), 0);
+        QTest::mousePress(&f.view, Qt::LeftButton, Qt::NoModifier, from);
+        f.movePointer(to);
+        QVERIFY(clip->property("dragging").toBool());
+        QVERIFY(media->clipActive());
+        QCOMPARE(media->timelineTrack().toJson(), original);
+        QCOMPARE(doc->serializeSceneState(), saved);
+        QCOMPARE(writes.count(), 0);
+        QCOMPARE(f.timeline.positionMs(), 1500.0);
+        f.movePointer(from);
+        QVERIFY(!media->clipActive());
+        f.movePointer(to);
+        QVERIFY(media->clipActive());
+        if (cancel) QVERIFY(QMetaObject::invokeMethod(clip, "cancelEdit"));
+        QTest::mouseRelease(&f.view, Qt::LeftButton, Qt::NoModifier, to);
+        QCOMPARE(media->clipActive(), !cancel);
+        QCOMPARE(writes.count(), cancel ? 0 : 1);
+        if (cancel) QCOMPARE(doc->serializeSceneState(), saved);
+        else QVERIFY(media->timelineTrack().clip.startSlot < 45);
+        QCOMPARE(doc->timelinePresentationTrack(media).toJson(), media->timelineTrack().toJson());
+    }
+
+    void videoClipPreviewSeeksWithoutSaving()
+    {
+        std::unique_ptr<QuickCanvasHost> host(QuickCanvasHost::create());
+        QVERIFY(host); host->setProjectEditingEnabled(true);
+        auto* doc = host->document();
+        auto* media = doc->addPreparedFile(QString::fromUtf8(TEST_VIDEO_FILE), {160, 90}, true, {});
+        QVERIFY(media);
+        QTRY_VERIFY(media->residencyReady() && media->player()->duration() > 1000);
+        TimelineController timeline; timeline.setHost(host.get());
+        const auto id = media->timelineTrack().clip.id;
+        timeline.moveClip(id, 3000);
+        timeline.seek(1500);
+        const auto saved = doc->serializeSceneState();
+        QSignalSpy writes(doc, &CanvasDocument::documentChanged);
+        const qreal duration = doc->timelineSettings().timeMs(media->timelineTrack().clip.durationSlots);
+        const int row = doc->timelineRow(media->timelineTrack().trackIndex);
+        const auto preview = timeline.previewClipEdit(id, 1000, 1000 + duration, row,
+            0, 3000, 3000 + duration, row, false);
+        timeline.applyClipPreview(id, preview, 0, false, false);
+        QVERIFY(media->clipActive());
+        QTRY_VERIFY(qAbs(media->player()->position() - 500) <= 34);
+        QVERIFY(!media->player()->isPlaying());
+        QCOMPARE(doc->serializeSceneState(), saved);
+        QCOMPARE(writes.count(), 0);
+        timeline.clearClipPreview();
+        QVERIFY(!media->clipActive());
+        QCOMPARE(doc->timelinePresentationTrack(media).toJson(), media->timelineTrack().toJson());
+        QCOMPARE(doc->serializeSceneState(), saved);
+    }
+
     void allClipsSelectableAndDragBetweenTracks()
     {
         TimelineFixture f; QVERIFY(f.initialize());

@@ -97,9 +97,15 @@ TimelineController::TimelineController(QObject* parent) : QObject(parent), m_cli
             this, &TimelineController::changed);
 }
 
+TimelineController::~TimelineController()
+{
+    clearClipPreview();
+}
+
 void TimelineController::setHost(QuickCanvasHost* host)
 {
     if (m_host == host) return;
+    clearClipPreview();
     if (m_host) {
         m_host->timelineEndScrub(false);
         disconnect(m_host, nullptr, this, nullptr);
@@ -502,6 +508,24 @@ QVariantMap TimelineController::previewClipEdit(const QString& id, qreal startMs
         guide = snap;
     preview.insert("snap", guide);
     return preview;
+}
+
+void TimelineController::applyClipPreview(const QString& id, const QVariantMap& preview,
+                                         int edge, bool overwrite, bool rolling)
+{
+    if (!editable() || !m_document || !preview.contains("startMs") || !preview.contains("endMs")) return;
+    const auto timing = grid();
+    m_document->setTimelineClipPreview(id,
+        {timing.nearestSlot(preview.value("startMs").toReal()),
+         timing.nearestSlot(preview.value("endMs").toReal()),
+         m_document->timelineTrackAtRow(preview.value("row").toInt())}, edge,
+        overwrite ? CanvasDocument::PlacementMode::Overwrite : CanvasDocument::PlacementMode::Avoid,
+        rolling ? CanvasDocument::TrimMode::Rolling : CanvasDocument::TrimMode::Independent);
+}
+
+void TimelineController::clearClipPreview()
+{
+    if (m_document) m_document->clearTimelineClipPreview();
 }
 
 void TimelineController::splitClip()

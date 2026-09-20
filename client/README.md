@@ -158,6 +158,10 @@ and cell size (8 pixels by default) are configurable in `client/.env`. The grid
 stays fixed in the viewport during pan, zoom and resize. See
 [selected-media transparency](docs/transparency-checkerboard.md).
 
+Dragging or trimming a timeline clip previews its provisional timing in the
+canvas immediately, including video seeking and track order. The saved clip
+changes only on release; cancelling the gesture restores the original preview.
+
 ## Usage
 
 1. **Start the Server**: Make sure the Mouffette server is running on `localhost:8080`

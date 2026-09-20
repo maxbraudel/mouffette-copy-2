@@ -379,6 +379,7 @@ bool CanvasDocument::removeMedia(const QString& mediaId)
 
 void CanvasDocument::clear()
 {
+    m_timelinePreviewTracks.clear();
     cancelPendingImportTasks();
     const bool hadPendingImports = hasPendingImports();
     m_pendingImports.clear();
@@ -488,7 +489,7 @@ void CanvasDocument::evaluateTimeline()
     m_evaluatingTimeline = true;
     const qint64 slot = m_timelineSettings.slotAt(m_timelinePositionMs);
     for(CanvasMedia* media:m_media) {
-        const auto& track = media->timelineTrack();
+        const auto track = timelinePresentationTrack(media);
         media->setClipActive(SceneTimeline::activeClip(track, slot) != nullptr);
         // Authoring geometry holds the first/last visible slot outside a clip.
         // Activity still follows the real playhead, so no content is exposed.
@@ -616,6 +617,7 @@ void CanvasDocument::setEditsLocked(bool locked)
 {
     if (m_editsLocked == locked) return;
     m_editsLocked = locked;
+    if (locked) clearTimelineClipPreview();
     emit editsLockedChanged();
     if (!locked)
         for (const QString& id : m_pendingImports.keys()) startPendingImport(id);
@@ -1237,6 +1239,67 @@ bool CanvasDocument::applyTimelinePlacement(const QJsonObject& incoming, const Q
     }
     result.append(incoming);
     return applyMediaPlan(result, paths, incomingId, freshInstance, error);
+}
+
+SceneTimeline::MediaTrack CanvasDocument::timelinePresentationTrack(const CanvasMedia* media) const
+{
+    const auto found = m_timelinePreviewTracks.constFind(media->mediaId());
+    return found == m_timelinePreviewTracks.cend() ? media->timelineTrack() : found.value();
+}
+
+void CanvasDocument::clearTimelineClipPreview()
+{
+    if (m_timelinePreviewTracks.isEmpty()) return;
+    m_timelinePreviewTracks.clear();
+    evaluateTimeline();
+    emit timelinePreviewChanged();
+}
+
+void CanvasDocument::setTimelineClipPreview(const QString& clipId, const ClipPlacement& p,
+                                           int edge, PlacementMode mode, TrimMode trimMode)
+{
+    auto* media = mediaForTimelineClip(clipId);
+    if (m_editsLocked || !media || p.startSlot < 0 || p.endSlot <= p.startSlot
+        || p.endSlot > m_timelineSettings.maxSlot()) return;
+    auto track = media->timelineTrack();
+    if (edge != 0 && track.clip.sourceStartSlot)
+        *track.clip.sourceStartSlot += p.startSlot - track.clip.startSlot;
+    track.clip.startSlot = p.startSlot;
+    track.clip.durationSlots = p.endSlot - p.startSlot;
+    track.trackIndex = p.trackIndex;
+    m_timelinePreviewTracks.clear();
+    m_timelinePreviewTracks.insert(media->mediaId(), track);
+    if (mode == PlacementMode::Avoid && trimMode == TrimMode::Rolling) {
+        if (auto* neighbour = adjacentTimelineClip(clipId, edge)) {
+            auto adjacent = neighbour->timelineTrack();
+            if (edge < 0) adjacent.clip.durationSlots = p.startSlot - adjacent.clip.startSlot;
+            else {
+                adjacent.clip.durationSlots = adjacent.clip.endSlot() - p.endSlot;
+                if (adjacent.clip.sourceStartSlot)
+                    *adjacent.clip.sourceStartSlot += p.endSlot - adjacent.clip.startSlot;
+                adjacent.clip.startSlot = p.endSlot;
+            }
+            m_timelinePreviewTracks.insert(neighbour->mediaId(), adjacent);
+        }
+    } else if (mode == PlacementMode::Overwrite) {
+        const auto slot = m_timelineSettings.slotAt(m_timelinePositionMs);
+        for (auto* other : m_media) {
+            if (other == media) continue;
+            auto cut = other->timelineTrack();
+            if (cut.trackIndex != p.trackIndex || cut.clip.endSlot() <= p.startSlot
+                || cut.clip.startSlot >= p.endSlot) continue;
+            if (slot >= p.startSlot && slot < p.endSlot) cut.clip.durationSlots = 0;
+            else if (slot < p.startSlot) cut.clip.durationSlots = qMax<qint64>(0, p.startSlot - cut.clip.startSlot);
+            else {
+                cut.clip.durationSlots = qMax<qint64>(0, cut.clip.endSlot() - p.endSlot);
+                if (cut.clip.sourceStartSlot) *cut.clip.sourceStartSlot += p.endSlot - cut.clip.startSlot;
+                cut.clip.startSlot = p.endSlot;
+            }
+            m_timelinePreviewTracks.insert(other->mediaId(), cut);
+        }
+    }
+    evaluateTimeline();
+    emit timelinePreviewChanged();
 }
 
 bool CanvasDocument::moveTimelineClip(const QString& clipId, qint64 startSlot, int trackIndex, QString* error, PlacementMode mode)

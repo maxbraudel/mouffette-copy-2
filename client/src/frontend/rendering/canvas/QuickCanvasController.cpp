@@ -338,6 +338,7 @@ void QuickCanvasController::publishMedia()
         for (CanvasMedia* item : media) {
             if (!item) continue;
             QVariantMap projection = item->toModelMap();
+            projection.insert(QStringLiteral("z"), SceneTimeline::trackZ(m_document->timelinePresentationTrack(item).trackIndex));
             projection.insert(QStringLiteral("rowKey"), item->mediaId());
             list.append(projection);
         }

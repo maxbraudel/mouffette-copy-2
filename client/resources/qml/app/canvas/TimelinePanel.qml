@@ -102,7 +102,10 @@ FocusScope {
         showSnapGuide(result)
         return result.timeMs
     }
-    function endDrag() { activeDrag = null; showSnapGuide(null) }
+    function endDrag() {
+        if (timeline) timeline.clearClipPreview()
+        activeDrag = null; showSnapGuide(null)
+    }
     function shownClipInterval(data) {
         if (activeDrag && activeDrag.isClipDrag) {
             if (activeDrag.modelData.id === data.id)
@@ -237,7 +240,10 @@ FocusScope {
         clipViewport.contentY = (root.clipHeight - clipViewport.height) / 2
         endDrag(); shiftHeld = false; controlHeld = false
     }
-    onVisibleChanged: if (!visible && scrubber && scrubber.dragTimeline) scrubber.finishScrub(false)
+    onVisibleChanged: {
+        if (!visible && activeDrag && activeDrag.isClipDrag) activeDrag.cancelEdit()
+        if (!visible && scrubber && scrubber.dragTimeline) scrubber.finishScrub(false)
+    }
     Keys.onPressed: event => {
         if (event.key === Qt.Key_Shift) { shiftHeld = true; event.accepted = true }
         else if (event.key === controlKey) { controlHeld = true; event.accepted = true }

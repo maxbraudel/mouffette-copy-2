@@ -78,6 +78,9 @@ QuickCanvasHost::QuickCanvasHost(CanvasDocument* document,
     });
     Q_ASSERT(m_document);
     Q_ASSERT(m_controller);
+    connect(m_document, &CanvasDocument::timelinePreviewChanged, this, [this] {
+        applyTimeline(timelinePositionMs(), m_timelinePlaying, true);
+    });
     m_document->setParent(this);
     m_controller->setParent(this);
     connect(m_controller, &QuickCanvasController::textToolActiveChanged,
@@ -1066,13 +1069,14 @@ void QuickCanvasHost::applyTimeline(qreal positionMs, bool playing, bool forceSe
     for (CanvasMedia* media : m_document->media()) {
         if (!media->isVideo() || !media->player()) continue;
         auto* player = media->player();
-        const auto sample = SceneTimeline::evaluateVideo(media->timelineTrack(), time, player->duration(), m_document->timelineSettings());
+        const auto track = m_document->timelinePresentationTrack(media);
+        const auto sample = SceneTimeline::evaluateVideo(track, time, player->duration(), m_document->timelineSettings());
         if (!sample.clipActive) {
             player->pause();
             if (auto* audio = player->audioOutput()) audio->setMuted(true);
-            if (time < m_document->timelineSettings().timeMs(media->timelineTrack().clip.startSlot)) {
+            if (time < m_document->timelineSettings().timeMs(track.clip.startSlot)) {
                 const qint64 sourceTime = timelineVideoPreparationSourceMs(
-                    media->timelineTrack(), time, player->duration(), m_document->timelineSettings());
+                    track, time, player->duration(), m_document->timelineSettings());
                 if (player->position() != sourceTime || (forceSeek && !player->preparedAt(sourceTime)))
                     player->prepare(sourceTime);
             }

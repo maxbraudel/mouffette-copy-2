@@ -62,6 +62,7 @@ Rectangle {
             lastValidStart = previewStart; lastValidEnd = previewEnd; lastValidTrack = previewTrack
         }
         panel.showSnapGuide(result.snap)
+        if (dragging) panel.timeline.applyClipPreview(modelData.id, result, editEdge, panel.controlHeld, editRolling)
     }
     function refreshFromPointer() {
         var point = timeContent.mapFromItem(panel, pointerPanelX, pointerPanelY)
@@ -105,6 +106,9 @@ Rectangle {
         refreshFromPointer()
     }
     function cancelEdit() { editPending = false; dragging = false; panel.endDrag() }
+    Component.onDestruction: {
+        if (dragging && panel && panel.timeline) panel.timeline.clearClipPreview()
+    }
     function finishEdit(mouse, area) {
         if (!dragging) { editPending = false; return }
         panel.updateModifiers(mouse.modifiers)
@@ -114,10 +118,11 @@ Rectangle {
         if (!dragging) return
         var overwrite = panel.controlHeld
         var id = modelData.id; var start = panel.clampTime(previewStart); var end = panel.clampTime(previewEnd); var edge = editEdge; var track = previewTrack
-        editPending = false; dragging = false; panel.endDrag()
-        if (start === initialStart && end === initialEnd && track === initialTrack) return
+        editPending = false; dragging = false
+        if (start === initialStart && end === initialEnd && track === initialTrack) { panel.endDrag(); return }
         if (edge === 0) panel.timeline.moveClip(id, start, track, overwrite)
         else panel.timeline.trimClip(id, start, end, overwrite, editRolling)
+        panel.endDrag()
     }
     x: 12 + shownStart * panel.pixelsPerMs
     y: (shownTrack + panel.firstTrackIndex) * trackHeight
