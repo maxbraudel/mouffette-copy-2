@@ -7,6 +7,7 @@ BaseMediaItem {
     property var cppMediaPlayer: null
     property var cppVideoSink: null
     property var remoteFrameSource: null
+    property var previewFrameSource: null
     property var boundMediaPlayer: null
     property var boundFallbackSink: null
     property var boundVideoOutput: null
@@ -21,7 +22,9 @@ BaseMediaItem {
         ? !!remoteFrameLoader.item && remoteFrameLoader.item.hasFrame
         : !!localVideoLoader.item && localFrameSeen
     property bool localFrameSeen: false
-    contentReady: root.residencyReady && hasLiveFrame
+    readonly property bool hasPreviewFrame: !remoteFrameMode && previewFrameSource !== null
+        && previewFrameSource.hasFrame === true
+    contentReady: (root.residencyReady && hasLiveFrame) || hasPreviewFrame
     initialFramePresented: mediaSurface.renderingAllowed
 
     function restoreBoundPlayer() {
@@ -88,8 +91,19 @@ BaseMediaItem {
         id: mediaSurface
         anchors.fill: parent
         requireInitialSkeleton: root.requireInitialSkeleton
-        residencyReady: root.residencyReady
+        // This gate controls authoring visibility only. Play and remote scene
+        // readiness continue to use the validated root.residencyReady value.
+        residencyReady: root.residencyReady || root.hasPreviewFrame
         contentReady: root.contentReady
+
+        Loader {
+            objectName: "videoImportPreview"
+            anchors.fill: parent
+            active: root.hasPreviewFrame && !root.hasLiveFrame && mediaSurface.renderingAllowed
+            sourceComponent: RemoteVideoFrameItem {
+                frameSource: root.previewFrameSource
+            }
+        }
 
         Loader {
             id: localVideoLoader
@@ -102,14 +116,8 @@ BaseMediaItem {
                 Qt.callLater(root.bindPlayerToOutput)
             }
             onLoaded: root.bindPlayerToOutput()
-            sourceComponent: VideoOutput {
+            sourceComponent: RemoteVideoFrameItem {
                 id: videoOutput
-                fillMode: VideoOutput.Stretch
-
-                onWindowChanged: function(window) {
-                    if (window)
-                        Qt.callLater(root.bindPlayerToOutput)
-                }
 
                 Component.onDestruction: {
                     if (root.boundVideoOutput === videoOutput)
@@ -129,8 +137,8 @@ BaseMediaItem {
             id: remoteFrameLoader
             anchors.fill: parent
             z: 1
-            // Local video uses VideoOutput only. Passive remote spans create a
-            // source-sized texture once their shared source holds a frame.
+            // Passive remote spans present the same native YUV frame through
+            // the shared texture adapter used for local video.
             active: root.remoteFrameMode && root.residencyReady
                     && root.remoteFrameSource.hasFrame === true
                     && mediaSurface.renderingAllowed

@@ -27,7 +27,7 @@ struct SettingSpec {
 constexpr std::array<SettingSpec, 97> kSpecs{{
     {Key::ServerUrl, "MOUFFETTE_SERVER_URL", "server-url", "serverUrl", "ws://localhost:8080", false},
     {Key::RemoteSessionHiddenTimeoutMs, "MOUFFETTE_REMOTE_SESSION_HIDDEN_TIMEOUT_MS", "remote-session-hidden-timeout-ms", nullptr, "60000", false},
-    {Key::ProjectMediaHiddenTimeoutMs, "MOUFFETTE_PROJECT_MEDIA_HIDDEN_TIMEOUT_MS", "project-media-hidden-timeout-ms", nullptr, "60000", false},
+    {Key::ProjectMediaHiddenTimeoutMs, "MOUFFETTE_PROJECT_MEDIA_HIDDEN_TIMEOUT_MS", "project-media-hidden-timeout-ms", nullptr, "0", false},
     {Key::ProjectHiddenRetentionMs, "MOUFFETTE_PROJECT_HIDDEN_RETENTION_MS", "project-hidden-retention-ms", nullptr, "300000", false},
     {Key::IncomingSessionOrphanTimeoutMs, "MOUFFETTE_INCOMING_SESSION_ORPHAN_TIMEOUT_MS", "incoming-session-orphan-timeout-ms", nullptr, "3000", false},
     {Key::UploadIdleTimeoutMs, "MOUFFETTE_UPLOAD_IDLE_TIMEOUT_MS", "upload-idle-timeout-ms", nullptr, "45000", false},
@@ -109,7 +109,7 @@ constexpr std::array<SettingSpec, 97> kSpecs{{
     {Key::ToastErrorDurationMs, "MOUFFETTE_TOAST_ERROR_DURATION_MS", "toast-error-duration-ms", nullptr, "5000", false},
     {Key::ToastAnimationDurationMs, "MOUFFETTE_TOAST_ANIMATION_DURATION_MS", "toast-animation-duration-ms", nullptr, "300", false},
     {Key::MediaRamReservePercent, "MOUFFETTE_MEDIA_RAM_RESERVE_PERCENT", "media-ram-reserve-percent", nullptr, "0", false},
-    {Key::MediaRamReserveMinMiB, "MOUFFETTE_MEDIA_RAM_RESERVE_MIN_MIB", "media-ram-reserve-min-mib", nullptr, "548", false},
+    {Key::MediaRamReserveMinMiB, "MOUFFETTE_MEDIA_RAM_RESERVE_MIN_MIB", "media-ram-reserve-min-mib", nullptr, "512", false},
     {Key::UploadConcurrency, "MOUFFETTE_UPLOAD_CONCURRENCY", "upload-concurrency", nullptr, "2", false},
     {Key::AutoUploadImportedMedia, "MOUFFETTE_AUTO_UPLOAD_IMPORTED_MEDIA", "auto-upload-imported-media", "autoUploadImportedMedia", "false", true},
     {Key::AppAlwaysOnTop, "MOUFFETTE_APP_ALWAYS_ON_TOP", "app-always-on-top", "appAlwaysOnTop", "true", true},
@@ -405,7 +405,7 @@ void AppConfig::resetToCompiledDefaults() {
     }
     m_serverUrl = QUrl(QStringLiteral("ws://localhost:8080"));
     m_remoteSessionHiddenTimeoutMs = 60000;
-    m_projectMediaHiddenTimeoutMs = 60000;
+    m_projectMediaHiddenTimeoutMs = 0;
     m_projectHiddenRetentionMs = 300000;
     m_incomingSessionOrphanTimeoutMs = 3000;
     m_uploadIdleTimeoutMs = 45000;
@@ -487,7 +487,7 @@ void AppConfig::resetToCompiledDefaults() {
     m_canvasCheckerboardOpacityPercent = 50;
     m_canvasCheckerboardCellSizePx = 8;
     m_remoteCursorDiameterPx = 30;
-    m_mediaRamReserveMinMiB = 548;
+    m_mediaRamReserveMinMiB = 512;
     m_uploadConcurrency = 2;
     m_autoUploadImportedMedia = false;
     m_appAlwaysOnTop = true;
@@ -654,10 +654,12 @@ bool AppConfig::load(const LoadOptions& options, QString* errorMessage) {
         return false;
     }
     if (!parseInteger(rawValues.at(Key::ProjectMediaHiddenTimeoutMs),
-                      keyName(Key::ProjectMediaHiddenTimeoutMs), 1000, 86400000,
+                      keyName(Key::ProjectMediaHiddenTimeoutMs), 0, 86400000,
                       candidate.m_projectMediaHiddenTimeoutMs, errorMessage)) {
         return false;
     }
+    if (candidate.m_projectMediaHiddenTimeoutMs > 0 && candidate.m_projectMediaHiddenTimeoutMs < 1000)
+        return setError(errorMessage, QStringLiteral("MOUFFETTE_PROJECT_MEDIA_HIDDEN_TIMEOUT_MS must be 0 or at least 1000"));
     if (!parseInteger(rawValues.at(Key::ProjectHiddenRetentionMs),
                       keyName(Key::ProjectHiddenRetentionMs), 60000, 2592000000LL,
                       candidate.m_projectHiddenRetentionMs, errorMessage)) {

@@ -1,6 +1,9 @@
 #include "frontend/rendering/remote/RemoteVideoFrameItem.h"
 #include "frontend/rendering/canvas/TimelineThumbnailItem.h"
 #include "backend/media/MediaResidencyManager.h"
+#include "backend/media/DecodeScheduler.h"
+#include "backend/media/MediaDecoder.h"
+#include "shared/rendering/SharedVideoNode.h"
 
 #include <QGuiApplication>
 #include <QQuickRenderControl>
@@ -179,21 +182,45 @@ class ObservedThumbnailItem final : public TimelineThumbnailItem {
 public:
     using TimelineThumbnailItem::TimelineThumbnailItem;
     QList<QRectF> quads;
+    QList<quintptr> quadTextures;
     QSet<quintptr> textures;
     QList<QSize> textureSizes;
 protected:
     QSGNode* updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData* data) override {
         auto* node = TimelineThumbnailItem::updatePaintNode(oldNode, data);
-        quads.clear(); textures.clear(); textureSizes.clear();
+        quads.clear(); quadTextures.clear(); textures.clear(); textureSizes.clear();
         for (auto* child = node ? node->firstChild() : nullptr; child; child = child->nextSibling()) {
             auto* quad = static_cast<QSGImageNode*>(child);
             quads.append(quad->rect());
+            quadTextures.append(reinterpret_cast<quintptr>(quad->texture()));
             textures.insert(reinterpret_cast<quintptr>(quad->texture()));
             textureSizes.append(quad->texture()->textureSize());
         }
         return node;
     }
 };
+
+bool coversViewport(const ObservedThumbnailItem* item, qreal left, qreal right) {
+    qreal edge = left;
+    for (const auto& rect : item->quads) {
+        if (qAbs(rect.left() - edge) > 0.001 || rect.width() <= 0) return false;
+        edge = rect.right();
+    }
+    return qAbs(edge - right) < 0.001;
+}
+
+QHash<qint64, quintptr> sourceTextureIdentities(const ObservedThumbnailItem* item) {
+    QHash<qint64, quintptr> result;
+    const qreal left = std::max(qreal(0), item->visibleLeft());
+    for (int i = 0; i < item->quads.size(); ++i) {
+        // The first visible cell may be cropped; the other left edges are the
+        // source grid anchors, independently of zoom, trim and viewport offset.
+        if (item->quads[i].left() <= left + .001) continue;
+        const auto time = qRound64((item->sourceInMs() + item->quads[i].left() / item->pixelsPerMs()) * 1000);
+        result.insert(time, item->quadTextures[i]);
+    }
+    return result;
+}
 
 } // namespace
 
@@ -202,6 +229,42 @@ class MediaFrameItemTest final : public QObject
     Q_OBJECT
 
 private slots:
+    void nativeVideoPlanesPreserveAlphaAndOrientation() {
+        RemoteVideoFrameSource source;
+        QVideoFrame video(quadrantImage());
+        source.setVideoFrame(video);
+        Scene scene;
+        scene.item->setFrameSource(&source);
+        QVERIFY(scene.initialize());
+        verifyQuadrants(scene.render());
+        video.setRotation(QtVideo::Rotation::Clockwise90);
+        source.setVideoFrame(video);
+        auto rotated = scene.render();
+        verifyPixel(rotated, {32,24}, Qt::blue);
+        verifyPixel(rotated, {96,24}, Qt::red);
+        source.clear();
+        verifyPixel(scene.render(), {32,24}, QColor(16,32,48));
+    }
+    void nativeYuvFrameRendersWithoutRgbaSource() {
+        QString error;
+        auto asset = MediaDecoder::decode(QString::fromUtf8(TEST_VIDEO_FILE), {}, &error);
+        QVERIFY2(asset, qPrintable(error));
+        RemoteVideoFrameSource source;
+        source.setVideoFrame(asset->firstFrame.frame);
+        QVERIFY(source.frame().isNull());
+        Scene scene;
+        scene.item->setFrameSource(&source);
+        QVERIFY(scene.initialize());
+        const auto rendered = scene.render();
+        QVERIFY(!rendered.isNull());
+        const auto reference = ResidentVideoPlayer::presentationFrame(asset->firstFrame.frame).toImage();
+        const QColor expected = reference.pixelColor(reference.width()/2, reference.height()/2);
+        const QColor actual = rendered.pixelColor(64,48);
+        QVERIFY(qAbs(actual.red()-expected.red()) <= 3);
+        QVERIFY(qAbs(actual.green()-expected.green()) <= 3);
+        QVERIFY(qAbs(actual.blue()-expected.blue()) <= 3);
+    }
+
     void thumbnailRepetitionZoomViewportAndRelease_data() {
         QTest::addColumn<qreal>("dpr");
         QTest::newRow("normal") << qreal(1);
@@ -268,7 +331,7 @@ private slots:
         auto cleanup = qScopeGuard([&] { manager.release(owner); });
         QTRY_VERIFY_WITH_TIMEOUT(manager.ready(owner), 15000);
         const auto asset = manager.asset(owner);
-        QVERIFY(asset->thumbnails.size() > 2);
+        QVERIFY(asset->frameIndex.size() > 2);
         Scene<ObservedThumbnailItem> scene;
         scene.item->setSize({240, 44});
         scene.item->setVisibleRight(240);
@@ -276,13 +339,14 @@ private slots:
         scene.item->setPixelsPerMs(1);
         scene.item->setSourceInMs(-10000);
         QVERIFY(scene.initialize());
-        QVERIFY(!scene.render().isNull());
+        QTRY_VERIFY((scene.render(), !scene.item->textures.isEmpty()));
         QCOMPARE(scene.item->textures.size(), 1); // First-frame hold.
         const auto firstTextures = scene.item->textures;
         scene.item->setSourceInMs(asset->durationUs / 1000.0 + 10000);
         QVERIFY(!scene.render().isNull());
-        QCOMPARE(scene.item->textures.size(), 1); // Final-frame hold.
-        QVERIFY(scene.item->textures != firstTextures);
+        QTRY_COMPARE((scene.render(), scene.item->textures.size()), 1); // Final-frame hold.
+        QTRY_VERIFY(!DecodeScheduler::instance().thumbnail(*asset, asset->frameIndex.last().timestampUs).isNull());
+        QVERIFY(!scene.render().isNull());
         const auto heldTextures = scene.item->textures;
         scene.item->setSourceInMs(asset->durationUs / 1000.0 + 20000);
         QVERIFY(!scene.render().isNull());
@@ -290,11 +354,134 @@ private slots:
         scene.item->setSourceInMs(0);
         scene.item->setPixelsPerMs(240.0 / (asset->durationUs / 1000.0));
         QVERIFY(!scene.render().isNull());
-        QVERIFY(scene.item->textures.size() > 1);
+        QTRY_VERIFY((scene.render(), scene.item->textures.size() > 1));
         for (const auto& size : scene.item->textureSizes) {
             QVERIFY(size.width() <= MediaThumbnails::Width);
             QVERIFY(size.height() <= MediaThumbnails::Height);
         }
+    }
+
+    void thumbnailCacheEvictionRecoversWithoutLayoutChange() {
+        auto& manager = MediaResidencyManager::instance();
+        auto& scheduler = DecodeScheduler::instance();
+        const QString owner = "thumbnail-eviction-test";
+        manager.acquire(owner, QString::fromUtf8(TEST_VIDEO_FILE));
+        auto cleanup = qScopeGuard([&] { manager.release(owner); scheduler.setOptionalCachingEnabled(true); });
+        QTRY_VERIFY_WITH_TIMEOUT(manager.ready(owner), 15000);
+        Scene<ObservedThumbnailItem> scene;
+        scene.item->setSize({240, 44});
+        scene.item->setVisibleRight(240);
+        scene.item->setOwnerId(owner);
+        scene.item->setPixelsPerMs(1);
+        QVERIFY(scene.initialize());
+        const auto completeStrip = [&] {
+            scene.render();
+            qreal paintedWidth = 0;
+            for (const auto& quad : scene.item->quads) paintedWidth += quad.width();
+            return qFuzzyCompare(paintedWidth, scene.item->width());
+        };
+        QTRY_VERIFY(completeStrip());
+        const auto displayedTextures = scene.item->textures;
+        scheduler.evictOptionalCaches();
+        scene.item->update(); // Selection/repaint, with no zoom or viewport change.
+        // A normal cache purge cannot expose a blank intermediate frame.
+        QVERIFY(completeStrip());
+        QCOMPARE(scene.item->textures, displayedTextures);
+        QTRY_VERIFY_WITH_TIMEOUT(completeStrip(), 3000);
+        QVERIFY(scene.item->hasThumbnails());
+        scheduler.setOptionalCachingEnabled(false);
+        QVERIFY(!scene.item->hasThumbnails());
+        QCOMPARE(scene.item->retainedThumbnailBytes(), quint64(0));
+        QVERIFY(!scene.render().isNull());
+        QVERIFY(scene.item->textures.isEmpty());
+        scheduler.setOptionalCachingEnabled(true);
+        QTRY_VERIFY(completeStrip());
+        QVERIFY(scene.item->hasThumbnails());
+    }
+
+    void videoFilmstripKeepsSourceIdentitiesAcrossZoomAndTrim() {
+        auto& manager = MediaResidencyManager::instance();
+        const QString owner = "thumbnail-stable-source-grid";
+        manager.acquire(owner, QString::fromUtf8(TEST_VIDEO_FILE));
+        const auto cleanup = qScopeGuard([&] { manager.release(owner); });
+        QTRY_VERIFY_WITH_TIMEOUT(manager.ready(owner), 15000);
+        Scene<ObservedThumbnailItem> scene;
+        scene.item->setSize({240, 44});
+        scene.item->setVisibleRight(240);
+        scene.item->setPixelsPerMs(.2);
+        scene.item->setOwnerId(owner);
+        QVERIFY(scene.initialize());
+        QCoreApplication::processEvents();
+        QTRY_COMPARE_WITH_TIMEOUT(DecodeScheduler::instance().pendingJobs(), 0, 10000);
+        QVERIFY(!scene.render().isNull());
+        QVERIFY(coversViewport(scene.item, 0, 240));
+        const auto original = sourceTextureIdentities(scene.item);
+        QVERIFY(original.size() >= 2);
+
+        // Small zoom steps project the same media-time cells. They do not
+        // request new exact timestamps for every visible screen coordinate.
+        scene.item->setPixelsPerMs(.21);
+        QVERIFY(!scene.render().isNull());
+        const auto zoomed = sourceTextureIdentities(scene.item);
+        QCOMPARE(zoomed, original);
+        scene.item->setSourceInMs(250);
+        QVERIFY(!scene.render().isNull());
+        const auto trimmed = sourceTextureIdentities(scene.item);
+        for (auto it = original.cbegin(); it != original.cend(); ++it)
+            QCOMPARE(trimmed.value(it.key()), it.value());
+        QVERIFY(coversViewport(scene.item, 0, 240));
+
+        // Crossing a density threshold inserts nested source samples. A small
+        // reversal around that threshold must retain the newly selected level.
+        scene.item->setSourceInMs(0);
+        scene.item->setPixelsPerMs(.252);
+        QVERIFY(!scene.render().isNull());
+        const qreal step = scene.item->quads.first().width() / scene.item->pixelsPerMs();
+        for (qreal scale : {.249, .251, .248, .252}) {
+            scene.item->setPixelsPerMs(scale);
+            QVERIFY(!scene.render().isNull());
+            QVERIFY(coversViewport(scene.item, 0, 240));
+            QVERIFY(qAbs(scene.item->quads.first().width() / scale - step) < .001);
+        }
+    }
+
+    void videoFilmstripCoversEveryFrameOfZoomScrollAndTrim() {
+        auto& manager = MediaResidencyManager::instance();
+        auto& scheduler = DecodeScheduler::instance();
+        const QString owner = "thumbnail-continuous-gesture";
+        manager.acquire(owner, QString::fromUtf8(TEST_VIDEO_FILE));
+        const auto cleanup = qScopeGuard([&] { manager.release(owner); scheduler.setOptionalCachingEnabled(true); });
+        QTRY_VERIFY_WITH_TIMEOUT(manager.ready(owner), 15000);
+        Scene<ObservedThumbnailItem> scene;
+        scene.item->setSize({1200, 44});
+        scene.item->setVisibleRight(240);
+        scene.item->setPixelsPerMs(.02);
+        scene.item->setOwnerId(owner);
+        QVERIFY(scene.initialize());
+        QTRY_VERIFY((scene.render(), coversViewport(scene.item, 0, 240)));
+        const qreal scales[] = {.02, .021, .028, .05, .11, .24, .4, .39, .23, .09, .04, .012};
+        for (int frame = 0; frame < 72; ++frame) {
+            const qreal left = (frame * 37) % 900;
+            scene.item->setPixelsPerMs(scales[frame % 12]);
+            scene.item->setSourceInMs(frame % 3 == 0 ? -750 : (frame % 7) * 137);
+            scene.item->setVisibleLeft(left);
+            scene.item->setVisibleRight(left + 240);
+            scene.camera->setX(-left);
+            if (frame % 11 == 0) scheduler.evictOptionalCaches();
+            // Render before servicing decode completions: an eventual QTRY
+            // success would miss the transient blanking this guards against.
+            QVERIFY(!scene.render().isNull());
+            QVERIFY2(coversViewport(scene.item, left, left + 240), qPrintable(QString::number(frame)));
+            QVERIFY(scene.item->retainedThumbnailBytes() <= TimelineThumbnailItem::VisibleImageLimit);
+            QCoreApplication::processEvents();
+        }
+        manager.release(owner);
+        QVERIFY(!scene.render().isNull());
+        QVERIFY(scene.item->quads.isEmpty());
+        QCoreApplication::processEvents();
+        QVERIFY(!scene.render().isNull());
+        QVERIFY(scene.item->quads.isEmpty()); // Late results cannot resurrect a released owner.
+        QCOMPARE(scene.item->retainedThumbnailBytes(), quint64(0));
     }
 
     void colorsAlphaAndOrientation_data()

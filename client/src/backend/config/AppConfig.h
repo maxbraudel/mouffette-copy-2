@@ -279,7 +279,7 @@ private:
 
     QUrl m_serverUrl;
     qint64 m_remoteSessionHiddenTimeoutMs = 60000;
-    qint64 m_projectMediaHiddenTimeoutMs = 60000;
+    qint64 m_projectMediaHiddenTimeoutMs = 0;
     qint64 m_projectHiddenRetentionMs = 300000;
     qint64 m_incomingSessionOrphanTimeoutMs = 3000;
     int m_uploadIdleTimeoutMs = 45000;
@@ -361,7 +361,7 @@ private:
     int m_canvasCheckerboardCellSizePx = 8;
     int m_remoteCursorDiameterPx = 30;
     int m_mediaRamReservePercent = 0;
-    int m_mediaRamReserveMinMiB = 548;
+    int m_mediaRamReserveMinMiB = 512;
     int m_uploadConcurrency = 2;
     bool m_autoUploadImportedMedia = false;
     bool m_appAlwaysOnTop = true;

@@ -196,7 +196,7 @@ change or explicit selection permits reevaluation.
 
 `client/.env` retains the existing outgoing idle thresholds:
 
-- `MOUFFETTE_PROJECT_MEDIA_HIDDEN_TIMEOUT_MS=60000`
+- `MOUFFETTE_PROJECT_MEDIA_HIDDEN_TIMEOUT_MS=0` (keep open canvases prepared)
 - `MOUFFETTE_REMOTE_SESSION_HIDDEN_TIMEOUT_MS=120000`
 - `MOUFFETTE_PROJECT_HIDDEN_RETENTION_MS=240000`
 

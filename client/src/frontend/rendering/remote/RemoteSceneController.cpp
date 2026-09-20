@@ -100,54 +100,6 @@ qint64 localSteadyMilliseconds()
 
 
 
-QImage convertFrameToImage(const QVideoFrame& frame) {
-    if (!frame.isValid()) {
-        return {};
-    }
-
-    const auto orient = [&frame](QImage image) {
-        if (image.isNull()) return image;
-        const int rotation = static_cast<int>(frame.rotation());
-        if (rotation) image = image.transformed(QTransform().rotate(rotation));
-        if (frame.mirrored()) image = image.flipped(Qt::Horizontal);
-        return image;
-    };
-    QImage direct = frame.toImage();
-    if (!direct.isNull()) {
-        if (direct.format() != QImage::Format_RGBA8888 && direct.format() != QImage::Format_ARGB32_Premultiplied) {
-            direct = direct.convertToFormat(QImage::Format_RGBA8888);
-        }
-        return orient(direct);
-    }
-
-    QVideoFrame copy(frame);
-    if (!copy.isValid()) {
-        return {};
-    }
-
-    if (!copy.map(QVideoFrame::ReadOnly)) {
-        return {};
-    }
-
-    QImage mapped;
-    const QVideoFrameFormat format = copy.surfaceFormat();
-    const int width = format.frameWidth();
-    const int height = format.frameHeight();
-    const int stride = copy.bytesPerLine(0);
-    const QImage::Format imgFormat = QVideoFrameFormat::imageFormatFromPixelFormat(format.pixelFormat());
-    if (imgFormat != QImage::Format_Invalid && width > 0 && height > 0 && stride > 0) {
-        mapped = QImage(copy.bits(0), width, height, stride, imgFormat).copy();
-    }
-
-    copy.unmap();
-
-    if (!mapped.isNull() && mapped.format() != QImage::Format_RGBA8888 && mapped.format() != QImage::Format_ARGB32_Premultiplied) {
-        mapped = mapped.convertToFormat(QImage::Format_RGBA8888);
-    }
-
-    return orient(mapped);
-}
-
 } // namespace
 
 RemoteSceneController::RemoteSceneController(FileManager* fileManager, WebSocketClient* ws, QObject* parent)
@@ -1726,7 +1678,6 @@ void RemoteSceneController::teardownMediaItem(const std::shared_ptr<RemoteMediaI
     }
     item->spans.clear();
     item->primedFrame = {};
-    item->lastFrameImage = {};
     item->loaded = item->primedFirstFrame = item->readyNotified = false;
     item->videoOutputsAttached = item->timelineVideoPlaying = false;
 }
@@ -1802,11 +1753,7 @@ void RemoteSceneController::ensureVideoOutputsAttached(const std::shared_ptr<Rem
             && !item->player->preparedAt(item->timelineRequestedSourceMs)) return;
         item->primedFrame = frame;
         if (!item->primedFirstFrame || item->timelinePixelsVisible) {
-            const QImage image = convertFrameToImage(frame);
-            if (!image.isNull()) {
-                item->lastFrameImage = image;
-                applyImageToSpans(item, image);
-            }
+            item->frameSource->setVideoFrame(frame);
         }
     });
     item->player->setVideoSink(item->liveSink);
@@ -2371,7 +2318,7 @@ void RemoteSceneController::scheduleMedia(const std::shared_ptr<RemoteMediaItem>
         return;
     }
     const auto resident = MediaResidencyManager::instance().asset(item->residencyOwner);
-    if (!resident || !resident->video || resident->compressedVideo.isEmpty()) {
+    if (!resident || !resident->video || resident->frameIndex.isEmpty()) {
         sendPrepareResult(false, QStringLiteral("Resident video allocation is unavailable"));
         return;
     }
@@ -2401,12 +2348,11 @@ void RemoteSceneController::scheduleMedia(const std::shared_ptr<RemoteMediaItem>
         if (!item || epoch != m_sceneEpoch || item->primedFirstFrame) return;
         const auto frame = item->player->preparedFrame(item->timelineRequestedSourceMs);
         if (!frame.isValid()) return;
-        item->lastFrameImage = convertFrameToImage(frame);
-        if (item->lastFrameImage.isNull()) return;
+        if (!item->player->preparedAt(item->timelineRequestedSourceMs)) return;
         item->primedFrame = frame;
         item->loaded = true;
         item->primedFirstFrame = true;
-        applyImageToSpans(item, item->lastFrameImage);
+        item->frameSource->setVideoFrame(frame);
         evaluateItemReadiness(item);
     });
     ensureVideoOutputsAttached(item);
@@ -2494,11 +2440,7 @@ void RemoteSceneController::updateTimelineGeometry(
         && !item->timelinePixelsVisible && item->primedFrame.isValid()) {
         // Refresh once on entry: decoding continued while CPU readbacks were
         // suspended for invisible pixels.
-        const auto image = convertFrameToImage(item->primedFrame);
-        if (!image.isNull()) {
-            item->lastFrameImage = image;
-            applyImageToSpans(item, image);
-        }
+        item->frameSource->setVideoFrame(item->primedFrame);
     }
     item->timelinePixelsVisible = pixelsVisible;
 }

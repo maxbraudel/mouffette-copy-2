@@ -1,5 +1,8 @@
 #include "backend/media/MediaResidencyManager.h"
+#include "backend/media/DecodeScheduler.h"
+#include "backend/media/PlaybackAudio.h"
 #include "backend/media/MediaDecoder.h"
+#include "backend/media/MediaPreviewStore.h"
 #include "backend/media/ResidentVideoPlayer.h"
 #include <QCoreApplication>
 #include <QCryptographicHash>
@@ -48,6 +51,11 @@ struct DecodeResult {
     std::shared_ptr<ResidentMediaAsset> asset;
     QString error;
 };
+struct PreviewMailbox {
+    QMutex mutex;
+    std::shared_ptr<const ResidentMediaPreview> pending;
+    bool queued = false;
+};
 }
 
 struct MediaResidencyManager::Entry {
@@ -66,6 +74,11 @@ struct MediaResidencyManager::Entry {
     std::atomic<quint64> required{0};
     double progress = 0;
     std::shared_ptr<const ResidentMediaAsset> data;
+    std::shared_ptr<const ResidentMediaPreview> preview;
+    quint64 previewGeneration = 0;
+    // Keep only the most recent worker snapshot while the GUI is busy. Its
+    // pixels already belong to allocation.thumbnailBytes during validation.
+    std::shared_ptr<PreviewMailbox> previewMailbox;
     std::unique_ptr<ResidentVideoPlayer> validationPlayer;
     bool validationAdmissionRefused = false;
     std::shared_ptr<std::atomic_bool> cancelled = std::make_shared<std::atomic_bool>(false);
@@ -86,6 +99,14 @@ struct MediaResidencyManager::Entry {
         QMutexLocker lock(&allocationMutex);
         allocation = memory;
         allocated.store(memory.totalBytes());
+    }
+    void clearPreview() {
+        preview.reset();
+        previewGeneration = 0;
+        if (previewMailbox) {
+            QMutexLocker lock(&previewMailbox->mutex);
+            previewMailbox->pending.reset();
+        }
     }
 };
 
@@ -177,7 +198,7 @@ MediaResidencyManager::MemorySnapshot MediaResidencyManager::readSystemMemory() 
     task_vm_info_data_t process{};
     count = TASK_VM_INFO_COUNT;
     if (task_info(mach_task_self(), TASK_VM_INFO, reinterpret_cast<task_info_t>(&process), &count) == KERN_SUCCESS)
-        result.processBytes = process.resident_size;
+        { result.processBytes = process.phys_footprint; result.residentBytes = process.resident_size; }
     result.availableEstimated = true;
     // Dispatch events can be coalesced and only report transitions. Reconcile
     // the latched notification with the current level on every measurement.
@@ -215,7 +236,7 @@ MediaResidencyManager::MemorySnapshot MediaResidencyManager::readSystemMemory() 
     }
 #endif
     result.availableBytes = std::min(result.totalBytes, result.availableBytes);
-    result.processBytes = std::min(result.processBytes, result.totalBytes - result.availableBytes);
+
     return result;
 }
 void MediaResidencyManager::setSafetyReserve(int percent, int minimumMiB)
@@ -238,14 +259,22 @@ int MediaResidencyManager::pinnedPlayerCount(const EntryPtr& entry) const {
     return count;
 }
 quint64 MediaResidencyManager::playbackBudgetBytes() const {
-    quint64 bytes = 0;
+    auto& scheduler = DecodeScheduler::instance();
+    quint64 graphics = 0, decoder = 0, proxyDecoder = 0;
+    bool active = false;
     for (const auto& e : m_entries) {
-        if (!e->data || !e->data->video) continue;
-        const int pinnedPlayers = pinnedPlayerCount(e);
-        bytes += e->data->playbackBudgetBytes * quint64(std::max(e->activePlayers, pinnedPlayers));
+        if (e->data && e->data->video && (e->activePlayers > 0 || pinnedPlayerCount(e) > 0)) {
+            active = true;
+            decoder = std::max(decoder, e->data->playbackBudgetBytes);
+            if (MediaPreviewStore::supportsScrubProxy(*e->data))
+                proxyDecoder = std::max(proxyDecoder, e->data->playbackBudgetBytes);
+            graphics += quint64(e->data->displaySize.width()) * e->data->displaySize.height() * 4;
+        }
     }
-    return bytes;
+    // Editing derivatives have one background decoder, shared across sources.
+    return active ? quint64(scheduler.workerCount()) * decoder + proxyDecoder + graphics : 0;
 }
+
 quint64 MediaResidencyManager::reservedBudgetBytes() const {
     quint64 bytes = pendingPlaybackBudgetBytes();
     for (const auto& e : m_entries)
@@ -253,19 +282,25 @@ quint64 MediaResidencyManager::reservedBudgetBytes() const {
     return bytes;
 }
 quint64 MediaResidencyManager::pendingPlaybackBudgetBytes() const {
-    quint64 bytes = 0;
+    quint64 bytes = 0, largest = 0, largestProxy = 0;
+    bool pending = false;
     for (const auto& e : m_entries) {
         if (!e->data || !e->data->video) continue;
-        const int pinnedPlayers = pinnedPlayerCount(e);
-        // A first decoded frame commits the player's allocations to the OS
-        // measurement. Keep only unopened scene slots and still-priming players
-        // as future commitments; charging prepared players again double-counts
-        // memory already absent from availableBytes.
-        const int pending = e->pendingPlayers + std::max(0, pinnedPlayers - e->activePlayers);
-        bytes += e->data->playbackBudgetBytes * quint64(pending);
+        const int cursors = e->pendingPlayers + std::max(0, pinnedPlayerCount(e) - e->activePlayers);
+        if (!cursors) continue;
+        pending = true;
+        // Reserve the worst case: cursors can reference different timestamps.
+        // Actual images are shared by the scheduler; only the decoder pool is
+        // independent of occurrence count. Unused reservations are released.
+        largest = std::max(largest, e->data->playbackBudgetBytes);
+        if (MediaPreviewStore::supportsScrubProxy(*e->data))
+            largestProxy = std::max(largestProxy, e->data->playbackBudgetBytes);
+        bytes += quint64(cursors) * (e->data->posterBytes * 3 + 200 * 48 * 2 * sizeof(float));
     }
+    if (pending) bytes += largest * quint64(DecodeScheduler::instance().workerCount()) + largestProxy;
     return bytes;
 }
+
 int MediaResidencyManager::pressureLevel() const {
     return std::max(m_memory.pressure, m_nativePressure.load());
 }
@@ -354,6 +389,7 @@ void MediaResidencyManager::release(const QString& ownerId) {
         e->cancelled->store(true);
         cancelPlaybackValidation(e);
         ++e->generation;
+        e->clearPreview();
         e->data.reset();
         m_entries.removeAll(e);
         QTimer::singleShot(0, this, &MediaResidencyManager::sampleNow);
@@ -404,6 +440,19 @@ QString MediaResidencyManager::sha256(const QString& id) const {
 std::shared_ptr<const ResidentMediaAsset> MediaResidencyManager::asset(const QString& id) const {
     return ready(id) ? m_owners.value(id).entry->data : nullptr;
 }
+std::shared_ptr<const ResidentMediaPreview> MediaResidencyManager::preview(const QString& id) const {
+    const auto owner = m_owners.constFind(id);
+    if (owner == m_owners.cend()) return {};
+    const auto& e = owner->entry;
+    if (!e->preview || e->cancelled->load() || e->previewGeneration != e->generation
+        || e->preview->sha256 != e->hash
+        || (!owner->expectedSha256.isEmpty() && owner->expectedSha256 != e->hash)
+        || (e->state != QLatin1String("decoding") && e->state != QLatin1String("ready"))) return {};
+    // Once resident, removal of the source does not invalidate owned bytes.
+    // Before that point, never show a stale preview for a replaced source.
+    if (e->state != QLatin1String("ready") && signature(owner->path) != owner->signature) return {};
+    return e->preview;
+}
 void MediaResidencyManager::publish(const EntryPtr& e) {
     const auto owners = e->owners.values();
     for (const auto& id : owners) if (m_owners.contains(id)) emit ownerChanged(id);
@@ -414,6 +463,7 @@ void MediaResidencyManager::startProbe(const EntryPtr& e) {
     const QString path = e->path, stamp = e->signature;
     ++m_backgroundPaths[path];
     const quint64 generation = ++e->generation;
+    e->clearPreview();
     e->state = QStringLiteral("analysing");
     e->error.clear();
     auto* watcher = new QFutureWatcher<ProbeResult>(this);
@@ -444,6 +494,7 @@ void MediaResidencyManager::startProbe(const EntryPtr& e) {
                 other->owners.insert(id);
             }
             e->owners.clear(); e->cancelled->store(true);
+            e->clearPreview();
             m_entries.removeAll(e);
             if (other->state == QLatin1String("error")) {
                 other->state = QStringLiteral("queued");
@@ -512,6 +563,7 @@ void MediaResidencyManager::evict(const EntryPtr& e) {
     e->state = QStringLiteral("waiting_for_memory");
     e->error = waitingReason(e->estimated + e->scratch);
     e->progress = 0;
+    e->clearPreview();
     e->requiresHealthySamples = true;
     m_healthySamples = 0;
     m_lastHealthySampleMs = m_clock.elapsed();
@@ -595,6 +647,9 @@ void MediaResidencyManager::startDecode(const EntryPtr& e, quint64 allowance) {
     e->cancelled = std::make_shared<std::atomic_bool>(false);
     const auto cancel = e->cancelled;
     const auto generation = ++e->generation;
+    e->clearPreview();
+    e->previewMailbox = std::make_shared<PreviewMailbox>();
+    const auto previewMailbox = e->previewMailbox;
     e->reserved = std::min(allowance, e->estimated + e->scratch);
     e->required.store(0); e->budgeted.store(0);
     e->state = QStringLiteral("decoding"); e->error.clear(); e->progress = 0;
@@ -612,6 +667,7 @@ void MediaResidencyManager::startDecode(const EntryPtr& e, quint64 allowance) {
         e->reserved = 0; e->setAllocation({});
         if (e->generation != generation || e->owners.isEmpty()) { schedule(); return; }
         if (e->cancelled->load() || result.error == QLatin1String("memory_unavailable")) {
+            e->clearPreview();
             e->state = QStringLiteral("waiting_for_memory");
             e->requiresHealthySamples = true; e->progress = 0;
             m_healthySamples = 0;
@@ -625,6 +681,7 @@ void MediaResidencyManager::startDecode(const EntryPtr& e, quint64 allowance) {
                 e->error = QStringLiteral("The media and its preparation buffers exceed this computer's RAM capacity and safety reserve");
             }
         } else if (!result.asset || result.asset->sha256 != e->hash || signature(e->path) != e->signature) {
+            e->clearPreview();
             e->state = QStringLiteral("error");
             e->error = !result.error.isEmpty() ? result.error : QStringLiteral("The source changed during decoding");
             for (const auto& id : e->owners) emit errorOccurred(id, e->error);
@@ -644,7 +701,7 @@ void MediaResidencyManager::startDecode(const EntryPtr& e, quint64 allowance) {
                 // without publishing a frame, so charging all of their full
                 // reservations again can reject an already admitted scene.
                 const bool admitted = consumesPinnedSlot
-                    ? manager->admitsBudget(entry->data->playbackBudgetBytes, false)
+                    ? manager->admitsBudget(200 * 48 * 2 * sizeof(float), false)
                     : manager->admitsBudget(0);
                 if (entry->validationPlayer) entry->validationAdmissionRefused = !admitted;
                 if (!admitted) {
@@ -674,6 +731,17 @@ void MediaResidencyManager::startDecode(const EntryPtr& e, quint64 allowance) {
                 }
             };
             e->data = std::move(result.asset);
+            if (!e->data->thumbnails.isEmpty()) {
+                auto snapshot = std::make_shared<ResidentMediaPreview>();
+                snapshot->sha256 = e->data->sha256;
+                snapshot->displaySize = e->data->displaySize;
+                snapshot->durationUs = e->data->durationUs;
+                snapshot->poster = e->data->firstFrame.frame;
+                snapshot->thumbnails = e->data->thumbnails;
+                snapshot->residentBytes = e->data->posterBytes + e->data->thumbnailBytes;
+                e->preview = std::move(snapshot);
+                e->previewGeneration = generation;
+            }
             e->estimated = e->data->residentBytes;
             if (e->data->video) {
                 validatePlayback(e);
@@ -687,9 +755,10 @@ void MediaResidencyManager::startDecode(const EntryPtr& e, quint64 allowance) {
     });
     const bool simulatedMemory = m_testMemory;
     const quint64 safetyReserve = reserveBytes();
-    watcher->setFuture(QtConcurrent::run([self, e, generation, allowance, cancel, simulatedMemory, safetyReserve]() {
+    watcher->setFuture(QtConcurrent::run([self, e, generation, allowance, cancel, simulatedMemory, safetyReserve, previewMailbox]() {
         DecodeResult result;
         MediaDecoder::DecodeCallbacks callbacks;
+        callbacks.retainOriginalVideo = true;
         callbacks.cancelled = [cancel]() { return cancel->load(); };
         QElapsedTimer budgetClock;
         budgetClock.start();
@@ -710,6 +779,29 @@ void MediaResidencyManager::startDecode(const EntryPtr& e, quint64 allowance) {
             return true;
         };
         callbacks.allocatedBreakdown = [e](const ResidentMediaMemory& memory) { e->setAllocation(memory); };
+        callbacks.preview = [self, e, generation, cancel, previewMailbox](std::shared_ptr<const ResidentMediaPreview> snapshot) {
+            if (cancel->load() || !snapshot || !self) return;
+            {
+                QMutexLocker lock(&previewMailbox->mutex);
+                previewMailbox->pending = std::move(snapshot);
+                if (previewMailbox->queued) return;
+                previewMailbox->queued = true;
+            }
+            QMetaObject::invokeMethod(self, [self, e, generation, cancel, previewMailbox]() {
+                std::shared_ptr<const ResidentMediaPreview> snapshot;
+                {
+                    QMutexLocker lock(&previewMailbox->mutex);
+                    snapshot.swap(previewMailbox->pending);
+                    previewMailbox->queued = false;
+                }
+                if (!self || !snapshot || cancel->load() || e->generation != generation
+                    || e->owners.isEmpty() || e->state != QLatin1String("decoding")
+                    || snapshot->sha256 != e->hash || signature(e->path) != e->signature) return;
+                e->preview = std::move(snapshot);
+                e->previewGeneration = generation;
+                self->publish(e);
+            }, Qt::QueuedConnection);
+        };
         callbacks.progress = [self, e, generation](double progress) {
             if (!self) return;
             QMetaObject::invokeMethod(self, [self, e, generation, progress]() {
@@ -723,9 +815,9 @@ void MediaResidencyManager::startDecode(const EntryPtr& e, quint64 allowance) {
     }));
 }
 void MediaResidencyManager::validatePlayback(const EntryPtr& e) {
-    // Keep the existing decoding state until the actual platform player has
-    // produced a renderable start image. This gates local imports and receiver
-    // residency alike, with one temporary, budgeted decoder per shared asset.
+    // Keep decoding state until a shared cursor has its current image and
+    // two lookahead frames. Initial audio was validated during packet indexing.
+    // This gates local/remote readiness without an independent decoder.
     m_decoding = true;
     e->validationAdmissionRefused = false;
     e->validationPlayer = std::make_unique<ResidentVideoPlayer>(this);
@@ -739,10 +831,10 @@ void MediaResidencyManager::validatePlayback(const EntryPtr& e) {
         }, Qt::QueuedConnection);
     };
     connect(player, &ResidentVideoPlayer::frameReady, this, [player, finish](qint64) {
-        if (!player) return;
+        if (!player || !player->preparedAt(0)) return;
         const auto frame = player->preparedFrame(0);
         if (!frame.isValid()) return;
-        finish(frame.toImage().isNull()
+        finish(ResidentVideoPlayer::presentationFrame(frame).toImage().isNull()
             ? QStringLiteral("The video player cannot render this video's first image") : QString());
     });
     connect(player, &ResidentVideoPlayer::errorOccurred, this,
@@ -773,6 +865,7 @@ void MediaResidencyManager::finishPlaybackValidation(
     if (waitingForMemory) {
         evict(e);
     } else if (!failure.isEmpty()) {
+        e->clearPreview();
         e->data.reset();
         e->state = QStringLiteral("error");
         e->error = failure;
@@ -792,6 +885,11 @@ void MediaResidencyManager::finishPlaybackValidation(
 void MediaResidencyManager::sampleNow() {
     refreshSystemMemory();
     const int pressure = pressureLevel();
+    DecodeScheduler::instance().setOptionalCachingEnabled(!allocationsBlocked());
+    if (allocationsBlocked()) {
+        DecodeScheduler::instance().evictOptionalCaches();
+        refreshSystemMemory();
+    }
     const qint64 sampleTime = m_clock.elapsed();
     if (!allocationsBlocked()) {
         if (sampleTime - m_lastHealthySampleMs >= 1000) {
@@ -805,6 +903,9 @@ void MediaResidencyManager::sampleNow() {
     // Use the same hard constraints for admission, recovery and reclamation.
     // Advisory warnings may persist with ample budget for bounded loading.
     if (allocationsBlocked()) {
+        for (const auto& e : m_entries) if (e->state == QLatin1String("decoding")) e->cancelled->store(true);
+    }
+    if (pressure >= 2) {
         for (const auto& e : m_entries) if (e->state == QLatin1String("decoding")) e->cancelled->store(true);
         auto candidates = m_entries;
         std::sort(candidates.begin(), candidates.end(), [](const EntryPtr& a, const EntryPtr& b) {
@@ -879,18 +980,27 @@ QVariantMap MediaResidencyManager::summary() const {
         reserved += e->reserved - std::min(e->reserved, stored.totalBytes());
     }
     const quint64 available = std::min(m_memory.availableBytes, m_memory.totalBytes);
-    const quint64 process = std::min(m_memory.processBytes, m_memory.totalBytes - available);
+    const quint64 process = m_memory.processBytes;
+    auto& scheduler = DecodeScheduler::instance();
     const int pressure = pressureLevel();
     return {{QStringLiteral("totalBytes"), QVariant::fromValue(m_memory.totalBytes)},
         {QStringLiteral("availableBytes"), QVariant::fromValue(available)},
         {QStringLiteral("processBytes"), QVariant::fromValue(process)},
-        {QStringLiteral("otherBytes"), QVariant::fromValue(m_memory.totalBytes - available - process)},
+        {QStringLiteral("residentProcessBytes"), QVariant::fromValue(m_memory.residentBytes)},
+        {QStringLiteral("cpuBufferBytes"), QVariant::fromValue(memory.audioPreviewBytes + memory.thumbnailBytes + scheduler.trackedFrameBytes() + scheduler.trackedThumbnailBytes() + PlaybackAudio::bufferBytes())},
+        {QStringLiteral("optionalFrameBytes"), QVariant::fromValue(scheduler.optionalFrameBytes())},
+        {QStringLiteral("optionalThumbnailBytes"), QVariant::fromValue(scheduler.thumbnailBytes())},
+        {QStringLiteral("thumbnailBufferBytes"), QVariant::fromValue(scheduler.trackedThumbnailBytes())},
+        {QStringLiteral("audioBufferBytes"), QVariant::fromValue(PlaybackAudio::bufferBytes())},
+        {QStringLiteral("decodeWorkers"), scheduler.workerCount()},
+        {QStringLiteral("audioDevices"), PlaybackAudio::deviceCount()},
         {QStringLiteral("mediaBytes"), QVariant::fromValue(memory.totalBytes())},
+        {QStringLiteral("sharedStoredBytes"), QVariant::fromValue(memory.videoBytes + memory.imageBytes)},
         {QStringLiteral("videoBytes"), QVariant::fromValue(memory.videoBytes)},
         {QStringLiteral("imageBytes"), QVariant::fromValue(memory.imageBytes)},
         {QStringLiteral("posterBytes"), QVariant::fromValue(memory.posterBytes)},
+        {QStringLiteral("audioPreviewBytes"), QVariant::fromValue(memory.audioPreviewBytes)},
         {QStringLiteral("thumbnailBytes"), QVariant::fromValue(memory.thumbnailBytes)},
-        {QStringLiteral("scrubProxyBytes"), QVariant::fromValue(memory.scrubProxyBytes)},
         {QStringLiteral("reservedBytes"), QVariant::fromValue(reserved)},
         {QStringLiteral("playbackBudgetBytes"), QVariant::fromValue(playbackBudgetBytes())},
         {QStringLiteral("pendingPlaybackBudgetBytes"), QVariant::fromValue(pendingPlaybackBudgetBytes())},
@@ -924,17 +1034,21 @@ QVariantList MediaResidencyManager::assets() const {
             {QStringLiteral("videoBytes"), QVariant::fromValue(memory.videoBytes)},
             {QStringLiteral("imageBytes"), QVariant::fromValue(memory.imageBytes)},
             {QStringLiteral("posterBytes"), QVariant::fromValue(memory.posterBytes)},
+            {QStringLiteral("audioPreviewBytes"), QVariant::fromValue(memory.audioPreviewBytes)},
             {QStringLiteral("thumbnailBytes"), QVariant::fromValue(memory.thumbnailBytes)},
-            {QStringLiteral("scrubProxyBytes"), QVariant::fromValue(memory.scrubProxyBytes)},
             {QStringLiteral("isVideo"), e->video},
-            // Compressed proxy size depends on content; the probe is an estimate.
+            // All-intra size depends on content; the probe is an estimate.
             // Never display a final-size estimate below the bytes already owned.
             {QStringLiteral("estimatedBytes"), QVariant::fromValue(std::max(e->estimated, memory.totalBytes()))},
             {QStringLiteral("preparationBudgetBytes"), QVariant::fromValue(std::max(e->estimated, memory.totalBytes()) + e->scratch)},
             {QStringLiteral("reservedBytes"), QVariant::fromValue(e->reserved - std::min(e->reserved, memory.totalBytes()))},
-            {QStringLiteral("playbackBudgetBytes"), QVariant::fromValue(playerBudget * quint64(std::max(e->activePlayers, pinnedPlayers)))},
-            {QStringLiteral("pendingPlaybackBudgetBytes"), QVariant::fromValue(playerBudget * quint64(pendingPlayers))},
+            {QStringLiteral("playbackBudgetBytes"), QVariant::fromValue(e->data && e->activePlayers ? playerBudget : quint64(0))},
+            {QStringLiteral("pendingPlaybackBudgetBytes"), QVariant::fromValue(e->data && pendingPlayers ? quint64(pendingPlayers) * (e->data->posterBytes * 3 + 200 * 48 * 2 * sizeof(float)) : quint64(0))},
             {QStringLiteral("activePlayers"), e->activePlayers},
+            {QStringLiteral("allIntra"), e->data && e->data->allIntra},
+            {QStringLiteral("representationReason"), e->data ? e->data->representationReason : QString()},
+            {QStringLiteral("sourceFileBytes"), QVariant::fromValue(e->data ? e->data->sourceFileBytes : 0)},
+            {QStringLiteral("conversionPeakBytes"), QVariant::fromValue(e->data ? e->data->conversionPeakBytes : 0)},
             {QStringLiteral("occurrences"), owners.size()}, {QStringLiteral("owners"), owners},
             {QStringLiteral("protected"), protectedEntry(e)}, {QStringLiteral("remoteStates"), remote}});
     }

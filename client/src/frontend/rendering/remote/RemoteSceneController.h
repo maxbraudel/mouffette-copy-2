@@ -154,7 +154,6 @@ private:
         quint64 sceneEpoch = 0;
         QVideoSink* liveSink = nullptr;
         bool videoOutputsAttached = false;
-        QImage lastFrameImage;
 		QPointer<RemoteVideoFrameSource> frameSource;
 	};
 

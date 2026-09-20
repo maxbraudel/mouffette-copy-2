@@ -708,9 +708,12 @@ void QuickCanvasHost::prepareSceneVideos(std::function<void()> ready)
                 failScene(QStringLiteral("Media memory availability changed during preparation"), m_sceneAccepted);
                 return;
             }
-            if (media->isVideo() && (!media->player()
-                || !media->player()->preparedAt(timelineVideoPreparationSourceMs(
-                    media->timelineTrack(), timelinePositionMs(), media->player()->duration(), m_document->timelineSettings())))) return;
+            if (!media->isVideo()) continue;
+            if (!media->player()) return;
+            const auto track = m_document->timelinePresentationTrack(media);
+            const auto sample = SceneTimeline::evaluateVideo(track, timelinePositionMs(),
+                media->player()->duration(), m_document->timelineSettings());
+            if (sample.clipActive && !media->player()->preparedAt(sample.sourceTimeMs)) return;
         }
         m_videoPreparation = nullptr;
         context->deleteLater();
@@ -735,14 +738,16 @@ void QuickCanvasHost::prepareSceneVideos(std::function<void()> ready)
     for (CanvasMedia* media : m_document->media()) {
         if (!context || m_videoPreparation != context) return;
         if (media->isVideo() && media->player()) {
-            media->player()->pause();
-            // Replace any preview seek queued while this player's source was
-            // loading. Its LoadedMedia handler must not restore the draft
-            // cursor over the scene's prepared start frame.
             const qint64 sourceTime = timelineVideoPreparationSourceMs(
-                media->timelineTrack(), timelinePositionMs(), media->player()->duration(), m_document->timelineSettings());
-            media->setPositionMs(sourceTime);
-            media->player()->prepare(sourceTime);
+                m_document->timelinePresentationTrack(media), timelinePositionMs(),
+                media->player()->duration(), m_document->timelineSettings());
+            // Asset identity and cursor generation version the prepared frame.
+            // A prepared cursor needs no new seek or audio/decoder initialization.
+            if (!media->player()->preparedAt(sourceTime)) {
+                media->player()->pause();
+                media->setPositionMs(sourceTime);
+                media->player()->prepare(sourceTime);
+            }
         }
     }
     finish();
@@ -1073,6 +1078,7 @@ void QuickCanvasHost::applyTimeline(qreal positionMs, bool playing, bool forceSe
         media->player()->setScrubbing(m_timelineScrubbing);
         auto* player = media->player();
         const auto track = m_document->timelinePresentationTrack(media);
+        player->prepareEntry(timelineVideoPreparationSourceMs(track, 0, player->duration(), m_document->timelineSettings()));
         const auto sample = SceneTimeline::evaluateVideo(track, time, player->duration(), m_document->timelineSettings());
         if (!sample.clipActive) {
             player->pause();

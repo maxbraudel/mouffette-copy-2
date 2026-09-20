@@ -489,6 +489,7 @@ qint64 ProjectManager::projectDeleteAtMs(const QString& targetEndpointId) const
 
 qint64 ProjectManager::projectMediaReleaseAtMs(const QString& targetEndpointId) const
 {
+    if (m_timing.projectMediaHiddenTimeoutMs <= 0) return -1;
     const ProjectRecord* project = projectForTarget(targetEndpointId);
     return project && project->state == ProjectLifecycleState::Hidden && project->hiddenAtMs >= 0
             && !projectMediaReleaseExpired(targetEndpointId)

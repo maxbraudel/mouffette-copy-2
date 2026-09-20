@@ -24,7 +24,7 @@ public:
     Q_ENUM(RemovalReason)
     struct TimingPolicy {
         qint64 projectHiddenRetentionMs = 300'000;
-        qint64 projectMediaHiddenTimeoutMs = 60'000;
+        qint64 projectMediaHiddenTimeoutMs = 0; // Keep open canvases prepared by default.
         int autosaveDelayMs = 300;
         int checkpointIntervalMs = 15'000;
         int deadlinePollIntervalMs = 250;

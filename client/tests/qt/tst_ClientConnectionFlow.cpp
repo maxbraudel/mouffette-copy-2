@@ -23,6 +23,7 @@
 #include <QWebSocketServer>
 
 #include "backend/runtime/ApplicationRuntime.h"
+#include "backend/config/AppConfig.h"
 #include "backend/media/MediaBackendBootstrap.h"
 #include "backend/media/MediaResidencyManager.h"
 #include "backend/runtime/ApplicationActivityMonitor.h"
@@ -2198,6 +2199,16 @@ private slots:
 
     void pointerPresenceKeepsAllProjectsAndSessionsAliveUntilItLeaves()
     {
+        // This case exercises the optional RAM-only inactivity policy.
+        // Open canvases retain media by default in the shared engine.
+        auto& config = AppConfig::instance();
+        const AppConfig previousConfig = config;
+        const auto restoreConfig = qScopeGuard([&] { config = previousConfig; });
+        AppConfig::LoadOptions options;
+        options.defaultEnvFilePath.clear();
+        options.arguments = {"tst_ClientConnectionFlow", "--project-media-hidden-timeout-ms=60000"};
+        QString configError;
+        QVERIFY2(config.load(options, &configError), qPrintable(configError));
         QTemporaryDir root;
         QVERIFY(root.isValid());
 

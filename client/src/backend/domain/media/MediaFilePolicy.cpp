@@ -303,8 +303,22 @@ std::optional<QMediaFormat::VideoCodec> videoCodecForSampleEntry(const QByteArra
 }
 
 bool decoderSupportsMp4Codec(QMediaFormat::VideoCodec codec) {
-    QMediaFormat capabilities(QMediaFormat::MPEG4);
-    return capabilities.supportedVideoCodecs(QMediaFormat::Decode).contains(codec);
+    // Import capability must describe the engine that will actually decode the
+    // file, independent of optional Qt streaming-player plugins.
+    AVCodecID id = AV_CODEC_ID_NONE;
+    switch (codec) {
+    case QMediaFormat::VideoCodec::H264: id = AV_CODEC_ID_H264; break;
+    case QMediaFormat::VideoCodec::H265: id = AV_CODEC_ID_HEVC; break;
+    case QMediaFormat::VideoCodec::AV1: id = AV_CODEC_ID_AV1; break;
+    case QMediaFormat::VideoCodec::VP8: id = AV_CODEC_ID_VP8; break;
+    case QMediaFormat::VideoCodec::VP9: id = AV_CODEC_ID_VP9; break;
+    case QMediaFormat::VideoCodec::MPEG4: id = AV_CODEC_ID_MPEG4; break;
+    case QMediaFormat::VideoCodec::MPEG1: id = AV_CODEC_ID_MPEG1VIDEO; break;
+    case QMediaFormat::VideoCodec::MPEG2: id = AV_CODEC_ID_MPEG2VIDEO; break;
+    case QMediaFormat::VideoCodec::MotionJPEG: id = AV_CODEC_ID_MJPEG; break;
+    default: break;
+    }
+    return avcodec_find_decoder(id) != nullptr;
 }
 
 VideoTrackValidation validateVideoSampleDescription(QFile& file,

@@ -1,230 +1,310 @@
-# Resident media and bounded video playback
+# Resident media and shared playback
 
-Application bootstrap prepares the Qt media backend, decoder capabilities and
-current audio devices before publishing `ApplicationController.ready`. The loading
-window remains responsive; activation requests cannot reveal the main window early.
-A failed preparation keeps startup on its retry screen. The startup probe does not
-open media or retain a player, video sink, audio stream, decoder queue or polling timer.
-Per-occurrence outputs still use the current audio device, including after hotplug.
-The worker expires when idle; shutdown joins outstanding discovery before Qt teardown.
+## Identity and validation
 
-Every image/video occurrence has an asynchronous residency lease. The process-wide
-`MediaResidencyManager` owns immutable assets shared by SHA-256. Text does not
-need a file lease. RAM state is transient; project references retain the source
-and an optional `pendingImport` flag until the asynchronous identity is known.
-Accepted drops also receive an immediate media ID and an optional canvas
-`pendingImports` record before metadata inspection. This preserves their source
-identity and drop center across restart; changed or missing sources are rejected
-on resume. A canvas with pending metadata imports cannot start a scene.
+`MediaResidencyManager` owns immutable assets shared by original SHA-256. Every
+image/video occurrence has a lease; text needs none. Saved projects, source paths,
+transfer payloads and hashes continue to refer to the original file on disk.
+Runtime resident representations are rebuilt during background loading. Optional
+editing derivatives may persist in the local disk cache; they never replace the
+original identity, transfer payload or validation requirement.
+Metadata discovery has its own bounded pool, so hashing/decoding does not delay
+editable skeleton creation. Source signatures, import cancellation and document
+generations fence publication, including after resume of pending imports.
 
-Drop performs geometry discovery in a dedicated, bounded worker pool before
-inserting the exact-size skeleton. MP4 geometry comes from headers when complete;
-only missing geometry requires an interruptible stream probe. Geometry inspection
-does not initialize Qt multimedia or enumerate hardware codecs. Import cancellation,
-source signatures and document generations still govern publication. Bulk hashing
-and decoding cannot occupy the geometry pool.
+`MediaDecoder` reads the original into RAM, hashes it, and strictly validates all
+video frames and selected audio through EOF. Interactive imports retain these
+original compressed bytes and build the frame index during that validation pass.
+`IndexedMediaDecoder` then indexes compressed audio and prepares the initial audio
+buffer without decoding the whole video again. Readiness no longer waits for
+all-intra encoding and another complete verification decode. Original quality,
+timestamps, SAR, rotation and color metadata are preserved. Both local and remote
+residency use this path; duplicate occurrences share the same allocation.
 
-The skeleton and its editable shell do not allocate image/video rendering surfaces.
-For content that is still loading when its visual attaches, those surfaces are
-created when resident content is available, after the first host skeleton frame,
-and the content fades in. A visual attaching to already-resident content creates
-its surface immediately and presents at full opacity, including after canvas page
-navigation. Delegate creation and video-output rebinding are presentation events,
-not residency transitions; neither may replay the loading reveal. A subsequent
-loss of residency arms a new loading reveal. The passive remote renderer does not
-have this presentation gate or loading fade; its scene owns its transitions.
-Platform backend and audio device discovery also run outside the GUI thread, before
-creating the first native video sink or QML VideoOutput. Volume, mute and cursor
-changes are retained while it is pending, and the player receives its asset only
-after its audio output exists. Deleting an occurrence discards its pending callback.
-Hashing, validation and complete decoding run outside the GUI thread.
-Images retain decoded pixels. Videos retain the **exact original compressed MP4**
-(unchanged), one native-format poster frame, bounded timeline thumbnails and
-an optional editing proxy,
-shared across occurrences.
-Validation still decodes every video frame and the selected audio stream through
-EOF, including delayed frames/audio drain, retaining the poster, sampled small thumbnails and independently compressed
-editing images. Images retain one small thumbnail (sharing pixels for tiny sources).
-The decoder reads the in-memory bytes it hashes; source mutation invalidates the job.
-No partial or corrupt video is ready. Preparation cost is file size plus one poster,
-at most 96 thumbnails fitting 192 × 108 pixels (under 8 MiB), an optional proxy
-(up to 64 MiB), and bounded codec/conversion scratch.
-Thumbnails are produced during the existing worker validation pass, with actual
-timestamps, sample aspect ratio and rotation. The first and final frames are retained;
-sampling becomes sparser for longer videos, including when duration metadata is missing.
-Their storage is included in residency admission and reported RAM. Timeline rendering
-never decodes or opens a file, starts a player, or pins an asset. Eviction/release removes
-its thumbnails; zoom and scrolling reuse small textures for the visible tiles only.
+Local authoring has a separate, display-only `ResidentMediaPreview`. After the
+first decoded frame, the worker publishes immutable snapshots containing the
+shared native poster and up to 16 cumulative thumbnails, each at most 192 × 108.
+The canvas can show the poster and the timeline can fill its strip while the
+rest of the source is still being validated. A coalesced mailbox keeps only the
+latest pending snapshot. Its pixels share the importing asset's allocations;
+they are not counted again as a second asset or copied for each snapshot.
 
-Editing proxies retain one JPEG (quality 80, fitting 640 × 360) per decoded source
-frame, with its real PTS, sample aspect ratio and rotation. They are generated in
-the existing worker validation pass, shared with the immutable asset, included in
-admission before growth, and released on eviction. The complete proxy, including
-index capacity, is capped at 64 MiB. If this cap is exceeded, the entire proxy is
-discarded and native seeking remains available. HDR, alpha, non-monotonic video
-PTS and unavailable JPEG conversion also retain the original seek path. No sparse
-thumbnail sequence is passed off as a continuous video, and no temporary proxy
-files or external transcoding process are used.
+Preview publication checks the original hash, source signature, owner,
+generation and cancellation. Failure, source replacement, owner release and
+memory cancellation remove the preview. `asset()`, `ready()`, local Play,
+scene pins and remote PREPARE still require complete validation and initial
+playback preparation. A visible poster is not a readiness acknowledgement.
+The probe's hash supports early content deduplication; the hash made while
+reading resident source bytes remains a second check that decoding uses the
+same content. Removing either pass would require a different admitted-source
+sharing contract.
 
-During an editor playhead drag, a dedicated two-thread pool decompresses a single
-proxy image per player at a time. Pointer events replace the target instead of
-queuing seeks; a completion presents its image and immediately follows the latest
-target. Only that JPEG is captured by the worker, so retiring an asset does not
-retain the full source until the job completes. Gesture/source generations fence
-stale results. The preview keeps at most a displayed image and one in-flight
-image per player, within the player's existing rendering/scratch budget. Native
-frames cannot overwrite the proxy during the drag. Release requests the exact
-original and keeps the preview until that original frame arrives. Proxy frames
-never satisfy `preparedFrame` or emit native `frameReady`; scene preparation,
-playback, audio, remote output and the saved project continue to use the original.
-The 16 ms native-seek coalescer remains the fallback when no proxy is available.
+The explicit conversion path remains available to the decoder qualification
+harness (default low-level `MediaDecoder::decode`, without
+`DecodeCallbacks::retainOriginalVideo`). It is not used by canvas imports:
 
-`ResidentVideoPlayer` supplies a seekable, read-only `QBuffer` to Qt's streaming
-player. Every occurrence shares the MP4 allocation but has independent playback
-queues, audio, cursor and settings. Codecs run during playback/seeks, with native
-hardware decoding where available. Playback never receives a filesystem URL.
-Players prime their bounded decoder queues as residency becomes available, including
-at cursor zero, so the first Play need not initialize the decoder. Opportunistic
-preparation at zero can defer if its playback budget is unavailable. The macOS Qt plugin includes pinned memory-stream
-fixes (UTI, metadata request completion, byte-range bounds) as well as precise seeks.
+* SDR 8-bit planar YUV420/422/444 becomes full-resolution H.264 all-intra using
+  linked libx264, CRF 18, `veryfast`, no B frames, repeated SPS/PPS. Each packet is
+  independently decodable. Actual timestamps and durations are indexed; there is
+  no conversion to constant frame rate. SAR, rotation and color metadata survive.
+* HDR, alpha, unsupported/changing pixel formats and unavailable encoders retain
+  their original representation. The same FFmpeg worker pool handles them. HDR
+  precision is preserved in native 10/16-bit formats; unsupported high-depth alpha
+  fails explicitly rather than being quantized or losing transparency. Import
+  still follows the existing MP4 contract; the engine's MOV alpha fixture tests
+  the lower-level fallback, without extending accepted project formats.
+* Audio remains compressed with codec parameters, packet timing and skip-sample
+  metadata. Only the first 200 ms of float stereo audio is retained for initial
+  preparation. There is no complete PCM track. The optional disk editing proxy
+  described below is independent of this validated resident representation.
+* Converted video/audio share one compact indexed payload. For original media,
+  audio packets alias the source allocation when their container offsets permit
+  it. Byte arrays and indexes are squeezed to useful capacity. The original RAM
+  allocation is released after successful conversion verification; disk is untouched.
 
-The application uses ordinary pageable memory, not physical page locking. The OS
-may compress or swap memory. A one-second monitor and native memory-pressure
-notifications enforce the configured reserve. The compiled fallback is
-**548 MiB**; an embedded or external environment file can override it, including
-with an explicit zero.
-Configure `MOUFFETTE_MEDIA_RAM_RESERVE_PERCENT` and
-`MOUFFETTE_MEDIA_RAM_RESERVE_MIN_MIB` in `client/.env` (or an external env file
-selected with `--env-file` / `MOUFFETTE_ENV_FILE`). Rebuild after changing the
-embedded `client/.env`; external env files only require an application restart.
-Leave the optional percentage at `0` to use only the minimum MiB setting. A nonzero
-percentage means a minimum free share of total physical RAM: the effective reserve
-is `max(total RAM × percent / 100, minimum MiB)`, not a cap on media RAM. For example,
-5% and 548 MiB reserve 819.2 MiB on a 16 GiB computer. There is no additional hidden
-byte reserve when retrying a waiting import. The RAM popup shows the effective
-reserve and the remaining budget for new media after outstanding reservations.
-The macOS available value is an explicitly labelled estimate (free plus inactive
-pages); speculative pages are already included in the free count. Process RAM and
-controlled media allocations are separate measurements and need not match.
-macOS pressure is sampled from the current system state as well as notifications,
-so a past notification cannot leave admission blocked after pressure has recovered.
-A native macOS warning is advisory: imports and playback may start when their
-full preparation budgets fit above the configured reserve, including outstanding
-reservations. A warning alone neither blocks the queue indefinitely nor discards
-existing media or stops scenes. The loader still admits only one full validation
-at a time and rechecks headroom during growth. Critical pressure or an actual
-reserve deficit blocks allocations, cancels preparation and triggers reclamation,
-even when both reserve settings are zero. Windows' low-physical-memory notification
-is treated as a hard pressure constraint, not a macOS-style advisory warning.
-Admission, recovery and reclamation share this distinction; recovery samples can
-be healthy while an advisory warning remains. The available estimate is not a
-guarantee of an allocation succeeding; a runtime budget rejection or caught
-`std::bad_alloc` still defers loading through the same recovery path.
+Admission checks allocation growth throughout validation, including temporary
+original/conversion coexistence, vector reallocation and codec scratch. The
+reported conversion peak is a conservative reservation, not a sampled physical
+peak. Explicit conversion is slower and compressed storage can grow substantially; the
+main saving is elimination of per-occurrence decoders and secondary video copies.
+No production path launches an external FFmpeg process.
 
-Only one full validation job runs at a time. It reserves estimated final storage plus
-codec/conversion scratch, and checks growth before allocation. Playback budgets
-are admitted separately per independent player, including atomic scene admission.
-They are conservative estimates of codec, queue and rendering overhead, not a
-measurement of allocated RAM. A player's preparation reservation remains pending
-until its first decoded frame proves that its decoder has initialized. Only budgets
-for pending players or pinned scene slots that still need players reduce admission
-headroom. Once prepared, a player's allocations are reflected in the fresh system
-measurement and its estimated budget is not subtracted a second time. The total
-playback estimate (`playbackBudgetBytes`) remains visible separately from the
-outstanding reservation (`pendingPlaybackBudgetBytes`). Qt controls its streaming
-queues; the system monitor remains the authority for actual pressure. Unprotected media
-are evicted largest first; all referring occurrences become skeletons. Scene
-leases protect data from PREPARE until stop/teardown. Persistent pressure first
-requests a coordinated stop before those leases can be reclaimed. Reloading waits
-for two noncritical samples above the reserve at least one second apart, using
-the same configured reserve as first-time admission, and never evicts another
-ready asset merely to retry a waiting asset.
+## Cursors, scheduling and readiness
 
-The RAM popup next to Settings shows process/system/available RAM, media bytes,
-additional preparation budgets, estimated and pending playback budgets, system
-reserve, the budget available for new media (`loadableBytes`), native pressure,
-and per-asset local/remote state. Retained bytes exclude scratch and future allocations;
-preparation reservations show only the remainder beyond those retained bytes.
-Opaque platform decoder/GPU memory appears in process/system measurements, not as
-fictional retained media allocations. Errors are reported there
-and through notifications, not overlays on loading media.
+`ResidentVideoPlayer` preserves the existing QML/transport facade. Its
+`PlaybackCursor` contains timing, a generation, current image and lookahead,
+without a `QMediaPlayer` or source device per occurrence. `DecodeScheduler` owns
+`max(1, min(4, cores / 2))` workers. It coalesces identical source/frame requests,
+prioritizes playback, scrubbing, preparation, prefetch, visible thumbnails and
+offscreen thumbnails in that order, and cancels subscribers by owner/generation.
+When the pool has more than one worker, optional prefetch and thumbnail jobs can
+occupy at most all but one of them. Source affinity prefers a worker whose live
+decoder session has already decoded a nearby earlier frame of the same source.
+It tracks the last successful source decode; a disk/cache hit does not move that
+position. Failed decodes invalidate it, and an expired worker session cannot
+advertise reusable history. Obsolete seeks are interrupted cooperatively inside
+FFmpeg packet/frame loops.
 
-The stored-media total is broken down into original compressed video data
-(`videoBytes`), decoded image pixels (`imageBytes`), full-size first video frames
-(`posterBytes`), small timeline previews (`thumbnailBytes`), and compressed editing
-images with their index (`scrubProxyBytes`). These disjoint
-categories sum to `mediaBytes` globally and `residentBytes` per asset, including
-during background loading. Reused files are counted once; a tiny image that shares
-pixels with its thumbnail counts those pixels under images, with only the extra
-thumbnail bookkeeping counted under thumbnails. Eviction, failed loading and
-owner release remove the corresponding allocations from the breakdown.
+Scrubbing keeps one request in flight and coalesces pointer updates with a 16 ms
+dispatch interval. After idle time, the leading request is scheduled immediately;
+otherwise only the remaining interval is delayed. It first tries a cached editing
+image for the requested source frame; a miss decodes the original.
 
-Playback is displayed separately as an estimate, with its still-pending preparation
-reserve below it. Per-asset player estimates include both active players and scene
-slots awaiting a player, using the same calculation as the global total. They are
-never added to the stored-media total or presented as measured playback RAM.
-The popup uses one scrollable area for the summary and media list, with category
-cards adapting to narrow windows. Small allocations use KiB or bytes instead of
-rounding down to zero MiB.
+On a cold long-GOP source, a completed image behind the moving pointer can provide
+intermediate progress only after at least 100 ms without a new presentation and
+while its request is at most 1,000 ms old. It must belong to the current direction
+epoch and move monotonically toward the pointer within that epoch. Reversing
+direction rejects pending results from the previous direction. These bounds use
+elapsed wall-clock time, not a one-second distance on the source timeline. An
+intermediate image cannot satisfy exact preparation for a different frame.
+Releasing the scrub gesture cancels the old generation and requests the exact
+full-resolution image and lookahead. Play and remote scene preparation also use
+exact full-resolution frames. Preview images have separate cache identities and
+cannot satisfy those readiness checks.
 
-## Remote protocol
+Each worker reuses a codec context for all-intra images. An original inter-frame
+source instead uses one cached demux/decoder session per worker, preserving
+reference history during sequential access and seeking for backwards/distant
+requests. Sessions expire with idle workers; their count cannot exceed the pool.
+One additional low-priority worker creates optional editing images, so the video
+playback/editing pools have at most four plus one decoder sessions. The serialized
+full-validation job and the audio workers are separate from those pools.
+Decoding currently uses FFmpeg software contexts, so CPU cost can exceed the old
+platform hardware decoder. See the measured tradeoffs in the validation report;
+historical all-intra benchmarks do not qualify scrubbing on retained long-GOP
+originals.
 
-Protocol v7 carries session-generation-bound, sequenced `media_residency` snapshots
-and a `media_memory_ready` preparation checklist stage. Upload completion still
-means validated durable transfer, independently of background decoding. The
-receiver validates and caches assets after receipt, outside the scene preparation
-deadline. Scene preparation then primes each requested video start frame from the
-compressed cache; it must finish before launch.
-Test launches require every file-backed medium in that canvas ready locally;
-remote launches additionally require current receiver readiness. PREPARE pins
-already-ready data and decoder budgets atomically. A stale readiness report fails preparation without
-starting a partial scene or scheduling an automatic retry of the launch.
+Open canvases retain prepared cursors and clip entry images. Paused positions warm
+their current frame, two subsequent frames and bounded audio. On retained original
+video, lookahead requests the next frame before requesting the second, so the
+decoder can reuse the same GOP history. Required paused lookahead has preparation
+priority; starting or active playback gives it playback priority. All-intra
+lookahead can run independently. Entry images remain pinned separately from the
+moving cursor. Shared images have one allocation per file/frame/format and remain
+alive while required by any cursor or renderer.
+Play checks current versioned readiness; already prepared frames are reused and
+future clips do not block local scene start. Unprepared seeks can require a short
+residual wait. Source/timing/position/output changes invalidate their affected
+resources; generation guards reject results after deletion or cancellation.
 
-Upgrade the server and both endpoints together. Protocol v4 peers cannot join a
-v7 session; existing saved projects remain readable. File format/animation rules
-and the 64-megapixel image limit remain; the old cumulative 1 GiB image-only cap
-is replaced by shared dynamic admission.
+## Audio and rendering
 
-## Build and validation
+One `QAudioSink` callback mixer serves each audio device. Per-occurrence
+`QAudioOutput` objects remain lightweight volume/mute/device controls only. Each
+voice has four preallocated 50 ms float blocks. Two background workers decode and
+resample compressed audio, including AAC priming/trimming and shifted timestamps.
+The real-time callback mixes published blocks without decoding, allocation,
+blocking locks or file/network I/O. Voice retirement protects callback lifetime;
+output changes rebuild affected voices. The scene clock remains authoritative;
+a continuous device sample clock is corrected gradually for drift.
 
-Qt 6.11.2 and public FFmpeg libraries are required: avformat, avcodec, avutil,
-swscale and swresample. No external ffmpeg process is used by the application.
-Native package scripts include directly linked FFmpeg runtimes and dependencies,
-and verify the streaming FFmpeg Qt plugin. On macOS and Windows, that plugin is
-built from pinned Qt 6.11.2 sources, including when Qt only ships AVFoundation.
-Its seek fixes account for reordered timestamps and variable frame durations.
-It also supplies the stream packet timebase to FFmpeg so AAC priming/trailing
-sample trimming adjusts audio timestamps correctly, including after rehydration.
-It uses Qt's bounded video/audio queues (3 video frames plus one frame of
-lookahead / 9 audio buffers in this version); codec reference surfaces, textures
-and compressed packet queues add
-platform-dependent overhead. The unrelated legacy QWindowCapture implementation
-uses a removed macOS API and is unavailable in this private plugin; Mouffette
-does not expose window capture. The supported native Darwin plugin remains bundled.
-It uses Qt's asynchronous media-selection-group loader on macOS, avoiding the
-deprecated synchronous AVFoundation accessor.
+Local and remote `RemoteVideoFrameItem` nodes consume the same native
+`QVideoFrame` planes. The hardware scene graph uses Qt's YUV/HDR shaders and shares
+texture planes per QRhi and immutable frame identity. Different graphics devices
+get separate textures. Static images/thumbnails share textures per window and
+pixel identity, with weak caches. The software renderer alone converts to RGBA.
+Temporary `presentationFrame` wrappers prevent `toImage()` from retaining an extra
+RGBA copy on shared native frames. Qt Multimedia private rendering APIs are pinned
+to the existing Qt 6.11.2 build dependency.
 
-The FFmpeg `Protocol name not provided` message is informational: the synthetic
-`resident:///video.mp4` URL is only a format hint for the in-memory `QIODevice`,
-not a file or network protocol. The following `Input #0` block is a metadata dump.
-These can recur when residency validation and canvas playback open fresh players;
-they do not indicate a failure to release the previous resident asset.
+## Caches and accounting
 
-`ResidentMedia` tests generate small real MP4 fixtures for full decoding, delayed
-frames, audio, timestamps, corruption and memory-only playback. `MediaResidencyManager`
-tests inject memory snapshots for deterministic admission, deduplication, eviction,
-hysteresis and protected-scene behavior. Canvas and remote lifecycle suites cover
-skeleton interaction, launch gating and asynchronous transfer readiness. Run CTest
-and the server's npm test suite after changing these contracts.
+Timeline cells are anchored to source time, including a clip's trimmed source
+offset. Their temporal step uses powers of two with overlapping zoom thresholds
+(hysteresis), rather than selecting a new sample at every pixel-scale change.
+Cell intervals fill the strip continuously; the image is cropped at clip and
+viewport boundaries without squeezing an edge thumbnail. Variable-frame-rate
+selection maps the nominal cell time to the frame index without moving the cell
+to that frame's presentation timestamp.
+
+Visible thumbnails are requested before the one-viewport margin on either side.
+Useful subscriptions survive scroll and zoom. Existing displayed images remain
+pinned until their replacements arrive, with the nearest available image from
+the same source or an import thumbnail as fallback. The per-strip visible pixel
+budget is 2 MiB; weak handles retain no additional offscreen images. The optional
+global LRU limits are 32 MiB for thumbnails and 64 MiB for reusable video frames;
+neither is preallocated. Required cursor/entry/render frames and the bounded
+visible-strip pins can outlive an LRU eviction and exceed its retained-byte limit.
+
+An ordinary cache purge keeps displayed fallback images. Disabling optional
+allocation under memory pressure also releases visible-strip pins and cancels
+optional work; requests resume after admission recovers. Source changes and
+failed imports clear their old images immediately. `hasThumbnails` reflects
+actual pixels, not merely the existence of a video index. Failed thumbnail
+requests complete explicitly; destroyed strips cancel their pending work.
+
+`MediaPreviewStore` adds two independent disk caches under Qt's application
+`CacheLocation/media-previews-v1`: **64 MiB** for thumbnails and **512 MiB** for
+scrub images, each also limited to **12,000 files**. Versioned keys include the
+original hash, video track, source frame timestamp/duration, geometry and
+rotation. All reads and writes happen on workers; writes are atomic. Missing,
+invalid or evicted derivatives fall back to decoding the original and can be
+regenerated. These are disposable local caches, not project assets or files sent
+to remote receivers. JPEG thumbnail storage preserves the alpha fallback by
+skipping sources whose transparency would be lost.
+
+`EditingProxyCache` creates independently readable JPEG images, with a maximum
+long edge of **960 pixels**, for retained original video that is SDR, at most
+8-bit, and has no alpha. It skips the explicit all-intra representation, HDR,
+high-depth/alpha formats and formats without usable metadata; these continue
+through the original/native path. Its single low-priority FFmpeg worker starts
+only for admitted resident players and processes batches of at most 32 frames.
+It pauses cooperatively during scrubbing, Play or memory-pressure suspension.
+After a gesture, a 32-frame focus window around the last requested position takes
+priority over the continuing scan. This revisits useful regions of long clips
+whose earlier images have already exceeded the disk budget; a complete proxy is
+neither required nor guaranteed. Releasing the last owner cancels that source's
+job. Idle worker expiry releases its cached decoder/source lease after one
+second; no decoder is retained per clip.
+
+The default minimum system reserve is **512 MiB**. Configure
+`MOUFFETTE_MEDIA_RAM_RESERVE_MIN_MIB` and optional
+`MOUFFETTE_MEDIA_RAM_RESERVE_PERCENT` in `client/.env` or an external env file.
+The effective reserve is the larger of the fixed minimum and total RAM times the
+percentage. Rebuild for embedded env changes; restart for external changes.
+Memory is ordinary pageable RAM: the OS may compress or swap it.
+
+A reserve deficit preserves already-ready media and defers/cancels new loading.
+Critical pressure retains the coordinated scene-stop/reclamation policy. The
+one-second monitor and native notifications share the same admission/hysteresis
+rules. Only one full validation job runs at a time. Pending playback reservations
+cover the bounded decoder pool, one shared proxy-decoder allowance for supported
+sources, worst-case distinct cursor frames and 200 ms of audio; unused
+reservations are retired after preparation. These estimates are
+not multiplied full decoder budgets per clip and are not counted twice against
+fresh OS available-memory measurements.
+
+The memory summary exposes overlapping measurements separately:
+
+* **Shared stored data**: compressed runtime video/audio/indexes and decoded static
+  images, counted once per original identity.
+* **Tracked CPU buffers**: actual native frame lifetimes (including reduced scrub
+  frames and frames still held by renderers), thumbnail pixels retained by the
+  LRU or visible strips, asset import/static thumbnails, initial audio and
+  per-voice PCM. Asset posters are a subset, not an additional total.
+* **Decoder/graphics estimate**: a conservative pool/surface estimate, separately
+  from outstanding preparation reservations. Driver allocations are opaque.
+* **Available memory estimate**, configured reserve and remaining load budget.
+* **Process footprint**: macOS `phys_footprint`; resident set is reported separately.
+  Free plus inactive pages estimates macOS availability.
+
+The popup restores the horizontal Mouffette/system/available overview and its
+color legend, with plain preparation totals in place of metric cards. This is
+explicitly an estimated distribution: available RAM is bounded by physical RAM,
+the process share is bounded by the remaining occupied portion, and the system
+share is the remainder. It does not add overlapping media/decoder counters to
+the process measurement. All asset details remain in the same scrolling list.
+
+`mediaBytes` remains the sum of asset-owned disjoint categories for compatibility:
+video, static pixels, initial video frames, import/static thumbnails and initial audio.
+`sharedStoredBytes` is the narrower stored-data total. Global caches and live
+playback buffers are additional tracked CPU allocations. A per-asset conversion
+peak and representation reason make storage growth visible.
+`optionalThumbnailBytes` reports only the LRU's retained pixels;
+`thumbnailBufferBytes` tracks their full shared lifetime, including visible-strip
+pins after LRU eviction. `cpuBufferBytes` uses the latter once, rather than adding
+both overlapping counters. Disk JPEG sizes are storage usage, not resident RAM.
+
+## Remote protocol and packaging
+
+Protocol v12, project schema and original-file transfers are unchanged. Residency
+snapshots remain session-generation-bound and sequenced. Durable upload completion
+is separate from background media readiness. Remote PREPARE pins ready data and
+prepares requested start cursors; stale readiness cannot launch a partial scene.
+The receiver renders native shared planes without an RGBA image per video frame.
+
+Qt 6.11.2 and linked avformat/avcodec/avutil/swscale/swresample are required. Native
+package scripts retain the pinned Qt multimedia plugin for device support and the
+legacy comparison harness. The application itself no longer instantiates the old
+per-clip Qt playback engine. The manual benchmark keeps an explicit Qt baseline;
+Windows qualification and physical audiovisual latency measurements remain release
+gates described in [media engine validation](MEDIA_ENGINE_VALIDATION.md).
+
+## Tests
+
+`ResidentMedia` covers indexed payload sharing, independent intra frames, variable
+PTS, SAR/rotation, full decode, corruption, AAC samples, memory-only playback,
+rapid seeks, repeated Play and late cancellation/deletion. Optional generated
+fixtures cover 4K/HDR/alpha. Repeated cursor cycles check live allocations return
+to their baseline. `MediaResidencyManager` injects deterministic memory snapshots
+for reservations, deduplication, cache reclamation and protected scenes. Its
+preview tests stop validation at the first image, check immutable shared pixels
+and a valid native poster before readiness, and cover corrupt tails, source
+replacement, cancellation, owner rebinding and pressure cleanup. Timeline strip
+tests cover source anchoring, zoom/LOD stability, fallback continuity and bounded
+visible memory; scheduler/proxy tests cover request priority, cancellation,
+derivative reuse and exact full-resolution recovery. Native
+`MediaFrameItem` tests exercise YUV, alpha and rotation on the GPU. Canvas, remote
+lifecycle, overlay and bootstrap suites cover integration. Benchmark procedures,
+raw measurements and limits are in the validation report.
+
+A development measurement on 20 September 2026, using
+`VID_20260920_013247.mp4`, observed the first timeline import preview at **192 ms**
+and strict readiness at **6,357 ms**. This was one Debug/offscreen run on macOS
+26.1 with Qt 6.11.2 during the progressive-preview implementation; it did not
+measure mouse-to-screen latency or purge OS caches. It measures the early
+thumbnail publication path, before the subsequent canvas-poster integration.
+Cold long-GOP scrubbing still depends on original decoding until useful proxy
+frames exist. Windows packaging/performance, native display latency and physical
+audio/video synchronization require their own qualification; neither this run
+nor older full-resolution all-intra tables establish those results.
+
+The final [interaction implementation and validation report](MEDIA_INTERACTION_IMPLEMENTATION_2026-09-20.md)
+adds a native canvas-preview check and an isolated cold/warm benchmark of the
+current retained-original path, with raw measurements for the supplied long-GOP
+video and a synthetic 4K fixture. It explicitly separates sink delivery, full
+quality refinement and physical display latency.
 
 ## Inactive project media
 
-`MOUFFETTE_PROJECT_MEDIA_HIDDEN_TIMEOUT_MS` controls how long an inactive project
-retains local image/video RAM (60,000 ms by default). It uses the same activity
-source as session disconnection and project retention: a visible control window
+`MOUFFETTE_PROJECT_MEDIA_HIDDEN_TIMEOUT_MS=0` keeps all open canvases prepared,
+including during inactivity. Project closure and critical memory pressure retain
+their own cleanup rules. Set a positive timeout to opt into releasing media RAM
+while inactive and rebuilding its representation on return. The optional policy
+uses the same activity source as session disconnection and project retention: a visible control window
 with the pointer inside keeps all projects active. Pointer departure, hiding the
 window or system suspension starts their deadlines; repeated inactive events do
-not extend them. The configured media delay must be at least 1,000 ms and less
+not extend them. A positive media delay must be at least 1,000 ms and less
 than project retention. It is independent of the remote session delay.
 
 `ProjectManager` owns this transient deadline, polls it alongside project deletion
@@ -244,8 +324,8 @@ project or an incoming session stay resident for those owners. This local deadli
 does not close a remote session or remove its receiver's cache; their existing
 session teardown policy continues to apply.
 
-The client list shows `Free RAM in m:ss` alongside the session and project
-deadlines. Timer values use the shared monospace font while labels retain the UI
+When RAM-only expiry is enabled, the client list shows `Free RAM in m:ss`
+alongside the session and project deadlines. Timer values use the shared monospace font while labels retain the UI
 font. Expired RAM countdowns disappear, including when a scene defers reclamation.
 `AppConfig`, `ProjectManager`, `ClientInfoDisplay`, `ClientConnectionFlow` and
 canvas/video lifecycle tests cover configuration, boundary expiry, cancellation,

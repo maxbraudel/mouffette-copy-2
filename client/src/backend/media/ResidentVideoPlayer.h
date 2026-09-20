@@ -2,19 +2,22 @@
 
 #include "backend/media/ResidentMediaAsset.h"
 #include <QMediaPlayer>
-#include <QFutureWatcher>
+#include "backend/media/DecodeScheduler.h"
+#include "backend/media/PlaybackAudio.h"
+#include <QElapsedTimer>
+#include <QHash>
 #include <QObject>
 #include <QPointer>
 #include <QTimer>
 #include <memory>
+#include <limits>
 
 class QAudioOutput;
-class QBuffer;
 class QVideoSink;
 
 
-// Streams the original resident MP4 through a read-only memory device. Qt owns
-// bounded decode queues, clocks and audio output; no file URL is supplied.
+// Compatible QML facade over a lightweight cursor. Decoding and device output
+// are shared by the scheduler and mixer, independent of occurrence count.
 class ResidentVideoPlayer final : public QObject
 {
     Q_OBJECT
@@ -34,12 +37,14 @@ public:
     // The decoded image for this cursor, including a hold before the first PTS.
     // Returns an invalid frame while loading, on error, or for another cursor.
     QVideoFrame preparedFrame(qint64 positionMs) const;
-    void prepare(qint64 positionMs); // prime a paused native frame asynchronously
-    void setScrubbing(bool enabled); // independent-frame proxy; exact original on release
+    void prepareEntry(qint64 positionMs);
+    void prepare(qint64 positionMs); // reuse or request the exact prepared cursor
+    void setScrubbing(bool enabled); // latest target; editing previews are refined on release
     void clearAsset(); // retain the occurrence's cursor for later re-residency
     // Fresh Qt presentation/cache identity, shared immutable CPU planes. Never
     // call toImage() on a long-lived asset frame: Qt caches that RGBA conversion.
     static QVideoFrame presentationFrame(const QVideoFrame& frame);
+    static quintptr frameIdentity(const QVideoFrame& frame);
     std::shared_ptr<const ResidentMediaAsset> asset() const { return m_asset; }
     qint64 position() const { return m_positionMs; }
     qint64 duration() const {
@@ -51,6 +56,7 @@ public:
     QMediaPlayer::Error error() const { return m_error; }
     QString errorString() const { return m_errorString; }
     bool isSeekable() const { return bool(m_asset); }
+    bool audioPresentedSincePlay() const { return m_audio.presentedSincePlay(); }
     bool isPlaying() const { return m_state == QMediaPlayer::PlayingState; }
     int loops() const { return m_loops; }
     void setLoops(int loops);
@@ -77,44 +83,57 @@ signals:
     void seekableChanged(bool seekable);
     void loopsChanged();
     void videoOutputChanged();
-    void frameReady(qint64 timestampMs); // decoded frame, never the cached poster
+    void frameReady(qint64 timestampMs); // A validated native frame (shared preparation may satisfy it).
 
 private:
+    friend class ResidentMediaTest;
     bool ensurePlayer(bool reportFailure = true);
     void releasePlayer();
     void presentPoster();
     void setState(QMediaPlayer::PlaybackState state);
     void setStatus(QMediaPlayer::MediaStatus status);
     void fail(QMediaPlayer::Error error, const QString& message);
-    void watchPreparation();
-    void flushScrubSeek();
-    void requestScrubFrame();
-    bool hasScrubProxy() const;
+    void requestFrame();
+    void scheduleScrubFrame();
+    bool acceptsIntermediateScrubFrame(qint64 requestedPosition, qint64 requestedAt,
+                                       quint64 directionEpoch, qint64 now) const;
+    void prefetch();
+    void startPreparedPlayback();
+    void tick();
 
+    struct PlaybackCursor {
+        quint64 generation = 1;
+        qint64 anchorMs = 0;
+        QElapsedTimer clock;
+        SharedMediaFramePtr frame;
+        QHash<int, SharedMediaFramePtr> lookahead;
+        bool pending = false;
+        bool starting = false;
+    } m_cursor;
     std::shared_ptr<const ResidentMediaAsset> m_asset;
     QPointer<QAudioOutput> m_audioOutput;
     QPointer<QVideoSink> m_videoSink;
     QPointer<QObject> m_videoOutput;
-    std::unique_ptr<QBuffer> m_source;
-    std::unique_ptr<QMediaPlayer> m_player;
-    std::unique_ptr<QVideoSink> m_decodeSink;
-    QVideoFrame m_frame;
-    QVideoFrame m_scrubFrame;
-    QFutureWatcher<QImage>* m_scrubDecode = nullptr;
-    quint64 m_scrubGeneration = 0;
-    qint64 m_scrubFrameIndex = -1;
-    bool m_awaitingOriginal = false;
-    QTimer m_scrubTimer;
-    bool m_scrubbing = false;
-    bool m_scrubPending = false;
+    PlaybackAudio m_audio;
+    QObject m_entryOwner;
+    SharedMediaFramePtr m_entryFrame;
+    qint64 m_entryPositionMs = -1;
+    quint64 m_entryGeneration = 0;
     QTimer m_positionTimer;
+    QTimer m_scrubTimer;
+    QElapsedTimer m_scrubClock;
+    qint64 m_lastScrubPresentationMs = 0;
+    qint64 m_lastScrubDispatchMs = -16;
+    int m_scrubDirection = 0;
+    quint64 m_scrubDirectionEpoch = 0;
+    quint64 m_scrubPresentationEpoch = std::numeric_limits<quint64>::max();
     QTimer m_preparationTimer;
     qint64 m_positionMs = 0;
     int m_loops = QMediaPlayer::Once;
-    bool m_loading = false;
+    int m_completedLoops = 0;
+    bool m_scrubbing = false;
     bool m_playbackReserved = false;
     bool m_playbackPrepared = false;
-    QMediaPlayer::PlaybackState m_requestedState = QMediaPlayer::StoppedState;
     QMediaPlayer::PlaybackState m_state = QMediaPlayer::StoppedState;
     QMediaPlayer::MediaStatus m_status = QMediaPlayer::NoMedia;
     QMediaPlayer::Error m_error = QMediaPlayer::NoError;

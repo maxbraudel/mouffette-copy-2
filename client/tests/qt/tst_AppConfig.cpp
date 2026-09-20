@@ -285,12 +285,11 @@ void AppConfigTest::loadsEmbeddedDefaults() {
     QCOMPARE(config.serverUrl(), QStringLiteral("ws://localhost:8080"));
     QCOMPARE(config.mediaRamReservePercent(), 0);
     // The checked-in client/.env explicitly overrides the compiled reserve.
-    QCOMPARE(config.mediaRamReserveMinMiB(), 0);
+    QCOMPARE(config.mediaRamReserveMinMiB(), 512);
     QVERIFY(config.provenance(AppConfig::Key::MediaRamReserveMinMiB)
                 .startsWith(QStringLiteral("embedded-env:")));
     QCOMPARE(config.remoteSessionHiddenTimeoutMs(), qint64(120000));
-    // The embedded .env also overrides the compiled hidden-media timeout.
-    QCOMPARE(config.projectMediaHiddenTimeoutMs(), qint64(180000));
+    QCOMPARE(config.projectMediaHiddenTimeoutMs(), qint64(0));
     QCOMPARE(config.projectHiddenRetentionMs(), qint64(240000));
     QCOMPARE(config.incomingSessionOrphanTimeoutMs(), qint64(5000));
     QCOMPARE(config.connectionAttemptTimeoutMs(), 10000);
@@ -356,7 +355,7 @@ void AppConfigTest::configuresProjectMediaHiddenTimeout() {
     auto options = isolatedOptions(QString());
     QString error;
     QVERIFY2(config.load(options, &error), qPrintable(error));
-    QCOMPARE(config.projectMediaHiddenTimeoutMs(), qint64(60000));
+    QCOMPARE(config.projectMediaHiddenTimeoutMs(), qint64(0));
 
     QTemporaryDir directory;
     options.defaultEnvFilePath = writeEnvFile(directory, "media-timeout.env",
@@ -377,14 +376,14 @@ void AppConfigTest::configuresProjectMediaHiddenTimeout() {
              QStringLiteral("cli:--project-media-hidden-timeout-ms"));
     options.arguments.removeLast();
 
-    for (const QString value : {"0", "-1", "999", "86400001", "1.5", "abc", "300000"}) {
+    for (const QString value : {"-1", "999", "86400001", "1.5", "abc", "300000"}) {
         options.processEnvironment.insert("MOUFFETTE_PROJECT_MEDIA_HIDDEN_TIMEOUT_MS", value);
         QVERIFY(!config.load(options, &error));
         QVERIFY(error.contains("MOUFFETTE_PROJECT_MEDIA_HIDDEN_TIMEOUT_MS"));
         QCOMPARE(config.projectMediaHiddenTimeoutMs(), qint64(90000)); // Atomic failure.
     }
     options.processEnvironment.insert("MOUFFETTE_PROJECT_HIDDEN_RETENTION_MS", "86400001");
-    for (const QString value : {"1000", "86400000"}) {
+    for (const QString value : {"0", "1000", "86400000"}) {
         options.processEnvironment.insert("MOUFFETTE_PROJECT_MEDIA_HIDDEN_TIMEOUT_MS", value);
         QVERIFY2(config.load(options, &error), qPrintable(error));
         QCOMPARE(config.projectMediaHiddenTimeoutMs(), value.toLongLong());
@@ -435,7 +434,7 @@ void AppConfigTest::compiledDefaultDisablesMultipleInstances() {
     QVERIFY2(config.load(options, &error), qPrintable(error));
     QVERIFY(!config.allowMultipleInstances());
     QCOMPARE(config.mediaRamReservePercent(), 0);
-    QCOMPARE(config.mediaRamReserveMinMiB(), 548);
+    QCOMPARE(config.mediaRamReserveMinMiB(), 512);
     QCOMPARE(config.provenance(AppConfig::Key::MediaRamReserveMinMiB),
              QStringLiteral("compiled-default"));
     QCOMPARE(config.provenance(AppConfig::Key::AllowMultipleInstances),

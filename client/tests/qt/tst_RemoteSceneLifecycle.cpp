@@ -354,8 +354,9 @@ private slots:
         const quint64 reserve = manager.summary().value(QStringLiteral("reserveBytes")).toULongLong();
         QVERIFY(reserve > 0);
         manager.setMemorySnapshotForTesting(
-            {8ULL << 30, reserve - 1, 128ULL << 20, false, 0});
-        // A protected scene survives the first pressure sample.
+            {8ULL << 30, reserve - 1, 128ULL << 20, false, 2});
+        // Critical OS pressure triggers coordinated stop after hysteresis;
+        // a reserve deficit alone preserves already prepared scenes.
         QVERIFY(host->testSceneLaunched());
         QVERIFY(host->testSceneActionEnabled()); // Stop is still available.
         QVERIFY(media->residencyReady());
@@ -365,7 +366,8 @@ private slots:
         QCOMPARE(pressureStop.size(), 1);
         QVERIFY(pressureStop.first().at(0).toString().startsWith(QStringLiteral("canvas-preview:")));
         QTRY_COMPARE_WITH_TIMEOUT(media->residencyState(), QStringLiteral("waiting_for_memory"), 1500);
-        QVERIFY(media->residencyError().contains(QStringLiteral("RAM")));
+        QVERIFY(!media->residencyError().isEmpty());
+        QCOMPARE(manager.summary().value("pressure").toString(), QStringLiteral("critical"));
         QVERIFY(!host->document()->editsLocked());
         QVERIFY(!assetRow().value(QStringLiteral("protected")).toBool());
         QCOMPARE(assetRow().value(QStringLiteral("residentBytes")).toULongLong(), quint64(0));
@@ -1536,6 +1538,9 @@ private slots:
         auto a=media->authorElementState(),b=a,c=a;
         a.opacity=0;b.opacity=.4;c.opacity=0;
         SceneTimeline::MediaTrack track=media->timelineTrack();
+        // Keep both interpolation samples inside the clip, independently of
+        // the configured default duration for a newly created text/image.
+        track.clip.durationSlots=std::max<qint64>(track.clip.durationSlots,61);
         SceneTimeline::upsertKeyframe(track,{"start",0,SceneTimeline::materialize(a)},180000);
         SceneTimeline::upsertKeyframe(track,{"middle",30,SceneTimeline::materialize(b)},180000);
         SceneTimeline::upsertKeyframe(track,{"end",60,SceneTimeline::materialize(c)},180000);

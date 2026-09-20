@@ -1,7 +1,6 @@
 #include "backend/files/FileManager.h"
 #include "backend/files/LocalFileRepository.h"
 #include "backend/network/RemoteFileTracker.h"
-#include "backend/files/FileMemoryCache.h"
 #include <QFile>
 #include <QDebug>
 #include <QDir>
@@ -12,19 +11,10 @@ QString FileManager::receivedScopeKey(const RemoteCacheStore::Scope& scope)
     return scope.senderEndpointId + QChar(0x1f) + scope.remoteSessionId;
 }
 
-QString FileManager::receivedMemoryKey(const RemoteCacheStore::Scope& scope,
-                                       const QString& fileId)
-{
-    return QStringLiteral("received:") + receivedScopeKey(scope)
-        + QChar(0x1f) + QString::number(scope.generation)
-        + QChar(0x1f) + fileId;
-}
-
 FileManager::FileManager()
 {
     m_repository = &LocalFileRepository::instance();
     m_tracker = &RemoteFileTracker::instance();
-    m_cache = &FileMemoryCache::instance();
 }
 
 void FileManager::registerVerifiedLocalFile(const QString& fileId, const QString& filePath) {
@@ -138,7 +128,6 @@ void FileManager::removeFileIfUnused(const QString& fileId)
     // Clean up service-managed data
     m_repository->removeFileMapping(fileId);
     m_tracker->removeAllTrackingForFile(fileId);
-    m_cache->releaseFileMemory(fileId);
 }
 
 void FileManager::registerReceivedFilePath(const QString& fileId, const QString& absolutePath) {
@@ -150,7 +139,6 @@ void FileManager::removeReceivedFileMapping(const QString& fileId) {
     if (fileId.isEmpty()) return;
     
     // Clean up local cache and repository
-    m_cache->releaseFileMemory(fileId);
     m_repository->removeFileMapping(fileId);
     
     // Clean up tracker data
@@ -207,7 +195,6 @@ bool FileManager::removeReceivedFileMapping(const RemoteCacheStore::Scope& scope
     if (scopeIt == m_receivedFilesByScope.end() || !(scopeIt->scope == scope)) {
         return false;
     }
-    releaseReceivedFileMemory(scope, fileId);
     const bool removed = scopeIt->pathsByFileId.remove(fileId) > 0;
     if (scopeIt->pathsByFileId.isEmpty()) m_receivedFilesByScope.erase(scopeIt);
     return removed;
@@ -221,7 +208,6 @@ int FileManager::removeReceivedFileMappingsForScope(
     if (scopeIt == m_receivedFilesByScope.end() || !(scopeIt->scope == scope)) return 0;
     const QList<QString> ids = scopeIt->pathsByFileId.keys();
     for (const QString& fileId : ids) {
-        releaseReceivedFileMemory(scope, fileId);
         m_tracker->dissociateFileFromProject(fileId, scope.remoteSessionId);
     }
     const int count = ids.size();
@@ -241,9 +227,6 @@ bool FileManager::rebindReceivedFileScope(const RemoteCacheStore::Scope& oldScop
     if (scopeIt == m_receivedFilesByScope.end()) return true;
     if (scopeIt->scope == newScope) return true;
     if (!(scopeIt->scope == oldScope)) return false;
-    for (const QString& fileId : scopeIt->pathsByFileId.keys()) {
-        releaseReceivedFileMemory(oldScope, fileId);
-    }
     scopeIt->scope = newScope;
     return true;
 }
@@ -256,34 +239,6 @@ QList<QString> FileManager::getReceivedFileIds(
         return {};
     }
     return scopeIt->pathsByFileId.keys();
-}
-
-void FileManager::releaseReceivedFileMemory(const RemoteCacheStore::Scope& scope,
-                                            const QString& fileId)
-{
-    m_cache->releaseFileMemory(receivedMemoryKey(scope, fileId));
-}
-
-void FileManager::preloadFileIntoMemory(const QString& fileId) {
-    // Delegate to FileMemoryCache
-    QString filePath = m_repository->getFilePathForId(fileId);
-    if (!filePath.isEmpty()) {
-        m_cache->preloadFileIntoMemory(fileId, filePath);
-    }
-}
-
-QSharedPointer<QByteArray> FileManager::getFileBytes(const QString& fileId, bool forceReload) {
-    // Delegate to FileMemoryCache
-    QString filePath = m_repository->getFilePathForId(fileId);
-    if (filePath.isEmpty()) {
-        return {};
-    }
-    return m_cache->getFileBytes(fileId, filePath, forceReload);
-}
-
-void FileManager::releaseFileMemory(const QString& fileId) {
-    // Delegate to FileMemoryCache
-    m_cache->releaseFileMemory(fileId);
 }
 
 void FileManager::markFileUploadedToClient(const QString& fileId, const QString& clientId)
@@ -334,7 +289,6 @@ void FileManager::removeReceivedFileMappingsUnderPathPrefix(const QString& pathP
     for (const QString& fileId : fileIdsToRemove) {
         m_repository->removeFileMapping(fileId);
         m_tracker->removeAllTrackingForFile(fileId);
-        m_cache->releaseFileMemory(fileId);
         m_fileIdToMediaIds.remove(fileId);
     }
 

@@ -65,6 +65,12 @@ jobs:
         working-directory: client
         run: ${{ matrix.build_script }}
 
+      - name: Generate 4K, HDR and alpha engine fixtures
+        working-directory: client
+        run: |
+          python3 tests/benchmarks/run_media_engine_benchmarks.py --binary unused --source tests/fixtures/resident-timeline.mp4 --output out/media-engine-validation --generate --fixtures-only
+          echo "MOUFFETTE_ENGINE_FIXTURES=$PWD/out/media-engine-validation/fixtures" >> "$GITHUB_ENV"
+
       - name: Test
         working-directory: client
         run: ctest --preset ${{ matrix.preset }} --parallel
@@ -152,6 +158,17 @@ jobs:
         env:
           MOUFFETTE_MSYS2_ROOT: ${{ steps.msys2.outputs.msys2-location }}
         run: ${{ matrix.build_script }}
+
+      - name: Generate 4K, HDR and alpha engine fixtures
+        working-directory: client
+        shell: pwsh
+        env:
+          MOUFFETTE_MSYS2_ROOT: ${{ steps.msys2.outputs.msys2-location }}
+        run: |
+          $env:Path = "$env:MOUFFETTE_MSYS2_ROOT\ucrt64\bin;$env:Path"
+          python tests/benchmarks/run_media_engine_benchmarks.py --binary unused --source tests/fixtures/resident-timeline.mp4 --output out/media-engine-validation --generate --fixtures-only
+          if ($LASTEXITCODE -ne 0) { throw 'Media fixture generation failed.' }
+          "MOUFFETTE_ENGINE_FIXTURES=$((Get-Location).Path)\out\media-engine-validation\fixtures" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Test
         working-directory: client

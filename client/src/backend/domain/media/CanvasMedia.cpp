@@ -199,6 +199,9 @@ void CanvasMedia::refreshResidency()
     if (manager.ready(m_residencyOwnerId) && asset) {
         m_nativeSourceSize = asset->displaySize;
         if (isVideo()) {
+            // Authoring can present the immutable first image independently of
+            // audio/player preparation. It never changes residency readiness.
+            if (m_residentFrameSource) m_residentFrameSource->setVideoFrame(asset->firstFrame.frame);
             // setAsset() can emit runtime signals before durationChanged().
             // Those signals publish the default clip, so its source bounds
             // must already be available to the document and timeline model.
@@ -212,7 +215,12 @@ void CanvasMedia::refreshResidency()
         }
     } else {
         if (m_player && m_player->asset()) m_player->clearAsset();
-        if (m_residentFrameSource) m_residentFrameSource->clear();
+        if (m_residentFrameSource) {
+            const auto preview = manager.preview(m_residencyOwnerId);
+            if (isVideo() && preview && preview->poster.isValid())
+                m_residentFrameSource->setVideoFrame(preview->poster);
+            else m_residentFrameSource->clear();
+        }
         m_hasRenderedFrame = false;
         m_firstFramePrimed = false;
     }

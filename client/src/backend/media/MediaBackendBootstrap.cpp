@@ -1,14 +1,13 @@
 #include "backend/media/MediaBackendBootstrap.h"
 
-#include <QAudioOutput>
 #include <QCoreApplication>
 #include <QMediaDevices>
-#include <QMediaFormat>
-#include <QMediaPlayer>
+extern "C" {
+#include <libavcodec/avcodec.h>
+}
 #include <QPointer>
 #include <QThread>
 #include <QThreadPool>
-#include <QVideoSink>
 #include <QtConcurrent/QtConcurrentRun>
 
 namespace {
@@ -69,20 +68,11 @@ QFuture<MediaBackendBootstrap::Result> MediaBackendBootstrap::initialize()
     state->initialization = QtConcurrent::run(&state->pool, [] {
         Discovery discovery;
         discovery.audioDevice = QMediaDevices::defaultAudioOutput();
-        QMediaFormat format(QMediaFormat::MPEG4);
-        discovery.supportsVideo = !format.supportedVideoCodecs(QMediaFormat::Decode).isEmpty();
+        discovery.supportsVideo = avcodec_find_decoder(AV_CODEC_ID_H264) && avcodec_find_decoder(AV_CODEC_ID_AAC);
         return discovery;
     }).then(state, [](const Discovery& discovery) {
-        // Platform QObjects are constructed and destroyed on the GUI thread,
-        // after plugin loading, hardware probing and audio enumeration finish.
-        // No source, decoder queues, audio stream or rendered surface is opened.
-        QVideoSink sink;
-        QAudioOutput audio(discovery.audioDevice);
-        QMediaPlayer player;
-        player.setVideoSink(&sink);
-        player.setAudioOutput(&audio);
-        if (!discovery.supportsVideo || !player.isAvailable())
-            return Result{false, QStringLiteral("The audio/video playback engine is unavailable.")};
+        if (!discovery.supportsVideo)
+            return Result{false, QStringLiteral("The integrated FFmpeg playback engine is unavailable.")};
         return Result{true, {}};
     });
     return state->initialization;

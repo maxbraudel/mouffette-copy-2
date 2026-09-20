@@ -19,6 +19,7 @@
 #include "frontend/rendering/remote/RemoteVideoFrameItem.h"
 #include "backend/media/MediaDecoder.h"
 #include "backend/media/MediaResidencyManager.h"
+#include "shared/rendering/MediaFrameSource.h"
 
 namespace {
 QString videoFixture()
@@ -33,6 +34,39 @@ class VideoPlaybackBackendTest final : public QObject
     Q_OBJECT
 
 private slots:
+    void authoringPreviewDoesNotAuthorizeRemoteOrPlayback()
+    {
+        CanvasDocument document;
+        QuickCanvasController controller(&document);
+        QString error;
+        QVERIFY2(controller.initialize(&error), qPrintable(error));
+        RemoteVideoFrameSource preview;
+        QImage image(160, 90, QImage::Format_RGB32); image.fill(Qt::cyan);
+        preview.setFrame(image);
+        QQuickView view;
+        view.resize(160, 90);
+        view.setInitialProperties({{"mediaWidth", 160}, {"mediaHeight", 90},
+            {"previewFrameSource", QVariant::fromValue<QObject*>(&preview)}, {"residencyReady", false}});
+        view.setSource(QUrl("qrc:/qt/qml/Mouffette/App/resources/qml/VideoItem.qml"));
+        QCOMPARE(view.status(), QQuickView::Ready);
+        view.show(); QVERIFY(QTest::qWaitForWindowExposed(&view));
+        auto* item = view.rootObject(); QVERIFY(item);
+        QTRY_VERIFY(item->property("contentReady").toBool());
+        QVERIFY(!item->property("residencyReady").toBool());
+        QVERIFY(!item->property("cppMediaPlayer").value<QObject*>());
+        auto* loader = item->findChild<QQuickItem*>("videoImportPreview"); QVERIFY(loader);
+        QTRY_VERIFY(loader->property("active").toBool());
+        QTRY_VERIFY(!view.grabWindow().isNull());
+        RemoteVideoFrameSource remote;
+        remote.setFrame(image);
+        item->setProperty("remoteFrameSource", QVariant::fromValue<QObject*>(&remote));
+        QTRY_VERIFY(!item->property("contentReady").toBool());
+        QVERIFY(!loader->property("active").toBool());
+        item->setProperty("remoteFrameSource", QVariant::fromValue<QObject*>(nullptr));
+        QTRY_VERIFY(item->property("contentReady").toBool());
+        preview.clear();
+        QTRY_VERIFY(!item->property("contentReady").toBool());
+    }
     void init()
     {
         MediaResidencyManager::instance().setMemorySnapshotForTesting(
@@ -171,11 +205,11 @@ private slots:
         QCOMPARE(player->position(), qint64(1600));
         QTRY_VERIFY_WITH_TIMEOUT(video->videoSink()->videoFrame().startTime() <= 1600000
             && video->videoSink()->videoFrame().endTime() > 1600000, 10000);
-        QVERIFY(!player->preparedAt(1600)); // the proxy is never an exact native preparation
+        QVERIFY(player->preparedAt(1600)); // The pointer target is visible before release.
         QVERIFY(!frames.isEmpty()); // preview arrives before releasing the pointer
         QCOMPARE(player->position(), qint64(1600));
         player->setPosition(789);
-        player->setScrubbing(false); // discard pending proxy work and request the original
+        player->setScrubbing(false); // Prepare the exact release position and its lookahead.
         QTRY_VERIFY_WITH_TIMEOUT(player->preparedAt(789), 10000);
         QCOMPARE(player->position(), qint64(789));
         QVERIFY(!player->isPlaying());
@@ -471,17 +505,75 @@ private slots:
             {QUrl::fromLocalFile(fixture)}, 480, 300));
         QVERIFY(document.media().isEmpty());
 
+        QElapsedTimer importing; importing.start();
         QVERIFY(controller.commitLocalFileDrop(480, 300));
         QTRY_COMPARE(document.media().size(), 1);
         CanvasMedia* video = document.selectedMedia();
         QVERIFY(video && video->isVideo() && video->player());
         QCOMPARE(video->baseSize(), nativeSize);
+        const auto previewCapture = qEnvironmentVariable("MOUFFETTE_PREVIEW_ARTIFACT");
+        if (!previewCapture.isEmpty()) {
+            // Opt-in real-source check: the native QML poster must be visible
+            // while validation is still in progress, without enabling Play.
+            const auto previewItem = [&]() -> QQuickItem* {
+                QList<QQuickItem*> pending{view.rootObject()};
+                while (!pending.isEmpty()) {
+                    auto* item = pending.takeLast();
+                    if (item->objectName() == QLatin1String("videoImportPreview")) return item;
+                    pending.append(item->childItems());
+                }
+                return nullptr;
+            };
+            QQuickItem* preview = nullptr;
+            QTRY_VERIFY_WITH_TIMEOUT((preview = previewItem()) && preview->property("active").toBool()
+                && preview->property("item").value<QObject*>(), 10000);
+            QTRY_VERIFY(preview->property("item").value<QObject*>()->property("hasFrame").toBool());
+            auto* surface = preview->parentItem()->parentItem();
+            QVERIFY(surface->property("revealProgress").isValid());
+            QTRY_COMPARE(surface->property("revealProgress").toReal(), 1.0);
+            QSignalSpy presented(&view, &QQuickWindow::frameSwapped);
+            view.update();
+            QTRY_VERIFY(!presented.isEmpty());
+            QVERIFY(!video->residencyReady());
+            QVERIFY(!video->player()->asset());
+            qInfo() << "Authoring QML preview fully revealed after" << importing.elapsed() << "ms; strict ready false";
+            const QImage rendered = view.grabWindow();
+            QVERIFY(!rendered.isNull());
+            QVERIFY(rendered.save(previewCapture));
+            QVERIFY(!video->residencyReady());
+        }
+        const int importTimeout = qEnvironmentVariableIsSet("MOUFFETTE_TEST_VIDEO_FILE") ? 180000 : 30000;
+        QTRY_VERIFY2_WITH_TIMEOUT(video->residencyReady(),
+            qPrintable(video->residencyState() + ": " + video->residencyError()), importTimeout);
         QTRY_VERIFY_WITH_TIMEOUT(video->player()->mediaStatus()
                                      == QMediaPlayer::LoadedMedia
                                  || video->player()->mediaStatus()
                                      == QMediaPlayer::BufferedMedia,
                                  8000);
-        QTRY_VERIFY_WITH_TIMEOUT(video->residencyReady(), 30000);
+        QTRY_VERIFY_WITH_TIMEOUT(video->player()->videoSink() && video->player()->videoSink()->videoFrame().isValid(), 8000);
+        QTRY_VERIFY_WITH_TIMEOUT(video->player()->preparedAt(0), 8000);
+        const auto loadingSkeleton = [&]() -> QQuickItem* {
+            QList<QQuickItem*> pending{view.rootObject()};
+            while (!pending.isEmpty()) {
+                auto* item = pending.takeLast();
+                if (item->objectName() == QLatin1String("mediaLoadingSkeleton")) return item;
+                pending.append(item->childItems());
+            }
+            return nullptr;
+        };
+        QQuickItem* skeleton = nullptr;
+        QTRY_VERIFY(skeleton = loadingSkeleton());
+        QTRY_VERIFY(skeleton->parentItem()->property("contentReady").toBool());
+        QTRY_COMPARE(skeleton->parentItem()->property("revealProgress").toReal(), 1.0);
+        QVERIFY(!skeleton->isVisible());
+        const auto capture = qEnvironmentVariable("MOUFFETTE_VIDEO_ARTIFACT");
+        if (!capture.isEmpty()) {
+            // A native window can be occluded by another application's
+            // always-on-top window. Grab renders without requiring scanout.
+            const QImage rendered = view.grabWindow();
+            QVERIFY(!rendered.isNull());
+            QVERIFY(rendered.save(capture));
+        }
         QVERIFY(!video->isPlaying());
 
         const QPointF originalPosition = video->position();

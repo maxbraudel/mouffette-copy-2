@@ -32,6 +32,12 @@ public:
         std::function<void(quint64)> allocated;
         std::function<void(const ResidentMediaMemory&)> allocatedBreakdown;
         std::function<void(double)> progress;
+        // Worker-thread, bounded immutable snapshots, before complete validation.
+        // Consumers must fence source identity/cancellation independently of ready.
+        std::function<void(std::shared_ptr<const ResidentMediaPreview>)> preview;
+        // Interactive imports reuse the validated source and its frame index.
+        // Conversion remains available for explicit offline qualification.
+        bool retainOriginalVideo = false;
     };
 
     // Worker-thread APIs: never construct QMediaPlayer or enter an event loop.
@@ -39,7 +45,8 @@ public:
     static Geometry inspectGeometry(const QString& path,
                                     const std::function<bool()>& cancelled = {});
     static Probe probe(const QString& path);
+    static std::shared_ptr<ResidentMediaAsset> decode(const QString& path);
     static std::shared_ptr<ResidentMediaAsset> decode(
-        const QString& path, const DecodeCallbacks& callbacks = {},
-        QString* error = nullptr, quint64 scrubProxyLimit = MediaScrubProxy::MaxBytes);
+        const QString& path, const DecodeCallbacks& callbacks,
+        QString* error = nullptr);
 };

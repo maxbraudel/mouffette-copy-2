@@ -382,7 +382,8 @@ private slots:
             QTRY_VERIFY_WITH_TIMEOUT(controller.m_sceneActivationRequested, 5000);
             const auto item = controller.m_mediaItems.first();
             QVERIFY(item->primedFirstFrame);
-            QVERIFY(!item->lastFrameImage.isNull());
+            QVERIFY(item->frameSource->videoFrame().isValid());
+            QVERIFY(item->frameSource->frame().isNull());
             const qint64 preparedTarget=target;
             QCOMPARE(item->player->position(), preparedTarget);
             QCOMPARE(item->timelineRequestedSourceMs, preparedTarget);
@@ -598,7 +599,7 @@ private slots:
         QVERIFY(item->audio->isMuted());
         controller.evaluateTimelineAt(400,true);
         QCOMPARE(item->timelineRequestedSourceMs,1100);
-        QVERIFY(item->player->isPlaying());
+        QTRY_VERIFY_WITH_TIMEOUT(item->player->isPlaying(),5000);
         QVERIFY(!item->audio->isMuted());
         controller.evaluateTimelineAt(700,true);
         QCOMPARE(item->timelineRequestedSourceMs,0);
@@ -632,7 +633,7 @@ private slots:
         QVERIFY(rightFrame.startTime()/1000 <= 1200);
         QVERIFY(rightFrame.endTime() > 1201000);
         controller.evaluateTimelineAt(499,true);
-        QVERIFY(item->player->isPlaying());
+        QTRY_VERIFY_WITH_TIMEOUT(item->player->isPlaying(),5000);
         QVERIFY(!secondItem->player->isPlaying());
         QSignalSpy rightCursorChanges(secondItem->player, &ResidentVideoPlayer::positionChanged);
         controller.evaluateTimelineAt(501,true);
@@ -661,7 +662,7 @@ private slots:
         QVERIFY(item->renderVisible); QVERIFY(item->clipActive);
         QCOMPARE(item->timelineRequestedSourceMs,0); QVERIFY(item->audio->isMuted());
         controller.evaluateTimelineAt(1000,true);
-        QVERIFY(item->player->isPlaying()); QVERIFY(!item->audio->isMuted());
+        QTRY_VERIFY_WITH_TIMEOUT(item->player->isPlaying(),5000); QVERIFY(!item->audio->isMuted());
         controller.evaluateTimelineAt(1000+duration+100,true);
         QVERIFY(item->renderVisible); QCOMPARE(item->timelineRequestedSourceMs,duration-1);
         QVERIFY(item->audio->isMuted()); QVERIFY(!item->player->isPlaying());

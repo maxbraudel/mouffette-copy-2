@@ -29,6 +29,7 @@ public:
         bool availableEstimated = false;
         int pressure = 0; // 0 normal, 1 advisory warning, 2 critical/OS low-memory
         bool pressureKnown = false; // otherwise native notifications are the fallback
+        quint64 residentBytes = 0; // RSS, distinct from macOS phys_footprint
     };
     static MediaResidencyManager& instance();
     explicit MediaResidencyManager(QObject* parent = nullptr);
@@ -49,6 +50,8 @@ public:
     QString errorString(const QString& ownerId) const;
     QString sha256(const QString& ownerId) const;
     std::shared_ptr<const ResidentMediaAsset> asset(const QString& ownerId) const;
+    // Display-only; does not relax asset(), ready(), scene pins or remote state.
+    std::shared_ptr<const ResidentMediaPreview> preview(const QString& ownerId) const;
     bool pinOwners(const QStringList& ownerIds, const QString& group);
     void unpinGroup(const QString& group);
     void setRemoteState(const QString& sha256, const QString& targetId,
@@ -112,7 +115,7 @@ private:
     qint64 m_lastHealthySampleMs = -1000;
     MemorySnapshot m_memory;
     int m_reservePercent = 0;
-    int m_reserveMinMiB = 548;
+    int m_reserveMinMiB = 512;
     bool m_testMemory = false;
     bool m_scheduling = false;
     bool m_decoding = false;

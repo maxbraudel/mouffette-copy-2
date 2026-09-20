@@ -10,6 +10,7 @@
 #include <QTemporaryDir>
 #include <QImage>
 #include <QtTest>
+#include <algorithm>
 #include "../fixtures/TimelineTrackRangeConfig.h"
 
 #include "backend/domain/canvas/CanvasDocument.h"
@@ -17,6 +18,8 @@
 #include "backend/domain/media/CanvasMedia.h"
 #include "backend/domain/scene/SceneTimeline.h"
 #include "backend/media/MediaResidencyManager.h"
+#include "backend/media/MediaDecoder.h"
+#include "backend/media/DecodeScheduler.h"
 #include "frontend/qml/MediaSettingsViewModel.h"
 #include "frontend/qml/ClientWorkspaceViewModel.h"
 #include "frontend/qml/TimelineController.h"
@@ -84,6 +87,57 @@ class TimelineControllerTest final : public QObject
 {
     Q_OBJECT
 private slots:
+    void loadingVideoHasAThumbnailOwnerBeforeReadiness()
+    {
+        TimelineFixture f; QVERIFY(f.initialize());
+        const QString path = QString::fromUtf8(TEST_VIDEO_FILE);
+        const auto geometry = MediaDecoder::probe(path);
+        QVERIFY(geometry.accepted());
+        auto* media = f.host->document()->addPreparedFile(path, geometry.displaySize, true, {});
+        QVERIFY(media);
+        QVERIFY(!media->residencyReady());
+        const auto clips = f.timeline.clips();
+        QCOMPARE(clips.size(), 1);
+        QCOMPARE(clips.first().toMap().value("thumbnailOwnerId").toString(), media->residencyOwnerId());
+        bool previewBeforeReady = false;
+        auto& manager = MediaResidencyManager::instance();
+        const auto connection = connect(&manager, &MediaResidencyManager::ownerChanged, this, [&](const QString& owner) {
+            if (owner == media->residencyOwnerId() && manager.preview(owner) && !manager.ready(owner))
+                previewBeforeReady = true;
+        });
+        QTRY_VERIFY_WITH_TIMEOUT(media->residencyReady(), 15000);
+        disconnect(connection);
+        QVERIFY(previewBeforeReady);
+        QTRY_VERIFY(f.item("timelineClip")->property("hasThumbnails").toBool());
+    }
+    void videoThumbnailsSurviveDuplicateAndCacheReclaim()
+    {
+        TimelineFixture f; QVERIFY(f.initialize());
+        const QString supplied = qEnvironmentVariable("MOUFFETTE_TEST_VIDEO_FILE");
+        const QString path = supplied.isEmpty() ? QString::fromUtf8(TEST_VIDEO_FILE) : supplied;
+        const auto geometry = MediaDecoder::probe(path);
+        QVERIFY2(geometry.accepted(), qPrintable(geometry.error));
+        auto* doc = f.host->document();
+        auto* first = doc->addPreparedFile(path, geometry.displaySize, true, {}); QVERIFY(first);
+        QTRY_VERIFY2_WITH_TIMEOUT(first->residencyReady(), qPrintable(first->residencyError()), 30000);
+        auto* second = doc->addPreparedFile(path, geometry.displaySize, true, {}); QVERIFY(second);
+        QTRY_VERIFY(second->residencyReady());
+        auto& manager = MediaResidencyManager::instance();
+        QCOMPARE(manager.asset(first->residencyOwnerId()), manager.asset(second->residencyOwnerId()));
+        auto clipsReady = [&] {
+            const auto clips = timelineItems(f.view.rootObject(), "timelineClip");
+            return clips.size() == 2 && std::all_of(clips.cbegin(), clips.cend(), [](auto* clip) {
+                return clip->property("hasThumbnails").toBool();
+            });
+        };
+        QTRY_VERIFY_WITH_TIMEOUT(clipsReady(), 10000);
+        QTRY_COMPARE_WITH_TIMEOUT(DecodeScheduler::instance().pendingJobs(), 0, 15000);
+        DecodeScheduler::instance().evictOptionalCaches();
+        QTRY_VERIFY_WITH_TIMEOUT(clipsReady(), 10000);
+        QTRY_COMPARE_WITH_TIMEOUT(DecodeScheduler::instance().pendingJobs(), 0, 15000);
+        const auto screenshot = qEnvironmentVariable("MOUFFETTE_TIMELINE_SCREENSHOT");
+        if (!screenshot.isEmpty()) QVERIFY(f.view.grabWindow().save(screenshot));
+    }
     void thumbnailsFollowResidencyViewportAndTrimPreview()
     {
         TimelineFixture f; QVERIFY(f.initialize());

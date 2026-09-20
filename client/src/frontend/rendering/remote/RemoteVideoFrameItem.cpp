@@ -1,4 +1,6 @@
 #include "frontend/rendering/remote/RemoteVideoFrameItem.h"
+#include "shared/rendering/SharedImageTexture.h"
+#include "shared/rendering/SharedVideoNode.h"
 
 #include <QQuickWindow>
 #include <QSGImageNode>
@@ -21,7 +23,7 @@ public:
     }
 
     QSGImageNode* image;
-    std::unique_ptr<QSGTexture> texture;
+    std::shared_ptr<QSGTexture> texture;
     qint64 frameKey = 0;
 };
 }
@@ -29,6 +31,7 @@ public:
 RemoteVideoFrameItem::RemoteVideoFrameItem(QQuickItem* parent)
     : QQuickItem(parent) {
     setFlag(ItemHasContents, true);
+    connect(&m_sink, &QVideoSink::videoFrameChanged, this, &RemoteVideoFrameItem::refreshFrame);
 }
 
 void RemoteVideoFrameItem::setFrameSource(QObject* source) {
@@ -54,7 +57,7 @@ void RemoteVideoFrameItem::setFrameSource(QObject* source) {
 }
 
 bool RemoteVideoFrameItem::hasFrame() const {
-    return m_source && m_source->hasFrame();
+    return m_source ? m_source->hasFrame() : m_sink.videoFrame().isValid();
 }
 
 void RemoteVideoFrameItem::refreshFrame() {
@@ -73,7 +76,17 @@ void RemoteVideoFrameItem::geometryChange(const QRectF& newGeometry, const QRect
 }
 
 QSGNode* RemoteVideoFrameItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData*) {
-    auto* node = static_cast<FrameNode*>(oldNode);
+    const QVideoFrame video = m_source ? m_source->videoFrame() : m_sink.videoFrame();
+    if (video.isValid() && window() && window()->rhi()) {
+        auto* node = dynamic_cast<SharedVideoNode*>(oldNode);
+        if (!node || node->pixelFormat() != video.pixelFormat()) {
+            delete oldNode; node = new SharedVideoNode(video, window()->rhi());
+        }
+        node->update(video, boundingRect());
+        return node;
+    }
+    auto* node = dynamic_cast<FrameNode*>(oldNode);
+    if (oldNode && !node) delete oldNode;
     if (!window() || !hasFrame() || width() <= 0 || height() <= 0) {
         delete node;
         return nullptr;
@@ -81,9 +94,11 @@ QSGNode* RemoteVideoFrameItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNode
 
     // The GUI thread is blocked during synchronization; the shared immutable
     // frame can be read here without copying or retaining it on the item.
-    const QImage& frame = m_source->frame();
+    // Software scene graphs have no native YUV textures; this fallback is only
+    // used by that renderer, never by the normal Metal/D3D path.
+    const QImage frame = video.isValid() ? ResidentVideoPlayer::presentationFrame(video).toImage() : m_source->frame();
     if (!node || node->frameKey != frame.cacheKey()) {
-        std::unique_ptr<QSGTexture> texture(window()->createTextureFromImage(frame));
+        auto texture = sharedImageTexture(window(), frame);
         if (!texture) {
             delete node;
             return nullptr;

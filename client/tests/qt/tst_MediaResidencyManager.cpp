@@ -2,8 +2,15 @@
 #include <QImage>
 #include <QTemporaryDir>
 #include <QSignalSpy>
+#include <QScopeGuard>
 #include "backend/media/MediaResidencyManager.h"
 #include "backend/media/ResidentVideoPlayer.h"
+#include "backend/media/DecodeScheduler.h"
+#include "backend/media/MediaDecoder.h"
+
+extern "C" {
+#include <libavformat/avformat.h>
+}
 
 class MediaResidencyManagerTest : public QObject {
     Q_OBJECT
@@ -18,7 +25,271 @@ class MediaResidencyManagerTest : public QObject {
         const auto path = dir.filePath(name);
         return value.save(path) ? path : QString();
     }
+    static bool corruptLastVideoPacket(const QString& path) {
+        AVFormatContext* format = nullptr;
+        const auto name = QFile::encodeName(path);
+        if (avformat_open_input(&format, name.constData(), nullptr, nullptr) < 0) return false;
+        auto close = qScopeGuard([&] { avformat_close_input(&format); });
+        if (avformat_find_stream_info(format, nullptr) < 0) return false;
+        const int video = av_find_best_stream(format, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
+        AVPacket* packet = av_packet_alloc();
+        if (!packet) return false;
+        auto free = qScopeGuard([&] { av_packet_free(&packet); });
+        qint64 offset = -1;
+        int length = 0;
+        while (av_read_frame(format, packet) >= 0) {
+            if (packet->stream_index == video) { offset = packet->pos; length = packet->size; }
+            av_packet_unref(packet);
+        }
+        avformat_close_input(&format);
+        QFile file(path);
+        return offset >= 0 && length > 0 && file.open(QIODevice::ReadWrite)
+            && file.seek(offset) && file.write(QByteArray(length, '\0')) == length;
+    }
 private slots:
+    void firstPreviewPrecedesCompleteValidation() {
+        MediaDecoder::DecodeCallbacks callbacks;
+        callbacks.retainOriginalVideo = true;
+        bool cancelled = false;
+        bool completed = false;
+        std::shared_ptr<const ResidentMediaPreview> first;
+        ResidentMediaMemory allocation;
+        callbacks.cancelled = [&] { return cancelled; };
+        callbacks.allocatedBreakdown = [&](const auto& memory) { allocation = memory; };
+        callbacks.progress = [&](double progress) { completed = progress >= 1; };
+        callbacks.preview = [&](auto snapshot) {
+            first = std::move(snapshot);
+            cancelled = true; // stop at the first image, before any EOF/ready
+        };
+        QString error;
+        QVERIFY(!MediaDecoder::decode(QString::fromUtf8(TEST_VIDEO_FILE), callbacks, &error));
+        QCOMPARE(error, QStringLiteral("cancelled"));
+        QVERIFY(!completed);
+        QVERIFY(first);
+        QCOMPARE(first->thumbnails.size(), 1);
+        QVERIFY(!first->sha256.isEmpty());
+        QVERIFY(first->poster.isValid());
+        QCOMPARE(first->poster.size(), first->displaySize);
+        QVERIFY(!first->thumbnails.first().image.isNull());
+        QCOMPARE(allocation.posterBytes + allocation.thumbnailBytes, first->residentBytes);
+    }
+    void previewsAreImmutableBoundedAndShareResidentPixels() {
+        MediaDecoder::DecodeCallbacks callbacks;
+        callbacks.retainOriginalVideo = true;
+        std::shared_ptr<const ResidentMediaPreview> first, latest;
+        callbacks.preview = [&](auto snapshot) {
+            if (!first) first = snapshot;
+            if (latest) QVERIFY(snapshot->thumbnails.size() > latest->thumbnails.size());
+            latest = std::move(snapshot);
+        };
+        QString error;
+        const auto asset = MediaDecoder::decode(QString::fromUtf8(TEST_VIDEO_FILE), callbacks, &error);
+        QVERIFY2(asset, qPrintable(error));
+        QVERIFY(first && latest);
+        QCOMPARE(first->thumbnails.size(), 1);
+        QVERIFY(latest->thumbnails.size() > 1);
+        QVERIFY(latest->thumbnails.size() <= MediaThumbnails::PreviewCount);
+        QCOMPARE(latest->thumbnails.size(), asset->thumbnails.size());
+        QCOMPARE(first->sha256, asset->sha256);
+        QVERIFY(first->poster.isValid());
+        QCOMPARE(first->poster.videoBuffer(), asset->firstFrame.frame.videoBuffer());
+        QCOMPARE(latest->poster.videoBuffer(), first->poster.videoBuffer());
+        quint64 pixels = 0;
+        qint64 previous = -1;
+        for (int i = 0; i < asset->thumbnails.size(); ++i) {
+            const auto& thumb = latest->thumbnails.at(i);
+            QVERIFY(thumb.timestampUs > previous);
+            previous = thumb.timestampUs;
+            QVERIFY(thumb.image.width() <= MediaThumbnails::Width);
+            QVERIFY(thumb.image.height() <= MediaThumbnails::Height);
+            QCOMPARE(thumb.image.cacheKey(), asset->thumbnails.at(i).image.cacheKey());
+            pixels += thumb.image.sizeInBytes();
+        }
+        QCOMPARE(asset->thumbnailBytes, pixels + quint64(asset->thumbnails.capacity()) * sizeof(ResidentThumbnail));
+        QVERIFY(pixels <= quint64(MediaThumbnails::PreviewCount * MediaThumbnails::Width * MediaThumbnails::Height * 4));
+    }
+    void previewDoesNotAuthorizeReadyPlaybackOrMismatchedOwners() {
+        MediaResidencyManager manager;
+        manager.setMemorySnapshotForTesting(memory());
+        bool observed = false;
+        connect(&manager, &MediaResidencyManager::ownerChanged, &manager, [&](const QString& owner) {
+            if (owner != QLatin1String("video") || manager.ready(owner)) return;
+            const auto preview = manager.preview(owner);
+            if (!preview) return;
+            observed = true;
+            QCOMPARE(manager.state(owner), QStringLiteral("decoding"));
+            QVERIFY(!manager.asset(owner));
+            QVERIFY(!manager.pinOwners({owner}, "not-ready"));
+            QVERIFY(!manager.preview("wrong"));
+            QVERIFY(preview->poster.isValid());
+            const auto usage = manager.summary();
+            QVERIFY(usage.value("thumbnailBytes").toULongLong() + usage.value("posterBytes").toULongLong()
+                >= preview->residentBytes);
+        });
+        const auto path = QString::fromUtf8(TEST_VIDEO_FILE);
+        manager.acquire("video", path);
+        manager.acquire("wrong", path, QString(64, '0'));
+        QTRY_VERIFY_WITH_TIMEOUT(manager.ready("video"), 10000);
+        QVERIFY(observed);
+        QVERIFY(!manager.ready("wrong"));
+        QVERIFY(!manager.preview("wrong"));
+        const auto preview = manager.preview("video");
+        QVERIFY(preview);
+        const auto asset = manager.asset("video");
+        QCOMPARE(preview->thumbnails.first().image.cacheKey(), asset->thumbnails.first().image.cacheKey());
+        QCOMPARE(manager.summary().value("mediaBytes").toULongLong(), asset->residentBytes);
+    }
+    void corruptTailClearsPublishedPreviewWithoutBecomingReady() {
+        QTemporaryDir directory;
+        const auto path = directory.filePath("corrupt-tail.mp4");
+        QVERIFY(QFile::copy(QString::fromUtf8(TEST_VIDEO_FILE), path));
+        QVERIFY(corruptLastVideoPacket(path));
+        MediaDecoder::DecodeCallbacks callbacks;
+        callbacks.retainOriginalVideo = true;
+        bool decodedPreview = false;
+        callbacks.preview = [&](auto preview) { decodedPreview |= !preview->thumbnails.isEmpty(); };
+        QString error;
+        QVERIFY(!MediaDecoder::decode(path, callbacks, &error));
+        QVERIFY(decodedPreview);
+        QVERIFY(!error.isEmpty());
+        MediaResidencyManager manager;
+        manager.setMemorySnapshotForTesting(memory());
+        bool announcedReady = false;
+        connect(&manager, &MediaResidencyManager::ownerChanged, &manager,
+            [&](const auto& id) { announcedReady |= manager.ready(id); });
+        manager.acquire("video", path);
+        QTRY_COMPARE_WITH_TIMEOUT(manager.state("video"), QStringLiteral("error"), 10000);
+        QVERIFY(!announcedReady);
+        QVERIFY(!manager.preview("video"));
+        QVERIFY(!manager.asset("video"));
+        QCOMPARE(manager.summary().value("mediaBytes").toULongLong(), quint64(0));
+    }
+    void sourceChangeAfterPreviewRejectsImport() {
+        QTemporaryDir directory;
+        const auto path = directory.filePath("changed.mp4");
+        QVERIFY(QFile::copy(QString::fromUtf8(TEST_VIDEO_FILE), path));
+        MediaResidencyManager manager;
+        manager.setMemorySnapshotForTesting(memory());
+        bool changed = false;
+        connect(&manager, &MediaResidencyManager::ownerChanged, &manager, [&](const QString& owner) {
+            if (changed || !manager.preview(owner) || manager.ready(owner)) return;
+            changed = true;
+            QFile file(path);
+            QVERIFY(file.open(QIODevice::Append));
+            QCOMPARE(file.write("changed"), qint64(7));
+            file.close();
+            QVERIFY(!manager.preview(owner));
+        });
+        manager.acquire("video", path);
+        QTRY_COMPARE_WITH_TIMEOUT(manager.state("video"), QStringLiteral("error"), 10000);
+        QVERIFY(changed);
+        QVERIFY(!manager.preview("video"));
+        QVERIFY(!manager.asset("video"));
+        QCOMPARE(manager.summary().value("mediaBytes").toULongLong(), quint64(0));
+    }
+    void cancelledPreviewCannotReplaceReboundOwner() {
+        QTemporaryDir directory;
+        const auto replacement = image(directory, "replacement.png", 8, qRgb(17, 29, 41));
+        MediaResidencyManager manager;
+        manager.setMemorySnapshotForTesting(memory());
+        bool rebound = false;
+        std::weak_ptr<const ResidentMediaPreview> retired;
+        connect(&manager, &MediaResidencyManager::ownerChanged, &manager, [&](const QString& owner) {
+            if (rebound || !manager.preview(owner) || manager.ready(owner)) return;
+            rebound = true;
+            retired = manager.preview(owner);
+            manager.acquire(owner, replacement);
+            QVERIFY(!manager.preview(owner));
+        });
+        manager.acquire("video", QString::fromUtf8(TEST_VIDEO_FILE));
+        QTRY_VERIFY_WITH_TIMEOUT(rebound && manager.ready("video"), 10000);
+        const auto asset = manager.asset("video");
+        QVERIFY(asset && !asset->video);
+        QCOMPARE(asset->image.pixelColor(0, 0), QColor(17, 29, 41));
+        QTRY_VERIFY(retired.expired());
+        manager.release("video");
+        QVERIFY(!manager.preview("video"));
+        QTRY_COMPARE(manager.summary().value("mediaBytes").toULongLong(), quint64(0));
+    }
+    void pressureCancellationReleasesPreviewPixels() {
+        MediaResidencyManager manager;
+        manager.setMemorySnapshotForTesting(memory());
+        bool cancelled = false;
+        std::weak_ptr<const ResidentMediaPreview> retired;
+        connect(&manager, &MediaResidencyManager::ownerChanged, &manager, [&](const QString& owner) {
+            if (cancelled || !manager.preview(owner) || manager.ready(owner)) return;
+            cancelled = true;
+            retired = manager.preview(owner);
+            auto critical = memory(); critical.pressure = 2;
+            manager.setMemorySnapshotForTesting(critical);
+            QVERIFY(!manager.preview(owner));
+        });
+        manager.acquire("video", QString::fromUtf8(TEST_VIDEO_FILE));
+        QTRY_COMPARE_WITH_TIMEOUT(manager.state("video"), QStringLiteral("waiting_for_memory"), 10000);
+        QVERIFY(cancelled);
+        QVERIFY(!manager.ready("video"));
+        QVERIFY(!manager.preview("video"));
+        QTRY_VERIFY(retired.expired());
+        QCOMPARE(manager.summary().value("mediaBytes").toULongLong(), quint64(0));
+    }
+    void originalImportDoesNotReserveTranscodedCopies() {
+        QTemporaryDir directory;
+        const auto path = directory.filePath("large-original.mp4");
+        QVERIFY(QFile::copy(QString::fromUtf8(TEST_VIDEO_FILE), path));
+        QFile source(path);
+        QVERIFY(source.open(QIODevice::Append));
+        // A valid MP4 free box makes source storage dominate the tiny fixture's
+        // frames without introducing a long-running decode into this test.
+        QCOMPARE(source.write(QByteArray::fromHex("0100000066726565")), qint64(8));
+        const QByteArray padding(16 * MiB - 8, '\0');
+        QCOMPARE(source.write(padding), qint64(padding.size()));
+        source.close();
+        const auto probe = MediaDecoder::probe(path);
+        QVERIFY2(probe.accepted(), qPrintable(probe.error));
+        MediaResidencyManager manager;
+        manager.setSafetyReserve(0, 0);
+        manager.setMemorySnapshotForTesting(memory(probe.scratchBytes + QFileInfo(path).size() + 4 * MiB));
+        manager.acquire("source", path);
+        QTRY_VERIFY2_WITH_TIMEOUT(manager.ready("source"), qPrintable(manager.errorString("source")), 10000);
+        QVERIFY(!manager.asset("source")->allIntra);
+        QCOMPARE(manager.asset("source")->compressedVideo.size(), QFileInfo(path).size());
+    }
+    void suppliedSourceFinishesPreparation() {
+        const auto path = qEnvironmentVariable("MOUFFETTE_IMPORT_TEST_FILE");
+        if (path.isEmpty()) QSKIP("Set MOUFFETTE_IMPORT_TEST_FILE to qualify an external source");
+        MediaResidencyManager manager;
+        QElapsedTimer elapsed;
+        elapsed.start();
+        QString lastState;
+        int lastProgress = -1;
+        qint64 firstPreviewMs = -1;
+        connect(&manager, &MediaResidencyManager::ownerChanged, &manager, [&](const QString& owner) {
+            if (owner != QLatin1String("source")) return;
+            if (firstPreviewMs < 0 && manager.preview(owner)) {
+                firstPreviewMs = elapsed.elapsed();
+                qInfo() << firstPreviewMs << "first-preview" << manager.preview(owner)->thumbnails.size()
+                        << "samples" << "ready:" << manager.ready(owner);
+            }
+            const auto state = manager.state(owner);
+            const int progress = int(manager.progress(owner) * 10);
+            if (state != lastState || progress != lastProgress) {
+                qInfo() << elapsed.elapsed() << state << manager.progress(owner) << manager.errorString(owner);
+                lastState = state;
+                lastProgress = progress;
+            }
+        });
+        manager.acquire("source", path);
+        QTRY_VERIFY2_WITH_TIMEOUT(manager.ready("source"), qPrintable(manager.state("source") + ": " + manager.errorString("source")), 180000);
+        QVERIFY(firstPreviewMs >= 0);
+        const auto asset = manager.asset("source");
+        QVERIFY(asset && asset->video);
+        ResidentVideoPlayer player;
+        player.setAsset(asset);
+        for (qint64 position : {qint64(0), qint64(500), qint64(1000), asset->durationUs / 1000 - 1}) {
+            player.prepare(position);
+            QTRY_VERIFY2_WITH_TIMEOUT(player.preparedAt(position), qPrintable(player.errorString()), 5000);
+        }
+    }
     void unavailablePlayerFailsBeforeResidency() {
         if (qEnvironmentVariable("QT_MEDIA_BACKEND") != QLatin1String("unavailable"))
             QSKIP("Run in the isolated unavailable-backend CTest process");
@@ -32,13 +303,9 @@ private slots:
         manager.setMemorySnapshotForTesting(memory());
         QSignalSpy errors(&manager, &MediaResidencyManager::errorOccurred);
         manager.acquire("video", QString::fromUtf8(TEST_VIDEO_FILE));
-        QTRY_COMPARE_WITH_TIMEOUT(manager.state("video"), QStringLiteral("error"), 10000);
-        QVERIFY(!manager.ready("video"));
-        QVERIFY(!manager.asset("video"));
-        QVERIFY(!manager.errorString("video").isEmpty());
-        QVERIFY(!errors.isEmpty());
-        // No stuck decoder reservation or stalled queue after native failure.
-        QCOMPARE(manager.summary().value("playbackBudgetBytes").toULongLong(), quint64(0));
+        QTRY_VERIFY_WITH_TIMEOUT(manager.ready("video"), 10000);
+        QVERIFY(!manager.asset("video")->allIntra);
+        QVERIFY(errors.isEmpty());
         QTemporaryDir dir;
         manager.acquire("image", image(dir, "valid.png", 32, qRgb(1, 2, 3)));
         QTRY_VERIFY_WITH_TIMEOUT(manager.ready("image"), 3000);
@@ -56,14 +323,9 @@ private slots:
             injected = true;
             const QPointer<ResidentVideoPlayer> player = manager.findChild<ResidentVideoPlayer*>();
             QVERIFY(player);
-            // Software validation has succeeded. Make only the native player's
-            // private source fail, leaving the verified shared asset intact.
-            QTimer::singleShot(0, player, [player] {
-                if (!player || !player->asset()) return;
-                auto broken = std::make_shared<ResidentMediaAsset>(*player->asset());
-                broken->compressedVideo = QByteArrayLiteral("invalid native MP4 stream");
-                player->setAsset(broken);
-            });
+            // Inject a preparation error at admission, before readiness is
+            // published. The decoder's corrupt-input path is tested separately.
+            player->errorOccurred(QMediaPlayer::FormatError, QStringLiteral("Injected preparation failure"));
         });
         manager.acquire("video", QString::fromUtf8(TEST_VIDEO_FILE));
         QTRY_COMPARE_WITH_TIMEOUT(manager.state("video"), QStringLiteral("error"), 10000);
@@ -173,10 +435,10 @@ private slots:
         const auto summary = manager.summary();
         QCOMPARE(summary.value("imageBytes").toULongLong(), imagePixels);
         QCOMPARE(summary.value("thumbnailBytes").toULongLong(), imageThumbnails + video->thumbnailBytes);
-        QCOMPARE(summary.value("videoBytes").toULongLong(), quint64(video->compressedVideo.capacity()));
+        QCOMPARE(summary.value("videoBytes").toULongLong(), video->memoryBreakdown().videoBytes);
         QCOMPARE(summary.value("posterBytes").toULongLong(), video->posterBytes);
         quint64 total = 0;
-        for (const auto* category : {"videoBytes", "imageBytes", "posterBytes", "thumbnailBytes", "scrubProxyBytes"}) {
+        for (const auto* category : {"videoBytes", "imageBytes", "posterBytes", "thumbnailBytes", "audioPreviewBytes"}) {
             quint64 rows = 0;
             for (const auto& value : manager.assets()) rows += value.toMap().value(category).toULongLong();
             QCOMPARE(rows, summary.value(category).toULongLong());
@@ -185,11 +447,11 @@ private slots:
         QCOMPARE(summary.value("mediaBytes").toULongLong(), total);
         manager.release("duplicate");
         QCOMPARE(manager.summary().value("mediaBytes").toULongLong(), total);
-        manager.setMemorySnapshotForTesting(memory(0));
+        { auto critical = memory(0); critical.pressure = 2; manager.setMemorySnapshotForTesting(critical); }
         QTRY_VERIFY(!manager.ready("image") && !manager.ready("video"));
         QCOMPARE(manager.summary().value("mediaBytes").toULongLong(), quint64(0));
         for (const auto& value : manager.assets()) {
-            for (const auto* category : {"videoBytes", "imageBytes", "posterBytes", "thumbnailBytes", "scrubProxyBytes"})
+            for (const auto* category : {"videoBytes", "imageBytes", "posterBytes", "thumbnailBytes", "audioPreviewBytes"})
                 QCOMPARE(value.toMap().value(category).toULongLong(), quint64(0));
         }
     }
@@ -209,7 +471,7 @@ private slots:
                 QCOMPARE(row.value("residentBytes").toULongLong(),
                     row.value("videoBytes").toULongLong() + row.value("imageBytes").toULongLong()
                     + row.value("posterBytes").toULongLong() + row.value("thumbnailBytes").toULongLong()
-                    + row.value("scrubProxyBytes").toULongLong());
+                    + row.value("audioPreviewBytes").toULongLong());
             }
         });
         manager.acquire("first", QString::fromUtf8(TEST_VIDEO_FILE));
@@ -219,84 +481,61 @@ private slots:
         const auto asset = manager.asset("first");
         QCOMPARE(asset, manager.asset("second"));
         QVERIFY(!asset->compressedVideo.isEmpty());
+        QVERIFY(!asset->allIntra);
         QCOMPARE(manager.summary().value("mediaBytes").toULongLong(), asset->residentBytes);
-        QCOMPARE(manager.summary().value("videoBytes").toULongLong(), quint64(asset->compressedVideo.capacity()));
+        QCOMPARE(manager.summary().value("videoBytes").toULongLong(), asset->memoryBreakdown().videoBytes);
         QCOMPARE(manager.summary().value("imageBytes").toULongLong(), quint64(0));
         QCOMPARE(manager.summary().value("thumbnailBytes").toULongLong(), asset->thumbnailBytes);
         QCOMPARE(manager.summary().value("posterBytes").toULongLong(), asset->posterBytes);
         QCOMPARE(manager.summary().value("reservedBytes").toULongLong(), quint64(0));
-        const quint64 budget = asset->playbackBudgetBytes;
-        manager.setMemorySnapshotForTesting(memory(2 * GiB + budget + 1));
-        QVERIFY(!manager.pinOwners({"first", "second"}, "too-many-players"));
-        QCOMPARE(manager.summary().value("playbackBudgetBytes").toULongLong(), quint64(0));
-        QVERIFY(!manager.pinOwners({"first", "first"}, "duplicate-remote-occurrences"));
-        QCOMPARE(manager.summary().value("playbackBudgetBytes").toULongLong(), quint64(0));
-        QVERIFY(manager.pinOwners({"first"}, "one-player"));
-        // A rejected replacement must preserve the original scene reservation.
-        QVERIFY(!manager.pinOwners({"first", "first"}, "one-player"));
-        QCOMPARE(manager.summary().value("playbackBudgetBytes").toULongLong(), budget);
-        QVERIFY(asset->reservePlayback()); // consumes the pre-admitted slot
-        QVERIFY(!asset->reservePlayback());
-        QCOMPARE(manager.summary().value("mediaBytes").toULongLong(), asset->residentBytes);
-        QCOMPARE(manager.summary().value("playbackBudgetBytes").toULongLong(), budget);
-        asset->releasePlayback(false);
-        manager.unpinGroup("one-player");
-        QCOMPARE(manager.summary().value("playbackBudgetBytes").toULongLong(), quint64(0));
+        QVERIFY(manager.pinOwners({"first"}, "scene"));
+        const quint64 oneDecoderPool = manager.summary().value("playbackBudgetBytes").toULongLong();
+        QStringList ten; for (int i = 0; i < 10; ++i) ten.append("first");
+        QVERIFY(manager.pinOwners(ten, "scene"));
+        QCOMPARE(manager.summary().value("playbackBudgetBytes").toULongLong(), oneDecoderPool);
+        const quint64 reservation = manager.summary().value("pendingPlaybackBudgetBytes").toULongLong();
+        QVERIFY(reservation > 0);
+        manager.unpinGroup("scene");
+        const quint64 reserve = manager.summary().value("reserveBytes").toULongLong();
+        manager.setMemorySnapshotForTesting(memory(reserve + reservation - 1));
+        QVERIFY(!manager.pinOwners(ten, "scene"));
+        QCOMPARE(manager.summary().value("pendingPlaybackBudgetBytes").toULongLong(), quint64(0));
+        QVERIFY(manager.ready("first"));
         manager.setMemorySnapshotForTesting(memory());
-        QVERIFY(manager.pinOwners({"first", "first"}, "duplicate-remote-occurrences"));
-        QCOMPARE(manager.summary().value("playbackBudgetBytes").toULongLong(), 2 * budget);
-        manager.release("first");
+        QVERIFY(manager.pinOwners(ten, "scene"));
+        for (int i = 0; i < 10; ++i) { QVERIFY(asset->reservePlayback()); asset->playbackPrepared(); }
+        QCOMPARE(manager.summary().value("pendingPlaybackBudgetBytes").toULongLong(), quint64(0));
+        QCOMPARE(manager.summary().value("playbackBudgetBytes").toULongLong(), oneDecoderPool);
+        for (int i = 0; i < 10; ++i) asset->releasePlayback(true);
+        manager.unpinGroup("scene");
         QCOMPARE(manager.summary().value("playbackBudgetBytes").toULongLong(), quint64(0));
     }
     void preparedPlaybackDoesNotReserveAlreadyAllocatedMemory() {
         MediaResidencyManager manager;
         manager.setMemorySnapshotForTesting(memory());
-        manager.setSafetyReserve(0, 548);
+        manager.setSafetyReserve(0, 512);
         manager.acquire("video", QString::fromUtf8(TEST_VIDEO_FILE));
         QTRY_VERIFY_WITH_TIMEOUT(manager.ready("video"), 10000);
         const auto asset = manager.asset("video");
-        const quint64 budget = asset->playbackBudgetBytes;
-        QVERIFY(budget > 0);
-        manager.setMemorySnapshotForTesting(memory(548 * MiB + 2 * budget + 1));
         QVERIFY(manager.pinOwners({"video", "video"}, "pair"));
-        QCOMPARE(manager.summary().value("pendingPlaybackBudgetBytes").toULongLong(), 2 * budget);
-        QCOMPARE(manager.assets().first().toMap().value("playbackBudgetBytes").toULongLong(), 2 * budget);
-        QCOMPARE(manager.assets().first().toMap().value("pendingPlaybackBudgetBytes").toULongLong(), 2 * budget);
-        QVERIFY(asset->reservePlayback());
-        QVERIFY(asset->reservePlayback());
-        QVERIFY(!asset->reservePlayback());
-
+        const auto initial = manager.summary().value("pendingPlaybackBudgetBytes").toULongLong();
+        QVERIFY(initial > 0);
+        QVERIFY(asset->reservePlayback()); QVERIFY(asset->reservePlayback());
+        QCOMPARE(manager.summary().value("pendingPlaybackBudgetBytes").toULongLong(), initial);
         asset->playbackPrepared();
-        // Available RAM now reflects the first player's real allocations.
-        manager.setMemorySnapshotForTesting(memory(548 * MiB + budget + 1));
-        QCOMPARE(manager.summary().value("pendingPlaybackBudgetBytes").toULongLong(), budget);
-        QCOMPARE(manager.assets().first().toMap().value("pendingPlaybackBudgetBytes").toULongLong(), budget);
-        QVERIFY(!asset->reservePlayback()); // The second player is still pending.
+        QVERIFY(manager.summary().value("pendingPlaybackBudgetBytes").toULongLong() < initial);
         asset->playbackPrepared();
         QCOMPARE(manager.summary().value("pendingPlaybackBudgetBytes").toULongLong(), quint64(0));
-        QCOMPARE(manager.summary().value("playbackBudgetBytes").toULongLong(), 2 * budget);
-
-        // Prepared players are already reflected in available RAM. The new
-        // scene reserves only its additional player, atomically.
-        QVERIFY(manager.pinOwners({"video"}, "third"));
-        QCOMPARE(manager.summary().value("pendingPlaybackBudgetBytes").toULongLong(), budget);
-        QVERIFY(asset->reservePlayback());
+        manager.setMemorySnapshotForTesting(memory(512 * MiB + 1));
+        QVERIFY(manager.ready("video"));
         QVERIFY(!asset->reservePlayback());
-        asset->releasePlayback(false);
-        // The scene still owns its slot even though its player failed early.
-        QCOMPARE(manager.summary().value("pendingPlaybackBudgetBytes").toULongLong(), budget);
-        manager.unpinGroup("third");
         QCOMPARE(manager.summary().value("pendingPlaybackBudgetBytes").toULongLong(), quint64(0));
         manager.unpinGroup("pair");
-
-        QVERIFY(asset->reservePlayback()); // An unpinned player uses the same accounting.
-        QVERIFY(!asset->reservePlayback());
-        asset->releasePlayback(false);
-        QCOMPARE(manager.summary().value("pendingPlaybackBudgetBytes").toULongLong(), quint64(0));
-        asset->releasePlayback(true);
-        asset->releasePlayback(true);
+        asset->releasePlayback(true); asset->releasePlayback(true);
         QCOMPARE(manager.summary().value("playbackBudgetBytes").toULongLong(), quint64(0));
     }
+
+
     void preparedPlaybackAllowsMediaImport() {
         QTemporaryDir dir;
         MediaResidencyManager manager;
@@ -318,46 +557,27 @@ private slots:
     void preAdmittedSceneSlotsSurvivePartialNativeAllocations() {
         MediaResidencyManager manager;
         manager.setMemorySnapshotForTesting(memory());
-        manager.setSafetyReserve(0, 548);
+        manager.setSafetyReserve(0, 512);
         manager.acquire("video", QString::fromUtf8(TEST_VIDEO_FILE));
         QTRY_VERIFY_WITH_TIMEOUT(manager.ready("video"), 10000);
         const auto asset = manager.asset("video");
-        const quint64 budget = asset->playbackBudgetBytes;
-        const quint64 reserve = 548 * MiB;
-        QVERIFY(budget > 0);
-        manager.setMemorySnapshotForTesting(memory(reserve + 2 * budget));
         QVERIFY(manager.pinOwners({"video", "video"}, "pair"));
         QVERIFY(asset->reservePlayback());
-
-        // The first decoder has allocated some buffers, but has not produced
-        // its first frame yet. Its existing commitment must not be charged
-        // again when the second player consumes its already admitted slot.
-        manager.setMemorySnapshotForTesting(memory(reserve + budget + budget / 2));
+        // Existing pool commitments are not charged twice as worker allocations
+        // appear in the OS measurement. Only the small cursor audio buffer grows.
+        manager.setMemorySnapshotForTesting(memory(512 * MiB + MiB));
         QVERIFY(asset->reservePlayback());
-        QVERIFY(!asset->reservePlayback()); // a third player is a new commitment
-        QCOMPARE(manager.summary().value("pendingPlaybackBudgetBytes").toULongLong(), 2 * budget);
-        asset->playbackPrepared();
-        asset->playbackPrepared();
-        manager.unpinGroup("pair");
-        asset->releasePlayback(true);
-        asset->releasePlayback(true);
-        QCOMPARE(manager.summary().value("pendingPlaybackBudgetBytes").toULongLong(), quint64(0));
-
-        // A pre-admitted slot still needs its own full future buffer budget
-        // above the configured system reserve when its decoder starts.
-        manager.setMemorySnapshotForTesting(memory(reserve + 2 * budget));
-        QVERIFY(manager.pinOwners({"video", "video"}, "pair"));
-        QVERIFY(asset->reservePlayback());
-        manager.setMemorySnapshotForTesting(memory(reserve + budget - 1));
         QVERIFY(!asset->reservePlayback());
-        manager.setMemorySnapshotForTesting(memory(reserve - 1));
-        QVERIFY(!asset->reservePlayback());
-        manager.setMemorySnapshotForTesting(memory());
-        manager.unpinGroup("pair");
-        asset->releasePlayback(false);
+        asset->playbackPrepared(); asset->playbackPrepared();
         QCOMPARE(manager.summary().value("pendingPlaybackBudgetBytes").toULongLong(), quint64(0));
-        QCOMPARE(manager.summary().value("playbackBudgetBytes").toULongLong(), quint64(0));
+        manager.setMemorySnapshotForTesting(memory(512 * MiB - 1));
+        QVERIFY(!asset->reservePlayback());
+        QVERIFY(manager.ready("video"));
+        manager.unpinGroup("pair");
+        asset->releasePlayback(true); asset->releasePlayback(true);
     }
+
+
     void survivingDuplicateReloadsItsOwnSource()
     {
         QTemporaryDir dir;
@@ -372,7 +592,7 @@ private slots:
         QTRY_VERIFY_WITH_TIMEOUT(manager.ready("a") && manager.ready("b"), 10000);
         manager.release("a");
         QVERIFY(QFile::remove(first));
-        manager.setMemorySnapshotForTesting(memory(2 * GiB - 1));
+        { auto critical = memory(2 * GiB - 1); critical.pressure = 2; manager.setMemorySnapshotForTesting(critical); }
         QVERIFY(!manager.ready("b"));
         manager.setMemorySnapshotForTesting(memory());
         for (int i = 0; i < 10; ++i) manager.retry("b");
@@ -442,7 +662,7 @@ private slots:
         QVERIFY(manager.hasBackgroundWorkForPath(path));
         QTRY_COMPARE_WITH_TIMEOUT(manager.state("second"), QStringLiteral("error"), 10000);
     }
-    void evictsLargestAndWaitsForHealthySamples() {
+    void headroomShortagePreservesReadyAndCriticalPressureRecovers() {
         QTemporaryDir dir;
         MediaResidencyManager manager;
         manager.setMemorySnapshotForTesting(memory());
@@ -450,18 +670,18 @@ private slots:
         manager.acquire("small", image(dir, "small.png", 8, qRgb(1, 2, 3)));
         manager.acquire("large", image(dir, "large.png", 32, qRgb(3, 2, 1)));
         QTRY_VERIFY_WITH_TIMEOUT(manager.ready("small") && manager.ready("large"), 10000);
-        manager.setMemorySnapshotForTesting(memory(2 * GiB - 1024));
-        QVERIFY(manager.ready("small"));
-        QVERIFY(!manager.ready("large"));
-        QCOMPARE(manager.state("large"), QStringLiteral("waiting_for_memory"));
-        manager.setMemorySnapshotForTesting(memory(2 * GiB + 128 * 1024 * 1024));
+        auto shortage = memory(2 * GiB - 1024);
+        manager.setMemorySnapshotForTesting(shortage);
+        QVERIFY(manager.ready("small") && manager.ready("large"));
+        QCOMPARE(manager.summary().value("loadableBytes").toULongLong(), quint64(0));
+        shortage.pressure = 2; manager.setMemorySnapshotForTesting(shortage);
+        QVERIFY(!manager.ready("small") && !manager.ready("large"));
+        manager.setMemorySnapshotForTesting(memory(2 * GiB + 128 * MiB));
         manager.sampleNow();
         QVERIFY(!manager.ready("large"));
-        QVERIFY(manager.ready("small"));
-        // Time-based hysteresis must recover here without an extra hidden
-        // 512 MiB (or percentage) added to the configured safety reserve.
-        QTRY_VERIFY_WITH_TIMEOUT(manager.ready("large"), 10000);
+        QTRY_VERIFY_WITH_TIMEOUT(manager.ready("small") && manager.ready("large"), 10000);
     }
+
     void atomicPinsAndControlledStop() {
         QTemporaryDir dir;
         MediaResidencyManager manager;
@@ -472,7 +692,7 @@ private slots:
         QVERIFY(!manager.pinOwners({"protected", "missing"}, "failed"));
         QVERIFY(manager.pinOwners({"protected"}, "scene"));
         QSignalSpy stop(&manager, &MediaResidencyManager::sceneStopRequested);
-        manager.setMemorySnapshotForTesting(memory(GiB));
+        { auto critical = memory(GiB); critical.pressure = 2; manager.setMemorySnapshotForTesting(critical); }
         QVERIFY(manager.ready("protected"));
         QTRY_COMPARE_WITH_TIMEOUT(stop.size(), 1, 4500);
         QCOMPARE(stop.first().first().toString(), QStringLiteral("scene"));
@@ -534,30 +754,27 @@ private slots:
     }
     void warningPlaybackAdmissionStillAccountsForPendingPlayers() {
         MediaResidencyManager manager;
-        auto warning = memory();
-        warning.pressure = 1;
+        auto warning = memory(); warning.pressure = 1;
         manager.setMemorySnapshotForTesting(warning);
-        manager.setSafetyReserve(0, 548);
+        manager.setSafetyReserve(0, 512);
         manager.acquire("video", QString::fromUtf8(TEST_VIDEO_FILE));
         QTRY_VERIFY_WITH_TIMEOUT(manager.ready("video"), 10000);
         const auto asset = manager.asset("video");
-        const quint64 budget = asset->playbackBudgetBytes;
-        QVERIFY(budget > 0);
-        warning.availableBytes = 548 * MiB + 2 * budget;
+        QVERIFY(manager.pinOwners({"video", "video"}, "pair"));
+        const auto pending = manager.summary().value("pendingPlaybackBudgetBytes").toULongLong();
+        manager.unpinGroup("pair");
+        warning.availableBytes = 512 * MiB + pending;
         manager.setMemorySnapshotForTesting(warning);
         QVERIFY(!manager.pinOwners({"video", "video", "video"}, "too-many"));
         QVERIFY(manager.pinOwners({"video", "video"}, "pair"));
-        QVERIFY(asset->reservePlayback());
-        QVERIFY(asset->reservePlayback());
+        QVERIFY(asset->reservePlayback()); QVERIFY(asset->reservePlayback());
         QVERIFY(!asset->reservePlayback());
-        QCOMPARE(manager.summary().value("pendingPlaybackBudgetBytes").toULongLong(), 2 * budget);
         QCOMPARE(manager.summary().value("loadableBytes").toULongLong(), quint64(0));
-        manager.unpinGroup("pair");
-        asset->releasePlayback(false);
-        asset->releasePlayback(false);
-        QVERIFY(asset->reservePlayback());
-        asset->releasePlayback(false);
+        manager.unpinGroup("pair"); asset->releasePlayback(false); asset->releasePlayback(false);
+        QCOMPARE(manager.summary().value("pendingPlaybackBudgetBytes").toULongLong(), quint64(0));
     }
+
+
     void criticalPressureStillBlocksZeroReserveAndRecoversToWarning() {
         QTemporaryDir dir;
         MediaResidencyManager manager;
@@ -682,9 +899,9 @@ private slots:
         manager.clearRemoteStates("target");
         QVERIFY(manager.assets().first().toMap().value("remoteStates").toList().isEmpty());
         const auto summary = manager.summary();
-        QCOMPARE(summary.value("totalBytes").toULongLong(),
-            summary.value("availableBytes").toULongLong() + summary.value("processBytes").toULongLong()
-                + summary.value("otherBytes").toULongLong());
+        QCOMPARE(summary.value("processBytes").toULongLong(), memory().processBytes);
+        QCOMPARE(summary.value("availableBytes").toULongLong(), memory().availableBytes);
+        QVERIFY(!summary.contains("otherBytes"));
     }
 };
 QTEST_MAIN(MediaResidencyManagerTest)

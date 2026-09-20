@@ -15,7 +15,6 @@
 
 class LocalFileRepository;
 class RemoteFileTracker;
-class FileMemoryCache;
 
 /**
  * FileManager - Façade orchestrating file operations
@@ -23,7 +22,6 @@ class FileMemoryCache;
  * Delegates storage concerns to three specialized services:
  * - LocalFileRepository: fileId ↔ filePath mapping
  * - RemoteFileTracker: remote client & projectId tracking
- * - FileMemoryCache: memory caching for performance
  * 
  */
 class FileManager
@@ -78,16 +76,6 @@ public:
     bool rebindReceivedFileScope(const RemoteCacheStore::Scope& oldScope,
                                  const RemoteCacheStore::Scope& newScope);
     QList<QString> getReceivedFileIds(const RemoteCacheStore::Scope& scope) const;
-    void releaseReceivedFileMemory(const RemoteCacheStore::Scope& scope,
-                                   const QString& fileId);
-
-    // Ensure file bytes are resident in memory for low-latency playback.
-    void preloadFileIntoMemory(const QString& fileId);
-    // Retrieve a shared QByteArray for a file. Loads from disk on first access unless already cached.
-    QSharedPointer<QByteArray> getFileBytes(const QString& fileId, bool forceReload = false);
-    // Release any resident memory for the given fileId (used when file is deleted remotely).
-    void releaseFileMemory(const QString& fileId);
-    
     // Check if a file ID exists
     bool hasFileId(const QString& fileId) const;
     
@@ -127,13 +115,11 @@ private:
     };
 
     static QString receivedScopeKey(const RemoteCacheStore::Scope& scope);
-    static QString receivedMemoryKey(const RemoteCacheStore::Scope& scope,
-                                     const QString& fileId);
+
 
     // Non-owning service references initialized in the constructor.
     LocalFileRepository* m_repository;
     RemoteFileTracker* m_tracker;
-    FileMemoryCache* m_cache;
     
     int m_mediaAssociationTransactionDepth = 0;
     QSet<QString> m_deferredUnusedFiles;

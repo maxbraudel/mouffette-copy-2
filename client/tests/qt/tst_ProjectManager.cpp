@@ -507,6 +507,29 @@ private slots:
                  ProjectManager::RemovalReason::UserDeleted);
     }
 
+    void openProjectsKeepPreparedMediaByDefault()
+    {
+        QTemporaryDir temporary;
+        ProjectStore store(temporary.filePath(QStringLiteral("projects.json")));
+        ProjectManager::TimingPolicy timing;
+        QCOMPARE(timing.projectMediaHiddenTimeoutMs, qint64(0));
+        ProjectManager manager(&store, timing);
+        manager.stopAutomaticTimersForTesting();
+        const auto endpoint = QStringLiteral("warm-canvas");
+        QVERIFY(!createProject(manager, target(endpoint, QStringLiteral("Warm canvas")),
+                               ProjectLifecycleState::Hidden, 100).isEmpty());
+        QSignalSpy releaseSpy(&manager, &ProjectManager::projectMediaReleaseDue);
+        QCOMPARE(manager.projectMediaReleaseAtMs(endpoint), qint64(-1));
+        manager.processDeadlines(100 + timing.projectHiddenRetentionMs - 1);
+        QCOMPARE(manager.projectCount(), 1);
+        QVERIFY(!manager.projectMediaReleaseExpired(endpoint));
+        QVERIFY(releaseSpy.isEmpty());
+        // Project closure retains its own deadline; only RAM-only purging is disabled.
+        manager.processDeadlines(100 + timing.projectHiddenRetentionMs);
+        QCOMPARE(manager.projectCount(), 0);
+        QVERIFY(releaseSpy.isEmpty());
+    }
+
     void mediaDeadlineIsExactPerProjectAndNeverExtended()
     {
         QTemporaryDir temporary;

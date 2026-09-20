@@ -540,13 +540,16 @@ void MediaOverlayTest::memoryBreakdownIsClearAndScrollable()
     QVERIFY(QMetaObject::invokeMethod(popup.get(), "open"));
     QTRY_VERIFY(popup->property("opened").toBool());
     auto* list = findVisualItem(window.contentItem(), "memoryAssetList"); QVERIFY(list);
-    auto* amount = findVisualItem(window.contentItem(), "memoryAmount_imageBytes"); QVERIFY(amount);
-    QCOMPARE(amount->property("text").toString(), QStringLiteral("1.0 MiB"));
-    for (const auto* category : {"videoBytes", "imageBytes", "posterBytes", "thumbnailBytes", "scrubProxyBytes"}) {
-        auto* card = findVisualItem(window.contentItem(), QStringLiteral("memoryCategory_") + category);
-        QVERIFY(card && card->width() > 0 && card->height() > 0);
-        QVERIFY(card->mapToItem(list, {card->width(), 0}).x() <= list->width() + 0.5);
-    }
+    QQuickItem* bar = nullptr;
+    QTRY_VERIFY(bar = findVisualItem(window.contentItem(), "memoryDistributionBar"));
+    QTRY_VERIFY(bar->isVisible() && bar->width() > 400 && bar->height() == 26);
+    auto* process = findVisualItem(window.contentItem(), "memoryProcessSegment"); QVERIFY(process);
+    auto* other = findVisualItem(window.contentItem(), "memoryOtherSegment"); QVERIFY(other);
+    auto* available = findVisualItem(window.contentItem(), "memoryAvailableSegment"); QVERIFY(available);
+    QTRY_VERIFY(qAbs(process->width() / bar->width() - 0.0625) < 0.001);
+    QTRY_VERIFY(qAbs(other->width() / bar->width() - 0.1875) < 0.001);
+    QTRY_VERIFY(qAbs(available->width() / bar->width() - 0.75) < 0.001);
+    QVERIFY(!findVisualItem(window.contentItem(), "memoryCategory_videoBytes"));
     auto* playback = findVisualItem(window.contentItem(), "memoryPlaybackEstimate"); QVERIFY(playback);
     QCOMPARE(playback->property("text").toString(), QStringLiteral("0 B"));
     const auto asset = manager.asset("memory-popup-video");
@@ -557,7 +560,7 @@ void MediaOverlayTest::memoryBreakdownIsClearAndScrollable()
     QCOMPARE(totals.value("mediaBytes").toULongLong(),
         totals.value("videoBytes").toULongLong() + totals.value("imageBytes").toULongLong()
         + totals.value("posterBytes").toULongLong() + totals.value("thumbnailBytes").toULongLong()
-        + totals.value("scrubProxyBytes").toULongLong());
+        + totals.value("audioPreviewBytes").toULongLong());
     const auto capture = [&](const QString& name) {
         const auto output = qEnvironmentVariable("MOUFFETTE_OVERLAY_ARTIFACT_DIR");
         if (output.isEmpty()) return;
@@ -577,10 +580,11 @@ void MediaOverlayTest::memoryBreakdownIsClearAndScrollable()
     window.resize(420, 360);
     QTRY_VERIFY(list->width() < 400);
     QTRY_VERIFY(list->property("contentHeight").toReal() > list->height());
-    auto* first = findVisualItem(window.contentItem(), "memoryCategory_videoBytes");
-    auto* third = findVisualItem(window.contentItem(), "memoryCategory_posterBytes");
+    auto* first = findVisualItem(window.contentItem(), "memoryLegend_process");
+    auto* third = findVisualItem(window.contentItem(), "memoryLegend_available");
     QVERIFY(first && third);
-    QTRY_VERIFY(third->y() > first->y()); // Two-column layout on narrow windows.
+    QTRY_VERIFY(third->y() > first->y()); // The legend wraps on narrow windows.
+    QTRY_VERIFY(bar->width() <= list->width() && bar->width() > 0);
     QVERIFY(QMetaObject::invokeMethod(popup.get(), "close"));
     QTRY_VERIFY(!popup->property("opened").toBool());
     QVERIFY(QMetaObject::invokeMethod(popup.get(), "open"));

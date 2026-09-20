@@ -75,7 +75,7 @@ QVariantMap clipRow(const SceneTimeline::Clip& clip, const CanvasMedia* media, c
         {QStringLiteral("mediaId"), media->mediaId()},
         {QStringLiteral("mediaName"), media->displayName()},
         {QStringLiteral("selected"), media->selected()},
-        {QStringLiteral("thumbnailOwnerId"), !media->isText() && media->residencyReady()
+        {QStringLiteral("thumbnailOwnerId"), !media->isText() && !media->residencySuspended()
             ? media->residencyOwnerId() : QString()},
         {QStringLiteral("trackIndex"), media->timelineTrack().trackIndex},
         {QStringLiteral("isVideo"), clip.sourceStartSlot.has_value()},

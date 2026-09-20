@@ -2,7 +2,8 @@
 
 #include "backend/domain/scene/SceneTimeline.h"
 
-// Each instance owns its decoder. Prepare a future clip at its source in-point
+// Each occurrence owns a lightweight cursor into the shared decoder pool.
+// Prepare a future clip at its source in-point
 // so its first visible frame is already decoded before the timeline reaches it.
 inline qint64 timelineVideoPreparationSourceMs(const SceneTimeline::MediaTrack& track,
                                                qreal positionMs, qint64 durationMs,

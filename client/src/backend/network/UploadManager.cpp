@@ -4072,7 +4072,6 @@ void UploadManager::handleIncomingAssetRemoval(const QJsonObject& message) {
         m_deferredIncomingRemovals.insert(removalId, message);
         return;
     }
-    m_fileManager->releaseReceivedFileMemory(scope, fileId);
     const RemoteCacheStore::AssetRemovalDescriptor removal{
         removalId,
         uploadId,

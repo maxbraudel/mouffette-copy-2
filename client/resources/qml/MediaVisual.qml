@@ -79,6 +79,8 @@ Item {
             cppMediaPlayer: root.media ? (root.media.videoPlayerPtr || null) : null
             cppVideoSink: root.media ? (root.media.videoSinkPtr || null) : null
             remoteFrameSource: root.media ? (root.media.remoteFrameSource || null) : null
+            previewFrameSource: root.media && root.media.canvasMedia === true
+                ? (root.media.residentFrameSource || null) : null
             videoPlaybackErrorCode: root.media ? (root.media.videoPlaybackErrorCode || 0) : 0
             videoPlaybackErrorString: root.media ? (root.media.videoPlaybackErrorString || "") : ""
             videoHasRenderedFrame: !!(root.media && root.media.videoHasRenderedFrame)

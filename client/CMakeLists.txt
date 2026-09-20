@@ -114,7 +114,7 @@ if(APPLE)
 endif()
 
 # Find Qt6
-find_package(Qt6 6.11 REQUIRED COMPONENTS Core Widgets Network WebSockets Multimedia Concurrent Quick QuickControls2 QuickDialogs2 Qml ShaderTools GuiPrivate QuickPrivate)
+find_package(Qt6 6.11 REQUIRED COMPONENTS Core Widgets Network WebSockets Multimedia Concurrent Quick QuickControls2 QuickDialogs2 Qml ShaderTools GuiPrivate QuickPrivate MultimediaPrivate)
 qt_policy(SET QTP0004 NEW)
 find_package(OpenSSL 1.1.1 REQUIRED COMPONENTS Crypto)
 if(NOT TARGET Qt6::QWebpPlugin)
@@ -160,6 +160,17 @@ pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET
 add_library(MouffetteResidentMedia STATIC
     src/backend/media/MediaBackendBootstrap.h
     src/backend/media/MediaBackendBootstrap.cpp
+    src/backend/media/PlaybackAudio.h
+    src/backend/media/PlaybackAudio.cpp
+    src/backend/media/DecodeScheduler.h
+    src/backend/media/DecodeScheduler.cpp
+    src/backend/media/MediaPacketStore.h
+    src/backend/media/IndexedMediaDecoder.h
+    src/backend/media/IndexedMediaDecoder.cpp
+    src/backend/media/MediaPreviewStore.h
+    src/backend/media/MediaPreviewStore.cpp
+    src/backend/media/EditingProxyCache.h
+    src/backend/media/EditingProxyCache.cpp
     src/backend/media/ResidentMediaAsset.h
     src/backend/media/MediaDecoder.h
     src/backend/media/MediaDecoder.cpp
@@ -171,6 +182,7 @@ add_library(MouffetteResidentMedia STATIC
 target_include_directories(MouffetteResidentMedia PUBLIC src)
 target_link_libraries(MouffetteResidentMedia PUBLIC
     Qt6::Core Qt6::Gui Qt6::Multimedia Qt6::Concurrent PkgConfig::FFMPEG)
+target_link_libraries(MouffetteResidentMedia PUBLIC Qt6::MultimediaPrivate Qt6::GuiPrivate)
 if(WIN32)
     target_link_libraries(MouffetteResidentMedia PRIVATE Psapi)
 endif()
@@ -295,7 +307,6 @@ set(SOURCES
     # Files
     src/backend/files/FileManager.cpp
     src/backend/files/LocalFileRepository.cpp
-    src/backend/files/FileMemoryCache.cpp
     src/backend/files/FileWatcher.cpp
     
     # Backend Handlers
@@ -442,7 +453,6 @@ set(HEADERS
     # Files
     src/backend/files/FileManager.h
     src/backend/files/LocalFileRepository.h
-    src/backend/files/FileMemoryCache.h
     src/backend/files/FileWatcher.h
     src/backend/files/PathSafety.h
     
@@ -722,6 +732,11 @@ if(BUILD_TESTING)
     target_link_libraries(tst_ResidentMedia PRIVATE MouffetteResidentMedia Qt6::Test)
     target_compile_definitions(tst_ResidentMedia PRIVATE TEST_SAMPLE_VIDEO_FILE="${CMAKE_SOURCE_DIR}/../video-1080p.mp4")
     add_test(NAME ResidentMedia COMMAND tst_ResidentMedia)
+
+    add_executable(tst_MediaEditingCache tests/qt/tst_MediaEditingCache.cpp)
+    target_link_libraries(tst_MediaEditingCache PRIVATE MouffetteResidentMedia Qt6::Test)
+    target_compile_definitions(tst_MediaEditingCache PRIVATE TEST_VIDEO_FILE="${CMAKE_SOURCE_DIR}/tests/fixtures/resident-timeline.mp4")
+    add_test(NAME MediaEditingCache COMMAND tst_MediaEditingCache)
 
     add_executable(tst_MediaResidencyManager tests/qt/tst_MediaResidencyManager.cpp)
     target_link_libraries(tst_MediaResidencyManager PRIVATE MouffetteResidentMedia Qt6::Test)
@@ -1285,3 +1300,9 @@ foreach(mouffette_target IN LISTS mouffette_targets)
         endif()
     endif()
 endforeach()
+
+# Manual benchmarks are excluded from CTest and normal builds.
+add_executable(media_engine_benchmark EXCLUDE_FROM_ALL tests/benchmarks/media_engine_benchmark.cpp)
+target_link_libraries(media_engine_benchmark PRIVATE MouffetteResidentMedia)
+add_executable(media_interaction_benchmark EXCLUDE_FROM_ALL tests/benchmarks/media_interaction_benchmark.cpp)
+target_link_libraries(media_interaction_benchmark PRIVATE MouffetteResidentMedia)

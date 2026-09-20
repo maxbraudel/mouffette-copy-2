@@ -3477,7 +3477,7 @@ private slots:
         QVERIFY(skeleton);
         const QPointer<QQuickItem> surface = skeleton->parentItem();
         QTRY_COMPARE(surface->property("revealProgress").toReal(), 1.0);
-        memory.setMemorySnapshotForTesting({8ULL << 30, 0, 512ULL << 20, false, 0});
+        memory.setMemorySnapshotForTesting({8ULL << 30, 0, 512ULL << 20, false, 2});
         memory.sampleNow();
         QTRY_VERIFY(!media->residencyReady());
         QTRY_VERIFY(skeleton->isVisible());

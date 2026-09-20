@@ -1,4 +1,7 @@
 #include "backend/media/MediaDecoder.h"
+#include "backend/media/IndexedMediaDecoder.h"
+#include "backend/media/DecodeScheduler.h"
+#include "backend/media/MediaPreviewStore.h"
 #include "backend/media/ResidentVideoPlayer.h"
 
 #include <QAudioBuffer>
@@ -156,64 +159,333 @@ bool corruptLastVideoPacket(const QString& path, AVMediaType mediaType = AVMEDIA
 class ResidentMediaTest final : public QObject {
     Q_OBJECT
 private slots:
-    void thumbnailStorageIsBoundedAndIncludesEndpoints() {
+    void interactiveImportUsesValidatedOriginal_data() {
+        QTest::addColumn<bool>("vfr");
+        QTest::addColumn<bool>("rotated");
+        QTest::newRow("b-frames") << false << false;
+        QTest::newRow("vfr-rotation-sar") << true << true;
+    }
+    void interactiveImportUsesValidatedOriginal() {
+        QFETCH(bool, vfr);
+        QFETCH(bool, rotated);
+        QTemporaryDir directory;
+        const auto path = directory.filePath("original.mp4");
+        QVERIFY(writeVideo(path, vfr, rotated, 2));
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::ReadOnly));
+        const auto original = file.readAll();
+        file.close();
+        MediaDecoder::DecodeCallbacks callbacks;
+        callbacks.retainOriginalVideo = true;
+        double lastProgress = 0;
+        callbacks.progress = [&](double progress) { QVERIFY(progress >= lastProgress); lastProgress = progress; };
+        QString error;
+        const auto asset = MediaDecoder::decode(path, callbacks, &error);
+        QVERIFY2(asset, qPrintable(error));
+        QVERIFY(!asset->allIntra);
+        QCOMPARE(asset->compressedVideo, original);
+        QVERIFY(asset->videoPackets.bytes.isEmpty());
+        QCOMPARE(asset->frameIndex.size(), qsizetype(asset->videoFrameCount));
+        QCOMPARE(asset->memoryBreakdown().totalBytes(), asset->residentBytes);
+        QCOMPARE(asset->audioPackets.bytes.constData(), asset->compressedVideo.constData());
+        QCOMPARE(lastProgress, 1.0);
+        QVERIFY(QFile::remove(path)); // All random access must now use RAM only.
+        IndexedMediaDecoder decoder;
+        for (int index : {0, int(asset->frameIndex.size()) - 1, 2, 1, 0}) {
+            const auto frame = decoder.videoFrame(*asset, index, error);
+            QVERIFY2(frame.isValid(), qPrintable(error));
+            QCOMPARE(frame.startTime(), asset->frameIndex[index].timestampUs);
+            QCOMPARE(frame.endTime(), asset->frameIndex[index].timestampUs + asset->frameIndex[index].durationUs);
+            QCOMPARE(frame.size(), asset->firstFrame.frame.size());
+            QCOMPARE(frame.rotation(), asset->firstFrame.frame.rotation());
+        }
+        ResidentVideoPlayer player;
+        player.setAsset(asset);
+        for (const qint64 position : {qint64(0), qint64(200), asset->durationUs / 1000 - 1, qint64(0)}) {
+            player.prepare(position);
+            QTRY_VERIFY2_WITH_TIMEOUT(player.preparedAt(position), qPrintable(player.errorString()), 5000);
+        }
+    }
+    void interactiveImportStillRejectsCorruptionAndCancellation() {
+        QTemporaryDir directory;
+        const auto path = directory.filePath("original.mp4");
+        QVERIFY(writeVideo(path));
+        MediaDecoder::DecodeCallbacks callbacks;
+        callbacks.retainOriginalVideo = true;
+        bool cancelled = false;
+        callbacks.cancelled = [&] { return cancelled; };
+        callbacks.progress = [&](double progress) { if (progress > 0.3) cancelled = true; };
+        QString error;
+        QVERIFY(!MediaDecoder::decode(path, callbacks, &error));
+        QCOMPARE(error, QStringLiteral("cancelled"));
+        callbacks.cancelled = {};
+        callbacks.progress = {};
+        QVERIFY(corruptLastVideoPacket(path));
+        QVERIFY(!MediaDecoder::decode(path, callbacks, &error));
+        QVERIFY(!error.isEmpty());
+    }
+    void failedThumbnailCompletesRequest() {
+        QTemporaryDir directory;
+        const auto path = directory.filePath("thumbnail-failure.mp4");
+        QVERIFY(writeVideo(path));
+        auto asset = MediaDecoder::decode(path);
+        QVERIFY(asset);
+        asset->sha256 += QStringLiteral("-damaged-thumbnail");
+        asset->videoPackets.packets.last().offset = asset->videoPackets.bytes.size() + 1;
+        int completions = 0;
+        DecodeScheduler::instance().requestThumbnail(this, asset, asset->frameIndex.last().timestampUs,
+            [&](auto image) { QVERIFY(!image); ++completions; });
+        QTRY_COMPARE_WITH_TIMEOUT(completions, 1, 3000);
+    }
+    void cancelledSeekReplacementKeepsItsCompletion() {
+        QTemporaryDir directory;
+        const auto path = directory.filePath("replacement.mp4");
+        QVERIFY(writeVideo(path));
+        auto asset = MediaDecoder::decode(path);
+        QVERIFY(asset);
+        auto& scheduler = DecodeScheduler::instance();
+        QTRY_COMPARE(scheduler.pendingJobs(), 0);
+        scheduler.evictOptionalCaches();
+        QObject cursor;
+        int cancelledCompletions = 0, replacements = 0;
+        const auto target = asset->frameIndex[8].timestampUs;
+        scheduler.request(&cursor, 1, asset, target, DecodeScheduler::Scrub, 0,
+            [&](auto, const QString&) { ++cancelledCompletions; });
+        scheduler.cancel(&cursor, 1);
+        // This has the identical key while the cancelled worker can still be
+        // running. Its completion must not erase the replacement from the map.
+        scheduler.request(&cursor, 2, asset, target, DecodeScheduler::Scrub, 0,
+            [&](auto frame, const QString& error) {
+                QVERIFY2(frame && frame->frame.isValid(), qPrintable(error));
+                QCOMPARE(frame->frame.startTime(), target);
+                ++replacements;
+            });
+        QTRY_COMPARE_WITH_TIMEOUT(replacements, 1, 3000);
+        QTRY_COMPARE(scheduler.pendingJobs(), 0);
+        QCOMPARE(cancelledCompletions, 0);
+    }
+    void thumbnailViewportRetainsOnlyUsefulSubscriptions() {
+        QTemporaryDir directory;
+        const auto path = directory.filePath("viewport.mp4");
+        QVERIFY(writeVideo(path));
+        const auto asset = MediaDecoder::decode(path);
+        QVERIFY(asset);
+        auto& scheduler = DecodeScheduler::instance();
+        QTRY_COMPARE(scheduler.pendingJobs(), 0);
+        scheduler.evictOptionalCaches();
+        QObject strip, secondStrip;
+        int obsolete = 0, useful = 0, shared = 0;
+        for (int index = 1; index < 10; ++index)
+            scheduler.requestThumbnail(&strip, asset, asset->frameIndex[index].timestampUs,
+                [&](auto) { ++obsolete; }, false);
+        QVERIFY(scheduler.runningThumbnailJobs() <= std::max(1, scheduler.workerCount() - 1));
+        scheduler.retainThumbnailRequests(&strip, *asset, QSet<int>{6});
+        // Promote the retained neighbour and replace its callback exactly once.
+        scheduler.requestThumbnail(&strip, asset, asset->frameIndex[6].timestampUs,
+            [&](auto image) { QVERIFY(image && !image->isNull()); ++useful; }, true);
+        scheduler.requestThumbnail(&secondStrip, asset, asset->frameIndex[6].timestampUs,
+            [&](auto image) { QVERIFY(image && !image->isNull()); ++shared; }, true);
+        QTRY_COMPARE_WITH_TIMEOUT(useful, 1, 3000);
+        QTRY_COMPARE_WITH_TIMEOUT(shared, 1, 3000);
+        QTRY_COMPARE(scheduler.pendingJobs(), 0);
+        QCOMPARE(obsolete, 0);
+    }
+    void thumbnailReusesPreparedPosterWithoutDecodingItsPacket() {
+        QTemporaryDir directory;
+        const auto path = directory.filePath("poster.mp4");
+        QVERIFY(writeVideo(path));
+        auto asset = MediaDecoder::decode(path);
+        QVERIFY(asset);
+        asset->sha256 += QStringLiteral("-poster-reuse");
+        asset->videoPackets.packets.first().offset = asset->videoPackets.bytes.size() + 1;
+        QObject strip;
+        QImage result;
+        DecodeScheduler::instance().requestThumbnail(&strip, asset, 0,
+            [&](auto image) { if (image) result = *image; });
+        QTRY_VERIFY_WITH_TIMEOUT(!result.isNull(), 3000);
+        QVERIFY(result.width() <= MediaThumbnails::Width);
+        QVERIFY(result.height() <= MediaThumbnails::Height);
+    }
+    void cancelledOriginalDecodeCanBeReused() {
+        QTemporaryDir directory;
+        const auto path = directory.filePath("cancel-original.mp4");
+        QVERIFY(writeVideo(path, false, false, 0, 60, 0, 60));
+        MediaDecoder::DecodeCallbacks callbacks;
+        callbacks.retainOriginalVideo = true;
+        QString error;
+        const auto asset = MediaDecoder::decode(path, callbacks, &error);
+        QVERIFY2(asset, qPrintable(error));
+        IndexedMediaDecoder decoder;
+        int cancellationChecks = 0;
+        const auto cancelled = decoder.videoFrame(*asset, 59, error,
+            [&] { return ++cancellationChecks > 2; });
+        QVERIFY(!cancelled.isValid());
+        QVERIFY(cancellationChecks > 2);
+        error.clear();
+        const auto recovered = decoder.videoFrame(*asset, 3, error);
+        QVERIFY2(recovered.isValid(), qPrintable(error));
+        QCOMPARE(recovered.startTime(), asset->frameIndex[3].timestampUs);
+    }
+    void visibleThumbnailAllocationSurvivesOptionalCacheEviction() {
+        QTemporaryDir directory;
+        const auto path = directory.filePath("thumbnail-lifetime.mp4");
+        QVERIFY(writeVideo(path));
+        const auto asset = MediaDecoder::decode(path);
+        QVERIFY(asset);
+        auto& scheduler = DecodeScheduler::instance();
+        QTRY_COMPARE(scheduler.pendingJobs(), 0);
+        scheduler.evictOptionalCaches();
+        const quint64 baseline = scheduler.trackedThumbnailBytes();
+        QObject strip;
+        std::shared_ptr<const QImage> visible;
+        scheduler.requestThumbnail(&strip, asset, asset->frameIndex[4].timestampUs,
+            [&](auto image) { visible = std::move(image); });
+        QTRY_VERIFY(visible && !visible->isNull());
+        QTRY_COMPARE(scheduler.pendingJobs(), 0);
+        QCOMPARE(scheduler.trackedThumbnailBytes(), baseline + quint64(visible->sizeInBytes()));
+        scheduler.evictOptionalCaches();
+        QCOMPARE(scheduler.thumbnailBytes(), quint64(0));
+        QCOMPARE(scheduler.trackedThumbnailBytes(), baseline + quint64(visible->sizeInBytes()));
+        visible.reset();
+        QTRY_COMPARE(scheduler.trackedThumbnailBytes(), baseline);
+    }
+    void coldScrubProgressRejectsOldDirectionsWithoutSourceDistanceStarvation() {
+        ResidentVideoPlayer player;
+        player.m_scrubbing = true;
+        player.m_positionMs = 60000;
+        player.m_scrubDirection = 1;
+        player.m_scrubDirectionEpoch = 7;
+        player.m_scrubPresentationEpoch = 7;
+        player.m_lastScrubPresentationMs = 0;
+        auto displayed = std::make_shared<SharedMediaFrame>();
+        displayed->frame = QVideoFrame(QVideoFrameFormat(QSize(2, 2), QVideoFrameFormat::Format_RGBA8888));
+        displayed->frame.setStartTime(5000000);
+        player.m_cursor.frame = displayed;
+
+        // A 625 ms cold decode while the pointer runs at tens of source seconds
+        // per real second still makes useful progress. The previous one-second
+        // source-distance / 350 ms age filters rejected every such result.
+        QVERIFY(player.acceptsIntermediateScrubFrame(10000, 0, 7, 625));
+        QVERIFY(!player.acceptsIntermediateScrubFrame(4000, 0, 7, 625));
+        QVERIFY(!player.acceptsIntermediateScrubFrame(10000, 0, 7, 1001));
+        QVERIFY(!player.acceptsIntermediateScrubFrame(10000, 0, 6, 625));
+        player.m_lastScrubPresentationMs = 600;
+        QVERIFY(!player.acceptsIntermediateScrubFrame(10000, 0, 7, 625));
+
+        // On reversal, reject the previous trajectory, but do not compare the
+        // first useful backwards result to an image that lagged on the forwards
+        // trajectory: that was another source of permanent cold-drag freezing.
+        player.m_lastScrubPresentationMs = 0;
+        player.m_positionMs = 20000;
+        player.m_scrubDirection = -1;
+        player.m_scrubDirectionEpoch = 8;
+        QVERIFY(!player.acceptsIntermediateScrubFrame(30000, 0, 7, 625));
+        QVERIFY(player.acceptsIntermediateScrubFrame(30000, 0, 8, 625));
+        player.m_scrubPresentationEpoch = 8;
+        displayed->frame.setStartTime(35000000);
+        QVERIFY(player.acceptsIntermediateScrubFrame(30000, 0, 8, 625));
+        QVERIFY(!player.acceptsIntermediateScrubFrame(36000, 0, 8, 625));
+    }
+    void scrubBatchesTargetsAndRefinesOnRelease() {
+        QTemporaryDir directory;
+        const auto path = directory.filePath("scrub-targets.mp4");
+        QVERIFY(writeVideo(path, false, false, 0, 60, 0, 40));
+        MediaDecoder::DecodeCallbacks callbacks;
+        callbacks.retainOriginalVideo = true;
+        const auto asset = MediaDecoder::decode(path, callbacks, nullptr);
+        QVERIFY(asset);
+        ResidentVideoPlayer player;
+        QVideoSink sink;
+        QAudioOutput audio; audio.setMuted(true);
+        player.setVideoSink(&sink); player.setAudioOutput(&audio); player.setAsset(asset);
+        QTRY_VERIFY(player.preparedAt(0));
+        player.setScrubbing(true);
+        const quint64 audioRequestsBeforeDrag = PlaybackAudio::decodeRequestCount();
+        QSignalSpy images(&sink, &QVideoSink::videoFrameChanged);
+        for (qint64 position : {80, 240, 400, 320}) player.prepare(position);
+        QTRY_VERIFY_WITH_TIMEOUT(player.preparedAt(320), 3000);
+        QVERIFY(!images.isEmpty());
+        for (const auto& event : images) {
+            const auto frame = qvariant_cast<QVideoFrame>(event.first());
+            QVERIFY(frame.startTime() <= 320000 && frame.endTime() > 320000);
+        }
+        // Sustained pointer input must not extend a debounce timer forever.
+        const int beforeDrag = images.size();
+        for (int i = 0; i < 30; ++i) {
+            player.pause(); // QuickCanvasHost applies pause before every target.
+            player.prepare((i * 37) % 1200);
+            QTest::qWait(5);
+        }
+        QVERIFY(images.size() > beforeDrag);
+        player.prepare(1000);
+        QTRY_VERIFY_WITH_TIMEOUT(player.preparedAt(1000), 3000);
+        QCOMPARE(PlaybackAudio::decodeRequestCount(), audioRequestsBeforeDrag);
+        player.setScrubbing(false);
+        QTRY_VERIFY_WITH_TIMEOUT(player.preparedAt(1000), 3000);
+        QCOMPARE(player.preparedFrame(1000).size(), asset->firstFrame.frame.size());
+        player.play();
+        QTRY_VERIFY_WITH_TIMEOUT(player.isPlaying() && player.position() > 1050, 3000);
+        QCOMPARE(player.error(), QMediaPlayer::NoError);
+        player.clearAsset();
+    }
+    void indexedFramesReplacePermanentThumbnails() {
         QTemporaryDir directory;
         const auto path = directory.filePath("long.mp4");
         QVERIFY(writeVideo(path, false, false, 0, 23, 0, 600));
         QString error;
         const auto asset = MediaDecoder::decode(path, {}, &error);
         QVERIFY2(asset, qPrintable(error));
-        QVERIFY(asset->thumbnails.size() > 50);
-        QVERIFY(asset->thumbnails.size() <= MediaThumbnails::MaxCount);
-        QCOMPARE(asset->thumbnails.first().timestampUs, qint64(0));
-        QCOMPARE(asset->thumbnails.last().timestampUs, qint64(599 * 40000));
-        quint64 bytes = 0;
-        for (const auto& thumbnail : asset->thumbnails) {
-            bytes += thumbnail.image.sizeInBytes() + sizeof(ResidentThumbnail);
-            QVERIFY(thumbnail.image.width() <= MediaThumbnails::Width);
-            QVERIFY(thumbnail.image.height() <= MediaThumbnails::Height);
-        }
-        QVERIFY(bytes <= MediaThumbnails::MaxBytes);
-        QVERIFY(asset->residentBytes >= bytes + quint64(asset->compressedVideo.size()));
-        const auto memory = asset->memoryBreakdown();
-        QCOMPARE(memory.videoBytes, quint64(asset->compressedVideo.capacity()));
-        QCOMPARE(memory.imageBytes, quint64(0));
-        QCOMPARE(memory.thumbnailBytes, bytes);
-        QVERIFY(memory.posterBytes > 0);
-        QCOMPARE(memory.totalBytes(), asset->residentBytes);
+        QVERIFY(asset->thumbnails.isEmpty());
+        QCOMPARE(asset->frameIndex.size(), 600);
+        QCOMPARE(asset->frameIndex.first().timestampUs, qint64(0));
+        QCOMPARE(asset->frameIndex.last().timestampUs, qint64(599 * 40000));
+        QVERIFY(asset->allIntra);
+        QVERIFY(asset->compressedVideo.isEmpty());
+        QCOMPARE(asset->videoPackets.bytes.size(), asset->videoPackets.bytes.capacity());
+        QCOMPARE(asset->audioPackets.bytes.size(), asset->audioPackets.bytes.capacity());
+        QCOMPARE(asset->memoryBreakdown().thumbnailBytes, quint64(0));
+        QCOMPARE(asset->memoryBreakdown().totalBytes(), asset->residentBytes);
+        auto& scheduler = DecodeScheduler::instance();
+        QImage first, last;
+        scheduler.requestThumbnail(this, asset, 0, [&](auto image) { if (image) first = *image; });
+        scheduler.requestThumbnail(this, asset, asset->frameIndex.last().timestampUs, [&](auto image) { if (image) last = *image; });
+        QTRY_VERIFY(!first.isNull() && !last.isNull());
+        QVERIFY(first.size().width() <= MediaThumbnails::Width);
+        QVERIFY(first != last);
+        QVERIFY(scheduler.thumbnailBytes() <= DecodeScheduler::ThumbnailLimit);
+        scheduler.evictOptionalCaches();
+        QCOMPARE(scheduler.thumbnailBytes(), quint64(0));
     }
 
-    void scrubProxyPreservesEveryFrameAndCanBeDiscarded() {
+
+    void intraPacketsPreserveVfrAndDecodeIndependently() {
         QTemporaryDir directory;
         const auto path = directory.filePath("rotated-vfr.mp4");
         QVERIFY(writeVideo(path, true, true, 2));
         QString error;
         const auto asset = MediaDecoder::decode(path, {}, &error);
         QVERIFY2(asset, qPrintable(error));
-        QCOMPARE(asset->scrubFrames.size(), size_t(asset->videoFrameCount));
-        QVERIFY(asset->scrubProxyBytes > 0 && asset->scrubProxyBytes <= MediaScrubProxy::MaxBytes);
-        quint64 bytes = asset->scrubFrames.capacity() * sizeof(ResidentScrubFrame);
+        QCOMPARE(asset->frameIndex.size(), qsizetype(asset->videoFrameCount));
+        QCOMPARE(asset->videoPackets.packets.size(), asset->frameIndex.size());
+        QVERIFY(asset->allIntra);
         qint64 previous = -1;
-        for (const auto& frame : asset->scrubFrames) {
-            QVERIFY(frame.timestampUs > previous);
-            previous = frame.timestampUs;
-            bytes += frame.jpeg.capacity();
-            const QImage image = QImage::fromData(frame.jpeg, "JPEG");
-            QCOMPARE(image.size(), asset->displaySize); // SAR and rotation baked into proxy
+        for (int i = 0; i < asset->frameIndex.size(); ++i) {
+            const auto& index = asset->frameIndex[i];
+            QVERIFY(index.timestampUs > previous); previous = index.timestampUs;
+            QVERIFY(asset->videoPackets.packets[i].flags & AV_PKT_FLAG_KEY);
+            IndexedMediaDecoder fresh;
+            auto frame = fresh.videoFrame(*asset, i, error);
+            QVERIFY2(frame.isValid(), qPrintable(error));
+            QCOMPARE(frame.startTime(), index.timestampUs);
+            QCOMPARE(frame.endTime(), index.timestampUs + index.durationUs);
+            QCOMPARE(frame.size(), QSize(128, 48));
+            QCOMPARE(frame.rotation(), asset->firstFrame.frame.rotation());
         }
-        QCOMPARE(bytes, asset->scrubProxyBytes);
-        QCOMPARE(asset->memoryBreakdown().scrubProxyBytes, bytes);
         QCOMPARE(asset->memoryBreakdown().totalBytes(), asset->residentBytes);
-        // A low cap must remove the complete partial cache, preserving the original.
-        const auto limited = MediaDecoder::decode(path, {}, &error, bytes / 2);
-        QVERIFY2(limited, qPrintable(error));
-        QVERIFY(limited->scrubFrames.empty());
-        QCOMPARE(limited->scrubProxyBytes, quint64(0));
-        QCOMPARE(limited->compressedVideo, asset->compressedVideo);
-        QCOMPARE(limited->memoryBreakdown().totalBytes(), limited->residentBytes);
     }
 
-    void scrubProxyLatencyAndExactRelease() {
+
+    void fullResolutionScrubbingAndExactRelease() {
         const QString path = QString::fromUtf8(TEST_SAMPLE_VIDEO_FILE);
         if (!QFile::exists(path)) QSKIP("Optional repository sample is not installed");
         QElapsedTimer loading;
@@ -221,9 +493,9 @@ private slots:
         QString error;
         const auto asset = MediaDecoder::decode(path, {}, &error);
         QVERIFY2(asset, qPrintable(error));
-        qInfo() << "Proxy preparation including full validation (ms):" << loading.elapsed()
-                << "proxy bytes:" << asset->scrubProxyBytes;
-        QVERIFY(!asset->scrubFrames.empty());
+        qInfo() << "Intra preparation including full validation (ms):" << loading.elapsed()
+                << "intra bytes:" << asset->videoPackets.bytes.size();
+        QVERIFY(asset->allIntra);
         QVideoSink sink;
         ResidentVideoPlayer player;
         player.setVideoSink(&sink);
@@ -251,10 +523,10 @@ private slots:
             QVERIFY(await([&] {
                 const auto frame = sink.videoFrame();
                 return frame.startTime() <= target * 1000 && frame.endTime() > target * 1000
-                    && frame.size().width() <= MediaScrubProxy::Width;
+                    && frame.size() == asset->firstFrame.frame.size();
             }, proxyUs, clock));
         }
-        QCOMPARE(nativeFrames.count(), 0); // zero expensive original seeks during motion
+        QVERIFY(nativeFrames.count() > 0); // the same native frames serve scrubbing and Play
         std::sort(nativeUs.begin(), nativeUs.end());
         std::sort(proxyUs.begin(), proxyUs.end());
         qInfo() << "1080p random seek latency in us: native median/max" << nativeUs[5] << nativeUs.last()
@@ -271,7 +543,7 @@ private slots:
         QTest::qWait(1000);
         drag.stop();
         QVERIFY(previews.count() > 1);
-        QCOMPARE(nativeFrames.count(), 0);
+        QVERIFY(nativeFrames.count() > 0);
         qInfo() << "One-second continuous drag: pointer targets" << moves
                 << "presented proxy frames" << previews.count();
         // Rapid reverse/forward requests, then release before the worker completes.
@@ -404,18 +676,13 @@ private slots:
         QVERIFY(asset->audioSampleCount >= 23 * 1024);
         QFile original(path);
         QVERIFY(original.open(QIODevice::ReadOnly));
-        QCOMPARE(asset->compressedVideo, original.readAll());
-        quint64 thumbnailStorage = 0;
-        for (const auto& thumbnail : asset->thumbnails)
-            thumbnailStorage += thumbnail.image.sizeInBytes() + sizeof(ResidentThumbnail);
-        QVERIFY(asset->residentBytes < quint64(asset->compressedVideo.size()) + 8192 + thumbnailStorage + asset->scrubProxyBytes);
-        QVERIFY(asset->thumbnails.size() >= 3);
-        QCOMPARE(asset->thumbnails.first().timestampUs, qint64(0));
-        QCOMPARE(asset->thumbnails.last().timestampUs, qint64(440000)); // Includes delayed final B-frame.
-        QVERIFY(asset->thumbnails.first().image.pixelColor(20, 20)
-                != asset->thumbnails.last().image.pixelColor(20, 20));
-        for (int i = 1; i < asset->thumbnails.size(); ++i)
-            QVERIFY(asset->thumbnails[i].timestampUs > asset->thumbnails[i - 1].timestampUs);
+        QCOMPARE(asset->sha256, QString::fromLatin1(QCryptographicHash::hash(original.readAll(), QCryptographicHash::Sha256).toHex()));
+        QVERIFY(asset->compressedVideo.isEmpty());
+        QVERIFY(asset->allIntra);
+        QCOMPARE(asset->frameIndex.last().timestampUs, qint64(440000));
+        IndexedMediaDecoder decoder;
+        const auto last = decoder.videoFrame(*asset, asset->frameIndex.size()-1, error);
+        QVERIFY(asset->firstFrame.frame.toImage().pixelColor(20,20) != last.toImage().pixelColor(20,20));
         QVideoFrame first = asset->firstFrame.frame;
         QCOMPARE(first.pixelFormat(), QVideoFrameFormat::Format_YUV420P);
         QVERIFY(!first.map(QVideoFrame::WriteOnly));
@@ -437,19 +704,14 @@ private slots:
         const auto asset = MediaDecoder::decode(path, callbacks, &error);
         QVERIFY2(asset, qPrintable(error));
         QCOMPARE(asset->videoFrameCount, quint64(921));
-        QCOMPARE(asset->compressedVideo.size(), QFileInfo(path).size());
-        QVERIFY(asset->residentBytes < quint64(QFileInfo(path).size()) + 4 * 1024 * 1024 + MediaThumbnails::MaxBytes + asset->scrubProxyBytes);
-        QVERIFY(asset->thumbnails.size() > 50);
-        QVERIFY(asset->thumbnails.size() <= MediaThumbnails::MaxCount);
-        for (const auto& thumbnail : asset->thumbnails) {
-            QVERIFY(thumbnail.image.width() <= MediaThumbnails::Width);
-            QVERIFY(thumbnail.image.height() <= MediaThumbnails::Height);
-        }
+        QVERIFY(asset->compressedVideo.isEmpty());
+        QVERIFY(asset->allIntra);
+        QVERIFY(asset->thumbnails.isEmpty());
         QCOMPARE(retained, asset->residentBytes);
-        QVERIFY(peakBudget < quint64(QFileInfo(path).size()) + 128 * 1024 * 1024 + asset->scrubProxyBytes);
+        QCOMPARE(asset->videoPackets.bytes.capacity(), asset->videoPackets.bytes.size());
         QVERIFY(peakBudget > retained);
-        const auto probe = MediaDecoder::probe(path);
-        QVERIFY(probe.estimatedBytes < 20 * 1024 * 1024 + MediaThumbnails::MaxBytes + MediaScrubProxy::MaxBytes);
+        QVERIFY(peakBudget >= asset->conversionPeakBytes);
+        QVERIFY(peakBudget < 512ULL * 1024 * 1024);
         qInfo() << "1080p retained bytes:" << retained << "preparation budget:" << peakBudget;
         // Exact original bitstream, shared between independent occurrences.
         QVideoSink sink;
@@ -458,8 +720,8 @@ private slots:
         QElapsedTimer preparationTime;
         preparationTime.start();
         one.setAsset(asset); two.setAsset(asset);
-        QCOMPARE(one.asset()->compressedVideo.constData(), two.asset()->compressedVideo.constData());
-        QCOMPARE(one.asset()->compressedVideo.constData(), asset->compressedVideo.constData());
+        QCOMPARE(one.asset()->videoPackets.bytes.constData(), two.asset()->videoPackets.bytes.constData());
+        QCOMPARE(one.asset()->videoPackets.bytes.constData(), asset->videoPackets.bytes.constData());
         QTRY_VERIFY2_WITH_TIMEOUT(one.preparedAt(0), qPrintable(one.errorString()), 5000);
         QTRY_VERIFY2_WITH_TIMEOUT(two.preparedAt(0), qPrintable(two.errorString()), 5000);
         qInfo() << "1080p automatic preparation ms:" << preparationTime.elapsed();
@@ -594,8 +856,9 @@ private slots:
         QCOMPARE(asset->displaySize, probe.displaySize);
         QCOMPARE(asset->firstFrame.frame.size(), QSize(128, 48));
         QVERIFY(asset->firstFrame.frame.rotation() != QtVideo::Rotation::None);
-        QVERIFY(!asset->thumbnails.isEmpty());
-        const QSize thumbnail = asset->thumbnails.first().image.size();
+        QImage thumbnail;
+        DecodeScheduler::instance().requestThumbnail(this, asset, 0, [&](auto image) { if (image) thumbnail = *image; });
+        QTRY_VERIFY(!thumbnail.isNull());
         QVERIFY(thumbnail.height() <= MediaThumbnails::Height);
         QVERIFY(qAbs(qreal(thumbnail.width()) / thumbnail.height() - 48.0 / 128) < 0.02);
     }
@@ -691,6 +954,25 @@ private slots:
         QCOMPARE(releases, 1);
     }
 
+    void scrubReleaseDuringInitialPreparationDoesNotStrandLookahead() {
+        QTemporaryDir directory;
+        const QString path = directory.filePath("initial-scrub.mp4");
+        QVERIFY(writeVideo(path));
+        const auto asset = MediaDecoder::decode(path);
+        QVERIFY(asset && asset->frameIndex.size() > 2);
+        DecodeScheduler::instance().evictOptionalCaches();
+        ResidentVideoPlayer player;
+        player.setAsset(asset);
+        // Release before the queued entry-frame lookahead has completed, with
+        // no cursor movement. Cancelled requests must be scheduled again.
+        player.setScrubbing(true);
+        player.setScrubbing(false);
+        player.prepare(0);
+        QTRY_VERIFY2_WITH_TIMEOUT(player.preparedAt(0), qPrintable(player.errorString()), 3000);
+        player.play();
+        QTRY_VERIFY_WITH_TIMEOUT(player.isPlaying() && player.position() > 50, 3000);
+    }
+
     void playbackReservationsFollowNativePreparation() {
         QTemporaryDir directory;
         const QString path = directory.filePath("reservations.mp4");
@@ -707,19 +989,20 @@ private slots:
 
         player.setAsset(asset);
         QCOMPARE(reservations, 1);
-        // A cached poster does not consume the future native decoder budget.
-        QCOMPARE(preparations, 0);
+        // A poster alone cannot retire the lookahead/audio preparation budget.
+        QTRY_VERIFY_WITH_TIMEOUT(player.preparedAt(0), 3000);
+        QCOMPARE(preparations, 1);
         player.clearAsset();
         QCOMPARE(releasedPrepared.size(), 1);
-        QVERIFY(!releasedPrepared.last());
+        QVERIFY(releasedPrepared.last());
 
         player.setAsset(asset);
         QTRY_VERIFY2_WITH_TIMEOUT(player.preparedAt(0), qPrintable(player.errorString()), 3000);
         QCOMPARE(reservations, 2);
-        QCOMPARE(preparations, 1);
+        QCOMPARE(preparations, 2);
         player.prepare(200);
         QTRY_VERIFY_WITH_TIMEOUT(player.preparedAt(200), 3000);
-        QCOMPARE(preparations, 1); // seek frames cannot retire the budget twice
+        QCOMPARE(preparations, 2); // seek frames cannot retire the budget twice
         player.clearAsset();
         QCOMPARE(releasedPrepared.size(), 2);
         QVERIFY(releasedPrepared.last());
@@ -728,7 +1011,7 @@ private slots:
         // frame transfers the budget into the measured process allocation.
         asset->playbackPrepared = [&] { ++preparations; player.clearAsset(); };
         player.setAsset(asset);
-        QTRY_COMPARE_WITH_TIMEOUT(preparations, 2, 3000);
+        QTRY_COMPARE_WITH_TIMEOUT(preparations, 3, 3000);
         QCOMPARE(reservations, 3);
         QVERIFY(!player.asset());
         QCOMPARE(releasedPrepared.size(), 3);
@@ -737,45 +1020,38 @@ private slots:
         asset->reservePlayback = [&] { ++reservations; player.clearAsset(); return true; };
         player.setAsset(asset);
         QCOMPARE(reservations, 4);
-        QCOMPARE(preparations, 2);
+        QCOMPARE(preparations, 3);
         QVERIFY(!player.asset());
         QCOMPARE(releasedPrepared.size(), 4);
         QVERIFY(!releasedPrepared.last());
     }
 
-    void failedNativePreparationReleasesPendingReservation() {
+    void invalidPacketFailureReleasesCursorAndAllowsRecovery() {
         QTemporaryDir directory;
         const QString path = directory.filePath("failed-preparation.mp4");
         QVERIFY(writeVideo(path));
-        const auto asset = MediaDecoder::decode(path);
-        QVERIFY(asset);
-        // Retain a valid cached poster, but force native source initialization
-        // to fail before a decoded frame can consume its pending reservation.
-        asset->compressedVideo = QByteArrayLiteral("invalid MP4 stream");
-        int reservations = 0;
-        int preparations = 0;
-        QList<bool> releasedPrepared;
-        asset->reservePlayback = [&] { ++reservations; return true; };
-        asset->playbackPrepared = [&] { ++preparations; };
-        asset->releasePlayback = [&](bool prepared) { releasedPrepared.append(prepared); };
-        QVideoSink sink;
+        const auto valid = MediaDecoder::decode(path);
+        QVERIFY(valid);
+        auto damaged = std::make_shared<ResidentMediaAsset>(*valid);
+        damaged->sha256 += QStringLiteral("-damaged");
+        damaged->videoPackets.packets[5].offset = damaged->videoPackets.bytes.size() + 1;
+        int releases = 0;
+        damaged->releasePlayback = [&](bool prepared) { QVERIFY(prepared); ++releases; };
         ResidentVideoPlayer player;
-        player.setVideoSink(&sink);
         QSignalSpy errors(&player, &ResidentVideoPlayer::errorOccurred);
-        player.setAsset(asset);
-        QTRY_COMPARE_WITH_TIMEOUT(releasedPrepared.size(), 1, 3000);
-        QCOMPARE(reservations, 1);
-        QCOMPARE(preparations, 0);
-        QVERIFY(!releasedPrepared.last());
-        QVERIFY(!errors.isEmpty());
-        QVERIFY(player.error() != QMediaPlayer::NoError);
-        QVERIFY(!player.errorString().isEmpty());
+        player.setAsset(damaged);
+        QTRY_VERIFY_WITH_TIMEOUT(player.preparedAt(0), 3000);
+        player.prepare(201);
+        QTRY_COMPARE(errors.size(), 1);
+        QTRY_COMPARE(releases, 1);
+        QVERIFY(!player.preparedAt(201));
         QCOMPARE(player.mediaStatus(), QMediaPlayer::InvalidMedia);
-        QCOMPARE(player.asset(), asset);
-        QVERIFY(sink.videoFrame().isValid());
+        player.setAsset(valid);
+        QTRY_VERIFY(player.preparedAt(201));
         player.clearAsset();
-        QCOMPARE(releasedPrepared.size(), 1); // teardown cannot release twice
+        QCOMPARE(releases, 1);
     }
+
 
     void delayedVideoAndAudioTailPrepareWithoutMovingTheClock_data() {
         QTest::addColumn<int>("delayFrames");
@@ -798,7 +1074,7 @@ private slots:
         audio.setMuted(true);
         player.setAudioOutput(&audio);
         player.setAsset(asset);
-        QVERIFY(!player.preparedAt(0)); // the poster is not native readiness
+        QTRY_VERIFY(player.preparedAt(0)); // validated first frame and initial audio are reusable
         const qint64 lastUs = firstUs + 440000;
         for (qint64 target : {qint64(0), firstUs / 2000, player.duration() - 1,
                              firstUs / 1000 + 201, qint64(0)}) {
@@ -825,30 +1101,31 @@ private slots:
         QCOMPARE(player.position(), qint64(0));
     }
 
-    void preparationTimeoutReleasesDecoderAndAllowsRecovery() {
+    void sharedDecodeDeduplicatesAndRejectsRetiredGenerations() {
         QTemporaryDir directory;
-        const QString path = directory.filePath("unreachable.mp4");
-        QVERIFY(writeVideo(path, false, false, 25, 80));
-        const auto valid = MediaDecoder::decode(path);
-        QVERIFY(valid);
-        auto inconsistent = std::make_shared<ResidentMediaAsset>(*valid);
-        // A cached poster claims a frame at zero, but native decoding proves
-        // there is none there. This must time out without poisoning a retry.
-        inconsistent->firstFrame.timestampUs = 0;
-        int released = 0;
-        inconsistent->releasePlayback = [&](bool) { ++released; };
-        ResidentVideoPlayer player;
-        QSignalSpy errors(&player, &ResidentVideoPlayer::errorOccurred);
-        player.setAsset(inconsistent);
-        QTRY_COMPARE_WITH_TIMEOUT(errors.size(), 1, 6500);
-        QTRY_COMPARE(released, 1);
-        QVERIFY(player.errorString().contains("0 ms"));
-        QVERIFY(!player.preparedAt(0));
-        player.setAsset(valid);
-        QTRY_VERIFY_WITH_TIMEOUT(player.preparedAt(0), 3000);
-        QCOMPARE(player.error(), QMediaPlayer::NoError);
-        QCOMPARE(errors.size(), 1);
+        const auto path = directory.filePath("shared.mp4");
+        QVERIFY(writeVideo(path));
+        auto asset = MediaDecoder::decode(path);
+        QVERIFY(asset);
+        auto& scheduler = DecodeScheduler::instance();
+        scheduler.evictOptionalCaches();
+        std::vector<SharedMediaFramePtr> frames(10);
+        for (int i = 0; i < 10; ++i)
+            scheduler.request(this, 71, asset, 201000, DecodeScheduler::Prepare, 0,
+                [&, i](auto frame, const QString& error) { QVERIFY2(error.isEmpty(), qPrintable(error)); frames[i] = frame; });
+        QTRY_VERIFY(std::all_of(frames.begin(), frames.end(), [](const auto& f) { return bool(f); }));
+        for (const auto& frame : frames) QCOMPARE(frame.get(), frames.front().get());
+        QCOMPARE(scheduler.workerCount(), std::max(1, std::min(4, QThread::idealThreadCount()/2)));
+        bool retiredCalled = false;
+        scheduler.request(this, 72, asset, 401000, DecodeScheduler::Scrub, 0,
+            [&](auto, const QString&) { retiredCalled = true; });
+        scheduler.cancel(this, 72);
+        QTRY_COMPARE(scheduler.pendingJobs(), 0);
+        QVERIFY(!retiredCalled);
+        frames.clear(); scheduler.evictOptionalCaches();
+        QTRY_COMPARE(scheduler.trackedFrameBytes(), asset->posterBytes);
     }
+
 
     void variableFrameRateUsesPresentationTimestamps() {
         QTemporaryDir directory;
@@ -885,6 +1162,141 @@ private slots:
         QTRY_VERIFY2_WITH_TIMEOUT(player.position() > 50, qPrintable(player.errorString()), 3000);
         QTRY_COMPARE_WITH_TIMEOUT(player.mediaStatus(), QMediaPlayer::EndOfMedia, 5000);
         QCOMPARE(player.error(), QMediaPlayer::NoError);
+    }
+
+    void difficultSourceRepresentations_data() {
+        QTest::addColumn<QString>("name"); QTest::addColumn<bool>("intra");
+        QTest::newRow("4k") << QStringLiteral("4k.mp4") << true;
+        QTest::newRow("hdr10") << QStringLiteral("hdr.mp4") << false;
+        QTest::newRow("alpha") << QStringLiteral("alpha.mp4") << false;
+    }
+    void difficultSourceRepresentations() {
+        QFETCH(QString, name); QFETCH(bool, intra);
+        const auto directory = qEnvironmentVariable("MOUFFETTE_ENGINE_FIXTURES");
+        if (directory.isEmpty()) QSKIP("Set MOUFFETTE_ENGINE_FIXTURES to the benchmark fixture directory");
+        QString error;
+        std::shared_ptr<const ResidentMediaAsset> asset;
+        if (name == QLatin1String("alpha.mp4")) {
+            // The import contract remains MP4-only. Exercise the engine's alpha
+            // fallback with a lossless MOV fixture independently of admission.
+            auto source = std::make_shared<ResidentMediaAsset>();
+            QFile file(QDir(directory).filePath(name));
+            QVERIFY(file.open(QIODevice::ReadOnly));
+            source->compressedVideo = file.readAll(); source->compressedVideo.squeeze();
+            source->residentBytes = source->compressedVideo.capacity();
+            source->sha256 = QStringLiteral("alpha-fixture"); source->video = true;
+            source->displaySize = QSize(128,96); source->durationUs = 1000000;
+            source->firstFrame.frame = QVideoFrame(QVideoFrameFormat(source->displaySize, QVideoFrameFormat::Format_ARGB8888));
+            source->firstFrame.durationUs = 100000;
+            QVERIFY2(IndexedMediaDecoder::build(*source, {}, 0, error), qPrintable(error));
+            asset = source;
+        } else asset = MediaDecoder::decode(QDir(directory).filePath(name), {}, &error);
+        QVERIFY2(asset, qPrintable(error));
+        QCOMPARE(asset->allIntra, intra);
+        QCOMPARE(asset->compressedVideo.isEmpty(), intra);
+        QVERIFY(asset->videoPackets.bytes.isEmpty() == !intra);
+        // The converted all-intra representation needs no editing proxy;
+        // HDR and alpha must not pass through the lossy SDR JPEG path.
+        QVERIFY(!MediaPreviewStore::supportsScrubProxy(*asset));
+        IndexedMediaDecoder decoder;
+        for (int index : {0, 1, 2, int(asset->frameIndex.size()/2), int(asset->frameIndex.size()-1), 0}) {
+            auto frame = decoder.videoFrame(*asset, index, error);
+            QVERIFY2(frame.isValid(), qPrintable(error));
+            QCOMPARE(frame.startTime(), asset->frameIndex[index].timestampUs);
+            if (name == QLatin1String("4k.mp4")) QCOMPARE(frame.size(), QSize(3840,2160));
+            if (name == QLatin1String("hdr.mp4")) {
+                QCOMPARE(frame.pixelFormat(), QVideoFrameFormat::Format_YUV420P10);
+                QCOMPARE(frame.surfaceFormat().colorTransfer(), QVideoFrameFormat::ColorTransfer_ST2084);
+                QCOMPARE(frame.surfaceFormat().colorSpace(), QVideoFrameFormat::ColorSpace_BT2020);
+            }
+            if (name == QLatin1String("alpha.mp4")) {
+                const int alpha = ResidentVideoPlayer::presentationFrame(frame).toImage().pixelColor(20,20).alpha();
+                QVERIFY(alpha > 120 && alpha < 136);
+            }
+        }
+    }
+
+    void repeatedCursorCyclesReleaseSharedAllocations() {
+        auto& scheduler = DecodeScheduler::instance();
+        QTRY_COMPARE(scheduler.pendingJobs(), 0);
+        scheduler.evictOptionalCaches();
+        const auto baseline = mediaFrameCpuBytes();
+        QTemporaryDir directory;
+        const auto path = directory.filePath("cycles.mp4");
+        QVERIFY(writeVideo(path, false, false, 0, 40));
+        auto asset = MediaDecoder::decode(path);
+        QVERIFY(asset);
+        std::weak_ptr<const ResidentMediaAsset> lifetime = asset;
+        for (int cycle = 0; cycle < 30; ++cycle) {
+            std::vector<std::unique_ptr<ResidentVideoPlayer>> players;
+            for (int occurrence = 0; occurrence < 6; ++occurrence) {
+                auto player = std::make_unique<ResidentVideoPlayer>();
+                player->setAsset(asset);
+                player->setScrubbing(true);
+                player->prepare((cycle * 37 + occurrence * 53) % 900);
+                players.push_back(std::move(player));
+            }
+            // Delete subscribers while jobs are pending, then drain late results.
+            players.erase(players.begin(), players.begin() + 3);
+            QTRY_COMPARE(scheduler.pendingJobs(), 0);
+            // Releasing a scrub schedules lookahead. Delete all subscribers
+            // before completion: late work must not repopulate the evicted cache.
+            for (auto& player : players) player->setScrubbing(false);
+            players.clear(); scheduler.evictOptionalCaches();
+            QTRY_COMPARE(scheduler.pendingJobs(), 0);
+            QTRY_COMPARE(mediaFrameCpuBytes(), baseline + asset->posterBytes);
+            QVERIFY(scheduler.optionalFrameBytes() <= DecodeScheduler::FrameLimit);
+        }
+        asset.reset();
+        QTRY_VERIFY(lifetime.expired());
+        QTRY_COMPARE(mediaFrameCpuBytes(), baseline);
+    }
+
+    void repeatedPlayAfterConsumedAudioRepreparesSameCursor() {
+        QTemporaryDir directory;
+        const auto path = directory.filePath("repeat-audio.mp4");
+        QVERIFY(writeVideo(path, false, false, 0, 80, 0, 40));
+        auto asset = MediaDecoder::decode(path);
+        QVERIFY(asset);
+        ResidentVideoPlayer player;
+        QAudioOutput output; output.setMuted(true); player.setAudioOutput(&output);
+        player.setAsset(asset);
+        for (int repetition = 0; repetition < 5; ++repetition) {
+            player.prepare(500);
+            QTRY_VERIFY2(player.preparedAt(500), qPrintable(player.errorString()));
+            player.play();
+            QTRY_VERIFY(player.position() > 620);
+            player.pause();
+        }
+    }
+
+    void indexedAudioPreservesTrimAndSeekSamples() {
+        QTemporaryDir directory;
+        const QString path = directory.filePath("indexed-audio.mp4");
+        QVERIFY(writeVideo(path, false, false, 0, 80, 512));
+        QString error;
+        auto asset = MediaDecoder::decode(path, {}, &error);
+        QVERIFY2(asset, qPrintable(error));
+        QVERIFY(QFile::remove(path));
+        for (int rate : {48000, 44100}) for (qint64 target : {qint64(0), qint64(123000), qint64(1000000)}) {
+            const int frames = rate / 5;
+            IndexedMediaDecoder decoder;
+            const auto pcm = decoder.audio(*asset, target, frames, rate, 1, error);
+            QVERIFY2(!pcm.isEmpty(), qPrintable(error));
+            QCOMPARE(pcm.size(), qsizetype(frames * sizeof(float)));
+            const auto* samples = reinterpret_cast<const float*>(pcm.constData());
+            double squaredError = 0;
+            for (int sample = 256; sample < frames; ++sample) {
+                const double time = target/1000000.0 + 512.0/48000 + double(sample)/rate;
+                const double expected = .1 * std::sin(time*440.0*6.283185307179586);
+                squaredError += std::pow(samples[sample]-expected, 2);
+            }
+            const double rms = std::sqrt(squaredError/(frames-256));
+            QVERIFY2(rms < .008, qPrintable(QStringLiteral("Audio phase/trim mismatch at %1 us / %2 Hz: RMS %3").arg(target).arg(rate).arg(rms)));
+        }
+        IndexedMediaDecoder decoder;
+        const auto silence = decoder.audio(*asset, asset->durationUs + 100000, 9600, 48000, 2, error);
+        QCOMPARE(silence, QByteArray(9600*2*sizeof(float), '\0'));
     }
 
     void aacPrimingKeepsAudioTimestampsAcrossReload() {
@@ -942,7 +1354,7 @@ private slots:
         player.pause();
         const qint64 cursor = player.position();
         player.clearAsset();
-        QVERIFY(retained.expired());
+        QTRY_VERIFY_WITH_TIMEOUT(retained.expired(), 3000);
         QCOMPARE(player.position(), cursor);
         QTest::qWait(60);
         QCOMPARE(player.position(), cursor);

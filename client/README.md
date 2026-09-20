@@ -162,13 +162,28 @@ Dragging or trimming a timeline clip previews its provisional timing in the
 canvas immediately, including video seeking and track order. The saved clip
 changes only on release; cancelling the gesture restores the original preview.
 
-While dragging the playhead, video previews use an independently compressed image
-for every source frame (up to 640 × 360), generated during background validation.
-A bounded worker pool decodes only the current requested image; each player keeps
-one request in flight and the latest cursor. Release seeks the exact original,
-and playback uses the original video. The shared proxy is capped at 64 MiB per
-asset and reported separately in the RAM popup. Sources exceeding that cap, HDR
-and alpha video retain native seeking; no sparse preview is substituted.
+Import displays an immutable local poster and progressive timeline thumbnails
+while complete source validation continues. Play and remote scenes remain gated
+on validated residency. The filmstrip uses a source-time grid with zoom levels
+and keeps displayed images until replacements arrive, avoiding empty cells during
+zoom changes. Identical source/frame requests share allocations across occurrences.
+
+Playback and exact positioning use a bounded FFmpeg pool of up to four workers.
+One additional background worker prepares optional SDR editing images up to a
+960-pixel long edge, pausing during interaction, playback or memory pressure.
+Scrubbing uses these images when available and otherwise decodes the original;
+the first request after idle is immediate, with later pointer updates coalesced
+within a 16 ms dispatch interval. During a slow original decode, an intermediate
+image can appear after 100 ms without a new presentation if its request is at
+most 1,000 ms old and advances in the current drag direction. Direction changes
+reject earlier pending results. Release and Play require exact full-resolution
+frames; original-video lookahead prepares the next two frames sequentially using
+the workers' actual decoder history. Disk caches are limited to
+64 MiB for thumbnails and 512 MiB for editing images, with 12,000 files maximum
+in each. HDR, alpha and unsupported proxy formats retain the native path. See
+[media residency](docs/MEDIA_RESIDENCY.md) for cache and readiness contracts, and
+[interaction corrections and measurements](docs/MEDIA_INTERACTION_IMPLEMENTATION_2026-09-20.md)
+for the native validation and retained-original cold/warm benchmark.
 
 ## Usage
 
@@ -192,13 +207,17 @@ opens centered at 90% of the available screen width and height. See
 
 ## Media memory
 
-Images and videos are completely validated before they become available. Videos
-retain their original compressed bytes, a poster, bounded timeline thumbnails and
-optional compressed editing proxies
-in RAM; playback uses independent bounded decoder queues. The RAM button beside Settings
-shows loading, memory use and pressure-driven eviction. See
-[media residency](docs/MEDIA_RESIDENCY.md) for the memory policy, playback contract
-and protocol v6 deployment requirements.
+Images and videos are completely validated before playback or scene execution;
+local import previews can appear earlier. Original files remain the save/transfer
+identity; validated runtime video/audio packets stay in RAM. Optional disk
+derivatives are disposable and do not replace those originals.
+Lightweight cursors share decoding, native rendering frames and one audio mixer per
+device. The RAM popup separates shared storage, tracked CPU buffers, pool/graphics
+estimates, reservations, available RAM and process footprint. Visible thumbnail
+buffers remain tracked after cache eviction, and shared preview posters are
+counted once. The default system
+reserve is 512 MiB. See [media residency](docs/MEDIA_RESIDENCY.md) and the
+[validation report](docs/MEDIA_ENGINE_VALIDATION.md) for contracts and tradeoffs.
 
 See [scene playback](docs/scene-playback.md) for timing, fades, end actions and
 the editor controls' lifecycle during test and remote scenes.

@@ -10,10 +10,10 @@
 #include <memory>
 #include <functional>
 #include <vector>
+#include "backend/media/MediaPacketStore.h"
 
-// Published only after validation to EOF. Video bytes retain the original
-// compression; editing proxies are optional, independently compressed images. Players share the bytes,
-// but own independent, bounded decoder queues and cursors.
+// Published only after complete validation and preparation. Runtime packets
+// and decoded entry frames are shared by file identity; occurrences are cursors.
 struct ResidentVideoFrame {
     QVideoFrame frame;
     qint64 timestampUs = 0;
@@ -26,24 +26,24 @@ struct ResidentThumbnail {
 };
 
 namespace MediaThumbnails {
-constexpr int MaxCount = 96;
 constexpr int Width = 192;
 constexpr int Height = 108;
-constexpr qint64 MinimumIntervalUs = 125000;
-constexpr quint64 MaxBytes = quint64(MaxCount) * (Width * Height * 4 + sizeof(ResidentThumbnail));
+constexpr int PreviewCount = 16;
 }
 
-// One independently decodable image per source frame, never sparse timeline tiles.
-struct ResidentScrubFrame {
-    QByteArray jpeg;
-    qint64 timestampUs = 0;
+// An immutable, display-only snapshot. It never authorizes playback: the source
+// can still fail validation after these images were decoded. Pixel allocations
+// are shared with the importing asset's first frame and thumbnails, not copied
+// per snapshot. They remain counted once in the asset/job memory breakdown.
+struct ResidentMediaPreview {
+    QString sha256;
+    QSize displaySize;
     qint64 durationUs = 0;
+    QVideoFrame poster;
+    QVector<ResidentThumbnail> thumbnails;
+    // Referenced poster + thumbnail storage; not an additional allocation.
+    quint64 residentBytes = 0;
 };
-namespace MediaScrubProxy {
-constexpr int Width = 640;
-constexpr int Height = 360;
-constexpr quint64 MaxBytes = 64ULL * 1024 * 1024;
-}
 
 // Disjoint allocations owned by an asset; excludes decoder/GPU estimates.
 struct ResidentMediaMemory {
@@ -51,12 +51,12 @@ struct ResidentMediaMemory {
     quint64 imageBytes = 0;
     quint64 posterBytes = 0;
     quint64 thumbnailBytes = 0;
-    quint64 scrubProxyBytes = 0;
-    quint64 totalBytes() const { return videoBytes + imageBytes + posterBytes + thumbnailBytes + scrubProxyBytes; }
+    quint64 audioPreviewBytes = 0;
+    quint64 totalBytes() const { return videoBytes + imageBytes + posterBytes + thumbnailBytes + audioPreviewBytes; }
     ResidentMediaMemory& operator+=(const ResidentMediaMemory& other) {
         videoBytes += other.videoBytes; imageBytes += other.imageBytes;
         posterBytes += other.posterBytes; thumbnailBytes += other.thumbnailBytes;
-        scrubProxyBytes += other.scrubProxyBytes;
+        audioPreviewBytes += other.audioPreviewBytes;
         return *this;
     }
 };
@@ -70,14 +70,24 @@ struct ResidentMediaAsset {
     quint64 residentBytes = 0;
     quint64 posterBytes = 0;
     quint64 thumbnailBytes = 0;
-    std::vector<ResidentScrubFrame> scrubFrames;
-    quint64 scrubProxyBytes = 0;
     ResidentMediaMemory memoryBreakdown() const {
-        const quint64 source = residentBytes - posterBytes - thumbnailBytes - scrubProxyBytes;
-        return {video ? source : 0, video ? 0 : source, posterBytes, thumbnailBytes, scrubProxyBytes};
+        const quint64 source = residentBytes - posterBytes - thumbnailBytes - quint64(firstAudioPcm.capacity());
+        return {video ? source : 0, video ? 0 : source, posterBytes, thumbnailBytes, quint64(firstAudioPcm.capacity())};
     }
     qint64 durationUs = 0;
     QByteArray compressedVideo;
+    // All-intra sources release compressedVideo after complete validation.
+    bool allIntra = false;
+    QString representationReason;
+    MediaPacketStore videoPackets;
+    MediaPacketStore audioPackets;
+    bool audioUsesVideoBytes = false;
+    QVector<MediaFrameIndex> frameIndex;
+    QSize codedDisplaySize;
+    int rotation = 0;
+    qint64 sourceOriginUs = 0;
+    quint64 conversionPeakBytes = 0;
+    quint64 sourceFileBytes = 0;
     ResidentVideoFrame firstFrame;
     quint64 videoFrameCount = 0;
     quint64 audioSampleCount = 0;
@@ -85,9 +95,10 @@ struct ResidentMediaAsset {
     int videoTrack = 0;
     int audioTrack = -1;
     QAudioFormat audioFormat;
+    QByteArray firstAudioPcm; // 200 ms, float stereo at 48 kHz, shared preparation only
     // Main-thread admission, installed by the owning residency manager. The
-    // future decoder budget is held until its first decoded frame: subsequent
-    // allocations are represented by the OS memory measurement. Release must
+    // future decoder budget is held until the cursor's image, lookahead and
+    // audio are prepared; allocations then enter the OS measurement. Release must
     // identify whether preparation consumed the outstanding reservation.
     std::function<bool()> reservePlayback;
     std::function<void()> playbackPrepared;
