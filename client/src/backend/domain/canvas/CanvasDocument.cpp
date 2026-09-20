@@ -486,10 +486,16 @@ void CanvasDocument::evaluateTimeline()
 {
     if (m_evaluatingTimeline) return;
     m_evaluatingTimeline = true;
+    const qint64 slot = m_timelineSettings.slotAt(m_timelinePositionMs);
     for(CanvasMedia* media:m_media) {
-        media->setClipActive(SceneTimeline::activeClip(media->timelineTrack(), m_timelineSettings.slotAt(m_timelinePositionMs)) != nullptr);
-        if(media->timelineTrack().keyframes.isEmpty()) media->clearEvaluatedElementState();
-        else media->setEvaluatedElementState(SceneTimeline::evaluate(media->authorElementState(),media->timelineTrack(),m_timelineSettings.slotAt(m_timelinePositionMs)));
+        const auto& track = media->timelineTrack();
+        media->setClipActive(SceneTimeline::activeClip(track, slot) != nullptr);
+        // Authoring geometry holds the first/last visible slot outside a clip.
+        // Activity still follows the real playhead, so no content is exposed.
+        const qint64 displaySlot = track.clip.durationSlots > 0
+            ? qBound(track.clip.startSlot, slot, track.clip.endSlot() - 1) : slot;
+        if(track.keyframes.isEmpty()) media->clearEvaluatedElementState();
+        else media->setEvaluatedElementState(SceneTimeline::evaluate(media->authorElementState(), track, displaySlot));
     }
     m_evaluatingTimeline = false;
     if (!m_publishingTimelineEdit) emit timelineEvaluated();

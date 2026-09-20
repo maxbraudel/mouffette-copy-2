@@ -1235,6 +1235,20 @@ private slots:
         QVERIFY(!f.timeline.selectedKeyframeId().isEmpty());
         const auto selectedKey = f.timeline.selectedKeyframeId();
         QVERIFY(selectionMatches());
+        auto* diamond = f.item("timelineKeyframeDiamond");
+        QVERIFY(diamond);
+        const QColor selectedColor = diamond->property("color").value<QColor>();
+        const auto selectedMedia = doc->selectedMediaIds();
+        doc->setEditsLocked(true);
+        for (auto* item : delegates) QVERIFY(!item->property("selected").toBool());
+        QVERIFY(diamond->property("color").value<QColor>() != selectedColor);
+        f.timeline.clearSelection();
+        f.timeline.clearKeyframeSelection();
+        QCOMPARE(doc->selectedMediaIds(), selectedMedia);
+        QCOMPARE(f.timeline.selectedKeyframeId(), selectedKey);
+        doc->setEditsLocked(false);
+        QVERIFY(selectionMatches());
+        QCOMPARE(diamond->property("color").value<QColor>(), selectedColor);
         f.timeline.copySelected();
         auto clipboard = [] {
             return QJsonDocument::fromJson(QGuiApplication::clipboard()->mimeData()->data(
@@ -1387,7 +1401,7 @@ private slots:
         f.timeline.trimClip(initial.id, 1000, 3000);
         f.timeline.seek(0);
         QVERIFY(!media->clipActive()); QVERIFY(media->contentVisible());
-        QVERIFY(f.host->controller()->selectionChromeModel().isEmpty());
+        QCOMPARE(f.host->controller()->selectionChromeModel().size(), 1);
         const auto saved = doc->serializeSceneState();
         f.timeline.seek(2000); QVERIFY(media->clipActive());
         f.timeline.seek(0); QCOMPARE(doc->serializeSceneState(), saved);
@@ -2556,6 +2570,9 @@ private slots:
         auto* document = host->document();
         auto* media = document->addText({20, 30}, QStringLiteral("Before"));
         QVERIFY(media);
+        auto track = media->timelineTrack();
+        track.clip.durationSlots = 60;
+        media->setTimelineTrack(track);
         media->setPosition({20, 30});
         document->select(media->mediaId());
         TimelineController timeline;
@@ -2588,6 +2605,79 @@ private slots:
         QVERIFY(media->uppercase());
         QCOMPARE(writes.count(), 0);
         QCOMPARE(document->serializeProjectState(), saved);
+    }
+
+    void playbackKeepsSelectionOnStandby_data()
+    {
+        QTest::addColumn<QString>("stopMode");
+        for (const QString mode : {"pause", "finished", "scrub-pause", "scrub-resume"})
+            QTest::newRow(qPrintable(mode)) << mode;
+    }
+
+    void playbackKeepsSelectionOnStandby()
+    {
+        QFETCH(QString, stopMode);
+        std::unique_ptr<QuickCanvasHost> host(QuickCanvasHost::create());
+        QVERIFY(host);
+        host->setProjectEditingEnabled(true);
+        auto* doc = host->document();
+        auto* a = doc->addText({}, "A");
+        auto* b = doc->addText({300, 0}, "B");
+        QVERIFY(a && b);
+        doc->select(b->mediaId());
+        doc->select(a->mediaId(), true);
+        auto settings = doc->timelineSettings();
+        settings.stopSlot = 30;
+        QVERIFY(doc->setTimelineSettings(settings));
+        TimelineController timeline;
+        timeline.setHost(host.get());
+        timeline.placeKeyframe();
+        const auto selected = doc->selectedMediaIds();
+        const auto primary = doc->primarySelectedMediaId();
+        const auto key = timeline.selectedKeyframeId();
+        QVERIFY(!key.isEmpty());
+        const auto saved = doc->serializeProjectState();
+        QSignalSpy selectionChanges(doc, &CanvasDocument::selectionChanged);
+        QSignalSpy writes(doc, &CanvasDocument::documentChanged);
+        timeline.togglePlayback();
+        QTRY_VERIFY(host->timelinePlaying());
+        QVERIFY(!host->controller()->editingEnabled());
+        QVERIFY(!timeline.editable());
+
+        // Neither canvas commands nor timeline background/keyframe clicks may
+        // alter the standby selection, including during a scrub pause.
+        const auto attemptSelection = [&] {
+            doc->select(b->mediaId());
+            host->controller()->handleClearSelectionRequested();
+            timeline.selectClip(b->timelineTrack().clip.id);
+            timeline.clearSelection();
+            timeline.clearKeyframeSelection();
+        };
+        attemptSelection();
+        if (stopMode.startsWith("scrub-")) {
+            timeline.beginScrub();
+            QVERIFY(!host->timelinePlaying());
+            QVERIFY(doc->editsLocked());
+            attemptSelection();
+            timeline.seek(500);
+            timeline.endScrub(stopMode == "scrub-resume");
+            if (stopMode == "scrub-resume") {
+                QTRY_VERIFY(host->timelinePlaying());
+                QVERIFY(!host->controller()->editingEnabled());
+                timeline.togglePlayback();
+            }
+        } else if (stopMode == "pause") {
+            timeline.togglePlayback();
+        } else {
+            QTRY_VERIFY(!timeline.playing());
+        }
+        QVERIFY(host->controller()->editingEnabled());
+        QCOMPARE(doc->selectedMediaIds(), selected);
+        QCOMPARE(doc->primarySelectedMediaId(), primary);
+        QCOMPARE(timeline.selectedKeyframeId(), key);
+        QCOMPARE(selectionChanges.count(), 0);
+        QCOMPARE(writes.count(), 0);
+        QCOMPARE(doc->serializeProjectState(), saved);
     }
 
     void activeSeeksKeepRunningFromTheNewPosition()
@@ -3384,13 +3474,13 @@ private slots:
         QVERIFY(keyItem);
         const qreal slotMs=1000.0/30;
         QVERIFY(view.rootObject()->property("gridStep").toDouble()>slotMs);
-        // Shift release immediately restores the grid preview, never free time.
+        // With Magnet enabled, Shift gives grid placement and release restores snapping.
         keyItem->setProperty("dragging",true); keyItem->setProperty("rawMs",1309.0);
         view.rootObject()->setProperty("activeDrag",QVariant::fromValue(keyItem));
         view.rootObject()->setProperty("shiftHeld",true);
-        QCOMPARE(keyItem->property("previewMs").toDouble(),4000.0/3);
-        view.rootObject()->setProperty("shiftHeld",false);
         QCOMPARE(keyItem->property("previewMs").toDouble(),1300.0);
+        view.rootObject()->setProperty("shiftHeld",false);
+        QCOMPARE(keyItem->property("previewMs").toDouble(),4000.0/3);
         keyItem->setProperty("dragging",false);
         QVERIFY(QMetaObject::invokeMethod(view.rootObject(),"endDrag"));
         view.rootObject()->setProperty("viewDurationMs",500.0);

@@ -1,6 +1,7 @@
 #include "frontend/rendering/canvas/CanvasQmlTypes.h"
 #include "frontend/rendering/canvas/MediaListModel.h"
 #include "frontend/rendering/canvas/TextOutlineItem.h"
+#include "shared/rendering/MediaFrameSource.h"
 
 #include <QEvent>
 #include <QCursor>
@@ -11,6 +12,7 @@
 #include <QQmlEngine>
 #include <QQuickWindow>
 #include <QPointer>
+#include <QPalette>
 #include <QRectF>
 #include <QRegularExpression>
 #include <QScopeGuard>
@@ -19,6 +21,29 @@
 #include <QTest>
 #include <QtGui/private/qpointingdevice_p.h>
 #include <QtQuick/private/qquicktextedit_p.h>
+
+static QQuickItem* namedVisual(QQuickItem* root, const QString& name)
+{
+    if (!root) return nullptr;
+    if (root->objectName() == name) return root;
+    for (auto* child : root->childItems())
+        if (auto* found = namedVisual(child, name)) return found;
+    return nullptr;
+}
+
+static bool sameColor(QColor actual, QColor expected)
+{
+    return actual.isValid() && qAbs(actual.red() - expected.red()) <= 1
+        && qAbs(actual.green() - expected.green()) <= 1
+        && qAbs(actual.blue() - expected.blue()) <= 1;
+}
+
+static QColor blended(QColor foreground, QColor background, qreal opacity)
+{
+    return QColor(qRound(foreground.red() * opacity + background.red() * (1 - opacity)),
+                  qRound(foreground.green() * opacity + background.green() * (1 - opacity)),
+                  qRound(foreground.blue() * opacity + background.blue() * (1 - opacity)));
+}
 
 // A deterministic host for the real canvas. Only backend storage/publication
 // is simulated: all picking, grabs, selection, editing and drag handlers are
@@ -213,6 +238,20 @@ public:
     {
         QTest::mouseClick(&window, Qt::LeftButton, modifiers, point);
         QCoreApplication::processEvents();
+    }
+
+    QQuickItem* checker(const QString& id) const
+    {
+        return namedVisual(mediaDelegate(id), QStringLiteral("mediaTransparencyCheckerboard"));
+    }
+
+    QColor pixelAt(QPoint canvasPoint)
+    {
+        const QImage frame = window.grabWindow();
+        if (frame.isNull()) return {};
+        const QPointF p = root->mapToScene(canvasPoint);
+        return frame.pixelColor(qRound(p.x() * frame.width() / window.width()),
+                                qRound(p.y() * frame.height() / window.height()));
     }
 
     void drag(QPoint start, QPoint end)
@@ -1144,6 +1183,257 @@ private slots:
         QCOMPARE(scene.selected, QStringList {"a"});
         QCOMPARE(scene.root->property("panX").toDouble(), 0.0);
         QCOMPARE(scene.root->property("panY").toDouble(), 0.0);
+    }
+
+    void checkerFollowsPrimarySelection()
+    {
+        CanvasFixture scene;
+        QVERIFY2(scene.initialize(), qPrintable(scene.error));
+        scene.add("a", "text", 100, 150);
+        scene.add("b", "text", 300, 150);
+        scene.change("a", {{"contentVisible", false}});
+        scene.change("b", {{"contentOpacity", 0.0}});
+        QVERIFY(!scene.checker("a") && !scene.checker("b"));
+        scene.select("a", false);
+        QTRY_VERIFY(scene.checker("a"));
+        QVERIFY(scene.checker("a")->isVisible());
+        scene.select("b", true);
+        QTRY_VERIFY(!scene.checker("a") && scene.checker("b"));
+        QCOMPARE(scene.selected.size(), 2);
+        scene.select("a", false);
+        QTRY_VERIFY(scene.checker("a") && !scene.checker("b"));
+        scene.change("a", {{"clipActive", false}});
+        QTRY_VERIFY(scene.checker("a") && scene.checker("a")->isVisible());
+        scene.change("a", {{"clipActive", true}});
+        QTRY_VERIFY(scene.checker("a"));
+        scene.clear();
+        QTRY_VERIFY(!scene.checker("a") && !scene.checker("b"));
+    }
+
+    void invisiblePrimaryRemainsDraggable_data()
+    {
+        QTest::addColumn<QString>("type");
+        QTest::addColumn<bool>("hidden");
+        QTest::addColumn<bool>("inactive");
+        for (const QString type : {"image", "video", "text"}) {
+            QTest::newRow(qPrintable(type + "-hidden")) << type << true << false;
+            QTest::newRow(qPrintable(type + "-transparent")) << type << false << false;
+            QTest::newRow(qPrintable(type + "-inactive")) << type << false << true;
+        }
+    }
+
+    void invisiblePrimaryRemainsDraggable()
+    {
+        QFETCH(QString, type);
+        QFETCH(bool, hidden);
+        QFETCH(bool, inactive);
+        CanvasFixture scene;
+        QVERIFY2(scene.initialize(), qPrintable(scene.error));
+        scene.add("behind", "image", 100, 150);
+        scene.add("primary", type, 100, 150);
+        scene.change("primary", {{"contentVisible", !hidden},
+                                 {"contentOpacity", hidden || inactive ? 1.0 : 0.0},
+                                 {"clipActive", !inactive}});
+        scene.select("primary", false);
+        QTRY_VERIFY(scene.checker("primary") && scene.checker("primary")->isVisible());
+        if (inactive)
+            QVERIFY(!namedVisual(scene.mediaDelegate("primary"), "canvasMediaContent")->isVisible());
+        if (type == "text") {
+            scene.doubleClick({240, 230});
+            QVERIFY(!scene.root->property("anyMediaEditing").toBool());
+        }
+        scene.drag({240, 230}, {270, 245});
+        QCOMPARE(scene.entry("primary").value("x").toDouble(), 130.0);
+        QCOMPARE(scene.entry("primary").value("y").toDouble(), 165.0);
+        QCOMPARE(scene.primarySelection, QString("primary"));
+        QCOMPARE(scene.root->property("interactionMode").toString(), QString("idle"));
+        // A deselected invisible body must not intercept the underlying media.
+        scene.click(scene.backgroundPoint());
+        scene.click({240, 230});
+        QCOMPARE(scene.primarySelection, QString("behind"));
+    }
+
+    void hidingTextFinishesEditing_data()
+    {
+        QTest::addColumn<bool>("hidden");
+        QTest::newRow("eye") << true;
+        QTest::newRow("opacity") << false;
+    }
+
+    void hidingTextFinishesEditing()
+    {
+        QFETCH(bool, hidden);
+        CanvasFixture scene;
+        QVERIFY2(scene.initialize(), qPrintable(scene.error));
+        scene.add("text", "text", 100, 150);
+        scene.doubleClick({240, 230});
+        QVERIFY(scene.root->property("anyMediaEditing").toBool());
+        scene.change("text", {{"contentVisible", !hidden}, {"contentOpacity", hidden ? 1.0 : 0.0}});
+        QTRY_VERIFY(!scene.root->property("anyMediaEditing").toBool());
+        QCOMPARE(scene.commitCount, 1);
+        scene.doubleClick({240, 230});
+        QVERIFY(!scene.root->property("anyMediaEditing").toBool());
+        scene.change("text", {{"contentVisible", true}, {"contentOpacity", 1.0}});
+        scene.doubleClick({240, 230});
+        QVERIFY(scene.root->property("anyMediaEditing").toBool());
+    }
+
+    void checkerStaysInViewportCoordinates()
+    {
+        CanvasFixture scene;
+        QVERIFY2(scene.initialize(), qPrintable(scene.error));
+        scene.add("a", "text", 100, 150);
+        scene.change("a", {{"contentOpacity", 0.0}});
+        scene.select("a", false);
+        QTRY_VERIFY(scene.checker("a"));
+        const QColor a = scene.checker("a")->property("colorA").value<QColor>();
+        const QColor b = scene.checker("a")->property("colorB").value<QColor>();
+        const auto verify = [&] {
+            auto* checker = scene.checker("a");
+            QVERIFY(checker);
+            QVERIFY(checker->width() <= scene.root->width());
+            QVERIFY(checker->height() <= scene.root->height());
+            for (QPoint p : {QPoint(115, 179), QPoint(123, 179), QPoint(115, 187), QPoint(123, 187)}) {
+                const QColor cell = ((p.x() / 8 + p.y() / 8) % 2) ? b : a;
+                const QColor expected = blended(cell, scene.root->property("color").value<QColor>(), 0.5);
+                QTRY_VERIFY(sameColor(scene.pixelAt(p), expected));
+            }
+        };
+        // Include a nonzero viewport origin in the window: the grid is anchored
+        // to the canvas viewport, not the window framebuffer or the media.
+        scene.root->setPosition({7, 9});
+        scene.root->setSize(scene.window.size() - QSize(14, 18));
+        for (qreal zoom : {0.5, 1.0, 2.75}) {
+            scene.root->setProperty("viewScale", zoom);
+            scene.root->setProperty("panX", 80.0 - 100 * zoom);
+            scene.root->setProperty("panY", 140.0 - 150 * zoom);
+            verify();
+            scene.root->setProperty("panX", 83.25 - 100 * zoom);
+            scene.root->setProperty("panY", 141.5 - 150 * zoom);
+            verify();
+        }
+        scene.root->setProperty("viewScale", 1.0);
+        scene.root->setProperty("panX", 0.0);
+        scene.root->setProperty("panY", 0.0);
+        scene.root->setProperty("liveResizeMediaId", "a");
+        scene.root->setProperty("liveResizeX", 80.0);
+        scene.root->setProperty("liveResizeY", 140.0);
+        scene.root->setProperty("liveResizeScale", 1.75);
+        scene.root->setProperty("liveResizeActive", true);
+        verify();
+        scene.root->setProperty("liveResizeActive", false);
+        scene.root->setProperty("liveAltResizeMediaId", "a");
+        scene.root->setProperty("liveAltResizeX", -500000.0);
+        scene.root->setProperty("liveAltResizeY", -250000.0);
+        scene.root->setProperty("liveAltResizeWidth", 1000000.0);
+        scene.root->setProperty("liveAltResizeHeight", 750000.0);
+        scene.root->setProperty("liveAltResizeScale", 2.0);
+        scene.root->setProperty("liveAltResizeActive", true);
+        verify();
+        QCOMPARE(scene.checker("a")->size(), scene.root->size());
+        scene.root->setProperty("liveAltResizeActive", false);
+        scene.change("a", {{"x", -500000.0}, {"y", -250000.0},
+                           {"width", 1000000.0}, {"height", 750000.0}, {"scale", 2.0}});
+        verify();
+        QCOMPARE(scene.checker("a")->size(), scene.root->size());
+        scene.change("a", {{"x", 1000000.0}, {"y", 1000000.0}});
+        QVERIFY(!scene.checker("a")->isVisible());
+    }
+
+    void checkerUsesApplicationTheme()
+    {
+        const QPalette original = QGuiApplication::palette();
+        const auto restore = qScopeGuard([&] { QGuiApplication::setPalette(original); });
+        CanvasFixture scene;
+        QVERIFY2(scene.initialize(), qPrintable(scene.error));
+        scene.add("a", "text", 100, 150);
+        scene.change("a", {{"contentOpacity", 0.0}});
+        scene.select("a", false);
+        QTRY_VERIFY(scene.checker("a"));
+        for (bool dark : {false, true}) {
+            QPalette palette = original;
+            palette.setColor(QPalette::Base, dark ? Qt::black : Qt::white);
+            palette.setColor(QPalette::Text, dark ? Qt::white : Qt::black);
+            QGuiApplication::setPalette(palette);
+            QTRY_VERIFY(sameColor(scene.pixelAt({115, 179}),
+                blended(QColor(dark ? "#383838" : "#D8D8D8"),
+                        scene.root->property("color").value<QColor>(), 0.5)));
+            QTRY_VERIFY(sameColor(scene.pixelAt({123, 179}),
+                blended(QColor(dark ? "#484848" : "#ECECEC"),
+                        scene.root->property("color").value<QColor>(), 0.5)));
+        }
+    }
+
+    void checkerCompositesContentAndKeepsPaintOrder_data()
+    {
+        QTest::addColumn<QString>("type");
+        QTest::newRow("image") << QString("image");
+        QTest::newRow("video-frame") << QString("video");
+    }
+
+    void checkerCompositesContentAndKeepsPaintOrder()
+    {
+        QFETCH(QString, type);
+        RemoteVideoFrameSource foreground, background;
+        QImage pixels(16, 16, QImage::Format_ARGB32_Premultiplied);
+        pixels.fill(Qt::red);
+        background.setFrame(pixels);
+        CanvasFixture scene;
+        QVERIFY2(scene.initialize(), qPrintable(scene.error));
+        scene.add("behind", "image", 100, 150);
+        scene.change("behind", {{"z", 0}, {"residentFrameSource", QVariant::fromValue(&background)}});
+        scene.add("primary", type, 100, 150);
+        scene.change("primary", {{type == "image" ? "residentFrameSource" : "remoteFrameSource",
+                                  QVariant::fromValue(&foreground)}});
+        scene.select("primary", false);
+        QTRY_VERIFY(scene.checker("primary"));
+        const QColor cell = blended(scene.checker("primary")->property("colorA").value<QColor>(),
+                                    QColor(Qt::red), 0.5);
+        const auto composite = [&](qreal alpha) {
+            return QColor(qRound(cell.red() * (1 - alpha)),
+                          qRound(255 * alpha + cell.green() * (1 - alpha)),
+                          qRound(cell.blue() * (1 - alpha)));
+        };
+        for (int alpha : {255, 128, 0}) {
+            pixels.fill(QColor(0, 255, 0, alpha));
+            foreground.setFrame(pixels);
+            QTRY_VERIFY(sameColor(scene.pixelAt({115, 179}), composite(alpha / 255.0)));
+        }
+        pixels.fill(Qt::green);
+        foreground.setFrame(pixels);
+        scene.change("primary", {{"contentOpacity", 0.5}});
+        QTRY_VERIFY(sameColor(scene.pixelAt({115, 179}), composite(0.5)));
+        scene.change("primary", {{"contentOpacity", 0.0}});
+        QTRY_VERIFY(sameColor(scene.pixelAt({115, 179}), cell));
+        scene.change("behind", {{"z", 2}});
+        QTRY_COMPARE(scene.pixelAt({115, 179}), QColor(Qt::red));
+        scene.change("behind", {{"z", 0}});
+        QTRY_VERIFY(sameColor(scene.pixelAt({115, 179}), cell));
+        scene.clear();
+        QTRY_COMPARE(scene.pixelAt({115, 179}), QColor(Qt::red));
+
+        // The shared media renderer must never introduce a checker into a
+        // passive output, including a selected/transparent source occurrence.
+        scene.root->setVisible(false);
+        scene.window.setColor(Qt::red);
+        auto span = scene.entry("primary");
+        const QVariantMap projection{{"destX", 100}, {"destY", 150}, {"destWidth", 280},
+                                     {"destHeight", 170}, {"sourceX", 0}, {"sourceY", 0},
+                                     {"sourceWidth", 1}, {"sourceHeight", 1}, {"renderVisible", true},
+                                     {"renderOpacity", 0.5}, {"selected", true}, {"spanId", "span"}};
+        for (auto it = projection.cbegin(); it != projection.cend(); ++it)
+            span[it.key()] = it.value();
+        MediaListModel remoteModel;
+        remoteModel.updateFromList({span});
+        QQmlComponent component(&scene.engine, QUrl::fromLocalFile(TEST_SOURCE_DIR "/resources/qml/RemoteSceneRoot.qml"));
+        std::unique_ptr<QObject> remote(component.createWithInitialProperties({
+            {"mediaListModel", QVariant::fromValue(&remoteModel)}}));
+        auto* remoteItem = qobject_cast<QQuickItem*>(remote.get());
+        QVERIFY2(remoteItem, qPrintable(component.errorString()));
+        remoteItem->setParentItem(scene.window.contentItem());
+        remoteItem->setSize(scene.window.size());
+        QVERIFY(!namedVisual(remoteItem, "mediaTransparencyCheckerboard"));
+        QTRY_VERIFY(sameColor(scene.pixelAt({115, 179}), QColor(128, 128, 0)));
     }
 
     void overlappingMediaUseVisibleTopmostDelegate()

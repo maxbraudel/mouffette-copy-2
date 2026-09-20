@@ -98,6 +98,8 @@ public:
         TimelineAutoScrollSpeedPxPerSecond,
         TimelineInitialViewDurationMs,
         CanvasTextInitialHeightPercent,
+        CanvasCheckerboardOpacityPercent,
+        CanvasCheckerboardCellSizePx,
         RemoteCursorDiameterPx,
         ToastDefaultDurationMs,
         ToastInfoDurationMs,
@@ -245,6 +247,8 @@ public:
     int timelineInitialViewDurationMs() const { return m_timelineInitialViewDurationMs; }
     int remoteCursorDiameterPx() const { return m_remoteCursorDiameterPx; }
     int canvasTextInitialHeightPercent() const { return m_canvasTextInitialHeightPercent; }
+    int canvasCheckerboardOpacityPercent() const { return m_canvasCheckerboardOpacityPercent; }
+    int canvasCheckerboardCellSizePx() const { return m_canvasCheckerboardCellSizePx; }
     int toastDefaultDurationMs() const { return m_toastDefaultDurationMs; }
     int toastInfoDurationMs() const { return m_toastInfoDurationMs; }
     int toastWarningDurationMs() const { return m_toastWarningDurationMs; }
@@ -353,6 +357,8 @@ private:
     int m_timelineAutoScrollSpeedPxPerSecond = 96;
     int m_timelineInitialViewDurationMs = 15000;
     int m_canvasTextInitialHeightPercent = 8;
+    int m_canvasCheckerboardOpacityPercent = 50;
+    int m_canvasCheckerboardCellSizePx = 8;
     int m_remoteCursorDiameterPx = 30;
     int m_mediaRamReservePercent = 0;
     int m_mediaRamReserveMinMiB = 548;

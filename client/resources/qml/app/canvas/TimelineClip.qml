@@ -43,7 +43,7 @@ Rectangle {
         ? panel.activeDrag.adjacentPreview : null
     readonly property real shownStart: dragging ? previewStart : linkedPreview ? linkedPreview.startMs : modelData.startMs
     readonly property real shownEnd: dragging ? previewEnd : linkedPreview ? linkedPreview.endMs : modelData.endMs
-    readonly property bool selected: interactive && modelData.selected
+    readonly property bool selected: interactive && panel.editable && modelData.selected
     // Time zoom changes clip geometry, not the item scale: these stay in viewport pixels.
     readonly property real resizeHandleWidth: panel.timeline ? panel.timeline.clipResizeHandleWidthPx : 8
     readonly property real minResizeWidth: panel.timeline ? panel.timeline.clipMinResizeWidthPx : 24

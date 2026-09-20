@@ -107,6 +107,8 @@ QtObject {
     // System bars deepen the screen's blue while following the same palette.
     readonly property color uiZoneSystemFill: mix(bluePigment, canvasPrimaryScreenBackground, 0.75)
     readonly property color mediaPlaceholder: mix(text, canvasBackground, 0.20)
+    readonly property color transparencyCheckerA: dark ? "#383838" : "#D8D8D8"
+    readonly property color transparencyCheckerB: dark ? "#484848" : "#ECECEC"
     // The remote pointer must stay legible on arbitrary authored content.
     readonly property color remoteCursorFill: "#ffffff"
     readonly property color remoteCursorBorder: "#e6000000"

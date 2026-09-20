@@ -484,6 +484,14 @@ set(RESOURCE_FILES
     resources/resources.qrc
 )
 
+# Share the compiled shader resource with standalone canvas/rendering tests.
+add_library(MouffetteCanvasShaders OBJECT)
+target_link_libraries(MouffetteCanvasShaders PRIVATE Qt6::Core)
+qt_add_shaders(MouffetteCanvasShaders "canvas_shaders"
+    PREFIX "/shaders"
+    BASE "resources/shaders"
+    FILES resources/shaders/transparency-checkerboard.frag)
+
 # Create executable
 add_executable(MouffetteClient ${SOURCES} ${HEADERS} ${RESOURCE_FILES})
 set_target_properties(MouffetteClient PROPERTIES
@@ -547,6 +555,7 @@ qt_add_qml_module(MouffetteClient
         resources/qml/SnapGuides.qml
         resources/qml/TextEditSession.qml
         resources/qml/TextItem.qml
+        resources/qml/TransparencyCheckerboard.qml
         resources/qml/UiZone.qml
         resources/qml/VideoItem.qml)
 
@@ -565,6 +574,7 @@ endif()
 
 # Link Qt libraries
 target_link_libraries(MouffetteClient PRIVATE
+    MouffetteCanvasShaders
     MouffetteResidentMedia
     Qt6::Core 
     Qt6::Widgets 
@@ -952,10 +962,16 @@ if(BUILD_TESTING)
     )
     target_include_directories(tst_CanvasInteraction PRIVATE src)
     target_compile_definitions(tst_CanvasInteraction PRIVATE TEST_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
-    target_link_libraries(tst_CanvasInteraction PRIVATE MouffetteResidentMedia Qt6::QuickPrivate Qt6::GuiPrivate Qt6::Qml Qt6::Multimedia Qt6::Test)
+    target_link_libraries(tst_CanvasInteraction PRIVATE MouffetteCanvasShaders MouffetteResidentMedia Qt6::QuickPrivate Qt6::GuiPrivate Qt6::Qml Qt6::Multimedia Qt6::Test)
     add_test(NAME CanvasInteraction COMMAND tst_CanvasInteraction)
     add_test(NAME CanvasInteractionScaled COMMAND tst_CanvasInteraction)
     set_tests_properties(CanvasInteractionScaled PROPERTIES ENVIRONMENT "QT_SCALE_FACTOR=2")
+
+    add_executable(tst_TransparencyCheckerboard tests/qt/tst_TransparencyCheckerboard.cpp)
+    target_compile_definitions(tst_TransparencyCheckerboard PRIVATE TEST_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+    target_link_libraries(tst_TransparencyCheckerboard PRIVATE
+        MouffetteCanvasShaders Qt6::Quick Qt6::GuiPrivate Qt6::Qml Qt6::Test)
+    add_test(NAME TransparencyCheckerboard COMMAND tst_TransparencyCheckerboard)
 
     # Exercise the real controller, scene and packaged QML without production
     # main() (which initializes services and clears upload caches). Reuse the

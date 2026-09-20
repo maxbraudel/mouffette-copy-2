@@ -24,7 +24,7 @@ struct SettingSpec {
     bool boolean;
 };
 
-constexpr std::array<SettingSpec, 95> kSpecs{{
+constexpr std::array<SettingSpec, 97> kSpecs{{
     {Key::ServerUrl, "MOUFFETTE_SERVER_URL", "server-url", "serverUrl", "ws://localhost:8080", false},
     {Key::RemoteSessionHiddenTimeoutMs, "MOUFFETTE_REMOTE_SESSION_HIDDEN_TIMEOUT_MS", "remote-session-hidden-timeout-ms", nullptr, "60000", false},
     {Key::ProjectMediaHiddenTimeoutMs, "MOUFFETTE_PROJECT_MEDIA_HIDDEN_TIMEOUT_MS", "project-media-hidden-timeout-ms", nullptr, "60000", false},
@@ -101,6 +101,8 @@ constexpr std::array<SettingSpec, 95> kSpecs{{
     {Key::TimelineInitialViewDurationMs, "MOUFFETTE_TIMELINE_INITIAL_VIEW_DURATION_MS", "timeline-initial-view-duration-ms", nullptr, "15000", false},
     {Key::RemoteCursorDiameterPx, "MOUFFETTE_REMOTE_CURSOR_DIAMETER_PX", "remote-cursor-diameter-px", nullptr, "30", false},
     {Key::CanvasTextInitialHeightPercent, "MOUFFETTE_CANVAS_TEXT_INITIAL_HEIGHT_PERCENT", "canvas-text-initial-height-percent", nullptr, "8", false},
+    {Key::CanvasCheckerboardOpacityPercent, "MOUFFETTE_CANVAS_CHECKERBOARD_OPACITY_PERCENT", "canvas-checkerboard-opacity-percent", nullptr, "50", false},
+    {Key::CanvasCheckerboardCellSizePx, "MOUFFETTE_CANVAS_CHECKERBOARD_CELL_SIZE_PX", "canvas-checkerboard-cell-size-px", nullptr, "8", false},
     {Key::ToastDefaultDurationMs, "MOUFFETTE_TOAST_DEFAULT_DURATION_MS", "toast-default-duration-ms", nullptr, "4000", false},
     {Key::ToastInfoDurationMs, "MOUFFETTE_TOAST_INFO_DURATION_MS", "toast-info-duration-ms", nullptr, "2000", false},
     {Key::ToastWarningDurationMs, "MOUFFETTE_TOAST_WARNING_DURATION_MS", "toast-warning-duration-ms", nullptr, "3500", false},
@@ -482,6 +484,8 @@ void AppConfig::resetToCompiledDefaults() {
     m_timelineAutoScrollSpeedPxPerSecond = 96;
     m_timelineInitialViewDurationMs = 15000;
     m_canvasTextInitialHeightPercent = 8;
+    m_canvasCheckerboardOpacityPercent = 50;
+    m_canvasCheckerboardCellSizePx = 8;
     m_remoteCursorDiameterPx = 30;
     m_mediaRamReserveMinMiB = 548;
     m_uploadConcurrency = 2;
@@ -696,6 +700,10 @@ bool AppConfig::load(const LoadOptions& options, QString* errorMessage) {
         || !parseIntSetting(Key::RemoteMediaCacheMaxMiB, 1, 1048576, &candidate.m_remoteMediaCacheMaxMiB)
         || !parseIntSetting(Key::CanvasTextInitialHeightPercent, 1, 100,
                          &candidate.m_canvasTextInitialHeightPercent)
+        || !parseIntSetting(Key::CanvasCheckerboardOpacityPercent, 0, 100,
+                            &candidate.m_canvasCheckerboardOpacityPercent)
+        || !parseIntSetting(Key::CanvasCheckerboardCellSizePx, 1, 256,
+                            &candidate.m_canvasCheckerboardCellSizePx)
         || !parseIntSetting(Key::TimelineMaxDurationMs, 1, 604800000, &candidate.m_timelineMaxDurationMs)
         || !parseIntSetting(Key::TimelineSlotsPerSecond, 1, 240, &candidate.m_timelineSlotsPerSecond)
         || !parseIntSetting(Key::TimelineDefaultClipDurationSlots, 1, 145152000, &candidate.m_timelineDefaultClipDurationSlots)

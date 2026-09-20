@@ -359,7 +359,7 @@ void QuickCanvasController::publishSelection()
     if (!m_document) return;
     QVariantList list;
     for (CanvasMedia* media : m_document->media()) {
-        if (!media || !media->selected() || !media->clipActive()) continue;
+        if (!media || !media->selected()) continue;
         const QRectF rect = media->sceneRect();
         list.append(QVariantMap{{QStringLiteral("mediaId"), media->mediaId()},
                                 {QStringLiteral("isPrimary"), media->mediaId() == m_document->primarySelectedMediaId()},
@@ -418,6 +418,16 @@ void QuickCanvasController::publishScreens()
 int QuickCanvasController::remoteCursorDiameter() const
 {
     return AppConfig::instance().remoteCursorDiameterPx();
+}
+
+qreal QuickCanvasController::checkerboardOpacity() const
+{
+    return AppConfig::instance().canvasCheckerboardOpacityPercent() / 100.0;
+}
+
+int QuickCanvasController::checkerboardCellSize() const
+{
+    return AppConfig::instance().canvasCheckerboardCellSizePx();
 }
 
 void QuickCanvasController::publishRemoteCursor()
@@ -661,7 +671,7 @@ void QuickCanvasController::handleMediaMoveStarted(const QString& mediaId,
     finishSelectionScaleGesture();
     if (!editingEnabled()) return;
     CanvasMedia* media = m_document->mediaById(mediaId);
-    if (!media || !media->clipActive() || mediaId != primarySelectedMediaId()) return;
+    if (!media || mediaId != primarySelectedMediaId()) return;
     m_dragMediaId = mediaId;
     m_lastMoveSnapped = false;
     m_liveSnapDragMediaId.clear();
@@ -679,7 +689,7 @@ void QuickCanvasController::rebuildSnapTargets(CanvasMedia* activeMedia)
         if (screen.isValid() && !screen.isEmpty()) m_snapTargetRects.append(screen);
     }
     for (CanvasMedia* media : m_document->media()) {
-        if (!media || !media->clipActive() || media == activeMedia
+        if (!media || (!media->clipActive() && !media->selected()) || media == activeMedia
             || m_transformStarts.contains(media->mediaId())) continue;
         const QRectF rect = media->sceneRect();
         if (rect.isValid() && !rect.isEmpty()) m_snapTargetRects.append(rect);
@@ -1413,7 +1423,7 @@ void QuickCanvasController::updateSelectionScaleGesture(qreal factor, bool phase
         || qFuzzyCompare(factor, 1.0) || !m_dragMediaId.isEmpty()
         || !m_resizeMediaId.isEmpty()) return;
     CanvasMedia* active = selectedMediaItem();
-    if (!active || !active->clipActive()) return;
+    if (!active) return;
 
     const bool startingGesture = !m_scaleGestureActive;
     if (!m_scaleGestureActive) {
@@ -1491,7 +1501,7 @@ void QuickCanvasController::handleMediaResizeRequested(
     CanvasMedia* media = m_document ? m_document->mediaById(mediaId) : nullptr;
     // Geometry edits do not depend on decoded content. Loading media shares
     // the same transform transaction as every other selected occurrence.
-    if (!media || !media->clipActive() || editsLocked() || mediaId != primarySelectedMediaId()) return;
+    if (!media || editsLocked() || mediaId != primarySelectedMediaId()) return;
     if (m_resizeMediaId != mediaId) {
         captureTransformSelection(media);
         m_resizeMediaId = mediaId;

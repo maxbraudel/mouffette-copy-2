@@ -2178,6 +2178,70 @@ private slots:
         QCOMPARE(fixture.controller.selectedMediaItem(), second);
     }
 
+    void selectedInactiveClipHoldsBoundaryAndAcceptsTransforms_data()
+    {
+        QTest::addColumn<qint64>("slot");
+        QTest::addColumn<bool>("animated");
+        for (bool animated : {false, true}) {
+            const QString prefix = animated ? "animated-" : "static-";
+            QTest::newRow(qPrintable(prefix + "before")) << qint64(0) << animated;
+            QTest::newRow(qPrintable(prefix + "end")) << qint64(60) << animated;
+            QTest::newRow(qPrintable(prefix + "after")) << qint64(90) << animated;
+        }
+    }
+
+    void selectedInactiveClipHoldsBoundaryAndAcceptsTransforms()
+    {
+        QFETCH(qint64, slot);
+        QFETCH(bool, animated);
+        Fixture fixture;
+        QVERIFY(fixture.initialize());
+        auto* media = fixture.document.addText({100, 150}, "Boundary geometry");
+        QVERIFY(media);
+        auto track = media->timelineTrack();
+        track.clip = {SceneTimeline::newId(), 30, std::nullopt, 30};
+        const auto first = media->authorElementState();
+        auto last = first;
+        last.position = {400, 240};
+        if (animated) track.keyframes = {{SceneTimeline::newId(), 0, first},
+                                         {SceneTimeline::newId(), 90, last}};
+        media->setTimelineTrack(track);
+        fixture.document.clearSelection();
+        const auto saved = fixture.document.serializeSceneState();
+        fixture.document.setTimelinePosition(fixture.document.timelineSettings().timeMs(slot));
+        QVERIFY(!media->clipActive());
+        QVERIFY(fixture.controller.selectionChromeModel().isEmpty());
+        fixture.document.select(media->mediaId());
+        const auto expected = SceneTimeline::evaluate(first, track, slot < 30 ? 30 : 59);
+        QCOMPARE(media->position(), expected.position);
+        QCOMPARE(fixture.controller.selectionChromeModel().size(), 1);
+        QCOMPARE(fixture.document.serializeSceneState(), saved);
+        auto* delegate = findQuickItemWithProperty(fixture.view.rootObject(), "currentMediaId", media->mediaId());
+        QVERIFY(delegate && delegate->isVisible() && delegate->isEnabled());
+        auto* content = findQuickItemWithProperty(delegate, "objectName", "canvasMediaContent");
+        QVERIFY(content && !content->isVisible());
+        QVERIFY(findQuickItemWithProperty(delegate, "objectName", "mediaTransparencyCheckerboard"));
+
+        const auto moved = expected.position + QPointF(25, 35);
+        fixture.controller.handleMediaMoveStarted(media->mediaId(), expected.position.x(), expected.position.y(), false);
+        fixture.controller.handleMediaMoveUpdated(media->mediaId(), moved.x(), moved.y(), false);
+        fixture.controller.handleMediaMoveEnded(media->mediaId(), moved.x(), moved.y(), false);
+        QCOMPARE(media->position(), moved);
+        const auto originalSize = media->sceneRect().size();
+        fixture.controller.scaleSelectionBy(1.5);
+        QCOMPARE(media->sceneRect().size(), originalSize * 1.5);
+        QVERIFY(!media->clipActive());
+        QVERIFY(!content->isVisible());
+        if (animated) {
+            QVERIFY(media->hasElementDraft());
+            QCOMPARE(fixture.document.serializeSceneState(), saved);
+        }
+        fixture.document.clearSelection();
+        QVERIFY(!delegate->isVisible());
+        QVERIFY(fixture.controller.selectionChromeModel().isEmpty());
+        if (animated) QCOMPARE(media->position(), expected.position);
+    }
+
     void emptyCanvasClearsSelectionOutsideClip_data()
     {
         QTest::addColumn<qreal>("positionMs");
@@ -2205,7 +2269,7 @@ private slots:
         fixture.document.setTimelinePosition(positionMs);
         QCOMPARE(media->clipActive(), clipActive);
         QVERIFY(media->selected());
-        QTRY_COMPARE(fixture.controller.selectionChromeModel().size(), clipActive ? 1 : 0);
+        QTRY_COMPARE(fixture.controller.selectionChromeModel().size(), 1);
 
         fixture.view.show();
         QVERIFY(QTest::qWaitForWindowExposed(&fixture.view));
@@ -2499,6 +2563,13 @@ private slots:
         QVERIFY(!c.liveTransforms().isEmpty());
         fixture.document.setEditsLocked(true);
         QVERIFY(c.liveTransforms().isEmpty()); QVERIFY(!c.editingEnabled());
+        const auto selected = fixture.document.selectedMediaIds();
+        QCOMPARE(selected.size(), 2);
+        QCOMPARE(fixture.document.primarySelectedMediaId(), active->mediaId());
+        QTRY_VERIFY(!findQuickItemWithProperty(fixture.view.rootObject(), "objectName", "mediaTransparencyCheckerboard"));
+        QVERIFY(!findQuickItemWithProperty(fixture.view.rootObject(), "objectName", "selectionChromeVisual"));
+        fixture.document.select(follower->mediaId());
+        QCOMPARE(fixture.document.primarySelectedMediaId(), active->mediaId());
         c.handleMediaResizeEnded(active->mediaId());
         c.handleMediaMoveStarted(active->mediaId(), 0, 0, false);
         c.handleMediaMoveUpdated(active->mediaId(), 900, 900, false);
@@ -2508,6 +2579,9 @@ private slots:
         c.handleOverlayDelete(active->mediaId());
         QCOMPARE(fixture.document.serializeProjectState(), original);
         fixture.document.setEditsLocked(false);
+        QCOMPARE(fixture.document.selectedMediaIds(), selected);
+        QCOMPARE(fixture.document.primarySelectedMediaId(), active->mediaId());
+        QTRY_VERIFY(findQuickItemWithProperty(fixture.view.rootObject(), "objectName", "mediaTransparencyCheckerboard"));
         c.handleMediaResizeEnded(active->mediaId());
         c.handleMediaMoveEnded(active->mediaId(), 900, 900, false);
         QCOMPARE(fixture.document.serializeProjectState(), original);

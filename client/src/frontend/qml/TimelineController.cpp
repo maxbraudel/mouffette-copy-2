@@ -599,6 +599,7 @@ void TimelineController::removeStop()
 }
 void TimelineController::clearSelection()
 {
+    if (!editable()) return;
     m_selectionArea = SelectionArea::Clips;
     m_keyframeId.clear();
     if (m_document) m_document->clearSelection();
@@ -607,6 +608,7 @@ void TimelineController::clearSelection()
 
 void TimelineController::clearKeyframeSelection()
 {
+    if (!editable()) return;
     m_selectionArea = SelectionArea::Keyframes;
     m_keyframeId.clear();
     emit changed();

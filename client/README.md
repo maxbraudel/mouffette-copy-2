@@ -150,6 +150,14 @@ The canvas shows the target's live mouse position through the active session.
 See [remote cursor](docs/remote-cursor.md) for coordinate mapping, freshness,
 regression coverage and the required client/server update.
 
+The primary selected media shows a transparency checkerboard in the authoring
+canvas, including when hidden, fully transparent or outside its timeline clip.
+Outside the clip, its content stays hidden while its first/last clip geometry
+remains movable and resizable. Its opacity (50% by default)
+and cell size (8 pixels by default) are configurable in `client/.env`. The grid
+stays fixed in the viewport during pan, zoom and resize. See
+[selected-media transparency](docs/transparency-checkerboard.md).
+
 ## Usage
 
 1. **Start the Server**: Make sure the Mouffette server is running on `localhost:8080`

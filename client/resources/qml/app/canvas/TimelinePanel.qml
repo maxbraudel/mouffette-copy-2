@@ -837,7 +837,7 @@ FocusScope {
                             KeyframeDiamond {
                                 objectName: "timelineKeyframeDiamond"
                                 anchors.centerIn: parent
-                                color: root.timeline && root.timeline.selectedKeyframeId === keyItem.modelData.id ? Theme.accent : Theme.overlayText
+                                color: root.editable && root.timeline.selectedKeyframeId === keyItem.modelData.id ? Theme.accent : Theme.overlayText
                             }
                             MouseArea {
                                 anchors.fill: parent

@@ -34,6 +34,8 @@ Rectangle {
     readonly property var canvasController: sessionViewModel
                                             ? sessionViewModel.canvasController : null
     readonly property bool editingEnabled: canvasController ? canvasController.editingEnabled : true
+    property real checkerboardOpacity: canvasController ? canvasController.checkerboardOpacity : 0.5
+    property int checkerboardCellSize: canvasController ? canvasController.checkerboardCellSize : 8
     readonly property var selectionChrome: selectionLayerLoader.item
                                            ? selectionLayerLoader.item.chromeItem : null
     readonly property string primarySelectedMediaId: {
@@ -427,7 +429,7 @@ Rectangle {
         var hitSelected = false
         for (var i = 0; i < mediaRepeater.count; ++i) {
             var candidate = mediaRepeater.itemAt(i)
-            if (!candidate || !candidate.visible || !candidate.enabled || candidate.opacity <= 0)
+            if (!candidate || !candidate.visible || !candidate.enabled)
                 continue
             var point = candidate.mapFromItem(viewport, viewX, viewY)
             if (point.x < 0 || point.y < 0 || point.x >= candidate.width || point.y >= candidate.height)
@@ -871,6 +873,17 @@ Rectangle {
                     property var media: modelData
                     readonly property bool contentReady: mediaContentLoader.contentReady
                     readonly property bool initialFramePresented: mediaContentLoader.initialFramePresented
+                    readonly property bool showsTransparency: isSelected
+                        && currentMediaId === root.primarySelectedMediaId
+                    readonly property bool clipActive: !!media && media.clipActive !== false
+                    readonly property bool selectedOutsideClip: isSelected && !clipActive
+                    readonly property bool contentInteractive: !!media
+                        && clipActive && media.contentVisible && media.contentOpacity > 0
+
+                    onContentInteractiveChanged: {
+                        if (!contentInteractive && mediaContentLoader.editing)
+                            textEditSession.finish()
+                    }
 
                     // Local position/scale — tracks model when idle, free during drag
                     property real localX: media ? media.x : 0.0
@@ -879,7 +892,7 @@ Rectangle {
                     property bool localDragging: false
                     function beginTextEditing(selectAll, sceneX, sceneY) {
                         var editor = mediaContentLoader.visualItem
-                        return !!editor && editor.textEditable
+                        return contentInteractive && !!editor && editor.textEditable
                             && editor.beginEditing(selectAll !== false, sceneX, sceneY)
                     }
                     // Actual rendered scale — switches to live scale during resize/alt-resize
@@ -901,6 +914,9 @@ Rectangle {
                     // Derived from selectionChromeModel — NOT from media.selected.
                     // This avoids mediaModel churn (and delegate destruction) on selection changes.
                     readonly property bool isSelected: {
+                        // Keep document selection on standby during playback,
+                        // using the same gate as handles and selection borders.
+                        if (!root.editingEnabled) return false
                         var mid = currentMediaId
                         if (!mid || !root.selectionChromeModel) return false
                         for (var i = 0; i < root.selectionChromeModel.length; ++i) {
@@ -991,22 +1007,49 @@ Rectangle {
                     scale: effectiveScale * root.viewScale
                     transformOrigin: Item.TopLeft
                     z: media ? media.z : 0
-                    visible: !!media && media.clipActive !== false && media.contentVisible
-                    opacity: media ? media.contentOpacity : 1.0
-                    // Opacity alone does not disable Qt input. Match the picker
-                    // for the whole subtree, including TextEdit and MouseArea,
-                    // so invisible content cannot swallow another item's press.
-                    enabled: opacity > 0
+                    visible: !!media && ((clipActive && media.contentVisible)
+                             || showsTransparency || selectedOutsideClip)
+                    // The primary selection remains a manipulation surface even
+                    // when only its checkerboard is visible. Other invisible
+                    // media still let pointer events through to the canvas.
+                    enabled: contentInteractive || showsTransparency || selectedOutsideClip
+
+                    Loader {
+                        active: mediaDelegate.showsTransparency && mediaDelegate.visible
+                        sourceComponent: TransparencyCheckerboard {
+                            readonly property real viewLeft: Math.max(0, Math.min(viewport.width, mediaDelegate.x))
+                            readonly property real viewTop: Math.max(0, Math.min(viewport.height, mediaDelegate.y))
+                            viewportRect: Qt.rect(viewLeft, viewTop,
+                                Math.max(0, Math.min(viewport.width,
+                                    mediaDelegate.x + mediaDelegate.width * mediaDelegate.scale) - viewLeft),
+                                Math.max(0, Math.min(viewport.height,
+                                    mediaDelegate.y + mediaDelegate.height * mediaDelegate.scale) - viewTop))
+                            // Stay in the media's paint order, but draw only the
+                            // viewport intersection with no inherited zoom/scale.
+                            x: (viewLeft - mediaDelegate.x) / mediaDelegate.scale
+                            y: (viewTop - mediaDelegate.y) / mediaDelegate.scale
+                            scale: 1 / mediaDelegate.scale
+                            transformOrigin: Item.TopLeft
+                            colorA: AppStyle.Theme.transparencyCheckerA
+                            colorB: AppStyle.Theme.transparencyCheckerB
+                            opacity: root.checkerboardOpacity
+                            cellSize: root.checkerboardCellSize
+                        }
+                    }
 
                     MediaVisual {
                         id: mediaContentLoader
+                        objectName: "canvasMediaContent"
                         media: mediaDelegate.media
                         selected: mediaDelegate.isSelected
                         anchors.fill: parent
+                        visible: mediaDelegate.clipActive && mediaDelegate.media.contentVisible
+                        opacity: mediaDelegate.media ? mediaDelegate.media.contentOpacity : 1.0
+                        enabled: mediaDelegate.contentInteractive
                         freeResizePreview: !!mediaDelegate.liveTransform && !!mediaDelegate.liveTransform.altResize
                         uniformScalePreview: !!mediaDelegate.liveTransform
                             && mediaDelegate.liveTransform.altResize === false
-                        textEditable: root.editingEnabled
+                        textEditable: root.editingEnabled && mediaDelegate.contentInteractive
                         editingSession: textEditSession
                     }
 
@@ -1440,8 +1483,7 @@ Rectangle {
                         // The same exact press decision drives deselection. A
                         // second TapHandler using hover state can disagree at
                         // handle edges and clear selection during resize.
-                        // Selection persists even when an inactive clip has no
-                        // visible selection chrome at the current playhead.
+                        // Empty canvas clears active and inactive selections.
                         if (ownerKind === "canvas" && !root.textToolActive
                                 && root.primarySelectedMediaId !== "")
                             root.clearSelectionRequested()

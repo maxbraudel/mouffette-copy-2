@@ -19,6 +19,7 @@ the OS appearance does not require reopening a page, canvas, or popup.
 | `controlSelectionBackground`, `controlSelectionText` | Soft blue fill and readable foreground for checked boxes and focused numeric fields |
 | `connected*`, `warning*`, `error*`, `scene*` | Shared green, amber, red and purple state colors |
 | `canvas*`, `selection*`, `snapGuide`, `uiZone*` | Editor screens, selection handles, guides and system zones |
+| `transparencyCheckerA/B` | The viewport-anchored transparency grid behind the primary selected media |
 | `overlay*`, `slider*`, `media*` | Canvas floating controls and media transfer indicators |
 | `controlPalette` | The same colors exposed to Qt Quick Controls |
 
