@@ -1020,6 +1020,7 @@ if(BUILD_TESTING)
 
     add_executable(tst_TextItemQml
         tests/qt/tst_TextItemQml.cpp
+        src/backend/domain/media/TextRenderState.cpp
         src/frontend/rendering/canvas/TextOutlineItem.cpp
         src/frontend/rendering/canvas/TextOutlineItem.h
         src/frontend/rendering/canvas/TextEditHelper.cpp

@@ -119,8 +119,8 @@ private:
 		bool fitToTextEnabled = false;
 		bool highlightEnabled = false;
 		QString textHighlightColor;
-		int baseWidth = 0;
-		int baseHeight = 0;
+		qreal baseWidth = 0;
+		qreal baseHeight = 0;
 		double z = 0.0;
 		bool clipActive = false;
 		bool contentVisible = true;

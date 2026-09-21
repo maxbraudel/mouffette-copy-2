@@ -255,6 +255,9 @@ masks and Qt's image-node/texture-atlas renderer. Its Qt-private document access
 is isolated in `TextOutlineItem.cpp`;
 build and package it with the same Qt version. See
 [the rendering investigation and validation notes](docs/text-outline-rendering.md).
+Fit sizing and remote text layout share document metrics and outline rounding;
+see [the canvas/remote text investigation](docs/text-layout-parity.md) for the
+wrapping incident, layout contract and regression coverage.
 
 Images and remote video frames use source-sized scene-graph textures. Resizing
 their canvas rectangles reuses those textures without allocating larger painted

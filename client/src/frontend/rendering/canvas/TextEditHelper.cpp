@@ -1,4 +1,5 @@
 #include "frontend/rendering/canvas/TextEditHelper.h"
+#include "backend/domain/media/TextRenderState.h"
 
 #include <QAbstractTextDocumentLayout>
 #include <QPointer>
@@ -87,12 +88,7 @@ void TextEditHelper::applyIncludeTrailingSpaces(QObject* obj)
     // adds the trailing-space width to line.textWidth.  Without this flag,
     // textWidth would also exclude trailing spaces and our fixup below
     // would have nothing to copy.
-    QTextOption opt = doc->defaultTextOption();
-    if (!(opt.flags() & QTextOption::IncludeTrailingSpaces)) {
-        opt.setFlags(opt.flags() | QTextOption::IncludeTrailingSpaces);
-        doc->setDefaultTextOption(opt);
-        doc->markContentsDirty(0, doc->characterCount());
-    }
+    TextRenderMetrics::configureTextDocumentLayout(*doc);
 
     // Step 2 — install a persistent post-layout hook.  On every layout pass
     // QAbstractTextDocumentLayout emits update(); we patch textAdvance there.

@@ -624,11 +624,11 @@ bool CanvasMedia::updateFitToTextGeometry()
     state.outlineWidthPixels = TextRenderMetrics::outlinePixels(
         state.outlineWidthPercent, m_fontPixelSize);
 
-    QSize fitted = TextRenderMetrics::fittedTextSize(state);
-    if (qAbs(fitted.width() - m_baseSize.width()) <= 1
-        && qAbs(fitted.height() - m_baseSize.height()) <= 1) {
-        fitted = m_baseSize.toSize();
-    }
+    // This is a layout constraint, not a visual tolerance: keeping a box even
+    // one pixel too small can move its final character onto another line when
+    // fit-to-text is disabled. The shared document measurement is stable, so
+    // retain its exact enclosing size on every content/style change.
+    const QSize fitted = TextRenderMetrics::fittedTextSize(state);
     if (fitted == m_baseSize) return false;
 
     const qreal anchorX = m_horizontalAlignment == QLatin1String("left")

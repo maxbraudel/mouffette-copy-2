@@ -6,13 +6,19 @@
 #include <QAudioOutput>
 #include <QDateTime>
 #include <QFile>
+#include <QFontDatabase>
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QMediaPlayer>
 #include <QPointer>
 #include <QQuickItem>
+#include <QQuickTextDocument>
 #include <QQuickWindow>
+#include <QQmlComponent>
 #include <QTemporaryDir>
+#include <QTextBlock>
+#include <QTextDocument>
+#include <QTextLayout>
 #include <QTimer>
 #include <QVariantAnimation>
 #include <QVideoSink>
@@ -21,7 +27,9 @@
 #include <qpa/qwindowsysteminterface.h>
 
 #include "backend/files/FileManager.h"
+#include "backend/domain/media/CanvasMedia.h"
 #include "frontend/rendering/canvas/MediaListModel.h"
+#include "frontend/qml/QmlRuntime.h"
 #include "frontend/rendering/remote/RemoteSceneController.h"
 #include "frontend/rendering/remote/RemoteVideoFrameItem.h"
 
@@ -119,6 +127,30 @@ QQuickWindow* findRemoteWindow()
     }
     return nullptr;
 }
+
+QQuickItem* textEditor(QQuickItem* root)
+{
+    if (!root) return nullptr;
+    if (root->property("textDocument").value<QQuickTextDocument*>()) return root;
+    for (QQuickItem* child : root->childItems())
+        if (auto* found = textEditor(child)) return found;
+    return nullptr;
+}
+
+QStringList renderedLines(QQuickItem* editor)
+{
+    QStringList result;
+    const auto* quickDocument = editor->property("textDocument").value<QQuickTextDocument*>();
+    if (!quickDocument) return result;
+    for (QTextBlock block = quickDocument->textDocument()->begin(); block.isValid(); block = block.next()) {
+        const auto* layout = block.layout();
+        for (int index = 0; layout && index < layout->lineCount(); ++index) {
+            const QTextLine line = layout->lineAt(index);
+            result.append(block.text().mid(line.textStart(), line.textLength()));
+        }
+    }
+    return result;
+}
 }
 
 class RemoteSceneControllerLifecycleTest final : public QObject {
@@ -127,6 +159,9 @@ class RemoteSceneControllerLifecycleTest final : public QObject {
 private slots:
     void initTestCase()
     {
+        const int fontId = QFontDatabase::addApplicationFont(QStringLiteral(":/fonts/impact.ttf"));
+        QVERIFY(fontId >= 0);
+        QVERIFY(QFontDatabase::applicationFontFamilies(fontId).contains(QStringLiteral("Impact")));
         MediaResidencyManager::instance().setMemorySnapshotForTesting(
             {8ULL << 30, 6ULL << 30, 128ULL << 20, false, 0});
     }
@@ -499,6 +534,123 @@ private slots:
             QCOMPARE(item->renderOpacity,local["contentOpacity"].toDouble());
             QCOMPARE(item->fontUppercase,local["fontUppercase"].toBool());
         }
+    }
+
+    void textProjectionMatchesCanvasAtFractionalTimelinePositions()
+    {
+        RemoteSceneController controller(nullptr, nullptr);
+        auto scene = textScene();
+        auto media = scene["media"].toArray().first().toObject();
+        SceneTimeline::ElementState first;
+        QVERIFY(SceneTimeline::ElementState::fromMediaJson(media, &first));
+        first.size = QSizeF(320.375, 180.125);
+        first.scale = 1.25;
+        // Serialized baseSize is redundant. Both consumers must use final
+        // geometry/scale even for a payload with stale redundant dimensions.
+        first.baseSize = QSizeF(500, 300);
+        first.fontPixelSize = 63.6;
+        first.fontWeight = 450.7;
+        first.fontWeightOverrideEnabled = true;
+        first.rawFontWeight = first.fontWeight;
+        first.outlineWidthOverrideEnabled = true;
+        first.rawOutlineWidthPercent = first.outlineWidthPercent = 1.875;
+        auto second = first;
+        second.size = QSizeF(420.625, 210.375);
+        second.scale = 1.75;
+        second.fontPixelSize = 70.2;
+        second.fontWeight = second.rawFontWeight = 590.1;
+        second.outlineWidthPercent = second.rawOutlineWidthPercent = 2.75;
+        SceneTimeline::MediaTrack track;
+        track.clip = {"full", 0, std::nullopt, 5400};
+        track.keyframes = {{"start", 0, first}, {"end", 30, second}};
+        media["timeline"] = track.toJson();
+        scene["media"] = QJsonArray{media};
+        controller.onRemoteSceneStart("text-projection-owner", scene);
+        QTRY_VERIFY(controller.m_sceneActivationRequested);
+        CanvasMedia local(CanvasMedia::Type::Text, QSize(1, 1));
+        const QStringList fields{
+            "width", "height", "textContent", "textFontFamily", "textFontPixelSize",
+            "textFontWeight", "textItalic", "textUnderline", "textUppercase",
+            "textHorizontalAlignment", "textVerticalAlignment", "fitToTextEnabled",
+            "textColor", "textOutlineWidthPx", "textOutlineColor",
+            "textHighlightEnabled", "textHighlightColor"
+        };
+        for (qreal time : {0.0, 333.3333333333333, 500.0, 999.9, 1000.0, 0.0}) {
+            const auto state = SceneTimeline::evaluate(first, track,
+                SceneTimeline::SceneSettings{}.slotAt(time));
+            local.setEvaluatedElementState(state);
+            controller.evaluateTimelineAt(time, false);
+            const auto* model = controller.m_screenWindows[0].mediaModel.data();
+            QVERIFY(model);
+            const QVariantMap remote = model->data(model->index(0, 0),
+                MediaListModel::ModelDataRole).toMap();
+            const QVariantMap canvas = local.toModelMap(1.0);
+            for (const QString& field : fields) {
+                QVERIFY2(remote.value(field) == canvas.value(field),
+                    qPrintable(QStringLiteral("%1 at %2 ms: canvas=%3, remote=%4")
+                        .arg(field).arg(time).arg(canvas.value(field).toString(), remote.value(field).toString())));
+            }
+        }
+    }
+
+    void disablingFitToTextPreservesRemoteLineBreaksWithOutline_data()
+    {
+        QTest::addColumn<qreal>("outlinePercent");
+        QTest::addColumn<qreal>("scale");
+        for (qreal scale : {1.0, 2.25}) {
+            for (qreal outlinePercent : {0.0, 1.875, 3.75, 3.90625, 4.6875}) {
+                const auto row = QStringLiteral("border-%1-scale-%2")
+                    .arg(outlinePercent).arg(scale).toLatin1();
+                QTest::newRow(row.constData()) << outlinePercent << scale;
+            }
+        }
+    }
+
+    void disablingFitToTextPreservesRemoteLineBreaksWithOutline()
+    {
+        QFETCH(qreal, outlinePercent);
+        QFETCH(qreal, scale);
+        CanvasMedia local(CanvasMedia::Type::Text, QSize(1, 1));
+        local.setText(QStringLiteral("Texte"));
+        local.setFontPixelSize(64);
+        local.setOutlineWidthOverrideEnabled(true);
+        // 1.2 logical pixels must use the same canonical rounded 1 px border
+        // locally and remotely. A raw 1.2 value adds 2 px to the layout inset.
+        local.setOutlineWidthPercent(outlinePercent);
+        local.fitTextToContent();
+        local.setScale(scale);
+        const QSizeF fittedSize = local.authorElementState().baseSize;
+        local.setFitToTextEnabled(false);
+        QCOMPARE(local.authorElementState().baseSize, fittedSize);
+
+        RemoteSceneController controller(nullptr, nullptr);
+        auto scene = textScene();
+        auto media = local.authorElementState().toJson();
+        const auto original = scene["media"].toArray().first().toObject();
+        for (const char* key : {"mediaId", "fileId", "fileName", "timeline"})
+            media[key] = original[key];
+        scene["media"] = QJsonArray{media};
+        controller.onRemoteSceneStart("text-line-owner", scene);
+        QTRY_VERIFY(controller.m_sceneActivationRequested);
+        auto* remoteWindow = findRemoteWindow();
+        QVERIFY(remoteWindow);
+        QQuickItem* remoteEditor = textEditor(remoteWindow->contentItem());
+        QVERIFY(remoteEditor);
+
+        QQmlComponent component(QmlRuntime::engine(),
+            QUrl(QStringLiteral("qrc:/qt/qml/Mouffette/App/resources/qml/MediaVisual.qml")));
+        std::unique_ptr<QObject> visual(component.createWithInitialProperties({
+            {"media", local.toModelMap(1.0)}, {"width", fittedSize.width()},
+            {"height", fittedSize.height()}
+        }));
+        auto* localVisual = qobject_cast<QQuickItem*>(visual.get());
+        QVERIFY2(localVisual, qPrintable(component.errorString()));
+        QQuickItem* localEditor = textEditor(localVisual);
+        QVERIFY(localEditor);
+        QTRY_COMPARE(renderedLines(localEditor), QStringList{QStringLiteral("Texte")});
+        QTRY_COMPARE(renderedLines(remoteEditor), renderedLines(localEditor));
+        QCOMPARE(remoteEditor->width(), localEditor->width());
+        QCOMPARE(remoteEditor->height(), localEditor->height());
     }
 
     void initiallyOffscreenMediaEntersAndLeavesOutput()

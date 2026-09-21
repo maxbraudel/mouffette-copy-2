@@ -4,6 +4,8 @@
 #include <QFont>
 #include <QSize>
 #include <QString>
+#include <QTextDocument>
+#include <QTextOption>
 #include <algorithm>
 #include <cmath>
 
@@ -33,6 +35,17 @@ namespace TextRenderMetrics {
 
 constexpr qreal ContentMarginPx = 4.0;
 constexpr qreal HighlightPaddingPx = 2.0;
+
+// Fit measurement and the live TextEdit must use the same document rules.
+// Wrap mode and alignment belong to the caller and are preserved here.
+inline void configureTextDocumentLayout(QTextDocument& document) {
+    document.setDocumentMargin(0.0);
+    document.setUseDesignMetrics(true);
+    QTextOption option = document.defaultTextOption();
+    option.setUseDesignMetrics(true);
+    option.setFlags(option.flags() | QTextOption::IncludeTrailingSpaces);
+    document.setDefaultTextOption(option);
+}
 
 int effectiveFontPixelSize(const QFont& font, qreal uniformScale = 1.0);
 inline qreal outlinePixels(qreal widthPercent, int fontPixelSize) {

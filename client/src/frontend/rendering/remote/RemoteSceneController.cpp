@@ -8,6 +8,7 @@
 #include "backend/network/WebSocketClient.h"
 #include "backend/runtime/SuspendInclusiveClock.h"
 #include "backend/domain/media/MediaFilePolicy.h"
+#include "backend/domain/media/TextRenderState.h"
 #include "frontend/rendering/canvas/CanvasQmlTypes.h"
 #include "frontend/rendering/canvas/MediaListModel.h"
 #include "frontend/qml/QmlRuntime.h"
@@ -2137,8 +2138,8 @@ void RemoteSceneController::publishMediaSpan(const std::shared_ptr<RemoteMediaIt
     media.insert(QStringLiteral("sourceY"), span.srcNy);
     media.insert(QStringLiteral("sourceWidth"), span.srcNw);
     media.insert(QStringLiteral("sourceHeight"), span.srcNh);
-    media.insert(QStringLiteral("width"), std::max(1, item->baseWidth));
-    media.insert(QStringLiteral("height"), std::max(1, item->baseHeight));
+    media.insert(QStringLiteral("width"), item->baseWidth);
+    media.insert(QStringLiteral("height"), item->baseHeight);
     media.insert(QStringLiteral("z"), item->z);
     media.insert(QStringLiteral("contentVisible"), item->contentVisible);
     media.insert(QStringLiteral("clipActive"), item->clipActive);
@@ -2212,8 +2213,8 @@ void RemoteSceneController::updatePublishedMediaItem(
             media.insert(QStringLiteral("sourceY"), span.srcNy);
             media.insert(QStringLiteral("sourceWidth"), span.srcNw);
             media.insert(QStringLiteral("sourceHeight"), span.srcNh);
-            media.insert(QStringLiteral("width"), std::max(1, item->baseWidth));
-            media.insert(QStringLiteral("height"), std::max(1, item->baseHeight));
+            media.insert(QStringLiteral("width"), item->baseWidth);
+            media.insert(QStringLiteral("height"), item->baseHeight);
             media.insert(QStringLiteral("z"), item->z);
             media.insert(QStringLiteral("contentVisible"), item->contentVisible);
             media.insert(QStringLiteral("clipActive"), item->clipActive);
@@ -2364,8 +2365,12 @@ void RemoteSceneController::scheduleMedia(const std::shared_ptr<RemoteMediaItem>
 void RemoteSceneController::updateTimelineGeometry(
     const std::shared_ptr<RemoteMediaItem>& item, const SceneTimeline::ElementState& state)
 {
-    item->baseWidth = std::max(1, qRound(state.baseSize.width()));
-    item->baseHeight = std::max(1, qRound(state.baseSize.height()));
+    // Match CanvasMedia::applyElementFields exactly. The unscaled layout box
+    // comes from the final size and scale; rounding or trusting the redundant
+    // baseSize changes line breaks before the outer scene transform is applied.
+    const QSizeF layoutSize = state.size / state.scale;
+    item->baseWidth = layoutSize.width();
+    item->baseHeight = layoutSize.height();
     item->z = SceneTimeline::trackZ(item->timeline.trackIndex);
     item->contentVisible = state.visible;
     item->contentOpacity = state.opacity;
@@ -2376,13 +2381,14 @@ void RemoteSceneController::updateTimelineGeometry(
     item->volume = state.volume;
     item->text = state.text;
     item->fontFamily = state.fontFamily;
-    item->fontWeight = state.fontWeight;
-    item->fontPixelSize = state.fontPixelSize;
+    item->fontWeight = qRound(state.fontWeight);
+    item->fontPixelSize = qRound(state.fontPixelSize);
     item->fontItalic = state.italic;
     item->fontUnderline = state.underline;
     item->fontUppercase = state.uppercase;
     item->textColor = state.textColor.name(QColor::HexArgb);
-    item->textOutlineWidthPx = state.outlineWidthPercent * state.fontPixelSize / 100.0;
+    item->textOutlineWidthPx = TextRenderMetrics::outlinePixels(
+        state.outlineWidthPercent, qRound(state.fontPixelSize));
     item->textBorderColor = state.outlineColor.name(QColor::HexArgb);
     item->fitToTextEnabled = state.fitToText;
     item->highlightEnabled = state.highlightEnabled;

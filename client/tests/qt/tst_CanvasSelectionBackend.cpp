@@ -12,6 +12,7 @@
 #include "backend/runtime/RuntimeProfile.h"
 #include "frontend/ui/notifications/ToastNotificationSystem.h"
 #include <QFile>
+#include <QFontDatabase>
 #include <QFutureWatcher>
 #include <QImage>
 #include <QQmlComponent>
@@ -160,6 +161,7 @@ private slots:
     {
         // The complete page must use the same controls as production main().
         QQuickStyle::setStyle(QStringLiteral("Basic"));
+        QVERIFY(QFontDatabase::addApplicationFont(QStringLiteral(":/fonts/impact.ttf")) >= 0);
     }
 
     void appPrioritySettingCommitsOnlyOnSave()
@@ -2804,6 +2806,52 @@ private slots:
         QVERIFY(media->fitToTextEnabled());
         QVERIFY(media->baseSize().width() < 310);
         QVERIFY(media->baseSize().height() < 170);
+    }
+
+    void fitToTextMustRecoverEvenOneMissingLayoutPixel()
+    {
+        Fixture fixture;
+        QVERIFY(fixture.initialize());
+        CanvasMedia* media = fixture.document.addText({300, 200}, QStringLiteral("Texte"));
+        QVERIFY(media);
+        const QSize fitted = media->baseSize();
+
+        // A one-pixel text/style change is still significant at a line-break
+        // boundary. Refit a box just below the required enclosing size.
+        for (const QSize& missing : {QSize(1, 0), QSize(0, 1), QSize(1, 1)}) {
+            media->setBaseSize(fitted - missing);
+            const QPointF anchor = media->sceneRect().center();
+            media->fitTextToContent();
+            QCOMPARE(media->baseSize(), fitted);
+            QCOMPARE(media->sceneRect().center(), anchor);
+            media->setFitToTextEnabled(false);
+            QCOMPARE(media->baseSize(), fitted);
+            media->setFitToTextEnabled(true);
+            QCOMPARE(media->baseSize(), fitted);
+        }
+    }
+
+    void onePixelContentGrowthStillFitsAfterDisablingFit()
+    {
+        Fixture fixture;
+        QVERIFY(fixture.initialize());
+        CanvasMedia* media = fixture.document.addText({300, 200}, QStringLiteral("Texte"));
+        QVERIFY(media);
+        media->setFontPixelSize(22);
+        const QSize initial = media->baseSize();
+        // In bundled Impact at 22 px these measure 47.921875 and 48.09375:
+        // a subpixel advance change crosses the enclosing-pixel boundary.
+        media->setText(QStringLiteral("Textg"));
+        QCOMPARE(media->baseSize(), initial + QSize(1, 0));
+        media->setFitToTextEnabled(false);
+
+        auto* root = fixture.view.rootObject();
+        QQuickItem* delegate = nullptr;
+        QTRY_VERIFY((delegate = findQuickItemWithProperty(root, "currentMediaId", media->mediaId())));
+        auto* editor = delegate->findChild<QQuickTextEdit*>();
+        QVERIFY(editor);
+        QTRY_COMPARE(editor->text(), QStringLiteral("Textg"));
+        QTRY_COMPARE(editor->lineCount(), 1);
     }
 
     void uniformAndFreeResizeCommitToDocument()

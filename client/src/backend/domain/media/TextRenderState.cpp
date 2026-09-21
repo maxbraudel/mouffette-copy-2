@@ -1,11 +1,8 @@
 #include "backend/domain/media/TextRenderState.h"
 
 #include <QFontInfo>
-#include <QFontMetricsF>
 #include <QGuiApplication>
 #include <QScreen>
-#include <QTextLayout>
-#include <QTextOption>
 
 #include <algorithm>
 #include <cmath>
@@ -70,45 +67,20 @@ QSize fittedTextSize(const TextRenderState& state) {
     font.setKerning(true);
     font.setHintingPreference(QFont::PreferNoHinting);
 
-    QString normalized = state.text;
-    normalized.replace(QLatin1String("\r\n"), QLatin1String("\n"));
-    normalized.replace(QLatin1Char('\r'), QLatin1Char('\n'));
-
-    QTextOption option;
+    // QTextDocument is also the layout authority inside the live TextEdit.
+    // Reimplementing paragraphs with QTextLayout misses document semantics
+    // such as Unicode paragraph separators and fallback-font line metrics.
+    QTextDocument document;
+    configureTextDocumentLayout(document);
+    document.setDefaultFont(font);
+    QTextOption option = document.defaultTextOption();
     option.setWrapMode(QTextOption::NoWrap);
-    option.setUseDesignMetrics(true);
+    document.setDefaultTextOption(option);
+    document.setPlainText(state.text);
 
-    const QFontMetricsF metrics(font);
-    const qreal emptyLineHeight = std::ceil(
-        metrics.ascent() + metrics.descent() + metrics.leading());
-    qreal contentWidth = 0.0;
-    qreal contentHeight = 0.0;
-    const QStringList paragraphs = normalized.split(QLatin1Char('\n'));
-    for (const QString& paragraph : paragraphs) {
-        if (paragraph.isEmpty()) {
-            contentHeight += emptyLineHeight;
-            continue;
-        }
-        QTextLayout layout(paragraph, font);
-        layout.setTextOption(option);
-        layout.beginLayout();
-        qreal paragraphHeight = 0.0;
-        while (true) {
-            QTextLine line = layout.createLine();
-            if (!line.isValid()) break;
-            line.setLineWidth(1000000.0);
-            line.setPosition(QPointF(0.0, paragraphHeight));
-            contentWidth = std::max(contentWidth, line.naturalTextWidth());
-            paragraphHeight += std::ceil(
-                line.ascent() + line.descent() + line.leading());
-        }
-        layout.endLayout();
-        contentHeight += paragraphHeight > 0.0
-            ? paragraphHeight : emptyLineHeight;
-    }
-
-    contentWidth = std::max<qreal>(1.0, contentWidth);
-    contentHeight = std::max<qreal>(1.0, contentHeight);
+    const QSizeF documentSize = document.size();
+    const qreal contentWidth = std::max<qreal>(1.0, document.idealWidth());
+    const qreal contentHeight = std::max<qreal>(1.0, documentSize.height());
     const qreal outline = state.outlineWidthPixels > 0.0
         ? state.outlineWidthPixels
         : outlinePixels(state.outlineWidthPercent, state.fontPixelSize);

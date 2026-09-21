@@ -1,5 +1,6 @@
 #include "frontend/rendering/canvas/TextOutlineItem.h"
 #include "frontend/rendering/canvas/TextEditHelper.h"
+#include "backend/domain/media/TextRenderState.h"
 
 #include <QFontDatabase>
 #include <QDir>
@@ -9,7 +10,10 @@
 #include <QQmlEngine>
 #include <QQmlPropertyMap>
 #include <QQuickWindow>
+#include <QQuickTextDocument>
 #include <QSignalSpy>
+#include <QTextBlock>
+#include <QTextLayout>
 #include <QTest>
 #include <QtQuick/private/qquicktextedit_p.h>
 
@@ -33,6 +37,85 @@ private slots:
         qmlRegisterSingletonType(
             QUrl::fromLocalFile(TEST_SOURCE_DIR "/resources/qml/app/Theme.qml"),
             "Mouffette.App", 1, 0, "Theme");
+    }
+
+    void fittedGeometryMatchesLiveDocument_data()
+    {
+        QTest::addColumn<QString>("text");
+        QTest::addColumn<int>("fontPixels");
+        QTest::addColumn<bool>("italic");
+        QTest::addColumn<bool>("uppercase");
+        QTest::addColumn<qreal>("outlinePixels");
+        QTest::newRow("default") << QStringLiteral("Texte") << 22 << false << false << qreal(0);
+        QTest::newRow("trailing-spaces") << QStringLiteral("Texte   ") << 22 << false << false << qreal(0);
+        QTest::newRow("tabs") << QStringLiteral("Texte\t\tTexte\t") << 22 << false << false << qreal(0);
+        QTest::newRow("newlines") << QStringLiteral("A\r\nB\rC\n\n") << 22 << false << false << qreal(0);
+        QTest::newRow("line-separators") << QStringLiteral("A\u2028\u2028B") << 22 << false << false << qreal(0);
+        QTest::newRow("paragraph-separators") << QStringLiteral("A\u2029B\u2029") << 22 << false << false << qreal(0);
+        QTest::newRow("fallback") << QStringLiteral("e\u0301 \U0001f600\n\U0001f600") << 22 << false << false << qreal(0);
+        QTest::newRow("empty") << QString() << 22 << false << false << qreal(0);
+        QTest::newRow("styled") << QStringLiteral("Texte ffff jjjj\nÉcole") << 48 << true << true << qreal(3);
+        QTest::newRow("fractional-outline") << QStringLiteral("Texte") << 22 << false << false << qreal(0.22);
+        QTest::newRow("large") << QStringLiteral("Texte") << 127 << false << false << qreal(0);
+    }
+
+    void fittedGeometryMatchesLiveDocument()
+    {
+        QFETCH(QString, text);
+        QFETCH(int, fontPixels);
+        QFETCH(bool, italic);
+        QFETCH(bool, uppercase);
+        QFETCH(qreal, outlinePixels);
+        TextRenderState state;
+        state.text = text;
+        state.fontFamily = QStringLiteral("Impact");
+        state.fontPixelSize = fontPixels;
+        state.italic = italic;
+        state.uppercase = uppercase;
+        state.outlineWidthPixels = outlinePixels;
+        const QSize fitted = TextRenderMetrics::fittedTextSize(state);
+        const qreal inset = TextRenderMetrics::ContentMarginPx
+            + TextRenderMetrics::outlineSafetyPadding(outlinePixels);
+
+        QQmlEngine engine;
+        QQmlComponent component(&engine, QUrl::fromLocalFile(TEST_SOURCE_DIR "/resources/qml/TextItem.qml"));
+        QVERIFY2(component.isReady(), qPrintable(component.errorString()));
+        std::unique_ptr<QObject> object(component.createWithInitialProperties({
+            {"mediaWidth", fitted.width()}, {"mediaHeight", fitted.height()},
+            {"textContent", text}, {"fontPixelSize", fontPixels},
+            {"fontItalic", italic}, {"fontUppercase", uppercase},
+            {"outlineWidthPx", outlinePixels}, {"fitToTextEnabled", true}
+        }));
+        QVERIFY2(object, qPrintable(component.errorString()));
+        auto* outline = object->findChild<TextOutlineItem*>();
+        QVERIFY(outline);
+        auto* edit = qobject_cast<QQuickTextEdit*>(outline->source());
+        QVERIFY(edit);
+        QTextDocument* document = edit->textDocument()->textDocument();
+        QVERIFY(document);
+        const auto lineCount = [document] {
+            document->size();
+            int count = 0;
+            for (QTextBlock block = document->begin(); block.isValid(); block = block.next())
+                count += block.layout()->lineCount();
+            return count;
+        };
+        const int unwrappedLines = lineCount();
+        const qreal unwrappedHeight = edit->contentHeight();
+        QVERIFY2(unwrappedHeight <= fitted.height() - inset * 2,
+                 qPrintable(QStringLiteral("Fitted height %1 clips live height %2 with inset %3")
+                     .arg(fitted.height()).arg(unwrappedHeight).arg(inset)));
+        QVERIFY(edit->contentWidth() <= fitted.width() - inset * 2);
+        QCOMPARE(fitted.height(), qCeil(unwrappedHeight + inset * 2));
+        QCOMPARE(fitted.width(), qCeil(std::max<qreal>(24, edit->contentWidth()) + inset * 2));
+
+        // Disabling fit preserves the authored rectangle. It must not create
+        // any new line breaks in text that just fitted that same document.
+        object->setProperty("fitToTextEnabled", false);
+        QCOMPARE(lineCount(), unwrappedLines);
+        QCOMPARE(edit->contentHeight(), unwrappedHeight);
+        QCOMPARE(object->property("mediaWidth").toInt(), fitted.width());
+        QCOMPARE(object->property("mediaHeight").toInt(), fitted.height());
     }
 
     void borderFitsAtEveryAlignmentAndAlphaIsUniform()
