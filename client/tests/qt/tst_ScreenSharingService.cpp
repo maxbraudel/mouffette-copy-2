@@ -1,13 +1,23 @@
 #include "backend/screensharing/ScreenSharingService.h"
 #include "backend/screensharing/ScreenStreamCodec.h"
+#include "backend/domain/project/ProjectManager.h"
+#include "backend/managers/app/SettingsManager.h"
+#include "backend/managers/network/ConnectionManager.h"
 #include "backend/managers/system/SystemMonitor.h"
 #include "backend/network/RemoteSessionCoordinator.h"
 #include "backend/network/WebSocketClient.h"
+#include "backend/runtime/ApplicationRuntime.h"
+#include "frontend/rendering/canvas/QuickCanvasController.h"
+#include "frontend/rendering/canvas/QuickCanvasHost.h"
+#include "shared/rendering/MediaFrameSource.h"
 
+#include <QDir>
+#include <QFile>
 #include <QFutureWatcher>
 #include <QImage>
 #include <QProcess>
 #include <QRegularExpression>
+#include <QScopeGuard>
 #include <QSignalSpy>
 #include <QStandardPaths>
 #include <QTemporaryDir>
@@ -310,6 +320,121 @@ private slots:
         QTRY_COMPARE_WITH_TIMEOUT(frames.count(), 3, 4000);
         viewer.stop();
         owner.disconnect();
+        target.disconnect();
+    }
+
+    void viewerPreferenceControlsRuntimeSubscriptionAndCanvas() {
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        const auto previousProfile = RuntimeProfile::context();
+        const auto restoreProfile = qScopeGuard([previousProfile] {
+            RuntimeProfile::configure(previousProfile);
+        });
+        RuntimeProfileContext profile;
+        profile.rootPath = directory.filePath(QStringLiteral("viewer"));
+        profile.persistent = false;
+        QVERIFY(QDir().mkpath(profile.rootPath));
+        QVERIFY(QFile::setPermissions(profile.rootPath,
+            QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+        RuntimeProfile::configure(profile);
+        SettingsManager savedSettings;
+        QString error;
+        QVERIFY2(savedSettings.setScreenContentVisible(false, &error), qPrintable(error));
+
+        ApplicationRuntime runtime(profile);
+        runtime.getProjectManager()->stopAutomaticTimersForTesting();
+        runtime.setQmlWindowVisible(true);
+        runtime.setPointerInsideControlWindow(true);
+        auto* settings = runtime.getSettingsManager();
+        auto* owner = runtime.getWebSocketClient();
+        auto* connection = runtime.findChild<ConnectionManager*>();
+        QVERIFY(connection);
+        QVERIFY(!settings->getScreenContentVisible());
+        QVERIFY(!settings->getScreenSharingEnabled());
+        QSignalSpy publishingChanges(settings, &SettingsManager::screenSharingEnabledChanged);
+        QSignalSpy states(owner, &WebSocketClient::screenShareStateReceived);
+        WebSocketClient target(directory.filePath(QStringLiteral("publisher")), false);
+        configure(target, QStringLiteral("publisher"));
+        QSignalSpy grants(&target, &WebSocketClient::screenShareRequestReceived);
+        target.setScreenSharingEnabled(true);
+        connection->connectToServer(m_url);
+        target.connectToServer(m_url);
+        QTRY_COMPARE_WITH_TIMEOUT(runtime.displayClients().size(), 1, 4000);
+        runtime.activateClient(target.endpointId());
+        QTRY_VERIFY_WITH_TIMEOUT(runtime.activeProjectExists(), 4000);
+        QTRY_VERIFY_WITH_TIMEOUT(!owner->remoteSessionCoordinator()
+            ->outgoingForPeer(target.endpointId()).remoteSessionId.isEmpty(), 4000);
+        const QString session = owner->remoteSessionCoordinator()
+                                    ->outgoingForPeer(target.endpointId()).remoteSessionId;
+        QTRY_VERIFY_WITH_TIMEOUT(owner->canIssueSessionCommands(session)
+                                && target.canIssueSessionCommands(session)
+                                && target.isScreenChannelConnected(), 4000);
+        auto* canvas = qobject_cast<QuickCanvasHost*>(runtime.getActiveCanvas());
+        QVERIFY(canvas);
+        auto* controller = canvas->controller();
+        QVERIFY(controller);
+        QTRY_COMPARE_WITH_TIMEOUT(controller->screensModel().size(), 1, 4000);
+        auto* source = qobject_cast<RemoteVideoFrameSource*>(controller->screensModel()
+            .first().toMap().value(QStringLiteral("frameSource")).value<QObject*>());
+        QVERIFY(source);
+        QTest::qWait(100);
+        QVERIFY(grants.isEmpty());
+        QVERIFY(!source->hasFrame());
+        QVERIFY(controller->remoteScreenSharingStatus().isEmpty());
+
+        QVERIFY2(settings->setScreenContentVisible(true, &error), qPrintable(error));
+        QTRY_VERIFY_WITH_TIMEOUT(!grants.isEmpty()
+            && grants.last().first().toJsonObject().value("enabled").toBool(), 4000);
+        const auto grant = grants.last().first().toJsonObject();
+        QTRY_VERIFY_WITH_TIMEOUT(!states.isEmpty()
+            && states.last().first().toJsonObject().value("streamId") == grant.value("streamId"), 4000);
+        QImage image(640, 360, QImage::Format_RGBA8888);
+        image.fill(Qt::green);
+        ScreenStreamEncoder encoder(false);
+        const auto packets = encoder.encode(QVideoFrame(image), true, error);
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QCOMPARE(packets.size(), 1);
+        const auto packet = packets.first();
+        QVERIFY(target.sendScreenFrame(header(grant, packet, 1), packet.annexB));
+        QTRY_VERIFY_WITH_TIMEOUT(source->hasFrame(), 4000);
+        QCOMPARE(source->videoFrame().size(), image.size());
+        // A publisher restarting capture can leave its latest frame visible
+        // alongside a waiting status; hiding content must clear both.
+        QVERIFY(target.sendScreenShareStatus(session,
+            quint64(grant.value("generation").toDouble()), QStringLiteral("starting")));
+        QTRY_VERIFY_WITH_TIMEOUT(!controller->remoteScreenSharingStatus().isEmpty(), 4000);
+        QVERIFY(source->hasFrame());
+
+        QVERIFY2(settings->setScreenContentVisible(false, &error), qPrintable(error));
+        QVERIFY(!source->hasFrame());
+        QVERIFY(controller->remoteScreenSharingStatus().isEmpty());
+        QTRY_VERIFY_WITH_TIMEOUT(!grants.last().first().toJsonObject().value("enabled").toBool(), 4000);
+        QVERIFY(!target.sendScreenFrame(header(grant, packet, 2), packet.annexB));
+        QVERIFY(owner->canIssueSessionCommands(session));
+        QVERIFY(canvas->hasActiveScreens());
+
+        const int grantsWhileHidden = grants.count();
+        runtime.navigateToClients();
+        runtime.activateClient(target.endpointId());
+        QTRY_COMPARE_WITH_TIMEOUT(runtime.getActiveCanvas(), canvas, 4000);
+        QTest::qWait(100);
+        QVERIFY(!settings->getScreenContentVisible());
+        QCOMPARE(grants.count(), grantsWhileHidden);
+        QVERIFY(!source->hasFrame());
+        QVERIFY(controller->remoteScreenSharingStatus().isEmpty());
+
+        QVERIFY2(settings->setScreenContentVisible(true, &error), qPrintable(error));
+        QTRY_VERIFY_WITH_TIMEOUT(grants.count() > grantsWhileHidden
+            && grants.last().first().toJsonObject().value("enabled").toBool(), 4000);
+        const auto nextGrant = grants.last().first().toJsonObject();
+        QVERIFY(nextGrant.value("streamId") != grant.value("streamId"));
+        QTRY_VERIFY_WITH_TIMEOUT(states.last().first().toJsonObject().value("streamId")
+                                == nextGrant.value("streamId"), 4000);
+        QVERIFY(target.sendScreenFrame(header(nextGrant, packet, 1), packet.annexB));
+        QTRY_VERIFY_WITH_TIMEOUT(source->hasFrame(), 4000);
+        QVERIFY(!settings->getScreenSharingEnabled());
+        QVERIFY(publishingChanges.isEmpty());
+        runtime.handleApplicationAboutToQuit();
         target.disconnect();
     }
 };

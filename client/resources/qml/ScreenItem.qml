@@ -78,7 +78,7 @@ Rectangle {
         visible: !screenVideo.hasFrame && text.length > 0
         text: root.sharingStatus
         textFormat: Text.PlainText
-        color: AppStyle.Theme.canvasScreenText
+        color: AppStyle.Theme.mix(AppStyle.Theme.canvasScreenText, root.color, 0.5)
         font.pixelSize: 13 / root.safeViewScale
         horizontalAlignment: Text.AlignHCenter
         wrapMode: Text.Wrap

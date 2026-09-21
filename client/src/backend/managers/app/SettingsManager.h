@@ -22,6 +22,7 @@ public:
     bool getAutoUploadImportedMedia() const { return m_autoUploadImportedMedia; }
     bool getAppAlwaysOnTop() const { return m_appAlwaysOnTop; }
     bool getScreenSharingEnabled() const { return m_screenSharingEnabled; }
+    bool getScreenContentVisible() const { return m_screenContentVisible; }
     QString username() const { return m_username; }
     QByteArray profilePictureJpeg() const { return m_profilePictureJpeg; }
     bool commitSettings(const QString& serverUrl, bool autoUpload, bool alwaysOnTop,
@@ -35,11 +36,13 @@ public:
     void setServerUrl(const QString& url);
     void setAutoUploadImportedMedia(bool enabled);
     void setAppAlwaysOnTop(bool enabled);
+    bool setScreenContentVisible(bool visible, QString* error = nullptr);
 
 signals:
     void settingsChanged();
     void serverUrlChanged(const QString& newUrl);
     void screenSharingEnabledChanged(bool enabled);
+    void screenContentVisibleChanged(bool visible);
 
 private:
     // Settings values
@@ -48,6 +51,8 @@ private:
     bool m_appAlwaysOnTop = true;
     // Sharing the desktop always requires this instance's explicit opt-in.
     bool m_screenSharingEnabled = false;
+    // Viewer preference shared by all projects in this client profile.
+    bool m_screenContentVisible = true;
     QString m_username;
     QByteArray m_profilePictureJpeg;
 };

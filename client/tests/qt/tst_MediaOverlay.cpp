@@ -10,6 +10,7 @@
 #include <QQmlProperty>
 #include <QQuickItem>
 #include <QPointer>
+#include <QPromise>
 #include <QQuickWindow>
 #include <QScopeGuard>
 #include <QTemporaryDir>
@@ -26,6 +27,7 @@
 #include "frontend/qml/ClientWorkspaceViewModel.h"
 #include "frontend/qml/ApplicationController.h"
 #include "frontend/qml/MediaSettingsViewModel.h"
+#include "frontend/qml/QmlRuntime.h"
 #include "frontend/qml/TimelineController.h"
 #include "frontend/ui/notifications/ToastNotificationSystem.h"
 #include "backend/domain/canvas/CanvasDocument.h"
@@ -64,6 +66,7 @@ private slots:
     void activationDuringBootstrapKeepsMainWindowHidden();
     void mainWindowPointerActivity_data();
     void mainWindowPointerActivity();
+    void screenContentButtonTogglesAndPersists();
     void mediaActionPalette_data();
     void mediaActionPalette();
     void mediaRowsAndProgress();
@@ -1769,6 +1772,129 @@ void MediaOverlayTest::activationDuringBootstrapKeepsMainWindowHidden()
     bootstrap->hide();
 }
 
+void MediaOverlayTest::screenContentButtonTogglesAndPersists()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const auto previousProfile = RuntimeProfile::context();
+    const auto restoreProfile = qScopeGuard([&] { RuntimeProfile::configure(previousProfile); });
+    RuntimeProfileContext profile;
+    profile.rootPath = directory.filePath(QStringLiteral("runtime"));
+    profile.installationRootPath = directory.filePath(QStringLiteral("installation"));
+    RuntimeProfile::configure(profile);
+    QQmlEngine* previousEngine = QmlRuntime::engine();
+
+    // Recreate the real controller and shell to verify that the viewer's
+    // preference survives a new session without any project being open.
+    for (int session = 0; session < 2; ++session) {
+        QQmlEngine engine;
+        QmlRuntime::setEngine(&engine);
+        const auto restoreEngine = qScopeGuard([&] { QmlRuntime::setEngine(previousEngine); });
+        ApplicationController controller(profile,
+            {QStringLiteral("screen-content-test"), QStringLiteral("--server-url=ws://127.0.0.1:1")},
+            nullptr, [] {
+                QPromise<MediaBackendBootstrap::Result> promise;
+                promise.start();
+                promise.addResult({true, {}});
+                promise.finish();
+                return promise.future();
+            });
+        controller.start();
+        QTRY_VERIFY_WITH_TIMEOUT(controller.ready(), 8000);
+        QVERIFY(!controller.hasProject());
+        QCOMPARE(controller.screenContentVisible(), session == 0);
+        QQmlComponent component(&engine, QUrl(QStringLiteral(
+            "qrc:/qt/qml/Mouffette/App/resources/qml/app/Main.qml")));
+        std::unique_ptr<QObject> root(component.createWithInitialProperties({
+            {QStringLiteral("controller"), QVariant::fromValue(&controller)}
+        }));
+        QVERIFY2(root, qPrintable(component.errorString()));
+        auto* bootstrap = qobject_cast<QWindow*>(root->property("bootstrap").value<QObject*>());
+        QVERIFY(bootstrap);
+        bootstrap->hide();
+        auto* window = qobject_cast<QQuickWindow*>(root->property("window").value<QObject*>());
+        QVERIFY(window);
+        window->showNormal();
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        window->resize(1200, 650);
+        auto* button = findVisualItem(window->contentItem(), QStringLiteral("screenContentButton"));
+        auto* connection = findVisualItem(window->contentItem(), QStringLiteral("connectionButton"));
+        QVERIFY(button && connection);
+        QVERIFY(button->isVisible() && button->isEnabled());
+        QTRY_VERIFY(!button->property("iconOnly").toBool());
+        QCOMPARE(button->parentItem(), connection->parentItem());
+        QTRY_COMPARE(button->x(), connection->x() + connection->width()
+                     + button->parentItem()->property("spacing").toReal());
+        QCOMPARE(button->property("checked").toBool(), session == 0);
+        QCOMPARE(button->property("text").toString(), session == 0
+                     ? QStringLiteral("Hide screen content") : QStringLiteral("Show screen content"));
+        QCOMPARE(button->property("iconSource").toUrl().fileName(), session == 0
+                     ? QStringLiteral("visibility-off.svg") : QStringLiteral("visibility-on.svg"));
+
+        const QString artifactDir = qEnvironmentVariable("MOUFFETTE_OVERLAY_ARTIFACT_DIR");
+        const auto saveFrame = [&](const QString& name) {
+            if (artifactDir.isEmpty()) return;
+            QVERIFY(QDir().mkpath(artifactDir));
+            QSignalSpy frames(window, &QQuickWindow::frameSwapped);
+            window->update();
+            QTRY_VERIFY(frames.size() > 0);
+            const QString scale = qEnvironmentVariable("QT_SCALE_FACTOR");
+            const QString suffix = scale.isEmpty() ? QString() : "-scale-" + scale;
+            QVERIFY(window->grabWindow().save(QDir(artifactDir).filePath(name + suffix + ".png")));
+        };
+        if (session == 1) {
+            saveFrame(QStringLiteral("screen-content-hidden-restored"));
+            continue;
+        }
+        saveFrame(QStringLiteral("screen-content-visible"));
+        const qreal fullTextWidth = button->property("textWidth").toReal();
+        QSignalSpy changes(&controller, &ApplicationController::screenContentVisibleChanged);
+        const auto clickButton = [&] {
+            QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+                button->mapToScene({button->width() / 2, button->height() / 2}).toPoint());
+        };
+        clickButton();
+        QTRY_VERIFY(!controller.screenContentVisible());
+        QCOMPARE(changes.size(), 1);
+        QCOMPARE(button->property("text").toString(), QStringLiteral("Show screen content"));
+        QCOMPARE(button->property("iconSource").toUrl().fileName(), QStringLiteral("visibility-on.svg"));
+        QVERIFY(!button->property("checked").toBool());
+        QCOMPARE(button->property("textWidth").toReal(), fullTextWidth);
+        QCOMPARE(RuntimeProfile::readSettings().value(QStringLiteral("screenContentVisible")).toString(),
+                 QStringLiteral("false"));
+        saveFrame(QStringLiteral("screen-content-hidden"));
+
+        controller.showHistory();
+        QTRY_COMPARE(controller.applicationPage(), ApplicationController::ApplicationPage::History);
+        QVERIFY(button->isVisible());
+        QVERIFY(!controller.screenContentVisible());
+        controller.goBack();
+        QTRY_COMPARE(controller.applicationPage(), ApplicationController::ApplicationPage::Clients);
+        clickButton();
+        QTRY_VERIFY(controller.screenContentVisible());
+        QCOMPARE(changes.size(), 2);
+        QCOMPARE(button->property("text").toString(), QStringLiteral("Hide screen content"));
+        QCOMPARE(button->property("iconSource").toUrl().fileName(), QStringLiteral("visibility-off.svg"));
+        QVERIFY(button->property("checked").toBool());
+        QCOMPARE(button->property("textWidth").toReal(), fullTextWidth);
+        QCOMPARE(RuntimeProfile::readSettings().value(QStringLiteral("screenContentVisible")).toString(),
+                 QStringLiteral("true"));
+
+        // The compact button has the same action and persists the hidden state.
+        window->resize(480, 650);
+        QTRY_VERIFY(button->property("iconOnly").toBool());
+        QVERIFY(button->isVisible());
+        QTRY_VERIFY(button->mapToScene({0, 0}).x() >= 0);
+        QTRY_VERIFY(button->mapToScene({button->width(), 0}).x() <= window->width());
+        clickButton();
+        QTRY_VERIFY(!controller.screenContentVisible());
+        QCOMPARE(changes.size(), 3);
+        QCOMPARE(RuntimeProfile::readSettings().value(QStringLiteral("screenContentVisible")).toString(),
+                 QStringLiteral("false"));
+        saveFrame(QStringLiteral("screen-content-hidden-narrow"));
+    }
+}
+
 void MediaOverlayTest::mainWindowPointerActivity_data()
 {
     QTest::addColumn<bool>("startsAsTouchpad");
@@ -1955,7 +2081,7 @@ void MediaOverlayTest::toolbarToolsAndGlobalMemoryUsage()
     auto* topBar = findVisualItem(appWindow->contentItem(), QStringLiteral("topBar"));
     auto* localStatus = findVisualItem(appWindow->contentItem(), QStringLiteral("localConnectionStatus"));
     QVERIFY(topBar && localStatus);
-    appWindow->resize(900, 650);
+    appWindow->resize(1200, 650);
     appWindow->showNormal();
     QVERIFY(QTest::qWaitForWindowExposed(appWindow));
     appWindow->requestActivate();
@@ -1963,8 +2089,8 @@ void MediaOverlayTest::toolbarToolsAndGlobalMemoryUsage()
     // First exposure can fit the window to a smaller screen at high DPR.
     // Establish the same wide size used below and wait for layout before
     // recording its position and clicking the button.
-    appWindow->resize(900, 650);
-    QCOMPARE(appWindow->width(), 900);
+    appWindow->resize(1200, 650);
+    QCOMPARE(appWindow->width(), 1200);
     QTRY_COMPARE(localStatus->y(), 0.0);
     QTRY_COMPARE(memory->mapToScene({0, 0}).y(), topBar->mapToScene({0, 0}).y());
     const qreal toolbarY = memory->mapToScene({0, 0}).y();
@@ -1997,7 +2123,7 @@ void MediaOverlayTest::toolbarToolsAndGlobalMemoryUsage()
     QTRY_COMPARE(memory->mapToScene({0, 0}).y(), toolbarY);
     QTRY_VERIFY(memory->mapToScene({memory->width(), 0}).x() <= appWindow->width());
     QVERIFY(memory->isVisible() && memory->width() >= memory->implicitWidth());
-    for (const auto* name : {"connectionButton", "historyButton", "settingsButton"}) {
+    for (const auto* name : {"connectionButton", "screenContentButton", "historyButton", "settingsButton"}) {
         auto* button = findVisualItem(topBar, QString::fromLatin1(name));
         QVERIFY(button && button->isVisible());
         QCOMPARE(button->mapToScene({0, 0}).y(), toolbarY);
@@ -2018,7 +2144,7 @@ void MediaOverlayTest::toolbarToolsAndGlobalMemoryUsage()
     QTRY_VERIFY(memory->property("checked").toBool());
     QTest::keyClick(appWindow, Qt::Key_Escape);
     QTRY_VERIFY(!memory->property("checked").toBool());
-    appWindow->resize(900, 650);
+    appWindow->resize(1200, 650);
     QTRY_COMPARE(localStatus->y(), 0.0);
     QTRY_COMPARE(memory->mapToScene({0, 0}).y(), toolbarY);
 }

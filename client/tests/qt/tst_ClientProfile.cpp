@@ -295,6 +295,94 @@ private slots:
         QVERIFY(!reloaded.getScreenSharingEnabled());
     }
 
+    void screenContentVisibilityIsAtomicAndProfileScoped()
+    {
+        const auto previousContext = RuntimeProfile::context();
+        const auto restore = qScopeGuard([&] { RuntimeProfile::configure(previousContext); });
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        RuntimeProfileContext context;
+        context.rootPath = directory.filePath(QStringLiteral("primary"));
+        QVERIFY(QDir().mkpath(context.rootPath));
+        QVERIFY(QFile::setPermissions(context.rootPath,
+            QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+        RuntimeProfile::configure(context);
+        SettingsManager settings;
+        settings.loadSettings();
+        QVERIFY(settings.getScreenContentVisible());
+        QVERIFY(!settings.getScreenSharingEnabled());
+        QSignalSpy visibilityChanges(&settings, &SettingsManager::screenContentVisibleChanged);
+        QSignalSpy settingsChanges(&settings, &SettingsManager::settingsChanged);
+        QString error;
+        // The toolbar can be used before the settings dialog is ever saved.
+        QVERIFY2(settings.setScreenContentVisible(false, &error), qPrintable(error));
+        QVERIFY(!settings.getScreenContentVisible());
+        QVERIFY(!settings.getScreenSharingEnabled());
+        QCOMPARE(visibilityChanges.count(), 1);
+        QCOMPARE(visibilityChanges.at(0).at(0).toBool(), false);
+        QCOMPARE(settingsChanges.count(), 1);
+        QCOMPARE(RuntimeStorage::readSettings(RuntimeProfile::profileRoot(),
+            RuntimeProfile::settingsFilePath()).inspection.state, RuntimeStorage::State::Current);
+        SettingsManager reloaded;
+        reloaded.loadSettings();
+        QVERIFY(!reloaded.getScreenContentVisible());
+        QVERIFY(settings.setScreenContentVisible(false, &error));
+        QCOMPARE(visibilityChanges.count(), 1);
+        QCOMPARE(settingsChanges.count(), 1);
+
+        // Saving unrelated preferences and publishing consent keeps the viewer choice.
+        const QByteArray jpeg = makeJpeg();
+        QVERIFY2(settings.commitSettings(QStringLiteral("ws://localhost:8080"), true, false,
+            QStringLiteral("Max"), jpeg, true, &error), qPrintable(error));
+        QVERIFY(settings.getScreenSharingEnabled());
+        settings.saveSettings();
+        reloaded.loadSettings();
+        QVERIFY(!reloaded.getScreenContentVisible());
+        QVERIFY(reloaded.getScreenSharingEnabled());
+        const auto saved = RuntimeProfile::readSettings();
+
+        // An unwritable destination must not change memory or announce success.
+        const QString originalRoot = context.rootPath;
+        const QString blocker = directory.filePath(QStringLiteral("blocked"));
+        QFile file(blocker);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        file.write("blocked");
+        file.close();
+        context.rootPath = blocker;
+        RuntimeProfile::configure(context);
+        const int savedChanges = settingsChanges.count();
+        QVERIFY(!settings.setScreenContentVisible(true, &error));
+        QVERIFY(!error.isEmpty());
+        QVERIFY(!settings.getScreenContentVisible());
+        QCOMPARE(visibilityChanges.count(), 1);
+        QCOMPARE(settingsChanges.count(), savedChanges);
+
+        context.rootPath = directory.filePath(QStringLiteral("secondary"));
+        RuntimeProfile::configure(context);
+        reloaded.loadSettings();
+        QVERIFY(reloaded.getScreenContentVisible());
+        QVERIFY(!reloaded.getScreenSharingEnabled());
+        context.rootPath = originalRoot;
+        RuntimeProfile::configure(context);
+        QCOMPARE(RuntimeProfile::readSettings(), saved);
+        reloaded.loadSettings();
+        QVERIFY(!reloaded.getScreenContentVisible());
+
+        QVERIFY2(settings.setScreenContentVisible(true, &error), qPrintable(error));
+        QCOMPARE(visibilityChanges.count(), 2);
+        QCOMPARE(visibilityChanges.at(1).at(0).toBool(), true);
+        auto updated = RuntimeProfile::readSettings();
+        QVERIFY(updated.take(QStringLiteral("screenContentVisible")).toBool());
+        auto unchanged = saved;
+        unchanged.remove(QStringLiteral("screenContentVisible"));
+        QCOMPARE(updated, unchanged);
+        reloaded.loadSettings();
+        QVERIFY(reloaded.getScreenContentVisible());
+        QVERIFY(reloaded.getScreenSharingEnabled());
+        QCOMPARE(reloaded.username(), QStringLiteral("Max"));
+        QCOMPARE(reloaded.profilePictureJpeg(), jpeg);
+    }
+
     void peerCacheIsTransientAndIgnoresStalePictures()
     {
         ClientProfileCache cache;

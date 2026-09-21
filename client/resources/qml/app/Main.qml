@@ -141,8 +141,9 @@ QtObject {
                     x: topBar.width - width
                     spacing: topBar.gap
                     readonly property real textWidth: connectionButton.textWidth
-                        + historyButton.textWidth + settingsButton.textWidth + memoryButton.textWidth
-                        + spacing * 3 + (deleteButton.visible ? deleteButton.textWidth + spacing : 0)
+                        + screenContentButton.textWidth + historyButton.textWidth
+                        + settingsButton.textWidth + memoryButton.textWidth
+                        + spacing * 4 + (deleteButton.visible ? deleteButton.textWidth + spacing : 0)
 
                     AppButton {
                         id: connectionButton
@@ -152,6 +153,18 @@ QtObject {
                         iconSource: "qrc:/icons/icons/power.svg"
                         iconOnly: topBar.compactButtons
                         onClicked: root.controller.setConnectionEnabled(!root.controller.connectionEnabled)
+                    }
+                    AppButton {
+                        id: screenContentButton
+                        objectName: "screenContentButton"
+                        text: root.controller.screenContentVisible ? "Hide screen content" : "Show screen content"
+                        textVariants: ["Hide screen content", "Show screen content"]
+                        iconSource: root.controller.screenContentVisible
+                            ? "qrc:/icons/icons/visibility-off.svg" : "qrc:/icons/icons/visibility-on.svg"
+                        iconOnly: topBar.compactButtons
+                        checked: root.controller.screenContentVisible
+                        enabled: root.controller.ready && !root.controller.clearingStorage
+                        onClicked: root.controller.setScreenContentVisible(!root.controller.screenContentVisible)
                     }
                     AppButton {
                         id: historyButton

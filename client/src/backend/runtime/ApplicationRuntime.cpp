@@ -423,13 +423,18 @@ ApplicationRuntime::ApplicationRuntime(const RuntimeProfileContext& runtimeProfi
             this, &ApplicationRuntime::screenSharingStatusChanged);
     connect(m_settingsManager, &SettingsManager::screenSharingEnabledChanged,
             m_screenSharing, &ScreenSharingService::setSharingEnabled);
+    connect(m_settingsManager, &SettingsManager::screenContentVisibleChanged,
+            this, &ApplicationRuntime::refreshScreenSharing);
     connect(m_screenSharing, &ScreenSharingService::frameReady, this,
             [this](const QString& endpoint, int screenId, const QVideoFrame& frame) {
         if (auto* canvas = canvasForEndpointId(endpoint)) canvas->setRemoteScreenFrame(screenId, frame);
     });
     connect(m_screenSharing, &ScreenSharingService::framesCleared, this,
             [this](const QString& endpoint) {
-        if (auto* canvas = canvasForEndpointId(endpoint)) canvas->clearRemoteScreenFrames();
+        if (auto* canvas = canvasForEndpointId(endpoint)) {
+            canvas->clearRemoteScreenFrames();
+            canvas->setRemoteScreenSharingStatus({});
+        }
     });
     connect(m_screenSharing, &ScreenSharingService::remoteStatusChanged, this,
             [this](const QString& endpoint, const QString& status) {
@@ -4206,7 +4211,8 @@ void ApplicationRuntime::refreshScreenSharing()
     m_screenSharing->setSuspended(m_nativeSystemSuspended
         || QGuiApplication::applicationState() == Qt::ApplicationSuspended);
     m_screenSharing->setViewedEndpoint(m_qmlWindowVisible && m_applicationPage == 1
-        && !m_applicationSuspended ? m_activeWorkspaceEndpointId : QString());
+        && !m_applicationSuspended && m_settingsManager->getScreenContentVisible()
+            ? m_activeWorkspaceEndpointId : QString());
 }
 
 void ApplicationRuntime::refreshRemoteCursorStreaming()

@@ -71,6 +71,12 @@ bool ApplicationController::connectionEnabled() const
     return m_runtime && !m_runtime->isUserDisconnected();
 }
 
+bool ApplicationController::screenContentVisible() const
+{
+    const auto* settings = m_runtime ? m_runtime->getSettingsManager() : nullptr;
+    return !settings || settings->getScreenContentVisible();
+}
+
 QString ApplicationController::localConnectionDetail() const { return m_runtime ? m_runtime->localConnectionDetail() : QString(); }
 QString ApplicationController::remoteConnectionDetail() const { return m_runtime ? m_runtime->remoteConnectionDetail() : QString(); }
 QString ApplicationController::clientConnectionDetail(const QString& endpoint) const { return m_runtime ? m_runtime->clientConnectionDetail(endpoint) : QString(); }
@@ -359,6 +365,8 @@ void ApplicationController::initializeBackend()
     m_runtime = std::make_unique<ApplicationRuntime>(m_runtimeProfile);
     connect(m_runtime.get(), &ApplicationRuntime::screenSharingStatusChanged,
             this, &ApplicationController::screenSharingStatusChanged);
+    connect(m_runtime->getSettingsManager(), &SettingsManager::screenContentVisibleChanged,
+            this, &ApplicationController::screenContentVisibleChanged);
     auto* profiles = m_runtime->profileCache();
     profiles->setLocalPicture(QStringLiteral("saved"), m_runtime->getSettingsManager()->profilePictureJpeg());
     QmlRuntime::engine()->addImageProvider(QStringLiteral("profiles"), new ProfilePictureProvider(profiles));
@@ -411,6 +419,7 @@ void ApplicationController::initializeBackend()
 
     m_ready = true;
     emit settingsChanged();
+    emit screenContentVisibleChanged();
     emit screenSharingStatusChanged();
     emit readyChanged();
     emit bootstrapChanged();
@@ -491,6 +500,19 @@ void ApplicationController::toggleConnection()
 void ApplicationController::setConnectionEnabled(bool enabled)
 {
     if (m_runtime) m_runtime->setConnectionEnabled(enabled);
+}
+
+void ApplicationController::setScreenContentVisible(bool visible)
+{
+    if (!m_runtime || m_clearingStorage) return;
+    QString error;
+    if (!m_runtime->getSettingsManager()->setScreenContentVisible(visible, &error)) {
+        NotificationRequest request;
+        request.severity = NotificationSeverity::Error;
+        request.category = QStringLiteral("Settings");
+        request.message = tr("Could not save the screen content preference: %1").arg(error);
+        m_runtime->getNotificationCenter()->publish(request);
+    }
 }
 
 void ApplicationController::requestDeleteProject()

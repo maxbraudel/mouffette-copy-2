@@ -12,6 +12,15 @@ The setting is off by default and belongs to the local runtime profile. Cancel
 does not change it. It authorizes all screens for owners of an authenticated
 active remote session. It does not enable audio capture or remote input.
 
+The top-bar **Hide screen content / Show screen content** button controls the
+viewer's desktop preview. Viewing is on by default. The choice is saved in the
+viewer's runtime profile and applies to all projects and remote clients. The
+primary instance remembers it across restarts; temporary instances keep it for
+their session. Hiding immediately clears the screen frames and unsubscribes from the
+stream; showing subscribes again to the visible canvas. Monitor outlines, scene
+media and the remote cursor remain available. This preference does not change
+either client's permission to share its own screens.
+
 macOS also requires the operating system's Screen Recording permission for the
 application. The checkbox only authorizes sharing within Mouffette; it does not
 grant this separate OS permission. Permission denial is distinguished from other
@@ -46,7 +55,8 @@ does not provide that continuity. This behavior is confirmed by
 Capture continues when the publisher's control window is hidden; native system
 lock/sleep suspends sharing.
 
-Only the visible canvas subscribes. Leaving it, hiding the viewer window,
+Only the visible canvas with screen content enabled subscribes. Leaving it,
+hiding screen content, hiding the viewer window,
 disabling consent, losing the session, or disconnecting removes its frames.
 Capture is created only while a permitted subscriber exists. Multiple viewers
 reuse the same capture and encoder for each screen. A static desktop supplies

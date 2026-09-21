@@ -41,6 +41,7 @@ class ApplicationController final : public QObject
     Q_PROPERTY(QObject* activeWorkspace READ activeWorkspace NOTIFY activeWorkspaceChanged)
 
     Q_PROPERTY(bool connectionEnabled READ connectionEnabled NOTIFY presentationChanged)
+    Q_PROPERTY(bool screenContentVisible READ screenContentVisible NOTIFY screenContentVisibleChanged)
     Q_PROPERTY(QString localStatusText READ localStatusText NOTIFY presentationChanged)
     Q_PROPERTY(ConnectionState localConnectionState READ localConnectionState NOTIFY presentationChanged)
     Q_PROPERTY(QString remoteDisplayName READ remoteDisplayName NOTIFY presentationChanged)
@@ -106,6 +107,7 @@ public:
     QObject* activeWorkspace() const;
 
     bool connectionEnabled() const;
+    bool screenContentVisible() const;
     QString localStatusText() const;
     Q_INVOKABLE QString localConnectionDetail() const;
     Q_INVOKABLE QString remoteConnectionDetail() const;
@@ -158,6 +160,7 @@ public:
     Q_INVOKABLE void showHistory();
     Q_INVOKABLE void toggleConnection();
     Q_INVOKABLE void setConnectionEnabled(bool enabled);
+    Q_INVOKABLE void setScreenContentVisible(bool visible);
     Q_INVOKABLE void requestDeleteProject();
     Q_INVOKABLE void requestClearHistory();
     Q_INVOKABLE void acceptDialog();
@@ -182,6 +185,7 @@ signals:
     void applicationPageChanged();
     void activeWorkspaceChanged();
     void presentationChanged();
+    void screenContentVisibleChanged();
     void settingsChanged();
     void screenSharingStatusChanged();
     void profilesChanged();
