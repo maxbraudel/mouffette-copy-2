@@ -682,10 +682,10 @@ void CanvasMedia::initializeVideoRuntime()
     m_player = new ResidentVideoPlayer(this);
     connect(m_player, &ResidentVideoPlayer::preparationChanged,
             this, &CanvasMedia::refreshContentAvailability);
-    connect(m_player, &ResidentVideoPlayer::videoOutputChanged, this, [this] {
-        m_contentReady = false;
-        refreshContentAvailability();
-    });
+    // A view rebind changes only the presentation sink. Keep the initial
+    // audiovisual admission across it, just as across an ordinary seek.
+    connect(m_player, &ResidentVideoPlayer::videoOutputChanged,
+            this, &CanvasMedia::refreshContentAvailability);
     connect(m_player, &ResidentVideoPlayer::playbackStateChanged,
             this, &CanvasMedia::runtimeStateChanged);
     connect(m_player, &ResidentVideoPlayer::positionChanged,

@@ -274,7 +274,7 @@ void CanvasDocument::adoptMedia(CanvasMedia* media)
         emit mediaSourceInvalidated(id, reason);
         QMetaObject::invokeMethod(this, [this, id, invalidated] {
             if (invalidated && mediaById(id) == invalidated)
-                removeMediaInternal(id, RemovalReason::InvalidatedSource);
+                removeInvalidatedMedia(id);
         }, Qt::QueuedConnection);
     });
     if (m_fileManager && media->residencyReady() && !media->fileId().isEmpty()) {
@@ -347,6 +347,11 @@ CanvasMedia* CanvasDocument::addPreparedFile(
 bool CanvasDocument::removeMedia(const QString& mediaId)
 {
     return removeMediaInternal(mediaId, RemovalReason::UserEdit);
+}
+
+bool CanvasDocument::removeInvalidatedMedia(const QString& mediaId)
+{
+    return removeMediaInternal(mediaId, RemovalReason::InvalidatedSource);
 }
 
 bool CanvasDocument::removeMediaInternal(const QString& mediaId, RemovalReason reason)

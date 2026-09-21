@@ -29,6 +29,7 @@ public:
 
     virtual CanvasDocument* document() const = 0;
     virtual QList<CanvasMedia*> enumerateMediaItems() const = 0;
+    // Trusted source-file invalidation; local playback and editing locks survive.
     virtual void deleteMediaItemCanonical(CanvasMedia* mediaItem) = 0;
 
     virtual void setActiveProjectId(const QString& projectId) = 0;
@@ -54,7 +55,7 @@ public:
     virtual bool projectEditingEnabled() const = 0;
     // Remote-session cleanup preserves local test preparation and playback.
     virtual void handleRemoteConnectionLost() = 0;
-    // Invalid local sources stop both local tests and remote playback.
+    // Explicit whole-graph stop for remote invalidation, project removal or shutdown.
     virtual void stopScenesForSourceInvalidation() = 0;
 
     virtual Tool currentTool() const = 0;

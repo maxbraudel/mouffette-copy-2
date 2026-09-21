@@ -53,6 +53,9 @@ public:
     QString queueFileImport(const QString& sourcePath, const QPointF& center);
     bool hasPendingImports() const { return !m_pendingImports.isEmpty(); }
     bool removeMedia(const QString& mediaId);
+    // Trusted source-file cleanup; local playback can remove an invalidated
+    // occurrence while ordinary user removals remain locked.
+    bool removeInvalidatedMedia(const QString& mediaId);
     void clear();
     CanvasMedia* mediaForTimelineClip(const QString& clipId) const;
     CanvasMedia* adjacentTimelineClip(const QString& clipId, int edge) const;

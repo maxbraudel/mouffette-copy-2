@@ -1060,6 +1060,52 @@ private slots:
         QVERIFY(!document.removeMedia(retained->mediaId()));
     }
 
+    void canonicalSourceRemovalKeepsLocalPlaybackRunning()
+    {
+        QTemporaryDir directory;
+        const QString path = directory.filePath(QStringLiteral("removed-during-playback.png"));
+        QImage image(96, 54, QImage::Format_ARGB32);
+        image.fill(Qt::red);
+        QVERIFY(image.save(path));
+        std::unique_ptr<QuickCanvasHost> host(QuickCanvasHost::create());
+        QVERIFY(host);
+        host->setProjectEditingEnabled(true);
+        auto* document = host->document();
+        auto* retained = document->addText({}, QStringLiteral("Keep playing"));
+        auto* media = document->addPreparedFile(path, image.size(), false, {});
+        QVERIFY(retained && media);
+        const QString removedId = media->mediaId();
+        const QString retainedId = retained->mediaId();
+        const QString owner = media->residencyOwnerId();
+        QTRY_VERIFY(media->contentReady());
+        host->timelinePlay();
+        QTRY_VERIFY(host->timelinePositionMs() > 50);
+        QVERIFY(host->timelinePlaying());
+        QVERIFY(document->editsLocked());
+        QVERIFY(!document->removeMedia(removedId));
+        QSignalSpy locks(document, &CanvasDocument::editsLockedChanged);
+        QSignalSpy removed(document, &CanvasDocument::mediaRemoved);
+        const qreal positionBeforeRemoval = host->timelinePositionMs();
+
+        // ApplicationRuntime and UploadEventHandler use this canonical path
+        // after their file watcher detects a removed or replaced source.
+        QVERIFY(QFile::remove(path));
+        host->deleteMediaItemCanonical(media);
+        QVERIFY(!document->mediaById(removedId));
+        QCOMPARE(removed.count(), 1);
+        QCOMPARE(removed.first().first().toString(), removedId);
+        QVERIFY(!MediaResidencyManager::instance().ready(owner));
+        QCOMPARE(document->mediaById(retainedId), retained);
+        QVERIFY(host->testSceneLaunched());
+        QVERIFY(host->timelinePlaying());
+        QVERIFY(document->editsLocked());
+        QCOMPARE(locks.count(), 0);
+        QTRY_VERIFY(host->timelinePositionMs() > positionBeforeRemoval + 50);
+        QVERIFY(!document->removeMedia(retainedId));
+        host->timelinePause();
+        QVERIFY(!document->editsLocked());
+    }
+
     void textCreationSizeFollowsCameraSquare_data()
     {
         QTest::addColumn<int>("percent");

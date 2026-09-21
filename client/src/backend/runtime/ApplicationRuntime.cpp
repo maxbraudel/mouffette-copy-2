@@ -1457,11 +1457,11 @@ void ApplicationRuntime::removeInvalidMediaItems(
         }
     }
 
-    // Stop every affected graph before deleting the first item. The canvas
-    // method also sends the remote stop when a remote run is active.
+    // Remote graphs are immutable, so stop them before removing a source.
+    // Local preview can retire only the invalid occurrences and keep its clock.
     for (auto it = itemsByProject.cbegin(); it != itemsByProject.cend(); ++it) {
         if (ClientWorkspace* session = m_workspaceManager->findWorkspace(it.key());
-            session && session->canvas) {
+            session && session->canvas && !session->canvas->testSceneLaunched()) {
             session->canvas->stopScenesForSourceInvalidation();
         }
     }

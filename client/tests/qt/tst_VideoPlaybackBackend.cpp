@@ -40,13 +40,10 @@ private slots:
         QuickCanvasController controller(&document);
         QString error;
         QVERIFY2(controller.initialize(&error), qPrintable(error));
-        RemoteVideoFrameSource preview;
-        QImage image(160, 90, QImage::Format_RGB32); image.fill(Qt::cyan);
-        preview.setFrame(image);
         QQuickView view;
         view.resize(160, 90);
         view.setInitialProperties({{"mediaWidth", 160}, {"mediaHeight", 90},
-            {"previewFrameSource", QVariant::fromValue<QObject*>(&preview)}, {"residencyReady", false}});
+            {"residencyReady", false}});
         view.setSource(QUrl("qrc:/qt/qml/Mouffette/App/resources/qml/VideoItem.qml"));
         QCOMPARE(view.status(), QQuickView::Ready);
         view.show(); QVERIFY(QTest::qWaitForWindowExposed(&view));
@@ -54,20 +51,16 @@ private slots:
         QVERIFY(!item->property("contentReady").toBool());
         QVERIFY(!item->property("residencyReady").toBool());
         QVERIFY(!item->property("cppMediaPlayer").value<QObject*>());
-        auto* loader = item->findChild<QQuickItem*>("videoImportPreview"); QVERIFY(loader);
-        QVERIFY(!loader->property("active").toBool());
         auto* skeleton = item->findChild<QQuickItem*>("mediaLoadingSkeleton"); QVERIFY(skeleton);
         QTRY_VERIFY(skeleton->isVisible());
         QTRY_VERIFY(!view.grabWindow().isNull());
         RemoteVideoFrameSource remote;
+        QImage image(160, 90, QImage::Format_RGB32); image.fill(Qt::cyan);
         remote.setFrame(image);
         item->setProperty("remoteFrameSource", QVariant::fromValue<QObject*>(&remote));
         QTRY_VERIFY(!item->property("contentReady").toBool());
-        QVERIFY(!loader->property("active").toBool());
         item->setProperty("remoteFrameSource", QVariant::fromValue<QObject*>(nullptr));
         QVERIFY(!item->property("contentReady").toBool());
-        preview.clear();
-        QTRY_VERIFY(!item->property("contentReady").toBool());
     }
     void init()
     {
@@ -103,6 +96,12 @@ private slots:
         QVERIFY(!video->player()->preparedAt(1700));
         QVERIFY(video->contentReady());
         QCOMPARE(changes.count(), 0); // A seek does not re-skeletonize the filmstrip.
+        QVideoSink replacement;
+        video->player()->setVideoSink(&replacement);
+        QVERIFY(video->contentReady()); // A view rebind does not reset import readiness.
+        QCOMPARE(video->loadingState(), QStringLiteral("ready"));
+        video->player()->setVideoSink(video->videoSink());
+        QVERIFY(video->contentReady());
         video->setResidencySuspended(true);
         QVERIFY(!video->contentReady());
         QVERIFY(!changes.isEmpty());
@@ -110,6 +109,30 @@ private slots:
         QVERIFY(!video->contentReady()); // Retired results cannot reveal the old asset.
         video->setResidencySuspended(false);
         QTRY_VERIFY_WITH_TIMEOUT(video->contentReady(), 10000);
+    }
+
+    void pausedSeekDuringImportPreparesTheMappedSourcePosition()
+    {
+        std::unique_ptr<QuickCanvasHost> host(QuickCanvasHost::create());
+        QVERIFY(host); host->setProjectEditingEnabled(true);
+        auto* video = host->document()->addPreparedFile(videoFixture(), {160, 90}, true, {});
+        QVERIFY(video);
+        auto track = video->timelineTrack();
+        track.clip.startSlot = 90;
+        track.clip.sourceStartSlot = 30;
+        video->setTimelineTrack(track);
+        auto& decoder = DecodeScheduler::instance();
+        decoder.holdCompletionsForTesting(video->player(), true);
+        const auto release = qScopeGuard([&] { decoder.holdCompletionsForTesting(video->player(), false); });
+        host->timelineSeek(6000); // Timeline 6 s maps to source 4 s.
+        QCOMPARE(video->positionMs(), qint64(4000));
+        QTRY_VERIFY_WITH_TIMEOUT(video->residencyReady() && video->player()->asset(), 10000);
+        QCOMPARE(video->player()->position(), qint64(4000));
+        QVERIFY(!video->contentReady());
+        decoder.holdCompletionsForTesting(video->player(), false);
+        QTRY_VERIFY_WITH_TIMEOUT(video->contentReady(), 5000);
+        QVERIFY(video->player()->preparedAt(4000));
+        QVERIFY(!host->timelinePlaying() && !video->isPlaying());
     }
 
     void localClockRunsWhileVideoIsPreparing_data()

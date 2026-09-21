@@ -251,10 +251,10 @@ QSGNode* TimelineThumbnailItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNod
         auto* imageChild = cell->firstChild();
         const auto paintImage = [&](qreal imageLeft, qreal quadLeft, qreal quadRight) {
             auto* quad = static_cast<QSGImageNode*>(imageChild);
+            const bool created = !quad;
             if (!quad) {
                 quad = window()->createImageNode();
                 quad->setFiltering(QSGTexture::Linear);
-                cell->appendChildNode(quad);
             }
             quad->setTexture(node->textures.value(key).get());
             // Keep all UVs inside this image, including when it shares an atlas.
@@ -262,6 +262,9 @@ QSGNode* TimelineThumbnailItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNod
             const qreal sourceRight = std::clamp((quadRight - imageLeft) / scale, sourceLeft, qreal(image.width()));
             quad->setSourceRect({sourceLeft, 0, sourceRight - sourceLeft, qreal(image.height())});
             quad->setRect({quadLeft, 0, quadRight - quadLeft, height()});
+            // The software renderer inspects newly attached nodes immediately.
+            // Publish a complete image node, including its non-null texture.
+            if (created) cell->appendChildNode(quad);
             imageChild = quad->nextSibling();
         };
         // Zoom changes the source-time cell width, never the image's vertical

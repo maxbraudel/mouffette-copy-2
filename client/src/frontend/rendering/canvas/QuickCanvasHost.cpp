@@ -195,7 +195,8 @@ QList<CanvasMedia*> QuickCanvasHost::enumerateMediaItems() const
 
 void QuickCanvasHost::deleteMediaItemCanonical(CanvasMedia* mediaItem)
 {
-    if (mediaItem) m_document->removeMedia(mediaItem->mediaId());
+    if (mediaItem && m_document->mediaById(mediaItem->mediaId()) == mediaItem)
+        m_document->removeInvalidatedMedia(mediaItem->mediaId());
 }
 
 void QuickCanvasHost::setActiveProjectId(const QString& id)
@@ -1267,6 +1268,16 @@ void QuickCanvasHost::applyTimeline(qreal positionMs, bool playing, bool forceSe
         media->player()->setScrubbing(m_timelineScrubbing);
         auto* player = media->player();
         const auto track = m_document->timelinePresentationTrack(media);
+        if (!player->asset()) {
+            // Metadata already defines the clip/source mapping. Remember a
+            // paused seek before residency instead of evaluating against the
+            // unloaded player's zero duration and priming the wrong frame.
+            media->setPositionMs(timelineVideoPreparationSourceMs(
+                track, time, media->sourceDurationMs(), m_document->timelineSettings()));
+            player->pause();
+            if (auto* audio = player->audioOutput()) audio->setMuted(true);
+            continue;
+        }
         player->prepareEntry(timelineVideoPreparationSourceMs(track, 0, player->duration(), m_document->timelineSettings()));
         const auto sample = SceneTimeline::evaluateVideo(track, time, player->duration(), m_document->timelineSettings());
         if (!sample.clipActive) {
