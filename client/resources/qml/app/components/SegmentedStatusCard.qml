@@ -38,7 +38,9 @@ Item {
     property url profilePictureSource: ""
     property var profileController: null
     property string profileEndpointId: ""
-    readonly property real profilePictureWidth: profilePictureVisible ? 24 + 8 : 0
+    // Leave room above and below the avatar so the card border cannot cover it.
+    readonly property real profilePictureSize: Math.max(0, height - 4)
+    readonly property real profilePictureWidth: profilePictureVisible ? profilePictureSize + 8 : 0
     readonly property real primaryWidth: Math.max(20, primaryLabel.implicitWidth
                                                  + profilePictureWidth + Theme.segmentPadding * 2)
     readonly property real statusWidth: statusMetrics.maximumWidth + Theme.segmentPadding * 2
@@ -129,8 +131,8 @@ Item {
                 anchors.left: parent.left
                 anchors.leftMargin: Theme.segmentPadding
                 anchors.verticalCenter: parent.verticalCenter
-                width: 24
-                height: 24
+                width: root.profilePictureSize
+                height: width
                 source: root.profilePictureSource
                 controller: root.profileController
                 endpointId: root.profileEndpointId

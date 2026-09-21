@@ -112,6 +112,8 @@ QtObject {
                     y: topBar.stacked ? Theme.controlHeight + topBar.gap : 0
                     width: topBar.stacked ? topBar.width : implicitWidth
                     primaryText: "You"
+                    profilePictureVisible: true
+                    profilePictureSource: root.controller.settingsProfilePictureSource
                     statusText: root.controller.localStatusText
                     detailProvider: () => root.controller.localConnectionDetail()
                     statusKind: root.controller.localConnectionState
