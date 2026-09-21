@@ -1,0 +1,276 @@
+#include "backend/screensharing/MacScreenCapture.h"
+#include "backend/screensharing/ScreenCaptureVideoBuffer.h"
+#include "backend/screensharing/ScreenStreamCodec.h"
+
+#include <QGuiApplication>
+#include <QScreen>
+#include <QtGui/qscreen_platform.h>
+#include <algorithm>
+#include <atomic>
+#include <utility>
+
+#import <AppKit/AppKit.h>
+#import <CoreMedia/CoreMedia.h>
+#import <CoreVideo/CoreVideo.h>
+#import <ScreenCaptureKit/ScreenCaptureKit.h>
+
+// AVFoundation (transitively imported by ScreenCaptureKit) and FFmpeg both
+// declare AVMediaType; isolate FFmpeg's otherwise unused enum in this TU.
+#define AVMediaType FFmpegAVMediaType
+extern "C" {
+#include <libavutil/buffer.h>
+#include <libavutil/frame.h>
+#include <libavutil/pixfmt.h>
+}
+#undef AVMediaType
+
+namespace {
+class SurfaceBuffer final : public ScreenCaptureVideoBuffer {
+public:
+    explicit SurfaceBuffer(CVPixelBufferRef surface) : m_surface(CVPixelBufferRetain(surface)) {}
+    ~SurfaceBuffer() override { unmap(); CVPixelBufferRelease(m_surface); }
+    QVideoFrameFormat format() const override {
+        QVideoFrameFormat result(QSize(int(CVPixelBufferGetWidth(m_surface)), int(CVPixelBufferGetHeight(m_surface))),
+            QVideoFrameFormat::Format_NV12);
+        result.setColorSpace(QVideoFrameFormat::ColorSpace_BT709);
+        result.setColorRange(QVideoFrameFormat::ColorRange_Video);
+        result.setColorTransfer(QVideoFrameFormat::ColorTransfer_BT709);
+        return result;
+    }
+    MapData map(QVideoFrame::MapMode mode) override {
+        if (mode != QVideoFrame::ReadOnly || CVPixelBufferLockBaseAddress(m_surface, kCVPixelBufferLock_ReadOnly) != kCVReturnSuccess)
+            return {};
+        m_mapped = true;
+        MapData result;
+        result.planeCount = 2;
+        for (int plane = 0; plane < 2; ++plane) {
+            result.data[plane] = static_cast<uchar*>(CVPixelBufferGetBaseAddressOfPlane(m_surface, plane));
+            result.bytesPerLine[plane] = int(CVPixelBufferGetBytesPerRowOfPlane(m_surface, plane));
+            result.dataSize[plane] = result.bytesPerLine[plane] * int(CVPixelBufferGetHeightOfPlane(m_surface, plane));
+        }
+        return result;
+    }
+    void unmap() override {
+        if (m_mapped) { CVPixelBufferUnlockBaseAddress(m_surface, kCVPixelBufferLock_ReadOnly); m_mapped = false; }
+    }
+    AVFrame* nativeEncoderFrame() const override {
+        auto* frame = av_frame_alloc();
+        if (!frame) return nullptr;
+        frame->format = AV_PIX_FMT_VIDEOTOOLBOX;
+        frame->width = int(CVPixelBufferGetWidth(m_surface));
+        frame->height = int(CVPixelBufferGetHeight(m_surface));
+        frame->color_range = AVCOL_RANGE_MPEG;
+        frame->colorspace = AVCOL_SPC_BT709;
+        frame->color_primaries = AVCOL_PRI_BT709;
+        frame->color_trc = AVCOL_TRC_BT709;
+        auto* retained = CVPixelBufferRetain(m_surface);
+        frame->buf[0] = av_buffer_create(reinterpret_cast<uint8_t*>(retained), 0,
+            [](void*, uint8_t* data) { CVPixelBufferRelease(reinterpret_cast<CVPixelBufferRef>(data)); }, nullptr, 0);
+        if (!frame->buf[0]) { CVPixelBufferRelease(retained); av_frame_free(&frame); return nullptr; }
+        frame->data[3] = reinterpret_cast<uint8_t*>(m_surface);
+        return frame;
+    }
+private:
+    CVPixelBufferRef m_surface;
+    bool m_mapped = false;
+};
+
+struct NativeState {
+    std::atomic_bool closed{false};
+    std::atomic_bool errorDelivered{false};
+    MacScreenCapture::FrameCallback frame;
+    MacScreenCapture::ErrorCallback error;
+    // These strong Objective-C references are accessed only on the main queue.
+    SCStream* stream = nil;
+    id<SCStreamOutput, SCStreamDelegate> delegate = nil;
+    dispatch_queue_t outputQueue = nil;
+    bool starting = false;
+    bool started = false;
+    bool stopping = false;
+};
+
+void reportError(const std::shared_ptr<NativeState>& state, QString message,
+                 ScreenCaptureError code = ScreenCaptureError::CaptureFailed) {
+    if (state->closed.load() || state->errorDelivered.exchange(true)) return;
+    state->error(code, message);
+}
+
+void reportNativeError(const std::shared_ptr<NativeState>& state, NSError* error, const char* stage) {
+    const auto domain = error ? QString::fromNSString(error.domain) : QString();
+    const auto nativeCode = error ? qint64(error.code) : 0;
+    const auto code = MacScreenCapture::nativeErrorCode(domain, nativeCode);
+    if (code == ScreenCaptureError::PermissionDenied) {
+        reportError(state, QStringLiteral("macOS denied screen recording. Open System Settings > Privacy & Security > Screen & System Audio Recording and allow the application that launched Mouffette (for example Visual Studio Code or Terminal), or launch Mouffette.app directly and allow Mouffette. Then fully quit and relaunch that application and reconnect."), code);
+        return;
+    }
+    const auto description = error ? QString::fromNSString(error.localizedDescription) : QStringLiteral("No native error details were provided");
+    reportError(state, QStringLiteral("%1: %2 (domain=%3, code=%4)")
+        .arg(QString::fromLatin1(stage), description, domain.isEmpty() ? QStringLiteral("none") : domain).arg(nativeCode), code);
+}
+
+// Main queue only. A revoked session that is still starting is stopped by its
+// start completion; calling stop prematurely can otherwise leave it running.
+void stopSession(const std::shared_ptr<NativeState>& state) {
+    if (!state->stream || state->starting || state->stopping) return;
+    if (!state->started) { state->stream = nil; state->delegate = nil; state->outputQueue = nil; return; }
+    state->stopping = true;
+    [state->stream stopCaptureWithCompletionHandler:^(NSError*) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            state->stream = nil; state->delegate = nil; state->outputQueue = nil;
+        });
+    }];
+}
+}
+
+@interface MouffetteScreenCaptureOutput : NSObject <SCStreamOutput, SCStreamDelegate> {
+@public
+    std::weak_ptr<NativeState> state;
+}
+@end
+
+@implementation MouffetteScreenCaptureOutput
+- (void)stream:(SCStream*)stream didOutputSampleBuffer:(CMSampleBufferRef)sample ofType:(SCStreamOutputType)type {
+    Q_UNUSED(stream);
+    const auto current = state.lock();
+    if (!current || current->closed.load() || type != SCStreamOutputTypeScreen || !CMSampleBufferIsValid(sample)) return;
+    @autoreleasepool {
+        const auto array = CMSampleBufferGetSampleAttachmentsArray(sample, false);
+        if (!array || CFArrayGetCount(array) == 0) return;
+        NSDictionary* attachments = (__bridge NSDictionary*)CFArrayGetValueAtIndex(array, 0);
+        NSNumber* status = attachments[SCStreamFrameInfoStatus];
+        if (!status) return;
+        const auto action = MacScreenCapture::sampleAction(int(status.integerValue));
+        if (action == MacScreenCapture::SampleAction::Suspend) {
+            // Blank/suspended samples are reversible stream states, not a
+            // capture failure. Clear the latest surface, then await completion.
+            if (!current->closed.load()) current->frame({});
+            return;
+        }
+        if (action == MacScreenCapture::SampleAction::Stop) {
+            reportError(current, QStringLiteral("The system stopped screen capture")); return;
+        }
+        // Started/idle samples can contain metadata only, without a surface.
+        if (action != MacScreenCapture::SampleAction::Deliver) return;
+        auto surface = CMSampleBufferGetImageBuffer(sample);
+        if (!surface || CVPixelBufferGetPixelFormatType(surface) != kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+            || CVPixelBufferGetPlaneCount(surface) != 2) {
+            reportError(current, QStringLiteral("ScreenCaptureKit returned an unsupported screen format"));
+            return;
+        }
+        QVideoFrame frame = MacScreenCapture::frameFromPixelBuffer(surface);
+        const auto pts = CMSampleBufferGetPresentationTimeStamp(sample);
+        if (CMTIME_IS_NUMERIC(pts)) frame.setStartTime(CMTimeConvertScale(pts, 1000000, kCMTimeRoundingMethod_Default).value);
+        if (!current->closed.load()) current->frame(frame);
+    }
+}
+- (void)stream:(SCStream*)stream didStopWithError:(NSError*)error {
+    Q_UNUSED(stream);
+    if (const auto current = state.lock()) reportNativeError(current, error, "ScreenCaptureKit stream stopped");
+}
+@end
+
+struct MacScreenCapture::Private { std::shared_ptr<NativeState> state; };
+MacScreenCapture::MacScreenCapture() : d(std::make_unique<Private>()) {}
+MacScreenCapture::~MacScreenCapture() { stop(); }
+bool MacScreenCapture::isActive() const { return d->state && !d->state->closed.load(); }
+
+ScreenCaptureError MacScreenCapture::nativeErrorCode(const QString& domain, qint64 code) {
+    return domain == QString::fromNSString(SCStreamErrorDomain) && code == SCStreamErrorUserDeclined
+        ? ScreenCaptureError::PermissionDenied : ScreenCaptureError::CaptureFailed;
+}
+
+MacScreenCapture::SampleAction MacScreenCapture::sampleAction(int nativeStatus) {
+    switch (nativeStatus) {
+    case SCFrameStatusComplete: return SampleAction::Deliver;
+    case SCFrameStatusBlank: case SCFrameStatusSuspended: return SampleAction::Suspend;
+    case SCFrameStatusStopped: return SampleAction::Stop;
+    default: return SampleAction::Ignore;
+    }
+}
+
+QVideoFrame MacScreenCapture::frameFromPixelBuffer(CVPixelBufferRef buffer) {
+    if (!buffer || CVPixelBufferGetPixelFormatType(buffer) != kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+        || CVPixelBufferGetPlaneCount(buffer) != 2) return {};
+    return QVideoFrame(std::make_unique<SurfaceBuffer>(buffer));
+}
+
+bool MacScreenCapture::start(QScreen* screen, FrameCallback frame, ErrorCallback error) {
+    stop();
+    if (!screen || QGuiApplication::platformName() != QLatin1String("cocoa")) {
+        error(ScreenCaptureError::CaptureFailed, QStringLiteral("Native macOS screen capture requires a connected Cocoa screen")); return false;
+    }
+    const auto* native = screen->nativeInterface<QNativeInterface::QCocoaScreen>();
+    NSNumber* number = native ? [[native->nativeScreen() deviceDescription] objectForKey:@"NSScreenNumber"] : nil;
+    if (!number) { error(ScreenCaptureError::CaptureFailed, QStringLiteral("Cannot resolve the selected macOS display")); return false; }
+    const CGDirectDisplayID displayID = number.unsignedIntValue;
+    QSize output(qRound(screen->geometry().width() * screen->devicePixelRatio()),
+                 qRound(screen->geometry().height() * screen->devicePixelRatio()));
+    if (output.width() > ScreenStreamEncoder::MaximumEdge || output.height() > ScreenStreamEncoder::MaximumEdge)
+        output.scale(ScreenStreamEncoder::MaximumEdge, ScreenStreamEncoder::MaximumEdge, Qt::KeepAspectRatio);
+    output = QSize(std::max(2, output.width() & ~1), std::max(2, output.height() & ~1));
+    const auto state = std::make_shared<NativeState>();
+    state->frame = std::move(frame); state->error = std::move(error);
+    d->state = state;
+    // ScreenCaptureKit performs the OS screen-recording authorization. Never
+    // enumerate content until local sharing is enabled and a viewer subscribes.
+    [SCShareableContent getShareableContentExcludingDesktopWindows:NO onScreenWindowsOnly:YES
+        completionHandler:^(SCShareableContent* content, NSError* nativeError) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (state->closed.load()) return;
+                if (nativeError || !content) {
+                    reportNativeError(state, nativeError, "ScreenCaptureKit content discovery failed"); return;
+                }
+                SCDisplay* selected = nil;
+                for (SCDisplay* display in content.displays)
+                    if (display.displayID == displayID) { selected = display; break; }
+                if (!selected) { reportError(state, QStringLiteral("The selected display is no longer available for sharing")); return; }
+                SCContentFilter* filter = [[SCContentFilter alloc] initWithDisplay:selected excludingWindows:@[]];
+                SCStreamConfiguration* config = [[SCStreamConfiguration alloc] init];
+                config.width = size_t(output.width()); config.height = size_t(output.height());
+                config.minimumFrameInterval = CMTimeMake(1, ScreenStreamEncoder::FramesPerSecond);
+                config.queueDepth = 3;
+                config.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange;
+                config.colorMatrix = kCVImageBufferYCbCrMatrix_ITU_R_709_2;
+                config.colorSpaceName = kCGColorSpaceITUR_709;
+                config.showsCursor = NO;
+                config.scalesToFit = YES;
+                if (@available(macOS 13.0, *)) config.capturesAudio = NO;
+                if (@available(macOS 14.0, *)) config.preservesAspectRatio = YES;
+                if (@available(macOS 15.0, *)) {
+                    config.captureDynamicRange = SCCaptureDynamicRangeSDR;
+                    config.captureMicrophone = NO;
+                }
+                auto* delegate = [[MouffetteScreenCaptureOutput alloc] init];
+                delegate->state = state;
+                state->delegate = delegate;
+                state->outputQueue = dispatch_queue_create("Mouffette.ScreenCaptureKit", DISPATCH_QUEUE_SERIAL);
+                state->stream = [[SCStream alloc] initWithFilter:filter configuration:config delegate:delegate];
+                NSError* addError = nil;
+                if (![state->stream addStreamOutput:delegate type:SCStreamOutputTypeScreen
+                    sampleHandlerQueue:state->outputQueue error:&addError]) {
+                    reportNativeError(state, addError, "ScreenCaptureKit output attachment failed"); return;
+                }
+                state->starting = true;
+                [state->stream startCaptureWithCompletionHandler:^(NSError* startError) {
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        state->starting = false;
+                        state->started = !startError;
+                        if (startError) reportNativeError(state, startError, "ScreenCaptureKit startup failed");
+                        if (state->closed.load()) stopSession(state);
+                    });
+                }];
+            });
+        }];
+    return true;
+}
+
+void MacScreenCapture::stop() {
+    const auto state = std::exchange(d->state, {});
+    if (!state) return;
+    state->closed.store(true);
+    dispatch_async(dispatch_get_main_queue(), ^{
+        // Keep stream, delegate and queue alive through completion. Every late
+        // discovery/start/frame/error callback is fenced by this session state.
+        stopSession(state);
+    });
+}

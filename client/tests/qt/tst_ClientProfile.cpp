@@ -224,6 +224,77 @@ private slots:
         QVERIFY(reloaded.profilePictureJpeg().isEmpty());
     }
 
+    void screenSharingIsOptInAtomicAndProfileScoped()
+    {
+        const auto previousContext = RuntimeProfile::context();
+        const auto restore = qScopeGuard([&] { RuntimeProfile::configure(previousContext); });
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        RuntimeProfileContext context;
+        context.rootPath = directory.filePath(QStringLiteral("primary"));
+        QVERIFY(QDir().mkpath(context.rootPath));
+        QVERIFY(QFile::setPermissions(context.rootPath,
+            QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+        RuntimeProfile::configure(context);
+        SettingsManager settings;
+        settings.loadSettings();
+        QVERIFY(!settings.getScreenSharingEnabled());
+        QSignalSpy changes(&settings, &SettingsManager::screenSharingEnabledChanged);
+        QString error;
+        QVERIFY2(settings.commitSettings(QStringLiteral("ws://localhost:8080"), true, true,
+                                          {}, {}, true, &error), qPrintable(error));
+        QVERIFY(settings.getScreenSharingEnabled());
+        QCOMPARE(changes.count(), 1);
+        QCOMPARE(changes.at(0).at(0).toBool(), true);
+        SettingsManager reloaded;
+        reloaded.loadSettings();
+        QVERIFY(reloaded.getScreenSharingEnabled());
+        // An invalid unrelated field cannot partially enable or revoke sharing.
+        QVERIFY(!settings.commitSettings(QStringLiteral("invalid"), true, true,
+                                           {}, {}, false, &error));
+        QVERIFY(settings.getScreenSharingEnabled());
+        QCOMPARE(changes.count(), 1);
+        reloaded.loadSettings();
+        QVERIFY(reloaded.getScreenSharingEnabled());
+        // A failed atomic disk write must not revoke consent in memory or
+        // announce a change that cannot survive an application restart.
+        const QString originalRoot = context.rootPath;
+        const QString blocker = directory.filePath(QStringLiteral("blocked"));
+        QFile file(blocker);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        file.write("blocked");
+        file.close();
+        context.rootPath = blocker;
+        RuntimeProfile::configure(context);
+        QVERIFY(!settings.commitSettings(QStringLiteral("ws://localhost:8080"), true, true,
+                                          {}, {}, false, &error));
+        QVERIFY(settings.getScreenSharingEnabled());
+        QCOMPARE(changes.count(), 1);
+        context.rootPath = originalRoot;
+        RuntimeProfile::configure(context);
+        // Older callers changing other preferences must preserve the opt-in.
+        QVERIFY(settings.commitSettings(QStringLiteral("ws://localhost:8080"), false, false,
+                                         {}, {}, &error));
+        reloaded.loadSettings();
+        QVERIFY(reloaded.getScreenSharingEnabled());
+        QVERIFY(settings.commitSettings(QStringLiteral("ws://localhost:8080"), false, false,
+                                         {}, {}, false, &error));
+        QCOMPARE(changes.count(), 2);
+        QCOMPARE(changes.at(1).at(0).toBool(), false);
+        reloaded.loadSettings();
+        QVERIFY(!reloaded.getScreenSharingEnabled());
+        auto malformed = RuntimeProfile::readSettings();
+        malformed.insert(QStringLiteral("screenSharingEnabled"), QStringLiteral("unexpected"));
+        QVERIFY(RuntimeStorage::writeSettings(RuntimeProfile::profileRoot(),
+            RuntimeProfile::settingsFilePath(), malformed, StorageVersions::Settings).succeeded());
+        reloaded.loadSettings();
+        QVERIFY(!reloaded.getScreenSharingEnabled());
+        context.rootPath = directory.filePath(QStringLiteral("secondary"));
+        RuntimeProfile::configure(context);
+        reloaded.loadSettings();
+        QVERIFY(!reloaded.getScreenSharingEnabled());
+    }
+
     void peerCacheIsTransientAndIgnoresStalePictures()
     {
         ClientProfileCache cache;

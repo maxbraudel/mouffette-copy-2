@@ -24,6 +24,8 @@
     <string>@CMAKE_OSX_DEPLOYMENT_TARGET@</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>NSScreenCaptureUsageDescription</key>
+    <string>Mouffette shares the live content of your screens with connected clients when you enable screen sharing.</string>
     <key>NSHumanReadableCopyright</key>
     <string>Copyright © 2025 Mouffette. All rights reserved.</string>
     <key>CFBundleDisplayName</key>

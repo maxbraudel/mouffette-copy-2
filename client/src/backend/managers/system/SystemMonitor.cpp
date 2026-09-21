@@ -63,6 +63,7 @@ void SystemMonitor::watchScreen(QScreen* screen) {
 
 void SystemMonitor::scheduleScreenConfigurationChanged() {
     m_topologyReady = false;
+    emit screenTopologyInvalidated();
     if (m_screenChangeTimer) {
         m_screenChangeTimer->start();
     }

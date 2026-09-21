@@ -58,6 +58,8 @@ class ApplicationController final : public QObject
     Q_PROPERTY(QString settingsServerUrl READ settingsServerUrl NOTIFY settingsChanged)
     Q_PROPERTY(bool settingsAutoUpload READ settingsAutoUpload NOTIFY settingsChanged)
     Q_PROPERTY(bool settingsAppAlwaysOnTop READ settingsAppAlwaysOnTop NOTIFY settingsChanged)
+    Q_PROPERTY(bool settingsScreenSharingEnabled READ settingsScreenSharingEnabled NOTIFY settingsChanged)
+    Q_PROPERTY(QString settingsScreenSharingStatus READ settingsScreenSharingStatus NOTIFY screenSharingStatusChanged)
     Q_PROPERTY(QString settingsUsername READ settingsUsername NOTIFY settingsChanged)
     Q_PROPERTY(QString settingsHostname READ settingsHostname NOTIFY settingsChanged)
     Q_PROPERTY(QString settingsProfilePictureSource READ settingsProfilePictureSource NOTIFY settingsChanged)
@@ -127,6 +129,8 @@ public:
     QString settingsServerUrl() const;
     bool settingsAutoUpload() const;
     bool settingsAppAlwaysOnTop() const;
+    bool settingsScreenSharingEnabled() const;
+    QString settingsScreenSharingStatus() const;
     QString settingsUsername() const;
     QString settingsHostname() const;
     QString settingsProfilePictureSource() const;
@@ -160,6 +164,8 @@ public:
     Q_INVOKABLE void rejectDialog();
     Q_INVOKABLE QString saveSettings(const QString& serverUrl, bool autoUpload, bool appAlwaysOnTop,
                                     const QString& username = QString());
+    Q_INVOKABLE QString saveSettings(const QString& serverUrl, bool autoUpload, bool appAlwaysOnTop,
+                                    const QString& username, bool screenSharingEnabled);
     Q_INVOKABLE void clearStorageAndClose();
     Q_INVOKABLE void hideWindow();
     Q_INVOKABLE void setWindowVisible(bool visible);
@@ -177,6 +183,7 @@ signals:
     void activeWorkspaceChanged();
     void presentationChanged();
     void settingsChanged();
+    void screenSharingStatusChanged();
     void profilesChanged();
     void profileDraftChanged();
     void clearingStorageChanged();

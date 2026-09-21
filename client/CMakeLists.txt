@@ -209,6 +209,9 @@ set(SOURCES
     src/main.cpp
     src/backend/runtime/ApplicationRuntime.cpp
     src/backend/runtime/ApplicationActivityMonitor.cpp
+    src/backend/screensharing/ScreenSharingService.cpp
+    src/backend/screensharing/ScreenCaptureSource.cpp
+    src/backend/screensharing/ScreenStreamCodec.cpp
 
     # Qt Quick application shell and presentation models
     src/frontend/qml/ApplicationController.cpp
@@ -341,6 +344,7 @@ if(APPLE)
     list(APPEND SOURCES 
         src/backend/platform/macos/MacWindowManager.mm
         src/backend/managers/system/SystemLifecycleMonitor_mac.mm
+        src/backend/screensharing/MacScreenCapture.mm
     )
 endif()
 
@@ -654,6 +658,9 @@ if(APPLE)
     )
     # Link with macOS frameworks used by native integrations
     target_link_libraries(MouffetteClient PRIVATE "-framework AppKit" "-framework AVFoundation" "-framework CoreMedia" "-framework CoreGraphics" "-framework Security")
+    target_link_libraries(MouffetteClient PRIVATE "-framework ScreenCaptureKit" "-framework CoreVideo")
+    set_source_files_properties(src/backend/screensharing/MacScreenCapture.mm
+        PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
     
     # Set Objective-C++ properties for .mm files (updated paths for backend/platform)
     set_source_files_properties(src/backend/platform/macos/MacWindowManager.mm PROPERTIES COMPILE_FLAGS "-x objective-c++")
@@ -690,6 +697,19 @@ endif()
 include(CTest)
 if(BUILD_TESTING)
     find_package(Qt6 REQUIRED COMPONENTS Test)
+
+    add_executable(tst_ScreenStreamCodec
+        tests/qt/tst_ScreenStreamCodec.cpp
+        src/backend/screensharing/ScreenStreamCodec.cpp)
+    target_include_directories(tst_ScreenStreamCodec PRIVATE src)
+    target_link_libraries(tst_ScreenStreamCodec PRIVATE
+        Qt6::Core Qt6::Gui Qt6::Multimedia Qt6::Test PkgConfig::FFMPEG)
+    if(APPLE)
+        target_sources(tst_ScreenStreamCodec PRIVATE src/backend/screensharing/MacScreenCapture.mm)
+        target_link_libraries(tst_ScreenStreamCodec PRIVATE "-framework ScreenCaptureKit"
+            "-framework CoreVideo" "-framework CoreMedia" "-framework CoreGraphics" "-framework AppKit")
+    endif()
+    add_test(NAME ScreenStreamCodec COMMAND tst_ScreenStreamCodec)
 
     add_executable(tst_WindowPresentation
         tests/qt/tst_WindowPresentation.cpp
@@ -814,6 +834,20 @@ if(BUILD_TESTING)
         "$<TARGET_PROPERTY:MouffetteClient,LINK_LIBRARIES>" Qt6::Test)
     add_test(NAME RemoteSessionIntegration COMMAND tst_RemoteSessionIntegration)
     set_tests_properties(RemoteSessionIntegration PROPERTIES TIMEOUT 300
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_CONTROLS_STYLE=Basic")
+
+    add_executable(tst_ScreenSharingService
+        tests/qt/tst_ScreenSharingService.cpp
+        "$<FILTER:$<TARGET_OBJECTS:MouffetteClient>,EXCLUDE,/src/main[.]cpp[.](o|obj)$>")
+    target_include_directories(tst_ScreenSharingService PRIVATE
+        "$<TARGET_PROPERTY:MouffetteClient,INCLUDE_DIRECTORIES>")
+    target_compile_definitions(tst_ScreenSharingService PRIVATE
+        "$<TARGET_PROPERTY:MouffetteClient,COMPILE_DEFINITIONS>"
+        MOUFFETTE_RELAY_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/remote-session-relay.js")
+    target_link_libraries(tst_ScreenSharingService PRIVATE
+        "$<TARGET_PROPERTY:MouffetteClient,LINK_LIBRARIES>" Qt6::Test)
+    add_test(NAME ScreenSharingService COMMAND tst_ScreenSharingService)
+    set_tests_properties(ScreenSharingService PROPERTIES TIMEOUT 90
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_CONTROLS_STYLE=Basic")
 
     add_executable(tst_ScreenCoordinateMapping

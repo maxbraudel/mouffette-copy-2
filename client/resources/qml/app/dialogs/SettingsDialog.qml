@@ -29,6 +29,7 @@ Dialog {
         serverUrl.text = controller.settingsServerUrl
         autoUpload.checked = controller.settingsAutoUpload
         appAlwaysOnTop.checked = controller.settingsAppAlwaysOnTop
+        screenSharing.checked = controller.settingsScreenSharingEnabled
         validationError = ""
     }
     onClosed: controller.cancelProfileEdit()
@@ -150,6 +151,37 @@ Dialog {
                     objectName: "settingsAppAlwaysOnTop"
                     text: "App always on top"
                 }
+                AppCheckBox {
+                    id: screenSharing
+                    objectName: "settingsScreenSharingEnabled"
+                    text: "Share my screens with connected clients"
+                }
+                Text {
+                    Layout.fillWidth: true
+                    text: "Connected clients can see the live content of all your screens. Changes apply when you save."
+                    color: Theme.mutedText
+                    font.pixelSize: 12
+                    wrapMode: Text.Wrap
+                }
+                Text {
+                    objectName: "settingsScreenRecordingHelp"
+                    Layout.fillWidth: true
+                    visible: Qt.platform.os === "osx"
+                    text: "This checkbox does not grant macOS Screen Recording permission. Open System Settings → Privacy & Security → Screen & System Audio Recording and allow the app named in the permission request. For development launches, this may be Terminal or Visual Studio Code. Then quit and reopen all Mouffette instances."
+                    color: Theme.mutedText
+                    font.pixelSize: 12
+                    wrapMode: Text.Wrap
+                }
+                Text {
+                    objectName: "settingsScreenSharingStatus"
+                    Layout.fillWidth: true
+                    visible: text.length > 0
+                    text: dialog.controller.settingsScreenSharingStatus || ""
+                    textFormat: Text.PlainText
+                    color: Theme.mutedText
+                    font.pixelSize: 12
+                    wrapMode: Text.Wrap
+                }
             }
         }
         Text {
@@ -183,7 +215,8 @@ Dialog {
                 primary: true
                 onClicked: {
                     var error = dialog.controller.saveSettings(serverUrl.text.trim(), autoUpload.checked,
-                                                               appAlwaysOnTop.checked, username.text)
+                                                               appAlwaysOnTop.checked, username.text,
+                                                               screenSharing.checked)
                     if (error && error.length > 0) {
                         dialog.validationError = error
                         return

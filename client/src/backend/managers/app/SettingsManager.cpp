@@ -22,6 +22,10 @@ void SettingsManager::loadSettings() {
     m_autoUploadImportedMedia = config.autoUploadImportedMedia();
     m_appAlwaysOnTop = config.appAlwaysOnTop();
     const auto settings = RuntimeProfile::createSettings();
+    // QSettings serializes booleans as "true"/"false". An unrelated nonempty
+    // string must not accidentally become desktop-sharing consent.
+    m_screenSharingEnabled = settings->value(QStringLiteral("screenSharingEnabled"), false)
+                                 .toString() == QLatin1String("true");
     if (!ProfileImage::normalizeUsername(settings->value(QStringLiteral("username")).toString(), &m_username))
         m_username.clear();
     const QByteArray encoded = settings->value(QStringLiteral("profilePictureJpeg")).toByteArray();
@@ -42,6 +46,14 @@ void SettingsManager::saveSettings() {
 bool SettingsManager::commitSettings(const QString& serverUrl, bool autoUpload, bool alwaysOnTop,
                                      const QString& username, const QByteArray& jpeg, QString* error)
 {
+    return commitSettings(serverUrl, autoUpload, alwaysOnTop, username, jpeg,
+                          m_screenSharingEnabled, error);
+}
+
+bool SettingsManager::commitSettings(const QString& serverUrl, bool autoUpload, bool alwaysOnTop,
+                                     const QString& username, const QByteArray& jpeg,
+                                     bool screenSharingEnabled, QString* error)
+{
     QUrl normalizedUrl;
     QString normalizedUsername;
     if (!AppConfig::validateServerUrl(serverUrl, &normalizedUrl, error)
@@ -61,6 +73,7 @@ bool SettingsManager::commitSettings(const QString& serverUrl, bool autoUpload, 
     values.insert(QStringLiteral("serverUrl"), canonical);
     values.insert(QStringLiteral("autoUploadImportedMedia"), autoUpload);
     values.insert(QStringLiteral("appAlwaysOnTop"), alwaysOnTop);
+    values.insert(QStringLiteral("screenSharingEnabled"), screenSharingEnabled);
     values.insert(QStringLiteral("username"), normalizedUsername);
     values.insert(QStringLiteral("profilePictureJpeg"), QString::fromLatin1(jpeg.toBase64()));
     const auto committed = RuntimeStorage::writeSettings(RuntimeProfile::profileRoot(),
@@ -70,12 +83,15 @@ bool SettingsManager::commitSettings(const QString& serverUrl, bool autoUpload, 
         return false;
     }
     const bool urlChanged = canonical != m_serverUrlConfig;
+    const bool sharingChanged = screenSharingEnabled != m_screenSharingEnabled;
     m_serverUrlConfig = canonical;
     m_autoUploadImportedMedia = autoUpload;
     m_appAlwaysOnTop = alwaysOnTop;
+    m_screenSharingEnabled = screenSharingEnabled;
     m_username = normalizedUsername;
     m_profilePictureJpeg = jpeg;
     if (urlChanged) emit serverUrlChanged(canonical);
+    if (sharingChanged) emit screenSharingEnabledChanged(screenSharingEnabled);
     emit settingsChanged();
     return true;
 }

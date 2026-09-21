@@ -2,6 +2,10 @@
 
 Node.js WebSocket coordinator for Mouffette protocol v12.
 
+Live screen sharing uses a separate authenticated H.264 video channel, with
+explicit target consent, session-bound stream identities and bounded receipt
+windows. See [the screen sharing protocol](SCREEN_SHARING_PROTOCOL.md).
+
 ## Run and test
 
 ```bash

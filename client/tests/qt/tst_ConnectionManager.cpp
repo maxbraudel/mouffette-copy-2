@@ -85,6 +85,8 @@ private slots:
     void handshakeRejectsMalformedEnvelope();
     void uploadChannelReadyRequiresExactEnvelope_data();
     void uploadChannelReadyRequiresExactEnvelope();
+    void screenChannelReadyRequiresExactEnvelope_data();
+    void screenChannelReadyRequiresExactEnvelope();
     void protocolUploadWireSchemaAndActiveGate();
     void suspendInclusiveTransportBoundaryRejectsLateContact_data();
     void suspendInclusiveTransportBoundaryRejectsLateContact();
@@ -1266,6 +1268,154 @@ void ConnectionManagerTest::uploadChannelReadyRequiresExactEnvelope() {
     client.disconnect();
 }
 
+void ConnectionManagerTest::screenChannelReadyRequiresExactEnvelope_data() {
+    QTest::addColumn<QString>("scenario");
+    QTest::newRow("missing-message-id")
+        << QStringLiteral("missing_message_id");
+    QTest::newRow("fractional-generation")
+        << QStringLiteral("fractional_generation");
+    QTest::newRow("wrong-server-boot")
+        << QStringLiteral("wrong_server_boot");
+}
+
+void ConnectionManagerTest::screenChannelReadyRequiresExactEnvelope() {
+    QFETCH(QString, scenario);
+    QTemporaryDir identityDirectory;
+    QVERIFY(identityDirectory.isValid());
+    QWebSocketServer server(QStringLiteral("screen-ready-envelope-test"),
+                            QWebSocketServer::NonSecureMode);
+    QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+
+    const QString bootId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    const QString token(43, QLatin1Char('t'));
+    QPointer<QWebSocket> controlPeer;
+    QPointer<QWebSocket> uploadPeer;
+    bool uploadPeerSeen = false;
+
+    connect(&server, &QWebSocketServer::newConnection, this, [&]() {
+        QWebSocket* candidate = server.nextPendingConnection();
+        QVERIFY(candidate);
+        if (candidate->requestUrl().query().contains(
+                QStringLiteral("channel=screen"))) {
+            uploadPeer = candidate;
+            uploadPeerSeen = true;
+            QJsonObject ready{
+                {QStringLiteral("type"), QStringLiteral("screen_channel_ready")},
+                {QStringLiteral("protocolVersion"), 12},
+                {QStringLiteral("serverBootId"), bootId},
+                {QStringLiteral("messageId"),
+                 QUuid::createUuid().toString(QUuid::WithoutBraces)},
+                {QStringLiteral("endpointId"),
+                 controlPeer ? controlPeer->property("endpointId").toString()
+                             : QString()},
+                {QStringLiteral("connectionGeneration"), 1}
+            };
+            if (scenario == QLatin1String("missing_message_id")) {
+                ready.remove(QStringLiteral("messageId"));
+            } else if (scenario == QLatin1String("fractional_generation")) {
+                ready.insert(QStringLiteral("connectionGeneration"), 1.5);
+            } else if (scenario == QLatin1String("wrong_server_boot")) {
+                ready.insert(QStringLiteral("serverBootId"),
+                             QUuid::createUuid().toString(QUuid::WithoutBraces));
+            }
+            candidate->sendTextMessage(QString::fromUtf8(
+                QJsonDocument(ready).toJson(QJsonDocument::Compact)));
+            return;
+        }
+
+        controlPeer = candidate;
+        const QJsonObject challenge{
+            {QStringLiteral("type"), QStringLiteral("auth_challenge")},
+            {QStringLiteral("protocolVersion"), 12},
+            {QStringLiteral("serverBootId"), bootId},
+            {QStringLiteral("messageId"),
+             QUuid::createUuid().toString(QUuid::WithoutBraces)},
+            {QStringLiteral("nonce"), QString::fromLatin1(
+                 QByteArray(32, 'c').toBase64(
+                     QByteArray::Base64UrlEncoding
+                     | QByteArray::OmitTrailingEquals))},
+            {QStringLiteral("issuedAt"), 1}
+        };
+        candidate->sendTextMessage(QString::fromUtf8(
+            QJsonDocument(challenge).toJson(QJsonDocument::Compact)));
+        connect(candidate, &QWebSocket::textMessageReceived, this,
+                [&, candidate](const QString& encoded) {
+            const QJsonObject request =
+                QJsonDocument::fromJson(encoded.toUtf8()).object();
+            const QString type = request.value(QStringLiteral("type")).toString();
+            if (type == QLatin1String("auth_response")) {
+                const QString endpointId = DeviceIdentityStore::endpointIdForInstallation(
+                    request.value(QStringLiteral("installationId")).toString(),
+                    request.value(QStringLiteral("instanceId")).toString());
+                candidate->setProperty("endpointId", endpointId);
+                const QJsonObject policy{
+                    {QStringLiteral("policyVersion"), 5}, {"transportTimeoutMs", 5000},
+                    {QStringLiteral("heartbeatIntervalMs"), 750},
+                    {QStringLiteral("transportSuspectAfterMs"), 1500},
+                    {QStringLiteral("sessionRecoveryTimeoutMs"), 15000},
+                    {QStringLiteral("leaseTimeoutMs"), 1500},
+                    {QStringLiteral("scenePrepareTimeoutMs"), 15000},
+                    {QStringLiteral("sceneActivationLeadMs"), 4000},
+                    {QStringLiteral("sceneMaxClockSkewMs"), 50},
+                    {QStringLiteral("sceneStartedAckTimeoutMs"), 5000},
+                    {QStringLiteral("sceneMaxStartSkewMs"), 750},
+                    {QStringLiteral("sceneStopTimeoutMs"), 5000},
+                    {QStringLiteral("uploadIdleTimeoutMs"), 45000},
+                    {QStringLiteral("uploadTargetAckTimeoutMs"), 30000},
+                    {QStringLiteral("removalAckTimeoutMs"), 30000}
+                };
+                candidate->sendTextMessage(QString::fromUtf8(QJsonDocument(
+                    QJsonObject{
+                        {QStringLiteral("type"), QStringLiteral("welcome")},
+                        {QStringLiteral("protocolVersion"), 12},
+                        {QStringLiteral("serverBootId"), bootId},
+                        {QStringLiteral("messageId"),
+                         QUuid::createUuid().toString(QUuid::WithoutBraces)},
+                        {QStringLiteral("connectionId"),
+                         QUuid::createUuid().toString(QUuid::WithoutBraces)},
+                        {QStringLiteral("installationId"),
+                         request.value(QStringLiteral("installationId"))},
+                        {QStringLiteral("endpointId"), endpointId},
+                        {QStringLiteral("instanceId"),
+                         request.value(QStringLiteral("instanceId"))},
+                        {QStringLiteral("instanceOrdinal"),
+                         request.value(QStringLiteral("instanceOrdinal"))},
+                        {QStringLiteral("runtimeId"),
+                         request.value(QStringLiteral("runtimeId"))},
+                        {QStringLiteral("connectionGeneration"), 1},
+                        {QStringLiteral("policy"), policy},
+                        {QStringLiteral("serverMonotonicMs"), 1}
+                    }).toJson(QJsonDocument::Compact)));
+            } else if (type == QLatin1String("request_screen_channel")) {
+                candidate->sendTextMessage(QString::fromUtf8(QJsonDocument(
+                    QJsonObject{
+                        {QStringLiteral("type"),
+                         QStringLiteral("screen_channel_token")},
+                        {QStringLiteral("protocolVersion"), 12},
+                        {QStringLiteral("serverBootId"), bootId},
+                        {QStringLiteral("messageId"),
+                         QUuid::createUuid().toString(QUuid::WithoutBraces)},
+                        {QStringLiteral("connectionGeneration"), 1},
+                        {QStringLiteral("requestId"), request.value("requestId")},
+                        {QStringLiteral("token"), token},
+                        {QStringLiteral("expiresAt"), 1000}
+                    }).toJson(QJsonDocument::Compact)));
+            }
+        });
+    });
+
+    WebSocketClient client(identityDirectory.path(), false);
+    QSignalSpy connectedSpy(&client, &WebSocketClient::connected);
+    client.connectToServer(
+        QStringLiteral("ws://127.0.0.1:%1").arg(server.serverPort()));
+    QTRY_COMPARE_WITH_TIMEOUT(connectedSpy.count(), 1, 2000);
+    QVERIFY(client.ensureScreenChannel());
+    QTRY_VERIFY_WITH_TIMEOUT(uploadPeerSeen, 2000);
+    QTest::qWait(100);
+    QVERIFY(!client.isScreenChannelConnected());
+    client.disconnect();
+}
+
 void ConnectionManagerTest::protocolUploadWireSchemaAndActiveGate() {
     QTemporaryDir identityDirectory;
     QVERIFY(identityDirectory.isValid());
@@ -1285,6 +1435,9 @@ void ConnectionManagerTest::protocolUploadWireSchemaAndActiveGate() {
     QVector<QJsonObject> deviceSnapshots;
     QWebSocket* peer = nullptr;
     QWebSocket* dataPeer = nullptr;
+    QWebSocket* screenPeer = nullptr;
+    QVector<QJsonObject> screenAcknowledgements;
+    QVector<QByteArray> publishedScreenFrames;
 
     WebSocketClient client(identityDirectory.path(), false);
     const auto sendServerMessage = [&](QJsonObject message) {
@@ -1314,6 +1467,20 @@ void ConnectionManagerTest::protocolUploadWireSchemaAndActiveGate() {
                 const auto message = QJsonDocument::fromJson(encoded.toUtf8()).object();
                 uploadCommands.append(message);
             });
+            return;
+        }
+        if (candidate->requestUrl().query().contains(QStringLiteral("channel=screen"))) {
+            screenPeer = candidate;
+            connect(candidate, &QWebSocket::textMessageReceived, this, [&](const QString& text) {
+                screenAcknowledgements.append(QJsonDocument::fromJson(text.toUtf8()).object());
+            });
+            connect(candidate, &QWebSocket::binaryMessageReceived, this, [&](const QByteArray& packet) {
+                publishedScreenFrames.append(packet);
+            });
+            const QJsonObject ready{{"type", "screen_channel_ready"}, {"protocolVersion", 12},
+                {"serverBootId", bootId}, {"messageId", QUuid::createUuid().toString(QUuid::WithoutBraces)},
+                {"endpointId", client.endpointId()}, {"connectionGeneration", 1}};
+            candidate->sendTextMessage(QString::fromUtf8(QJsonDocument(ready).toJson(QJsonDocument::Compact)));
             return;
         }
         peer = candidate;
@@ -1398,6 +1565,9 @@ void ConnectionManagerTest::protocolUploadWireSchemaAndActiveGate() {
                 sendServerMessage({{"type", "upload_channel_token"}, {"connectionGeneration", 1},
                     {"requestId", message.value("requestId")}, {"token", QString(43, QLatin1Char('t'))},
                     {"expiresAt", 1000}});
+            } else if (type == QLatin1String("request_screen_channel")) {
+                sendServerMessage({{"type", "screen_channel_token"}, {"connectionGeneration", 1},
+                    {"requestId", message.value("requestId")}, {"token", QString(43, QLatin1Char('s'))}});
             } else if (type.startsWith(QLatin1String("upload_"))) {
                 QFAIL("Bulk upload data must not enter the control channel");
             } else if (type == QLatin1String("remote_session_teardown_ack")) {
@@ -1444,6 +1614,55 @@ void ConnectionManagerTest::protocolUploadWireSchemaAndActiveGate() {
     });
     QTRY_COMPARE_WITH_TIMEOUT(sessionSpy.count(), 1, 1000);
     QVERIFY(client.remoteSessionCoordinator()->forPeer(targetEndpointId).active);
+    // The video pipe is authenticated independently. A revoked stream epoch
+    // cannot leak a frame already queued on the other TCP connection.
+    QSignalSpy screenFrames(&client, &WebSocketClient::screenFrameReceived);
+    QSignalSpy screenStates(&client, &WebSocketClient::screenShareStateReceived);
+    QVERIFY(client.setScreenShareSubscription(remoteSessionId, 1, true));
+    QTRY_VERIFY_WITH_TIMEOUT(client.isScreenChannelConnected(), 2000);
+    QVERIFY(screenPeer);
+    QString streamId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    const auto screenState = [&](bool enabled) {
+        sendServerMessage({{"type", "screen_share_state"}, {"connectionGeneration", 1},
+            {"remoteSessionId", remoteSessionId}, {"generation", 1}, {"enabled", enabled},
+            {"streamId", enabled ? streamId : QString()}, {"reason", enabled ? "ready" : "disabled"}});
+    };
+    const auto screenPacket = [&](const QString& epoch, int sequence, bool keyFrame = true) {
+        const QJsonObject metadata{{"remoteSessionId", remoteSessionId}, {"generation", 1},
+            {"streamId", epoch}, {"screenId", 0}, {"sequence", sequence},
+            {"width", 1280}, {"height", 720}, {"keyFrame", keyFrame}, {"codec", "h264"}};
+        const auto header = QJsonDocument(metadata).toJson(QJsonDocument::Compact);
+        QByteArray packet("MSV1", 4);
+        packet.append(char((header.size() >> 8) & 255)); packet.append(char(header.size() & 255));
+        packet.append(header); packet.append(QByteArray::fromHex("000000016588"));
+        return packet;
+    };
+    screenState(true);
+    QTRY_COMPARE_WITH_TIMEOUT(screenStates.count(), 1, 1000);
+    screenPeer->sendBinaryMessage(screenPacket(streamId, 1));
+    QTRY_COMPARE_WITH_TIMEOUT(screenFrames.count(), 1, 1000);
+    QTRY_COMPARE_WITH_TIMEOUT(screenAcknowledgements.size(), 1, 1000);
+    QCOMPARE(screenAcknowledgements.first().value("type").toString(), QStringLiteral("screen_frame_ack"));
+    QCOMPARE(screenAcknowledgements.first().value("streamId").toString(), streamId);
+    QCOMPARE(screenAcknowledgements.first().value("sequence").toInt(), 1);
+    QCOMPARE(screenFrames.first().at(1).toByteArray(), QByteArray::fromHex("000000016588"));
+    screenState(false);
+    QTRY_COMPARE_WITH_TIMEOUT(screenStates.count(), 2, 1000);
+    screenPeer->sendBinaryMessage(screenPacket(streamId, 2));
+    // This control state creates a new epoch without changing session generation.
+    const QString oldStreamId = streamId;
+    streamId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    screenState(true);
+    QTRY_COMPARE_WITH_TIMEOUT(screenStates.count(), 3, 1000);
+    screenPeer->sendBinaryMessage(screenPacket(oldStreamId, 3));
+    screenPeer->sendBinaryMessage(screenPacket(streamId, 1, false)); // No IDR yet.
+    screenPeer->sendBinaryMessage(screenPacket(streamId, 2));
+    QTRY_COMPARE_WITH_TIMEOUT(screenFrames.count(), 2, 1000);
+    QCOMPARE(screenFrames.last().at(0).toJsonObject().value("streamId").toString(), streamId);
+    QVERIFY(client.setScreenShareSubscription(remoteSessionId, 1, false));
+    screenPeer->sendBinaryMessage(screenPacket(streamId, 3));
+    QTest::qWait(30);
+    QCOMPARE(screenFrames.count(), 2);
     // The cursor rides the same authenticated session without an obsolete
     // watch_screens subscription. Reject stale, malformed and reverse traffic.
     QJsonObject cursor{
@@ -1603,6 +1822,54 @@ void ConnectionManagerTest::protocolUploadWireSchemaAndActiveGate() {
     QVERIFY(client.remoteSessionCoordinator()
                 ->incomingForPeer(targetEndpointId).active);
     QCOMPARE(cursorSpy.count(), 2); // inactive outgoing session was ignored
+    // Source-side receipts keep the kernel send buffer inside a three-frame
+    // window. Only this dedicated socket and the exact tuple free credit.
+    client.setScreenSharingEnabled(true);
+    const QString publicationStream = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    QSignalSpy publicationGrants(&client, &WebSocketClient::screenShareRequestReceived);
+    sendServerMessage({{"type", "screen_share_request"}, {"connectionGeneration", 1},
+        {"remoteSessionId", incomingSessionId}, {"generation", 1}, {"enabled", true},
+        {"streamId", publicationStream}, {"reason", "ready"}});
+    QTRY_COMPARE_WITH_TIMEOUT(publicationGrants.count(), 1, 1000);
+    const auto publication = [&](int sequence) {
+        return QJsonObject{{"remoteSessionId", incomingSessionId}, {"generation", 1},
+            {"streamId", publicationStream}, {"screenId", 2}, {"sequence", sequence},
+            {"width", 1280}, {"height", 720}, {"keyFrame", true}, {"codec", "h264"}};
+    };
+    const QByteArray accessUnit = QByteArray::fromHex("000000016588");
+    for (int sequence = 1; sequence <= 3; ++sequence) QVERIFY(client.sendScreenFrame(publication(sequence), accessUnit));
+    QTRY_COMPARE_WITH_TIMEOUT(publishedScreenFrames.size(), 3, 1000);
+    QVERIFY(!client.sendScreenFrame(publication(4), accessUnit));
+    const auto acknowledgePublication = [&](const QString& epoch, int sequence) {
+        screenPeer->sendTextMessage(QString::fromUtf8(QJsonDocument(QJsonObject{
+            {"type", "screen_frame_ack"}, {"streamId", epoch}, {"screenId", 2}, {"sequence", sequence},
+            {"protocolVersion", 12}, {"serverBootId", bootId}, {"connectionGeneration", 1},
+            {"messageId", QUuid::createUuid().toString(QUuid::WithoutBraces)}
+        }).toJson(QJsonDocument::Compact)));
+    };
+    acknowledgePublication(QUuid::createUuid().toString(QUuid::WithoutBraces), 1);
+    QTest::qWait(30);
+    QVERIFY(!client.sendScreenFrame(publication(4), accessUnit));
+    acknowledgePublication(publicationStream, 1);
+    QTest::qWait(30);
+    QVERIFY(client.sendScreenFrame(publication(4), accessUnit));
+    acknowledgePublication(publicationStream, 2);
+    acknowledgePublication(publicationStream, 3);
+    acknowledgePublication(publicationStream, 4);
+    QTest::qWait(30);
+    const auto monitorPublication = [&](int screenId, int sequence) {
+        auto packet = publication(sequence); packet.insert("screenId", screenId); return packet;
+    };
+    for (int screenId = 0; screenId < 3; ++screenId)
+        QVERIFY(client.sendScreenFrame(monitorPublication(screenId, 100), accessUnit));
+    QVERIFY(!client.sendScreenFrame(monitorPublication(3, 100), accessUnit));
+    // Free screen2's slot. Screen0 must yield it to the waiting fourth display.
+    acknowledgePublication(publicationStream, 100);
+    QTest::qWait(30);
+    QVERIFY(!client.sendScreenFrame(monitorPublication(0, 101), accessUnit));
+    QVERIFY(client.sendScreenFrame(monitorPublication(3, 101), accessUnit));
+    client.setScreenSharingEnabled(false);
+    QVERIFY(!client.sendScreenFrame(publication(5), accessUnit));
     QVERIFY(client.sendRemoteCursor(incomingSessionId, 1, 1, true, 2, {12.9, 24.1}));
     QVERIFY(client.sendRemoteCursor(incomingSessionId, 1, 2, false, 2, {12.9, 24.1}));
     QVERIFY(!client.sendRemoteCursor(incomingSessionId, 2, 3, true, 2, {12, 24}));

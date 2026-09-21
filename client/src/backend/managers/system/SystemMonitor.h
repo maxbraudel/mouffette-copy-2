@@ -62,6 +62,11 @@ public:
      */
     QList<ScreenInfo> getLocalScreenInfo() const;
     bool captureScreenInfo(QList<ScreenInfo>* screens);
+    // Exact inventory used by the last published snapshot, including native
+    // Windows ordering. Capture must never guess screen IDs from Qt's order.
+    QList<LocalScreenTopology::Screen> screenCaptureTopology() const {
+        return m_topologyReady ? m_topology : QList<LocalScreenTopology::Screen>{};
+    }
 
     /**
      * Sample the desktop cursor in the advertised screen's local coordinates.
@@ -83,6 +88,7 @@ public:
     QString getPlatformName() const;
     
 signals:
+    void screenTopologyInvalidated();
     /**
      * @brief Emitted when system volume changes
      * @param volumePercent New volume level (0-100)

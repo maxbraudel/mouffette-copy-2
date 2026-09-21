@@ -9,6 +9,7 @@ const { RemoteSessionRegistry, TERMINAL_PHASES } = require('./remote_session_reg
 const { ProtocolMetrics } = require('./protocol_metrics');
 const { isAllowedMediaExtension } = require('./media_format_contract');
 const { normalizeClientProfile } = require('./client_profile');
+const { ScreenShareRelay } = require('./screen_share_relay');
 const {
     SCENE_PHASES, SceneRunRegistry, computeSceneDigest, isPlainObject,
 } = require('./scene_run_registry');
@@ -229,6 +230,7 @@ class MouffetteServer {
         this.assetRemovalTombstones = new Map(); // removalId -> bounded committed/error result
         this.connectionsByEndpoint = new Map(); // endpointId -> Set(connectionId)
         this.sessionAssets = new Map(); // remoteSessionId -> Map(assetId -> validated metadata)
+        this.screenShare = new ScreenShareRelay(this);
 
         this.UPLOAD_TIMEOUT_MS = this.config.uploadIdleTimeoutMs;
         this.UPLOAD_TARGET_ACK_TIMEOUT_MS = this.config.uploadTargetAckTimeoutMs;
@@ -338,7 +340,10 @@ class MouffetteServer {
         this.uploadCleanupInterval = setInterval(() => {
             this.cleanupStalledUploads();
         }, this.config.uploadSweepIntervalMs);
-        this.leaseSweepInterval = setInterval(() => this.sweepRemoteSessionLeases(),
+        this.leaseSweepInterval = setInterval(() => {
+            this.sweepRemoteSessionLeases();
+            this.screenShare.sweep();
+        },
             this.config.sessionLeaseSweepIntervalMs);
         console.log(`🧹 Upload timeout cleanup started (timeout: ${this.UPLOAD_TIMEOUT_MS}ms)`);
         
@@ -348,6 +353,10 @@ class MouffetteServer {
             const url = new URL(req.url || '/', 'ws://dummy');
             const channel = url.searchParams.get('channel');
             const isUploadChannel = (channel === 'upload');
+            if (channel === 'screen') {
+                this.screenShare.acceptSocket(ws, url.searchParams.get('token'));
+                return;
+            }
             
             if (isUploadChannel) {
                 const boundClient = this.consumeUploadChannelToken(url.searchParams.get('token'));
@@ -467,6 +476,7 @@ class MouffetteServer {
                 console.log(`📱 Client disconnected: ${finalId}`);
                 const protectedByLease = this.handleRemoteSessionDeparture(clientInfo);
                 this.revokeUploadChannelsForClient(clientInfo, protectedByLease);
+                this.screenShare.revokeClient(clientInfo);
                 if (!protectedByLease) {
                     this.abortUploadsForClient(finalId);
                 }
@@ -487,6 +497,7 @@ class MouffetteServer {
                 console.error(`❌ WebSocket error for client ${finalId}:`, error);
                 const protectedByLease = this.handleRemoteSessionDeparture(clientInfo);
                 this.revokeUploadChannelsForClient(clientInfo, protectedByLease);
+                this.screenShare.revokeClient(clientInfo);
                 if (!protectedByLease) {
                     this.abortUploadsForClient(finalId);
                 }
@@ -1563,6 +1574,13 @@ class MouffetteServer {
             case 'profile_picture_request':
                 this.handleProfilePictureRequest(clientId, message);
                 break;
+            case 'request_screen_channel':
+            case 'screen_share_consent':
+            case 'screen_share_subscribe':
+            case 'screen_share_status':
+            case 'screen_share_keyframe':
+                this.screenShare.handleControl(clientId, message);
+                break;
             case 'request_upload_channel':
                 if (!this.issueUploadChannelToken(clientId, message.requestId)) {
                     this.sendError(clientId, 'Upload channel requires a registered control connection');
@@ -1696,6 +1714,7 @@ class MouffetteServer {
         client.replaced = true;
         this.rememberEndpointPresence(client);
         this.revokeUploadChannelsForClient(client, preserveSessionUploads);
+        this.screenShare.revokeClient(client);
         if (!preserveSessionUploads) this.abortUploadsForClient(client.id);
         if (client.endpointId) {
             this.unregisterConnectionForEndpoint(client.endpointId, client.id);
@@ -1906,6 +1925,7 @@ class MouffetteServer {
                     'remote_session_lease_state');
                 payload.degradedEndpointId = client.endpointId;
                 this.reconcileSceneAfterRecovery(session);
+                this.screenShare.refreshSession(session);
                 this.sendToEndpoint(session.ownerEndpointId, payload);
                 this.sendToEndpoint(session.targetEndpointId, payload);
             }
@@ -2309,7 +2329,8 @@ class MouffetteServer {
             snapshotSequence: message.snapshotSequence,
             snapshot,
         };
-        this.flushRemoteSessionSnapshot(session);
+        this.screenShare.refreshSession(session);
+        if (this.flushRemoteSessionSnapshot(session)) this.screenShare.refreshSession(session);
     }
 
     flushRemoteSessionSnapshot(session) {
@@ -2330,6 +2351,7 @@ class MouffetteServer {
             snapshot: pending.snapshot,
         })) return false;
         delete session.pendingTargetSnapshot;
+        this.screenShare.refreshSession(session);
         return true;
     }
 
@@ -2840,6 +2862,7 @@ class MouffetteServer {
                 this.sendToEndpoint(session.ownerEndpointId, payload);
                 this.sendToEndpoint(session.targetEndpointId, payload);
                 this.reconcileSceneAfterRecovery(session);
+                this.screenShare.refreshSession(session);
                 this.grantPendingUploadCapacity(session.targetEndpointId);
             }
         }
@@ -2911,7 +2934,10 @@ class MouffetteServer {
         // barrier after the state response, even when no applied-state ACK
         // transition remains. Delivery is not a preparation acknowledgement.
         if (delivered) {
-            for (const session of sceneSessions) this.reconcileSceneAfterRecovery(session);
+            for (const session of sceneSessions) {
+                this.reconcileSceneAfterRecovery(session);
+                this.screenShare.refreshSession(session);
+            }
         }
     }
 
@@ -2992,6 +3018,7 @@ class MouffetteServer {
     beginRemoteSessionTeardown(session, requestId) {
         if (!session || !session.teardownId || session.teardownDispatchStarted) return false;
         session.teardownDispatchStarted = true;
+        this.screenShare.removeSession(session);
         delete session.mediaResidency;
         delete session.mediaResidencySummary;
         const run = this.sceneRuns.getForSession(session.remoteSessionId);
@@ -3104,6 +3131,7 @@ class MouffetteServer {
     handleRemoteSessionDeparture(client, now = this.remoteSessions.now()) {
         if (!client || !client.endpointId) return false;
         this.rememberEndpointPresence(client);
+        this.screenShare.revokeClient(client);
         const changed = this.remoteSessions.markDisconnected(client.endpointId, now);
         for (const session of changed) {
             if (session.phase === 'Terminating') {
@@ -3313,6 +3341,7 @@ class MouffetteServer {
         client.profilePictureHash = profile.profilePictureHash;
         client.platform = message.platform;
         client.screens = normalizeScreens(message.screens, this.MAX_REMOTE_SCENE_SCREENS);
+        this.screenShare.refreshForClient(client);
         client.systemUI = message.systemUI.map(normalizeUiZone);
         client.volumePercent = message.volumePercent;
         this.rememberEndpointPresence(client);

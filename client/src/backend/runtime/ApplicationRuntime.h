@@ -33,6 +33,7 @@ class RemoteSceneController;
 class CanvasMedia;
 class SceneActivityModel;
 class ScreenEventHandler;
+class ScreenSharingService;
 class ScreenNavigationManager;
 class SettingsManager;
 class SystemMonitor;
@@ -70,6 +71,7 @@ public:
     SceneActivityModel* getSceneActivityModel() const { return m_sceneActivityModel; }
     NotificationCenter* getNotificationCenter() const;
     SettingsManager* getSettingsManager() const { return m_settingsManager; }
+    QString screenSharingStatus() const;
     ClientProfileCache* profileCache() const { return m_profileCache; }
     ICanvasHost* getActiveCanvas() const { return m_activeCanvas; }
     const ClientInfo& getSelectedClient() const { return m_selectedClient; }
@@ -179,6 +181,7 @@ public slots:
     void onUploadButtonClicked();
 
 signals:
+    void screenSharingStatusChanged();
     void displayClientsChanged(const QList<ClientInfo>& clients);
     void presentationStateChanged();
     void applicationPageChanged(int page);
@@ -205,6 +208,7 @@ private slots:
     void onTrayIconActivated(int reason);
 
 private:
+    void refreshScreenSharing();
     void refreshRemoteCursorStreaming();
     void publishLocalCursor();
     void expireStaleRemoteCursors();
@@ -308,6 +312,7 @@ private:
     WebSocketClient* m_webSocketClient = nullptr;
     ConnectionManager* m_connectionManager = nullptr;
     SettingsManager* m_settingsManager = nullptr;
+    ScreenSharingService* m_screenSharing = nullptr;
     ClientProfileCache* m_profileCache = nullptr;
     WebSocketMessageHandler* m_webSocketMessageHandler = nullptr;
     ScreenEventHandler* m_screenEventHandler = nullptr;

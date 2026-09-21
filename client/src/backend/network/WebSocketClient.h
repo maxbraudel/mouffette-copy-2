@@ -60,6 +60,17 @@ public:
         return m_uploadSessionActive && m_useUploadSocketForSession;
     }
     
+    // Ephemeral H.264 screen video uses its own authenticated, bounded socket.
+    bool ensureScreenChannel();
+    void closeScreenChannel();
+    bool isScreenChannelConnected() const;
+    void setScreenSharingEnabled(bool enabled);
+    bool setScreenShareSubscription(const QString& remoteSessionId, quint64 generation, bool enabled);
+    // False means this access unit was dropped; resume this stream with an IDR.
+    bool sendScreenFrame(const QJsonObject& metadata, const QByteArray& annexB);
+    bool sendScreenShareStatus(const QString& remoteSessionId, quint64 generation, const QString& reason);
+    bool requestScreenShareKeyFrame(const QString& remoteSessionId, quint64 generation, int screenId = -1);
+
     // Client registration
     void registerClient(const QString& machineName, const QString& platform,
                         const QList<ScreenInfo>& screens, int volumePercent,
@@ -212,6 +223,12 @@ public:
     QString getConnectionStatus() const { return m_connectionStatus; }
 
 signals:
+    void screenChannelReady();
+    void screenChannelUnavailable();
+    void screenShareRequestReceived(const QJsonObject& message);
+    void screenShareStateReceived(const QJsonObject& message);
+    void screenShareKeyFrameRequested(const QJsonObject& message);
+    void screenFrameReceived(const QJsonObject& metadata, const QByteArray& annexB);
     void connected();
     void disconnected();
     void transportConnected();
@@ -287,6 +304,29 @@ private slots:
     void onUploadError(QAbstractSocket::SocketError error);
 
 private:
+    void onScreenTextMessageReceived(const QString& message);
+    void onScreenBinaryMessageReceived(const QByteArray& message);
+    void failScreenChannel();
+    void clearScreenReceiptEpoch(const QString& streamId);
+    bool handleScreenControlMessage(const QJsonObject& message);
+    QWebSocket* m_screenSocket = nullptr;
+    bool m_screenChannelAuthenticated = false;
+    bool m_screenChannelWanted = false;
+    bool m_screenSharingEnabled = false;
+    bool m_screenTokenRequested = false;
+    QString m_screenTokenRequestId;
+    QString m_screenChannelToken;
+    QTimer m_screenChannelTimer;
+    QTimer m_screenAckTimer;
+    struct ScreenFrameReceipt { qint64 bytes = 0; qint64 sentAt = 0; };
+    QHash<QString, ScreenFrameReceipt> m_screenPendingReceipts;
+    qint64 m_screenPendingBytes = 0;
+    QList<QString> m_screenWaitingStreams;
+    QHash<QString, qint64> m_screenWaitingSeen;
+    QHash<QString, QJsonObject> m_screenPublishGrants;
+    QHash<QString, QJsonObject> m_screenReceiveGrants;
+    QHash<QString, quint64> m_screenFrameSequences;
+    QHash<QString, quint64> m_screenSubscriptions;
     struct ClockSample {
         qint64 receivedAtMs = 0;
         qint64 offsetMs = 0;

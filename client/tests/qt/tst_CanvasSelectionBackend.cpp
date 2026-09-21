@@ -177,6 +177,8 @@ private slots:
             "        property string settingsServerUrl: \"ws://127.0.0.1:3000\"\n"
             "        property bool settingsAutoUpload: true\n"
             "        property bool settingsAppAlwaysOnTop: true\n"
+            "        property bool settingsScreenSharingEnabled: false\n"
+            "        property string settingsScreenSharingStatus: \"\"\n"
             "        property string settingsUsername: \"Original name\"\n"
             "        property string settingsHostname: \"Original hostname\"\n"
             "        property string settingsProfilePictureSource: \"qrc:/icons/logo/mouffette-64.png\"\n"
@@ -188,8 +190,9 @@ private slots:
             "        function cancelProfileEdit() { settingsProfilePictureDraftSource = settingsProfilePictureSource }\n"
             "        function removeProfilePicture() { settingsProfilePictureDraftSource = \"\" }\n"
             "        function importProfilePicture(url) { settingsProfilePictureDraftSource = url.toString(); return \"\" }\n"
-            "        function saveSettings(url, upload, priority, username) {\n"
+            "        function saveSettings(url, upload, priority, username, sharing) {\n"
             "            settingsAppAlwaysOnTop = priority; settingsUsername = username;\n"
+            "            settingsScreenSharingEnabled = sharing;\n"
             "            settingsProfilePictureSource = settingsProfilePictureDraftSource;\n"
             "            ++saveCalls; return \"\"\n"
             "        }\n"
@@ -203,10 +206,11 @@ private slots:
         QObject* controller = window->property("settingsController").value<QObject*>();
         QVERIFY(dialog && controller);
         QObject* checkbox = dialog->findChild<QObject*>(QStringLiteral("settingsAppAlwaysOnTop"));
+        QObject* sharing = dialog->findChild<QObject*>(QStringLiteral("settingsScreenSharingEnabled"));
         QObject* username = dialog->findChild<QObject*>(QStringLiteral("settingsUsername"));
         QObject* preview = dialog->findChild<QObject*>(QStringLiteral("settingsProfilePicture"));
         QObject* remove = dialog->findChild<QObject*>(QStringLiteral("settingsRemoveProfilePicture"));
-        QVERIFY(checkbox && username && preview && remove);
+        QVERIFY(checkbox && sharing && username && preview && remove);
         const auto content = dialog->property("contentItem").value<QQuickItem*>();
         QObject* cancel = findQuickItemWithProperty(content, "text", QStringLiteral("Cancel"));
         QObject* save = findQuickItemWithProperty(content, "text", QStringLiteral("Save"));
@@ -214,14 +218,17 @@ private slots:
         QVERIFY(QMetaObject::invokeMethod(dialog, "open"));
         QTRY_VERIFY(dialog->property("opened").toBool());
         QVERIFY(checkbox->property("checked").toBool());
+        QVERIFY(!sharing->property("checked").toBool());
         QCOMPARE(username->property("text").toString(), QStringLiteral("Original name"));
         QCOMPARE(username->property("placeholderText").toString(), QStringLiteral("Original hostname"));
         QCOMPARE(preview->property("source").toUrl(), QUrl(QStringLiteral("qrc:/icons/logo/mouffette-64.png")));
         checkbox->setProperty("checked", false);
+        sharing->setProperty("checked", true);
         username->setProperty("text", QStringLiteral("Discarded name"));
         QVERIFY(QMetaObject::invokeMethod(remove, "clicked"));
         QCOMPARE(preview->property("source").toUrl(), QUrl());
         QVERIFY(controller->property("settingsAppAlwaysOnTop").toBool());
+        QVERIFY(!controller->property("settingsScreenSharingEnabled").toBool());
         QCOMPARE(controller->property("settingsUsername").toString(), QStringLiteral("Original name"));
         QCOMPARE(controller->property("settingsProfilePictureSource").toString(), QStringLiteral("qrc:/icons/logo/mouffette-64.png"));
         QVERIFY(QMetaObject::invokeMethod(cancel, "clicked"));
@@ -230,20 +237,24 @@ private slots:
         QVERIFY(QMetaObject::invokeMethod(dialog, "open"));
         QTRY_VERIFY(dialog->property("opened").toBool());
         QVERIFY(checkbox->property("checked").toBool());
+        QVERIFY(!sharing->property("checked").toBool());
         QCOMPARE(username->property("text").toString(), QStringLiteral("Original name"));
         QCOMPARE(preview->property("source").toUrl(), QUrl(QStringLiteral("qrc:/icons/logo/mouffette-64.png")));
         checkbox->setProperty("checked", false);
+        sharing->setProperty("checked", true);
         username->setProperty("text", QStringLiteral("Saved username"));
         QVERIFY(QMetaObject::invokeMethod(remove, "clicked"));
         QVERIFY(QMetaObject::invokeMethod(save, "clicked"));
         QTRY_VERIFY(!dialog->property("visible").toBool());
         QVERIFY(!controller->property("settingsAppAlwaysOnTop").toBool());
+        QVERIFY(controller->property("settingsScreenSharingEnabled").toBool());
         QCOMPARE(controller->property("settingsUsername").toString(), QStringLiteral("Saved username"));
         QVERIFY(controller->property("settingsProfilePictureSource").toString().isEmpty());
         QCOMPARE(controller->property("saveCalls").toInt(), 1);
         QVERIFY(QMetaObject::invokeMethod(dialog, "open"));
         QTRY_VERIFY(dialog->property("opened").toBool());
         QVERIFY(!checkbox->property("checked").toBool());
+        QVERIFY(sharing->property("checked").toBool());
         QCOMPARE(username->property("text").toString(), QStringLiteral("Saved username"));
         QVERIFY(!remove->property("enabled").toBool());
         auto* quickWindow = qobject_cast<QQuickWindow*>(window.data());
@@ -493,6 +504,109 @@ private slots:
         fixture.controller.hideRemoteCursor();
         QVERIFY(!cursor->isVisible());
         QTRY_VERIFY(cursorPixel() != QColor(Qt::white));
+    }
+
+    void remoteScreenFramesStayTransientAndRespectMonitorLifecycle()
+    {
+        // QuickCanvasHost adopts both objects and owns their lifetime.
+        auto& document = *new CanvasDocument;
+        auto& controller = *new QuickCanvasController(&document);
+        QuickCanvasHost host(&document, &controller);
+        host.setScreens({ScreenInfo(1, 1920, 1080, 0, 0, true),
+                         ScreenInfo(2, 1280, 720, 1920, 0, false)});
+        const auto sourceFor = [&controller](int id) -> RemoteVideoFrameSource* {
+            for (const QVariant& entry : controller.screensModel()) {
+                const auto screen = entry.toMap();
+                if (screen.value(QStringLiteral("screenId")).toInt() == id)
+                    return qobject_cast<RemoteVideoFrameSource*>(
+                        screen.value(QStringLiteral("frameSource")).value<QObject*>());
+            }
+            return nullptr;
+        };
+        auto* first = sourceFor(1);
+        auto* second = sourceFor(2);
+        QVERIFY(first && second && first != second);
+        QImage pixels(16, 16, QImage::Format_RGBA8888);
+        pixels.fill(Qt::cyan);
+        QVideoFrame frame(pixels);
+        QVERIFY(frame.isValid());
+        QSignalSpy presentations(&controller, &QuickCanvasController::presentationChanged);
+        QSignalSpy edits(&document, &CanvasDocument::documentChanged);
+        const QJsonObject saved = document.serializeProjectState();
+        host.setRemoteScreenFrame(1, frame);
+        QVERIFY(first->hasFrame());
+        QVERIFY(!second->hasFrame());
+        QVERIFY(first->frame().isNull());
+        QVERIFY(first->videoFrame().isValid());
+        host.setRemoteScreenFrame(2, frame);
+        host.setRemoteScreenFrame(99, frame);
+        QCOMPARE(presentations.count(), 0);
+        QCOMPARE(edits.count(), 0);
+        QCOMPARE(document.serializeProjectState(), saved);
+        host.clearRemoteScreenFrame(1);
+        QVERIFY(!first->hasFrame());
+        QVERIFY(second->hasFrame());
+        host.setRemoteScreenSharingStatus(QStringLiteral("Sharing disabled"));
+        QCOMPARE(controller.remoteScreenSharingStatus(), QStringLiteral("Sharing disabled"));
+        host.hideContentPreservingState();
+        QVERIFY(!second->hasFrame());
+        QVERIFY(controller.remoteScreenSharingStatus().isEmpty());
+        host.setRemoteScreenFrame(2, frame);
+        QVERIFY(!second->hasFrame());
+        host.showContentAfterReconnect();
+        host.setRemoteScreenFrame(2, frame);
+        QVERIFY(second->hasFrame());
+        host.setRemoteScreenFrame(1, frame);
+        host.setScreens({ScreenInfo(1, 1920, 1080, 0, 0, true)});
+        QVERIFY(!first->hasFrame());
+        QVERIFY(!second->hasFrame());
+        QVERIFY(!sourceFor(2));
+        host.setScreens({ScreenInfo(1, 1920, 1080, 0, 0, true),
+                         ScreenInfo(2, 1280, 720, 1920, 0, false)});
+        QVERIFY(!sourceFor(2)->hasFrame());
+        host.setRemoteScreenFrame(1, frame);
+        host.setRemoteSceneTarget(QStringLiteral("new-peer"), QStringLiteral("New peer"));
+        QVERIFY(!first->hasFrame());
+        host.setRemoteScreenFrame(1, frame);
+        host.handleRemoteConnectionLost();
+        QVERIFY(!first->hasFrame());
+    }
+
+    void remoteScreenVideoRendersInsideTheScreenUnderMedia()
+    {
+        Fixture fixture;
+        QVERIFY(fixture.initialize());
+        fixture.document.setScreens({ScreenInfo(0, 640, 480, 0, 0, true)});
+        fixture.controller.updateCamera(1, 10, 10);
+        QImage pixels(64, 48, QImage::Format_RGBA8888);
+        pixels.fill(Qt::cyan);
+        fixture.controller.setRemoteScreenFrame(0, QVideoFrame(pixels));
+        auto* item = qobject_cast<RemoteVideoFrameItem*>(findQuickItemWithProperty(
+            fixture.view.rootObject(), "objectName", QStringLiteral("remoteScreenVideo")));
+        QVERIFY(item);
+        QVERIFY(item->hasFrame());
+        QVERIFY(item->isVisible());
+        fixture.view.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&fixture.view));
+        const auto sample = [&]() {
+            const QImage image = fixture.view.grabWindow();
+            if (image.isNull()) return QColor();
+            const QPointF center = item->mapToScene(QPointF(item->width() / 2, item->height() / 2));
+            return image.pixelColor(qRound(center.x() * image.width() / fixture.view.width()),
+                                    qRound(center.y() * image.height() / fixture.view.height()));
+        };
+        QTRY_COMPARE(sample(), QColor(Qt::cyan));
+        // A GPU-backed screen is a background, so regular canvas media remains
+        // above it and all camera transforms apply to the same scene geometry.
+        QVERIFY(item->parentItem()->z() < 0);
+        fixture.controller.updateCamera(.5, 30, 40);
+        QCOMPARE(item->mapRectToItem(fixture.view.rootObject(), item->boundingRect()).size(),
+                 QSizeF(320, 240));
+        QTRY_COMPARE(sample(), QColor(Qt::cyan));
+        fixture.controller.clearRemoteScreenFrames();
+        QVERIFY(!item->hasFrame());
+        QVERIFY(!item->isVisible());
+        QTRY_VERIFY(sample() != QColor(Qt::cyan));
     }
 
     void frameSourcePublishesOnlyChangedContentAndAvailability()

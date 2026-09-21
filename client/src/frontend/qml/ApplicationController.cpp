@@ -247,6 +247,17 @@ bool ApplicationController::settingsAppAlwaysOnTop() const
     return settings ? settings->getAppAlwaysOnTop() : AppConfig::instance().appAlwaysOnTop();
 }
 
+bool ApplicationController::settingsScreenSharingEnabled() const
+{
+    const auto* settings = m_runtime ? m_runtime->getSettingsManager() : nullptr;
+    return settings && settings->getScreenSharingEnabled();
+}
+
+QString ApplicationController::settingsScreenSharingStatus() const
+{
+    return m_runtime ? m_runtime->screenSharingStatus() : QString();
+}
+
 void ApplicationController::start()
 {
     if (m_bootstrapStarted) return;
@@ -346,6 +357,8 @@ void ApplicationController::initializeBackend()
 {
     if (m_runtime) return;
     m_runtime = std::make_unique<ApplicationRuntime>(m_runtimeProfile);
+    connect(m_runtime.get(), &ApplicationRuntime::screenSharingStatusChanged,
+            this, &ApplicationController::screenSharingStatusChanged);
     auto* profiles = m_runtime->profileCache();
     profiles->setLocalPicture(QStringLiteral("saved"), m_runtime->getSettingsManager()->profilePictureJpeg());
     QmlRuntime::engine()->addImageProvider(QStringLiteral("profiles"), new ProfilePictureProvider(profiles));
@@ -398,6 +411,7 @@ void ApplicationController::initializeBackend()
 
     m_ready = true;
     emit settingsChanged();
+    emit screenSharingStatusChanged();
     emit readyChanged();
     emit bootstrapChanged();
     refreshPresentation();
@@ -517,6 +531,14 @@ QString ApplicationController::saveSettings(const QString& serverUrl,
                                             bool autoUpload, bool appAlwaysOnTop,
                                             const QString& username)
 {
+    return saveSettings(serverUrl, autoUpload, appAlwaysOnTop, username,
+                        settingsScreenSharingEnabled());
+}
+
+QString ApplicationController::saveSettings(const QString& serverUrl,
+                                            bool autoUpload, bool appAlwaysOnTop,
+                                            const QString& username, bool screenSharingEnabled)
+{
     if (m_clearingStorage) return QStringLiteral("The application is closing.");
     if (!m_runtime || !m_runtime->getSettingsManager()) {
         return QStringLiteral("Settings are not ready yet.");
@@ -530,7 +552,8 @@ QString ApplicationController::saveSettings(const QString& serverUrl,
     const QString canonical = normalized.toString(QUrl::FullyEncoded);
     const bool reconnect = canonical != settings->getServerUrl();
     const QByteArray picture = m_profileEditing ? m_draftProfilePicture : settings->profilePictureJpeg();
-    if (!settings->commitSettings(canonical, autoUpload, appAlwaysOnTop, username, picture, &error)) return error;
+    if (!settings->commitSettings(canonical, autoUpload, appAlwaysOnTop, username, picture,
+                                  screenSharingEnabled, &error)) return error;
     m_runtime->profileCache()->setLocalPicture(QStringLiteral("saved"), picture);
     cancelProfileEdit();
     if (reconnect) {

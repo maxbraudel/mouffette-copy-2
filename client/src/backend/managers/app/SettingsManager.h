@@ -21,11 +21,15 @@ public:
     QString getServerUrl() const { return m_serverUrlConfig; }
     bool getAutoUploadImportedMedia() const { return m_autoUploadImportedMedia; }
     bool getAppAlwaysOnTop() const { return m_appAlwaysOnTop; }
+    bool getScreenSharingEnabled() const { return m_screenSharingEnabled; }
     QString username() const { return m_username; }
     QByteArray profilePictureJpeg() const { return m_profilePictureJpeg; }
     bool commitSettings(const QString& serverUrl, bool autoUpload, bool alwaysOnTop,
                         const QString& username, const QByteArray& profilePictureJpeg,
                         QString* error = nullptr);
+    bool commitSettings(const QString& serverUrl, bool autoUpload, bool alwaysOnTop,
+                        const QString& username, const QByteArray& profilePictureJpeg,
+                        bool screenSharingEnabled, QString* error = nullptr);
     
     // Setters
     void setServerUrl(const QString& url);
@@ -35,12 +39,15 @@ public:
 signals:
     void settingsChanged();
     void serverUrlChanged(const QString& newUrl);
+    void screenSharingEnabledChanged(bool enabled);
 
 private:
     // Settings values
     QString m_serverUrlConfig;
     bool m_autoUploadImportedMedia;
     bool m_appAlwaysOnTop = true;
+    // Sharing the desktop always requires this instance's explicit opt-in.
+    bool m_screenSharingEnabled = false;
     QString m_username;
     QByteArray m_profilePictureJpeg;
 };

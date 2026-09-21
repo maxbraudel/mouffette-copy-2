@@ -8,6 +8,7 @@
 #include "frontend/rendering/canvas/CanvasQmlTypes.h"
 #include "frontend/rendering/canvas/MediaListModel.h"
 #include "frontend/ui/notifications/ToastNotificationSystem.h"
+#include "shared/rendering/MediaFrameSource.h"
 
 #include <QClipboard>
 #include <QGuiApplication>
@@ -17,6 +18,7 @@
 #include <QFileInfo>
 #include <QMetaObject>
 #include <QQuickWindow>
+#include <QSet>
 #include <QTimer>
 #include <QUrl>
 
@@ -235,6 +237,9 @@ QuickCanvasController::QuickCanvasController(CanvasDocument* document,
         publishSelection();
     });
     connect(document, &CanvasDocument::screensChanged, this, [this] {
+        // Screen IDs follow the remote enumeration and can be reassigned when
+        // a monitor is unplugged. Never reuse its last pixels for a new layout.
+        clearRemoteScreenFrames();
         publishScreens();
         ensureInitialFit(m_initialFitMargin);
     });
@@ -380,15 +385,20 @@ void QuickCanvasController::publishScreens()
     if (!m_document) return;
     QVariantList screens;
     QVariantList zones;
+    QSet<int> activeScreens;
     QList<ScreenInfo> ordered = m_document->screens();
     std::sort(ordered.begin(), ordered.end(), [](const ScreenInfo& a, const ScreenInfo& b) {
         return a.y == b.y ? (a.x == b.x ? a.id < b.id : a.x < b.x) : a.y < b.y;
     });
     int displayIndex = 1;
     for (const ScreenInfo& screen : ordered) {
+        activeScreens.insert(screen.id);
+        auto*& frameSource = m_screenFrameSources[screen.id];
+        if (!frameSource) frameSource = new RemoteVideoFrameSource(this);
         const QRectF rect = m_document->screenRects().value(screen.id);
         screens.append(QVariantMap{
             {QStringLiteral("screenId"), screen.id},
+            {QStringLiteral("frameSource"), QVariant::fromValue(static_cast<QObject*>(frameSource))},
             {QStringLiteral("displayIndex"), displayIndex++},
             {QStringLiteral("x"), rect.x()}, {QStringLiteral("y"), rect.y()},
             {QStringLiteral("width"), rect.width()},
@@ -413,6 +423,15 @@ void QuickCanvasController::publishScreens()
     }
     m_screensModel = screens;
     m_uiZonesModel = zones;
+    // Release removed monitors immediately; the deferred QObject deletion lets
+    // any old QML delegates disconnect cleanly as their model is replaced.
+    for (auto source = m_screenFrameSources.begin(); source != m_screenFrameSources.end();) {
+        if (!activeScreens.contains(source.key())) {
+            source.value()->clear();
+            source.value()->deleteLater();
+            source = m_screenFrameSources.erase(source);
+        } else ++source;
+    }
     emit presentationChanged();
 }
 
@@ -472,6 +491,10 @@ void QuickCanvasController::selectMedia(const QString& mediaId, bool additive)
 
 void QuickCanvasController::setShellActive(bool active)
 {
+    if (!active) {
+        clearRemoteScreenFrames();
+        setRemoteScreenSharingStatus({});
+    }
     if (m_shellActive == active) return;
     m_shellActive = active;
     emit presentationChanged();
@@ -485,6 +508,29 @@ void QuickCanvasController::updateRemoteCursor(int screenId, const QPointF& scre
 void QuickCanvasController::hideRemoteCursor()
 {
     if (m_document) m_document->hideRemoteCursor();
+}
+
+void QuickCanvasController::setRemoteScreenFrame(int screenId, const QVideoFrame& frame)
+{
+    // Topology is authoritative: stale frames cannot create phantom monitors.
+    if (auto* source = m_screenFrameSources.value(screenId)) source->setVideoFrame(frame);
+}
+
+void QuickCanvasController::clearRemoteScreenFrame(int screenId)
+{
+    if (auto* source = m_screenFrameSources.value(screenId)) source->clear();
+}
+
+void QuickCanvasController::clearRemoteScreenFrames()
+{
+    for (auto* source : std::as_const(m_screenFrameSources)) source->clear();
+}
+
+void QuickCanvasController::setRemoteScreenSharingStatus(const QString& status)
+{
+    if (m_remoteScreenSharingStatus == status) return;
+    m_remoteScreenSharingStatus = status;
+    emit remoteScreenSharingStatusChanged();
 }
 
 void QuickCanvasController::resetView()

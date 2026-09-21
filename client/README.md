@@ -155,6 +155,12 @@ The canvas shows the target's live mouse position through the active session.
 See [remote cursor](docs/remote-cursor.md) for coordinate mapping, freshness,
 regression coverage and the required client/server update.
 
+Clients can opt in to live screen sharing in Settings. Their desktop then
+appears inside the remote canvas's monitor rectangles, using bounded H.264
+streams and the Qt Quick video renderer. Sharing is off by default. See
+[screen sharing](docs/screen-sharing.md) for platform permissions, architecture,
+transport limits and validation.
+
 The primary selected media shows a transparency checkerboard in the authoring
 canvas, including when hidden, fully transparent or outside its timeline clip.
 Outside the clip, its content stays hidden while its first/last clip geometry

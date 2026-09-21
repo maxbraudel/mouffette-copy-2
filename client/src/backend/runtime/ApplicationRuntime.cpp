@@ -30,6 +30,7 @@
 #include "backend/controllers/ClientWorkspaceController.h"
 #include "backend/config/AppConfig.h"
 #include "backend/managers/app/SettingsManager.h"
+#include "backend/screensharing/ScreenSharingService.h"
 #include "backend/managers/network/ClientListBuilder.h"
 #include "backend/managers/network/ConnectionManager.h"
 #include "frontend/handlers/UploadSignalConnector.h"
@@ -417,6 +418,26 @@ ApplicationRuntime::ApplicationRuntime(const RuntimeProfileContext& runtimeProfi
     });
 
     m_settingsManager->loadSettings();
+    m_screenSharing = new ScreenSharingService(m_webSocketClient, m_systemMonitor, this);
+    connect(m_screenSharing, &ScreenSharingService::statusChanged,
+            this, &ApplicationRuntime::screenSharingStatusChanged);
+    connect(m_settingsManager, &SettingsManager::screenSharingEnabledChanged,
+            m_screenSharing, &ScreenSharingService::setSharingEnabled);
+    connect(m_screenSharing, &ScreenSharingService::frameReady, this,
+            [this](const QString& endpoint, int screenId, const QVideoFrame& frame) {
+        if (auto* canvas = canvasForEndpointId(endpoint)) canvas->setRemoteScreenFrame(screenId, frame);
+    });
+    connect(m_screenSharing, &ScreenSharingService::framesCleared, this,
+            [this](const QString& endpoint) {
+        if (auto* canvas = canvasForEndpointId(endpoint)) canvas->clearRemoteScreenFrames();
+    });
+    connect(m_screenSharing, &ScreenSharingService::remoteStatusChanged, this,
+            [this](const QString& endpoint, const QString& status) {
+        if (auto* canvas = canvasForEndpointId(endpoint)) canvas->setRemoteScreenSharingStatus(status);
+    });
+    connect(this, &ApplicationRuntime::activeWorkspaceChanged, this, &ApplicationRuntime::refreshScreenSharing);
+    connect(this, &ApplicationRuntime::applicationPageChanged, this, &ApplicationRuntime::refreshScreenSharing);
+    m_screenSharing->setSharingEnabled(m_settingsManager->getScreenSharingEnabled());
     m_profileCache->setPictureRequester([this](const QString& endpoint, const QString& hash) {
         return m_webSocketClient->requestProfilePicture(endpoint, hash);
     });
@@ -1624,6 +1645,7 @@ void ApplicationRuntime::handleApplicationStateChanged(Qt::ApplicationState stat
     setApplicationSuspended(state == Qt::ApplicationHidden
                             || state == Qt::ApplicationSuspended
                             || m_nativeSystemSuspended);
+    refreshScreenSharing();
 }
 
 void ApplicationRuntime::handleNativeSystemSuspendedChanged(bool suspended) {
@@ -1632,6 +1654,7 @@ void ApplicationRuntime::handleNativeSystemSuspendedChanged(bool suspended) {
     setApplicationSuspended(suspended
                             || QGuiApplication::applicationState() == Qt::ApplicationHidden
                             || QGuiApplication::applicationState() == Qt::ApplicationSuspended);
+    refreshScreenSharing();
 }
 
 void ApplicationRuntime::showScreenView(const ClientInfo& client) {
@@ -3760,6 +3783,7 @@ void ApplicationRuntime::setApplicationSuspended(bool suspended) {
         return;
     }
     m_applicationSuspended = suspended;
+    refreshScreenSharing();
     if (m_activityMonitor) m_activityMonitor->setSystemSuspended(suspended);
     updateHistoryVisibilityState();
 }
@@ -3887,6 +3911,7 @@ void ApplicationRuntime::setQmlWindowVisible(bool visible)
 {
     if (m_qmlWindowVisible == visible) return;
     m_qmlWindowVisible = visible;
+    refreshScreenSharing();
     if (m_activityMonitor) m_activityMonitor->setControlWindowVisible(visible);
     updateHistoryVisibilityState();
 }
@@ -3938,6 +3963,7 @@ void ApplicationRuntime::prepareCleanShutdown()
 {
     if (m_cleanShutdownPrepared) return;
     m_cleanShutdownPrepared = true;
+    if (m_screenSharing) m_screenSharing->stop();
 
     if (m_webSocketClient && m_webSocketMessageHandler) {
         QObject::disconnect(m_webSocketClient, nullptr,
@@ -4165,6 +4191,22 @@ void ApplicationRuntime::onDisconnected() {
         m_webSocketMessageHandler->onDisconnected();
     }
     if (m_controlledDisconnectInProgress) finishControlledDisconnect();
+}
+
+QString ApplicationRuntime::screenSharingStatus() const
+{
+    return m_screenSharing ? m_screenSharing->status() : QString();
+}
+
+void ApplicationRuntime::refreshScreenSharing()
+{
+    if (!m_screenSharing || m_cleanShutdownPrepared) return;
+    // Hiding the control application must not stop an authorized publisher.
+    // Native lock/sleep suspends both directions, independently of tray state.
+    m_screenSharing->setSuspended(m_nativeSystemSuspended
+        || QGuiApplication::applicationState() == Qt::ApplicationSuspended);
+    m_screenSharing->setViewedEndpoint(m_qmlWindowVisible && m_applicationPage == 1
+        && !m_applicationSuspended ? m_activeWorkspaceEndpointId : QString());
 }
 
 void ApplicationRuntime::refreshRemoteCursorStreaming()

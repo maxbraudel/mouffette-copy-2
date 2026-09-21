@@ -1,4 +1,5 @@
 import QtQuick
+import Mouffette.Canvas
 import Mouffette.App as AppStyle
 Rectangle {
     id: root
@@ -17,6 +18,8 @@ Rectangle {
     property int  pixelWidth: 0
     property int  pixelHeight: 0
     property var uiZonesModel: []
+    property var frameSource: null
+    property string sharingStatus: ""
 
     x: screenX
     y: screenY
@@ -34,6 +37,7 @@ Rectangle {
         anchors.fill: parent
         z: 0
         clip: true
+        visible: !screenVideo.hasFrame
 
         Repeater {
             model: root.uiZonesModel || []
@@ -53,6 +57,32 @@ Rectangle {
                 border.width: 0
             }
         }
+    }
+
+    // The immutable QVideoFrame stays in C++; the existing video scene-graph
+    // item imports its YUV planes directly into the Metal/D3D render pass.
+    RemoteVideoFrameItem {
+        id: screenVideo
+        objectName: "remoteScreenVideo"
+        anchors.fill: parent
+        z: 0
+        frameSource: root.frameSource
+        visible: hasFrame
+    }
+
+    Text {
+        objectName: "remoteScreenSharingStatus"
+        anchors.centerIn: parent
+        width: Math.max(0, Math.min(root.width - 24 / root.safeViewScale,
+                                   340 / root.safeViewScale))
+        visible: !screenVideo.hasFrame && text.length > 0
+        text: root.sharingStatus
+        textFormat: Text.PlainText
+        color: AppStyle.Theme.canvasScreenText
+        font.pixelSize: 13 / root.safeViewScale
+        horizontalAlignment: Text.AlignHCenter
+        wrapMode: Text.Wrap
+        z: 1
     }
 
     // Zoom-invariant inner border (always 1 screen pixel)
