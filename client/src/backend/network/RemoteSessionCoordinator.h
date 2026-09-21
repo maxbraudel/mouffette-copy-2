@@ -41,6 +41,11 @@ public:
     bool acceptSnapshot(const QJsonObject& envelope,
                         quint64 localConnectionGeneration = 0,
                         bool allowInitialReplay = false);
+    // An accepted idempotent replay may contain an older initial snapshot.
+    // Consumers must project the latest accepted reading, not that replay.
+    QJsonObject latestSnapshot(const QString& remoteSessionId) const {
+        return m_latestSnapshotBySession.value(remoteSessionId);
+    }
     static bool validateSnapshot(const QJsonObject& snapshot);
     bool isClosedDuplicate(const QJsonObject& envelope) const;
     void suspend(const QString& remoteSessionId);

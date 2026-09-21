@@ -44,7 +44,6 @@ Item {
         : screenAvailable ? SegmentedStatusCard.Connected : SegmentedStatusCard.Error
     readonly property color screenStatusColor: foregroundForStatus(screenStatusKind)
     readonly property color screenStatusBackground: backgroundForStatus(screenStatusKind)
-    property bool busy: false
     property bool profilePictureVisible: false
     property url profilePictureSource: ""
     property var profileController: null
@@ -59,7 +58,6 @@ Item {
         ? Math.max(40, auxiliaryMetrics.maximumWidth + Theme.segmentPadding * 2 + 16 + 4) : 0
     readonly property real screenStatusWidth: screenStatusVisible
         ? screenStatusMetrics.maximumWidth + Theme.segmentPadding * 2 + 16 + 4 : 0
-    readonly property real busyWidth: busy ? Theme.controlHeight + Theme.segmentPadding : 0
     readonly property bool availableStatus: statusText.trim().toUpperCase() === "AVAILABLE"
 
     function foregroundForStatus(kind) {
@@ -96,7 +94,7 @@ Item {
 
     implicitWidth: primaryWidth + 1 + statusWidth
                    + (auxiliaryVisible ? 1 + auxiliaryWidth : 0)
-                   + (screenStatusVisible ? 1 + screenStatusWidth : 0) + busyWidth
+                   + (screenStatusVisible ? 1 + screenStatusWidth : 0)
     implicitHeight: Theme.controlHeight
     height: Theme.controlHeight
 
@@ -142,8 +140,7 @@ Item {
             height: root.height
             width: Math.max(0, root.width - 1 - root.statusWidth
                            - (root.auxiliaryVisible ? 1 + root.auxiliaryWidth : 0)
-                           - (root.screenStatusVisible ? 1 + root.screenStatusWidth : 0)
-                           - root.busyWidth)
+                           - (root.screenStatusVisible ? 1 + root.screenStatusWidth : 0))
             color: "transparent"
 
             ProfilePicture {
@@ -190,7 +187,7 @@ Item {
             height: root.height
             width: root.screenStatusWidth
             color: root.screenStatusBackground
-            topRightRadius: root.auxiliaryVisible || root.busy ? 0 : Theme.controlRadius
+            topRightRadius: root.auxiliaryVisible ? 0 : Theme.controlRadius
             bottomRightRadius: topRightRadius
             Accessible.role: Accessible.StaticText
             Accessible.name: root.screenStatusText
@@ -295,12 +292,4 @@ Item {
         border.color: Theme.border
     }
 
-    AppSpinner {
-        visible: root.busy
-        running: visible
-        width: root.height
-        height: root.height
-        anchors.right: parent.right
-        anchors.rightMargin: Theme.segmentPadding / 2
-    }
 }

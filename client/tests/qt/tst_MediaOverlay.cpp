@@ -936,7 +936,7 @@ void MediaOverlayTest::emptyScreenHintStaysBehindMediaAndCenteredInViewport()
     QQmlComponent component(&engine, QUrl(QStringLiteral(
         "qrc:/qt/qml/Mouffette/App/resources/qml/app/pages/CanvasPage.qml")));
     std::unique_ptr<QObject> pageObject(component.createWithInitialProperties({
-        {"controller", QVariantMap{{"activeWorkspace", QVariant::fromValue(&session)}, {"remoteBusy", false}}}
+        {"controller", QVariantMap{{"activeWorkspace", QVariant::fromValue(&session)}, {"remoteStatusText", QStringLiteral("CONNECTED")}}}
     }));
     auto* page = qobject_cast<QQuickItem*>(pageObject.get());
     QVERIFY2(page, qPrintable(component.errorString()));
@@ -2256,7 +2256,7 @@ void MediaOverlayTest::scenePlaybackUnloadsEditorOverlays()
     std::unique_ptr<QObject> pageObject(component.createWithInitialProperties({
         {QStringLiteral("controller"), QVariantMap{
              {QStringLiteral("activeWorkspace"), QVariant::fromValue(&session)},
-             {QStringLiteral("remoteBusy"), false}}}
+             {QStringLiteral("remoteStatusText"), QStringLiteral("CONNECTED")}}}
     }));
     auto* page = qobject_cast<QQuickItem*>(pageObject.get());
     QVERIFY2(page, qPrintable(component.errorString()));
@@ -2658,7 +2658,7 @@ void MediaOverlayTest::videoVolumeAndMuteStayIndependentAndSyncWithSettings()
     std::unique_ptr<QObject> pageObject(component.createWithInitialProperties({
         {QStringLiteral("controller"), QVariantMap{
              {QStringLiteral("activeWorkspace"), QVariant::fromValue(&session)},
-             {QStringLiteral("remoteBusy"), false}}}
+             {QStringLiteral("remoteStatusText"), QStringLiteral("CONNECTED")}}}
     }));
     auto* page = qobject_cast<QQuickItem*>(pageObject.get());
     QVERIFY2(page, qPrintable(component.errorString()));

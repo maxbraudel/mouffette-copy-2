@@ -229,11 +229,6 @@ bool ApplicationController::remoteScreenLoading() const
     return m_runtime && m_runtime->remoteScreenLoading();
 }
 
-bool ApplicationController::remoteBusy() const
-{
-    return m_runtime && m_runtime->remoteBusy();
-}
-
 bool ApplicationController::canDeleteProject() const
 {
     return m_runtime && m_runtime->canDeleteActiveProject();

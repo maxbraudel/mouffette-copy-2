@@ -563,7 +563,7 @@ private slots:
         view.setResizeMode(QQuickView::SizeRootObjectToView);
         view.resize(1100, 800);
         view.setInitialProperties({{"controller", QVariantMap{
-            {"activeWorkspace", QVariant::fromValue<QObject*>(&session)}, {"remoteBusy", false}}}});
+            {"activeWorkspace", QVariant::fromValue<QObject*>(&session)}, {"remoteStatusText", QStringLiteral("CONNECTED")}}}});
         view.setSource(QUrl("qrc:/qt/qml/Mouffette/App/resources/qml/app/pages/CanvasPage.qml"));
         QVERIFY2(view.status() == QQuickView::Ready, qPrintable(view.errors().isEmpty() ? QString() : view.errors().first().toString()));
         view.show();

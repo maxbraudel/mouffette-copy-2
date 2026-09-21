@@ -54,7 +54,6 @@ class ApplicationController final : public QObject
     Q_PROPERTY(bool remoteVolumeVisible READ remoteVolumeVisible NOTIFY presentationChanged)
     Q_PROPERTY(bool remoteScreenAvailable READ remoteScreenAvailable NOTIFY presentationChanged)
     Q_PROPERTY(bool remoteScreenLoading READ remoteScreenLoading NOTIFY presentationChanged)
-    Q_PROPERTY(bool remoteBusy READ remoteBusy NOTIFY presentationChanged)
     Q_PROPERTY(bool canDeleteProject READ canDeleteProject NOTIFY presentationChanged)
     Q_PROPERTY(bool hasProject READ hasProject NOTIFY presentationChanged)
 
@@ -128,7 +127,6 @@ public:
     bool remoteVolumeVisible() const;
     bool remoteScreenAvailable() const;
     bool remoteScreenLoading() const;
-    bool remoteBusy() const;
     bool canDeleteProject() const;
     bool hasProject() const;
 

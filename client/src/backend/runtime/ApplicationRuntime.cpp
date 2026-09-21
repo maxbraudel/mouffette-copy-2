@@ -290,8 +290,13 @@ void ApplicationRuntime::refreshRemoteConnectionPresentation(bool propagateLoss)
         && !isUserDisconnected() && !isConnectionDraining()
         && !hasPendingOutgoingSessionClose(m_activeWorkspaceEndpointId)
         && !m_locallyTerminatingRemoteSessions.contains(binding.remoteSessionId);
-    m_remoteBusy = m_remoteStatusText == QLatin1String("CONNECTING");
-    if (!m_remoteClientConnected) m_remoteVolumePercent = -1;
+    // Connection loss only hides the value; the authenticated workspace keeps
+    // its last reading. Restore it on every readiness transition, even if the
+    // remote volume has not changed and therefore produces no new notification.
+    const ClientWorkspace* workspace = m_workspaceManager
+        ? m_workspaceManager->findWorkspace(m_activeWorkspaceEndpointId) : nullptr;
+    m_remoteVolumePercent = m_remoteClientConnected && workspace && activeProjectExists()
+        ? workspace->lastClientInfo.getVolumePercent() : -1;
     const bool retainedRecovery = m_webSocketClient && !binding.remoteSessionId.isEmpty()
         && (binding.phase == QLatin1String("Active") || binding.phase == QLatin1String("Grace"))
         && m_webSocketClient->sessionRecoveryRemainingMs(binding.remoteSessionId) > 0;
@@ -1099,12 +1104,6 @@ void ApplicationRuntime::handleTerminalTransportLoss(
     refreshProjectClientList();
 }
 
-void ApplicationRuntime::stopInlineSpinner() {
-    if (!m_remoteBusy) return;
-    m_remoteBusy = false;
-    emit presentationStateChanged();
-}
-
 void ApplicationRuntime::setLocalNetworkStatus(const QString& status) {
     const QString normalized = status.trimmed().toUpper();
     if (m_localStatusText == normalized) return;
@@ -1900,7 +1899,6 @@ void ApplicationRuntime::showClientListView() {
     // Preserve the authenticated binding and its presentation state until the
     // hidden-project deadline or an explicit user action closes it.
     
-    m_remoteBusy = false;
     m_applicationPage = 0;
     updateHistoryVisibilityState();
     emit applicationPageChanged(0);
@@ -2472,9 +2470,15 @@ void ApplicationRuntime::handleRemoteSessionReady(const QJsonObject& envelope,
     }
     const bool hadProject = m_projectManager
         && m_projectManager->hasProjectForTarget(peerEndpointId);
-    if (!resumed || !hadProject) {
-        const QJsonObject snapshot =
-            envelope.value(QStringLiteral("snapshot")).toObject();
+    // Active RESUME snapshots have passed the same protocol validation as
+    // initial snapshots. Install their latest volume/topology for retained
+    // projects as well; the value may have changed during the outage.
+    const bool hasResumedSnapshot = resumed && envelope.contains(QStringLiteral("snapshot"))
+        && m_webSocketClient->remoteSessionCoordinator()->byId(remoteSessionId).active;
+    if (!resumed || !hadProject || hasResumedSnapshot) {
+        const QJsonObject snapshot = hasResumedSnapshot
+            ? m_webSocketClient->remoteSessionCoordinator()->latestSnapshot(remoteSessionId)
+            : envelope.value(QStringLiteral("snapshot")).toObject();
         const QJsonArray screenValues =
             snapshot.value(QStringLiteral("screens")).toArray();
         QList<ScreenInfo> screens;
@@ -2620,17 +2624,21 @@ void ApplicationRuntime::handleRemoteSessionSnapshot(const QJsonObject& envelope
         m_workspaceManager->findWorkspace(targetEndpointId);
     if (!workspace) return;
     const bool topologyChanged = workspace->lastClientInfo.getScreens() != screens;
-    const bool changed = topologyChanged || workspace->lastClientInfo.getVolumePercent() != volumePercent;
     if (topologyChanged && workspace->canvas) workspace->canvas->hideRemoteCursor();
     workspace->lastClientInfo.setScreens(screens);
     workspace->lastClientInfo.setVolumePercent(volumePercent);
     m_projectManager->updateRemoteSnapshot(
         targetEndpointId, screens, volumePercent, revision, capturedAtMs);
     if (workspace->canvas) workspace->canvas->setScreens(screens);
-    if (changed && m_activeWorkspaceEndpointId == targetEndpointId) {
+    if (m_activeWorkspaceEndpointId == targetEndpointId) {
         m_selectedClient = workspace->lastClientInfo;
-        m_remoteVolumePercent = volumePercent;
-        emit presentationStateChanged();
+        // Compare the displayed value, not just the retained snapshot: an
+        // identical reading can arrive after recovery cleared the indicator.
+        const int visibleVolume = m_remoteClientConnected ? volumePercent : -1;
+        if (topologyChanged || m_remoteVolumePercent != visibleVolume) {
+            m_remoteVolumePercent = visibleVolume;
+            emit presentationStateChanged();
+        }
     }
 }
 

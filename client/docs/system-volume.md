@@ -43,6 +43,14 @@ that suppression was not the polling delay.
   delivery; only the latest pending snapshot is retained.
 - An absent or unreadable output explicitly publishes unknown. A later
   device/API recovery restores the percentage. Stop followed by start works.
+- Connection loss hides the percentage while retaining the authenticated
+  workspace reading. Returning to command-ready state restores that reading,
+  including recovery through lease-state updates alone. An Active RESUME
+  snapshot replaces it with the latest volume, including an explicit unknown
+  value; unchanged follow-up snapshots cannot leave the indicator blank.
+  Idempotent replies that replay an older initial snapshot retain the latest
+  accepted value instead of rolling the project back.
+- The status card has no trailing loading spinner or reserved spinner space.
 
 Windows errors now include the failing API and HRESULT, for example
 `System volume: Windows Core Audio: GetDefaultAudioEndpoint (HRESULT 0x...)`.

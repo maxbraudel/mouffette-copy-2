@@ -118,7 +118,6 @@ public:
     void ensureRemoteSessionForClient(const ClientInfo& client);
     void updateClientNameDisplay(const ClientInfo& clientInfo);
     void updateVolumeIndicator();
-    void stopInlineSpinner();
 
     QList<ScreenInfo> getLocalScreenInfo();
     bool captureLocalScreenInfo(QList<ScreenInfo>* screens);
@@ -153,7 +152,6 @@ public:
     int remoteVolumePercent() const { return m_remoteVolumePercent; }
     bool remoteScreenAvailable() const;
     bool remoteScreenLoading() const;
-    bool remoteBusy() const { return m_remoteBusy; }
     bool canDeleteActiveProject() const;
     bool activeProjectExists() const;
     bool activeRemoteSessionExists() const;
@@ -362,7 +360,6 @@ private:
     QString m_remoteStatusText = QStringLiteral("DISCONNECTED");
     QString m_remoteDisplayName;
     int m_remoteVolumePercent = -1;
-    bool m_remoteBusy = false;
     QList<ClientInfo> m_discoveredClients;
     QList<ClientInfo> m_displayClients;
     QSet<QString> m_restoredProjectIds;

@@ -43,7 +43,7 @@ AppPanel {
 
     AppSpinner {
         anchors.centerIn: canvasLoader
-        visible: (!root.session && root.controller.remoteBusy)
+        visible: (!root.session && root.controller.remoteStatusText === "CONNECTING")
             || (root.session && root.session.loading)
         running: visible
     }

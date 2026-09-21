@@ -3029,8 +3029,20 @@ private slots:
         workspace->canvas = nullptr;
     }
 
+    void resumedGraceAndStaleActiveTransportNeverGrantCommands_data()
+    {
+        QTest::addColumn<bool>("resumeSnapshot");
+        QTest::addColumn<int>("recoveredVolume");
+        QTest::newRow("active-lease-unchanged-volume") << false << 68;
+        QTest::newRow("resume-unchanged-volume") << true << 68;
+        QTest::newRow("resume-new-volume") << true << 73;
+        QTest::newRow("resume-unavailable-volume") << true << -1;
+    }
+
     void resumedGraceAndStaleActiveTransportNeverGrantCommands()
     {
+        QFETCH(bool, resumeSnapshot);
+        QFETCH(int, recoveredVolume);
         QTemporaryDir root;
         QVERIFY(root.isValid());
 
@@ -3058,6 +3070,7 @@ private slots:
                                    &WebSocketClient::disconnected);
         connections->connectToServer(server.url());
         QTRY_COMPARE_WITH_TIMEOUT(connectedSpy.count(), 1, 2'000);
+        QTRY_VERIFY_WITH_TIMEOUT(connections->isReady(), 2'000);
 
         const QString targetEndpointId = fixtureEndpoint(QLatin1Char('R'));
         const QString remoteSessionId = QStringLiteral("resumed-grace-session");
@@ -3070,6 +3083,7 @@ private slots:
 
         runtime.activateClient(targetEndpointId);
         QTRY_COMPARE_WITH_TIMEOUT(server.openCommands.size(), 1, 1'000);
+        QSignalSpy initialReady(runtime.getWebSocketClient(), &WebSocketClient::remoteSessionOpened);
         QVERIFY(server.sendOpened(
             remoteSessionId,
             server.openCommands.constFirst()
@@ -3131,6 +3145,85 @@ private slots:
         QCOMPARE(runtime.remoteStatusText(), QStringLiteral("DEGRADED"));
         QCOMPARE(runtime.remoteVolumePercent(), -1);
         QCOMPARE(server.openCommands.size(), 1);
+
+        // A resumed session may carry a fresh snapshot, or just restore its
+        // retained reading. Neither path needs another native volume change.
+        QJsonObject recovered{
+            {QStringLiteral("type"), QStringLiteral("remote_session_resumed")},
+            {QStringLiteral("remoteSessionId"), remoteSessionId},
+            {QStringLiteral("generation"), 3},
+            {QStringLiteral("ownerConnectionGeneration"), 2},
+            {QStringLiteral("targetConnectionGeneration"), 2},
+            {QStringLiteral("ownerEndpointId"), runtime.getWebSocketClient()->endpointId()},
+            {QStringLiteral("targetEndpointId"), targetEndpointId},
+            {QStringLiteral("phase"), QStringLiteral("Active")}
+        };
+        QJsonObject recoveredSnapshot{
+            {QStringLiteral("screens"), QJsonArray{ScreenInfo(62, 2560, 1440, 0, 0, true).toJson()}},
+            {QStringLiteral("systemUI"), QJsonArray{}},
+            {QStringLiteral("volumePercent"), recoveredVolume < 0
+                 ? QJsonValue(QJsonValue::Null) : QJsonValue(recoveredVolume)},
+            {QStringLiteral("revision"), 2},
+            {QStringLiteral("capturedAtEpochMs"), static_cast<double>(QDateTime::currentMSecsSinceEpoch())}
+        };
+        if (resumeSnapshot) {
+            recovered.insert(QStringLiteral("snapshotSequence"), 2);
+            recovered.insert(QStringLiteral("snapshot"), recoveredSnapshot);
+        }
+        QSignalSpy presentation(&runtime, &ApplicationRuntime::presentationStateChanged);
+        QVERIFY(server.send(recovered));
+        QTRY_VERIFY_WITH_TIMEOUT(runtime.isRemoteClientConnected(), 1'000);
+        QCOMPARE(runtime.remoteVolumePercent(), recoveredVolume);
+        QVERIFY(!presentation.isEmpty());
+        QVERIFY(runtime.isRemoteOverlayActionsEnabled());
+        QCOMPARE(runtime.remoteStatusText(), QStringLiteral("CONNECTED"));
+        QCOMPARE(server.openCommands.size(), 1);
+
+        // A heartbeat outage can also degrade and restore this same binding
+        // using lease-state messages only, with no new RESUME or discovery.
+        QJsonObject lease = recovered;
+        lease.insert(QStringLiteral("type"), QStringLiteral("remote_session_lease_state"));
+        lease.remove(QStringLiteral("snapshot"));
+        lease.remove(QStringLiteral("snapshotSequence"));
+        lease.insert(QStringLiteral("degraded"), true);
+        lease.insert(QStringLiteral("commandReady"), false);
+        QVERIFY(server.send(lease));
+        QTRY_VERIFY_WITH_TIMEOUT(!runtime.isRemoteClientConnected(), 1'000);
+        QCOMPARE(runtime.remoteVolumePercent(), -1);
+        presentation.clear();
+        lease.insert(QStringLiteral("degraded"), false);
+        lease.insert(QStringLiteral("commandReady"), true);
+        QVERIFY(server.send(lease));
+        QTRY_VERIFY_WITH_TIMEOUT(runtime.isRemoteClientConnected(), 1'000);
+        QCOMPARE(runtime.remoteVolumePercent(), recoveredVolume);
+        QVERIFY(!presentation.isEmpty());
+
+        // The target's normal refresh can contain the exact same volume and
+        // topology as before the outage. It must not blank the restored label.
+        recovered.insert(QStringLiteral("type"), QStringLiteral("remote_session_snapshot"));
+        recovered.remove(QStringLiteral("phase"));
+        recovered.insert(QStringLiteral("snapshotSequence"), 3);
+        recoveredSnapshot.insert(QStringLiteral("revision"), 3);
+        recovered.insert(QStringLiteral("snapshot"), recoveredSnapshot);
+        QSignalSpy snapshots(runtime.getWebSocketClient(), &WebSocketClient::remoteSessionSnapshotReceived);
+        QVERIFY(server.send(recovered));
+        QTRY_COMPARE_WITH_TIMEOUT(snapshots.count(), 1, 1'000);
+        QCOMPARE(runtime.remoteVolumePercent(), recoveredVolume);
+        QCOMPARE(runtime.findWorkspace(targetEndpointId)->lastClientInfo.getVolumePercent(), recoveredVolume);
+
+        // A duplicate Ready reply is allowed to repeat the initial snapshot.
+        // It must acknowledge the reply without rolling back newer readings.
+        QCOMPARE(initialReady.count(), 1);
+        recovered.insert(QStringLiteral("type"), QStringLiteral("remote_session_resumed"));
+        recovered.insert(QStringLiteral("phase"), QStringLiteral("Active"));
+        recovered.insert(QStringLiteral("snapshotSequence"), 1);
+        recovered.insert(QStringLiteral("snapshot"), initialReady.first().first().toJsonObject()
+                             .value(QStringLiteral("snapshot")));
+        const auto readyReplies = resumedSpy.count();
+        QVERIFY(server.send(recovered));
+        QTRY_COMPARE_WITH_TIMEOUT(resumedSpy.count(), readyReplies + 1, 1'000);
+        QCOMPARE(runtime.remoteVolumePercent(), recoveredVolume);
+        QCOMPARE(runtime.findWorkspace(targetEndpointId)->lastClientInfo.getVolumePercent(), recoveredVolume);
 
         ApplicationRuntime::ClientWorkspace* workspace =
             runtime.findWorkspace(targetEndpointId);
