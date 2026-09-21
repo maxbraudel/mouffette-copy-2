@@ -59,6 +59,7 @@ AppPanel {
         active: !!root.session
         sourceComponent: CanvasToolbar {
             session: root.session
+            controller: root.controller
             timelineExpanded: root.timelineExpanded
             onToggleTimeline: root.timelineExpanded = !root.timelineExpanded
         }

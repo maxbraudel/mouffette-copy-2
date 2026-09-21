@@ -11,7 +11,7 @@ C++ Qt application for the Mouffette media sharing system.
 
 ```bash
 # Install Qt6 via Homebrew
-brew install qt cmake ninja ffmpeg pkg-config
+brew install qt cmake ninja ffmpeg opus pkg-config
 ```
 
 ### Windows
@@ -19,7 +19,7 @@ brew install qt cmake ninja ffmpeg pkg-config
 - CMake, Ninja, Qt 6.11+, OpenSSL, C++/WinRT headers and the matching MinGW toolchain
 
 ```powershell
-C:\msys64\usr\bin\bash.exe -lc "pacman -S --needed mingw-w64-ucrt-x86_64-toolchain mingw-w64-ucrt-x86_64-cmake mingw-w64-ucrt-x86_64-ninja mingw-w64-ucrt-x86_64-qt6-base mingw-w64-ucrt-x86_64-qt6-tools mingw-w64-ucrt-x86_64-qt6-imageformats mingw-w64-ucrt-x86_64-qt6-websockets mingw-w64-ucrt-x86_64-qt6-declarative mingw-w64-ucrt-x86_64-qt6-multimedia mingw-w64-ucrt-x86_64-qt6-svg mingw-w64-ucrt-x86_64-ffmpeg mingw-w64-ucrt-x86_64-pkgconf mingw-w64-ucrt-x86_64-openssl mingw-w64-ucrt-x86_64-cppwinrt"
+C:\msys64\usr\bin\bash.exe -lc "pacman -S --needed mingw-w64-ucrt-x86_64-toolchain mingw-w64-ucrt-x86_64-cmake mingw-w64-ucrt-x86_64-ninja mingw-w64-ucrt-x86_64-qt6-base mingw-w64-ucrt-x86_64-qt6-tools mingw-w64-ucrt-x86_64-qt6-imageformats mingw-w64-ucrt-x86_64-qt6-websockets mingw-w64-ucrt-x86_64-qt6-declarative mingw-w64-ucrt-x86_64-qt6-multimedia mingw-w64-ucrt-x86_64-qt6-svg mingw-w64-ucrt-x86_64-ffmpeg mingw-w64-ucrt-x86_64-opus mingw-w64-ucrt-x86_64-pkgconf mingw-w64-ucrt-x86_64-openssl mingw-w64-ucrt-x86_64-cppwinrt"
 ```
 
 ## Building
@@ -155,11 +155,14 @@ The canvas shows the target's live mouse position through the active session.
 See [remote cursor](docs/remote-cursor.md) for coordinate mapping, freshness,
 regression coverage and the required client/server update.
 
-Clients can opt in to live screen sharing in Settings. Their desktop then
+Clients can opt in to live screen and system audio sharing in Settings. Their desktop then
 appears inside the remote canvas's monitor rectangles, using bounded H.264
 streams and the Qt Quick video renderer. Sharing is off by default. See
 [screen sharing](docs/screen-sharing.md) for platform permissions, architecture,
-transport limits and validation.
+transport limits and validation. The control interface and its audio stay local;
+received scenes remain visible and audible. A canvas toolbar button mutes the
+single remote audio stream independently of the monitor previews. See
+[system audio sharing](docs/system-audio-sharing.md).
 
 The primary selected media shows a transparency checkerboard in the authoring
 canvas, including when hidden, fully transparent or outside its timeline clip.

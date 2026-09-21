@@ -2329,6 +2329,7 @@ void RemoteSceneController::scheduleMedia(const std::shared_ptr<RemoteMediaItem>
         return;
     }
     item->player = new ResidentVideoPlayer(this);
+    item->player->setAudioRole(PlaybackAudio::Role::ReceivedScene);
     item->audio = new QAudioOutput(this);
     item->audio->setMuted(true);
     item->player->setAudioOutput(item->audio);

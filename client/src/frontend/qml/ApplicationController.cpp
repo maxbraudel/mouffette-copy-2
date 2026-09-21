@@ -77,6 +77,17 @@ bool ApplicationController::screenContentVisible() const
     return !settings || settings->getScreenContentVisible();
 }
 
+bool ApplicationController::remoteAudioMuted() const
+{
+    const auto* settings = m_runtime ? m_runtime->getSettingsManager() : nullptr;
+    return settings && settings->getRemoteAudioMuted();
+}
+
+QString ApplicationController::remoteAudioState() const
+{
+    return m_runtime ? m_runtime->remoteAudioState() : QStringLiteral("unavailable");
+}
+
 QString ApplicationController::localConnectionDetail() const { return m_runtime ? m_runtime->localConnectionDetail() : QString(); }
 QString ApplicationController::remoteConnectionDetail() const { return m_runtime ? m_runtime->remoteConnectionDetail() : QString(); }
 QString ApplicationController::clientConnectionDetail(const QString& endpoint) const { return m_runtime ? m_runtime->clientConnectionDetail(endpoint) : QString(); }
@@ -374,6 +385,8 @@ void ApplicationController::initializeBackend()
             this, &ApplicationController::screenSharingStatusChanged);
     connect(m_runtime->getSettingsManager(), &SettingsManager::screenContentVisibleChanged,
             this, &ApplicationController::screenContentVisibleChanged);
+    connect(m_runtime->getSettingsManager(), &SettingsManager::remoteAudioMutedChanged,
+            this, &ApplicationController::remoteAudioMutedChanged);
     auto* profiles = m_runtime->profileCache();
     profiles->setLocalPicture(QStringLiteral("saved"), m_runtime->getSettingsManager()->profilePictureJpeg());
     QmlRuntime::engine()->addImageProvider(QStringLiteral("profiles"), new ProfilePictureProvider(profiles));
@@ -427,6 +440,7 @@ void ApplicationController::initializeBackend()
     m_ready = true;
     emit settingsChanged();
     emit screenContentVisibleChanged();
+    emit remoteAudioMutedChanged();
     emit screenSharingStatusChanged();
     emit readyChanged();
     emit bootstrapChanged();
@@ -518,6 +532,19 @@ void ApplicationController::setScreenContentVisible(bool visible)
         request.severity = NotificationSeverity::Error;
         request.category = QStringLiteral("Settings");
         request.message = tr("Could not save the screen content preference: %1").arg(error);
+        m_runtime->getNotificationCenter()->publish(request);
+    }
+}
+
+void ApplicationController::setRemoteAudioMuted(bool muted)
+{
+    if (!m_runtime || m_clearingStorage) return;
+    QString error;
+    if (!m_runtime->getSettingsManager()->setRemoteAudioMuted(muted, &error)) {
+        NotificationRequest request;
+        request.severity = NotificationSeverity::Error;
+        request.category = QStringLiteral("Settings");
+        request.message = tr("Could not save the remote audio preference: %1").arg(error);
         m_runtime->getNotificationCenter()->publish(request);
     }
 }

@@ -94,6 +94,11 @@ foreach ($library in @('avformat', 'avcodec', 'avutil', 'swscale', 'swresample')
     }
 }
 
+$opusLibrary = Get-ChildItem $stagedBin -Filter 'libopus-*.dll'
+if (-not $opusLibrary) {
+    throw 'Packaged application is missing the system audio dependency libopus'
+}
+
 $streamingPlugin = Join-Path $stagedBin 'multimedia\ffmpegmediaplugin.dll'
 if (-not (Test-Path $streamingPlugin)) {
     throw "Packaged application is missing the memory streaming FFmpeg plugin: $streamingPlugin"

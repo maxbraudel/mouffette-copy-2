@@ -3,6 +3,7 @@
 #include "ScreenAdaptiveController.h"
 #include "ScreenPublicationProfiles.h"
 #include "ScreenFrameAdmissionCeiling.h"
+#include "ScreenAudioClock.h"
 #include "backend/config/AppConfig.h"
 #include "backend/network/NetworkDiagnostics.h"
 #include "ScreenStreamCodec.h"
@@ -21,6 +22,7 @@
 #include <QTimer>
 #include <QtConcurrent/QtConcurrentRun>
 #include <utility>
+#include <cmath>
 
 namespace {
 QString issueText(const QString& reason)
@@ -82,6 +84,9 @@ struct ScreenSharingService::Private {
     SystemMonitor* monitor;
     QThreadPool pool;
     QTimer timer;
+    QTimer presentationTimer;
+    ScreenAudioClock audioClock;
+    QString audioEndpoint, audioEpoch;
     QElapsedTimer clock;
     bool enabled = false;
     bool suspended = false;
@@ -94,6 +99,8 @@ struct ScreenSharingService::Private {
     qint64 lastProfileUpdate = -10000;
     qint64 lastDiagnosticsAt = -10000;
     int currentBudget = 0;
+    int totalBudget = 0;
+    int audioReservation = 0;
     QString subscribedSession;
     quint64 subscribedGeneration = 0;
     QString receivedStream;
@@ -142,8 +149,50 @@ struct ScreenSharingService::Private {
         qint64 lastFrameAt = -1;
         qint64 lastKeyRequestAt = -1;
         int droppedFrames = 0;
+        QVideoFrame presentation;
+        qint64 presentationDueUs = 0;
+        quint64 presentationEpoch = 0;
     };
     QHash<int, std::shared_ptr<Decode>> decoders;
+
+    void deliverFrame(int screen, const std::shared_ptr<Decode>& state, const QVideoFrame& frame) {
+        state->lastFrameAt = clock.elapsed();
+        reportedScreenIssues.remove(screen);
+        waitingSince = -1;
+        emit q->frameReady(viewedEndpoint, screen, frame);
+        setRemoteState(RemoteState::Available);
+    }
+    void presentFrame(int screen, const std::shared_ptr<Decode>& state, const QVideoFrame& frame) {
+        const qint64 nowUs = clock.nsecsElapsed() / 1000;
+        const qint64 delay = viewedEndpoint == audioEndpoint
+            ? audioClock.videoDelayUs(frame.startTime(), nowUs) : 0;
+        if (!delay) {
+            state->presentation = {};
+            deliverFrame(screen, state, frame);
+            return;
+        }
+        // Replacing a waiting image cannot postpone presentation indefinitely.
+        state->presentationDueUs = state->presentation.isValid()
+            ? std::min(state->presentationDueUs, nowUs + delay) : nowUs + delay;
+        state->presentation = frame;
+        state->presentationEpoch = state->epoch;
+        if (!presentationTimer.isActive()) presentationTimer.start();
+    }
+    void flushPresentations(bool immediate = false) {
+        const auto current = decoders;
+        const qint64 nowUs = clock.nsecsElapsed() / 1000;
+        bool pending = false;
+        for (auto it = current.cbegin(); it != current.cend(); ++it) {
+            const auto state = it.value();
+            if (!state->presentation.isValid()) continue;
+            if (decoders.value(it.key()) != state || state->epoch != state->presentationEpoch
+                || !ready(subscribedSession, false)) { state->presentation = {}; continue; }
+            if (!immediate && state->presentationDueUs > nowUs) { pending = true; continue; }
+            const QVideoFrame frame = std::exchange(state->presentation, {});
+            deliverFrame(it.key(), state, frame);
+        }
+        if (!pending) presentationTimer.stop();
+    }
 
     bool ready(const QString& session, bool incoming) const {
         const auto binding = network->remoteSessionCoordinator()->byId(session);
@@ -205,6 +254,7 @@ struct ScreenSharingService::Private {
         setRemoteState(RemoteState::Loading);
     }
     void clearReceived() {
+        presentationTimer.stop();
         decoders.clear(); // In-flight results retain their state, never the canvas.
         failedRemoteScreens.clear();
         reportedScreenIssues.clear();
@@ -255,7 +305,12 @@ struct ScreenSharingService::Private {
     }
     void updateProfiles(bool force = false) {
         const qint64 now = clock.elapsed();
-        currentBudget = adaptation.budget(now, network->outgoingUploadActive());
+        const int budget = adaptation.budget(now, network->outgoingUploadActive());
+        if (totalBudget != budget) {
+            totalBudget = budget;
+            emit q->sourceBudgetChanged(totalBudget);
+        }
+        currentBudget = std::max(16000, totalBudget - audioReservation);
         network->setScreenVideoBudget(currentBudget);
         if (!force && now - lastProfileUpdate < 1000) return;
         lastProfileUpdate = now;
@@ -352,11 +407,7 @@ struct ScreenSharingService::Private {
                     int(clock.elapsed() - startedAt), state->droppedFrames)) state->droppedFrames = 0;
             if (state->epoch == epoch && ready(subscribedSession, false)) {
                 if (frame.isValid() && frame.size() == packet.size) {
-                    state->lastFrameAt = clock.elapsed();
-                    reportedScreenIssues.remove(screen);
-                    waitingSince = -1;
-                    emit q->frameReady(viewedEndpoint, screen, frame);
-                    setRemoteState(RemoteState::Available);
+                    presentFrame(screen, state, frame);
                 } else {
                     state->pending.clear();
                     state->pendingBytes = 0;
@@ -405,7 +456,10 @@ struct ScreenSharingService::Private {
         state->lastSequence = sequence;
         if (state->waitingForKey && !key) { requestKey(screen, state); return; }
         if (key) state->waitingForKey = false;
-        state->pending.enqueue({bytes, sequence, size, key, clock.nsecsElapsed() / 1000, clock.elapsed()});
+        const double timestamp = metadata.value("timestampUs").toDouble(-1);
+        const qint64 sourceUs = std::isfinite(timestamp) && timestamp >= 0
+            && timestamp <= 9007199254740991.0 ? qint64(timestamp) : -1;
+        state->pending.enqueue({bytes, sequence, size, key, sourceUs, clock.elapsed()});
         state->pendingBytes += bytes.size();
         decodeNext(screen, state);
     }
@@ -441,6 +495,7 @@ struct ScreenSharingService::Private {
             header.insert("height", packet.size.height());
             header.insert("keyFrame", packet.keyFrame);
             header.insert("codec", QStringLiteral("h264"));
+            header.insert("timestampUs", double(packet.timestampUs));
             dropped |= !network->sendScreenFrame(header, packet.annexB);
         }
         if (dropped) captures.value(screen).source->requestKeyFrame();
@@ -586,6 +641,9 @@ ScreenSharingService::ScreenSharingService(WebSocketClient* network, SystemMonit
     d->pool.setMaxThreadCount(2);
     d->pool.setExpiryTimeout(5000);
     d->clock.start();
+    d->presentationTimer.setInterval(2);
+    d->presentationTimer.setTimerType(Qt::PreciseTimer);
+    connect(&d->presentationTimer, &QTimer::timeout, this, [this] { d->flushPresentations(); });
     connect(&d->timer, &QTimer::timeout, this, &ScreenSharingService::refresh);
     d->timer.start(AppConfig::instance().screenFeedbackIntervalMs());
     connect(network, &WebSocketClient::screenSourceFeedback, this, [this](int rtt, bool congested) {
@@ -755,6 +813,7 @@ ScreenSharingService::ScreenSharingService(WebSocketClient* network, SystemMonit
 ScreenSharingService::~ScreenSharingService()
 {
     d->timer.stop();
+    d->presentationTimer.stop();
     d->stopCaptures();
     d->decoders.clear();
     d->pool.waitForDone();
@@ -824,6 +883,7 @@ void ScreenSharingService::setSuspended(bool suspended)
 
 void ScreenSharingService::refresh()
 {
+    d->updateProfiles();
     if (d->network->isConnected() && !d->suspended && (d->enabled || !d->viewedEndpoint.isEmpty()))
         d->network->ensureScreenChannel();
     const auto binding = d->network->remoteSessionCoordinator()->outgoingForPeer(d->viewedEndpoint);
@@ -856,6 +916,34 @@ void ScreenSharingService::refresh()
     }
     if (d->waitingSince >= 0 && d->clock.elapsed() - d->waitingSince > AppConfig::instance().screenFirstFrameTimeoutMs())
         d->reportIssue(QStringLiteral("timeout"));
+}
+
+void ScreenSharingService::setAudioReservationBps(int bitrate)
+{
+    bitrate = std::clamp(bitrate, 0, 160000);
+    if (d->audioReservation == bitrate) return;
+    d->audioReservation = bitrate;
+    d->updateProfiles(true);
+}
+
+void ScreenSharingService::setAudioPlaybackClock(const QString& endpoint, const QString& epoch, qint64 sourceUs)
+{
+    if (d->audioEndpoint != endpoint || d->audioEpoch != epoch) {
+        d->audioClock.reset();
+        d->flushPresentations(true);
+    }
+    d->audioEndpoint = endpoint;
+    d->audioEpoch = epoch;
+    d->audioClock.update(sourceUs, d->clock.nsecsElapsed() / 1000);
+}
+
+void ScreenSharingService::clearAudioPlaybackClock(const QString& endpoint)
+{
+    if (d->audioEndpoint != endpoint) return;
+    d->audioEndpoint.clear();
+    d->audioEpoch.clear();
+    d->audioClock.reset();
+    d->flushPresentations(true);
 }
 
 void ScreenSharingService::stop()

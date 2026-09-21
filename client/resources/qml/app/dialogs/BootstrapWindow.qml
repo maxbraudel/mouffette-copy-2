@@ -17,6 +17,11 @@ Window {
     modality: Qt.ApplicationModal
     color: Theme.windowBackground
 
+    WindowPresentation {
+        window: root
+        alwaysOnTop: false
+    }
+
     ColumnLayout {
         id: content
         anchors.fill: parent

@@ -1292,7 +1292,7 @@ bool WebSocketClient::screenTransportWindowOpen() const
 void WebSocketClient::setScreenVideoBudget(int bitsPerSecond)
 {
     armScreenPacer(); // Drain debt at the old rate before changing it.
-    m_screenBudgetBps = std::clamp(bitsPerSecond, 32000, 100000000);
+    m_screenBudgetBps = std::clamp(bitsPerSecond, 16000, 100000000);
     armScreenPacer();
     emit screenSendWindowChanged();
 }
@@ -3375,6 +3375,7 @@ bool WebSocketClient::handleWelcome(const QJsonObject& message) {
     m_localClockAnchorMs = suspendInclusiveNowMs();
     m_socketClientId = message.value("connectionId").toString();
     m_serverPolicy = policy;
+    m_audioSharingSupported = message.value("audioVersion").toInt() == 1;
     m_heartbeatIntervalMs = policy.value("heartbeatIntervalMs").toInt();
     m_leaseTimeoutMs = policy.value("leaseTimeoutMs").toInt();
     m_sessionRecoveryTimeoutMs = policy.value("sessionRecoveryTimeoutMs").toInt();
@@ -3504,6 +3505,12 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
     if (!m_dispatchingData) noteServerContact();
     if (dataWireType(type) && !m_dispatchingData) {
         NetworkDiagnostics::record("message_rejected", {{"type", type}, {"reason", "wrong_channel"}}, true);
+        return;
+    }
+    if (type.startsWith(QLatin1String("audio_"))) {
+        if (!m_dispatchingData && m_audioSharingSupported
+            && message.value("connectionGeneration").toDouble() == double(m_connectionGeneration))
+            emit audioControlReceived(message);
         return;
     }
     if (handleScreenControlMessage(message)) return;
@@ -4300,7 +4307,8 @@ bool WebSocketClient::sendRawControlMessage(const QJsonObject& message) {
     const QString type = message.value("type").toString();
     const bool priority = type == "heartbeat" || type == "stop" || type == "stopped"
         || type == "remote_session_close" || type == "remote_session_state_ack"
-        || ((type == "screen_share_consent" || type == "screen_share_subscribe")
+        || ((type == "screen_share_consent" || type == "screen_share_subscribe"
+             || type == "audio_share_consent" || type == "audio_share_subscribe")
             && message.value("enabled").isBool() && !message.value("enabled").toBool());
     const qint64 limit = priority ? kControlQueueLimit : kControlQueueLimit - 16 * 1024;
     if (bytes.size() > limit || m_webSocket->bytesToWrite() + bytes.size() > limit) {

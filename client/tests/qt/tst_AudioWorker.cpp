@@ -1,0 +1,241 @@
+#include "backend/audiosharing/AudioWorker.h"
+#include "backend/audiosharing/AudioWorkerClient.h"
+#include "backend/audiosharing/AudioWorkerProtocol.h"
+#include "backend/audiosharing/AudioPlaybackTimeline.h"
+#include "backend/audiosharing/AudioStreamCodec.h"
+#include <QGuiApplication>
+#include <QAudioDevice>
+#include <QAudioSink>
+#include <QLocalServer>
+#include <QMediaDevices>
+#include <QSignalSpy>
+#include <QTimer>
+#include <QUuid>
+#include <QtTest>
+#include <opus.h>
+#include <array>
+#include <cmath>
+#include <thread>
+
+class AudioWorkerTest final : public QObject {
+    Q_OBJECT
+private slots:
+    void codecProfiles_data() {
+        QTest::addColumn<int>("bitrate");
+        QTest::newRow("music-96k") << 96000;
+        QTest::newRow("economy-32k") << 32000;
+    }
+    void codecProfiles() {
+        QFETCH(int, bitrate);
+        AudioStreamEncoder encoder; AudioStreamDecoder decoder; QString error;
+        QVERIFY2(encoder.initialize(bitrate, error), qPrintable(error));
+        std::array<float, 1920> samples{};
+        qint64 encodedBytes = 0;
+        double leftEnergy = 0, rightEnergy = 0;
+        for (int packet = 0; packet < 50; ++packet) {
+            for (int frame = 0; frame < 960; ++frame) {
+                const double time = double(packet * 960 + frame) / 48000;
+                samples[frame * 2] = float(0.3 * std::sin(time * 2 * 3.141592653589793 * 440));
+                samples[frame * 2 + 1] = float(0.15 * std::sin(time * 2 * 3.141592653589793 * 880));
+            }
+            const auto encoded = encoder.encode(samples.data(), error);
+            QVERIFY2(!encoded.isEmpty(), qPrintable(error));
+            QVERIFY(encoded.size() <= 1275); encodedBytes += encoded.size();
+            const auto decoded = decoder.decode(encoded, error);
+            QCOMPARE(decoded.size(), qsizetype(1920 * sizeof(float)));
+            const auto* pcm = reinterpret_cast<const float*>(decoded.constData());
+            for (int frame = 0; frame < 960; ++frame) {
+                QVERIFY(std::isfinite(pcm[frame * 2])); QVERIFY(std::isfinite(pcm[frame * 2 + 1]));
+                leftEnergy += pcm[frame * 2] * pcm[frame * 2];
+                rightEnergy += pcm[frame * 2 + 1] * pcm[frame * 2 + 1];
+            }
+        }
+        // Both channels survive with their intended relative level, and the
+        // complete second remains bounded by constrained VBR at each profile.
+        QVERIFY(leftEnergy > 1000); QVERIFY(rightEnergy > 200);
+        QVERIFY(leftEnergy > rightEnergy * 2);
+        QVERIFY(encodedBytes * 8 < bitrate * 1.4);
+        encoder.reset(); decoder.reset(); encoder.setBitrate(bitrate == 96000 ? 32000 : 96000);
+        QVERIFY(!decoder.decode(encoder.encode(samples.data(), error), error).isEmpty());
+        QVERIFY(error.isEmpty());
+    }
+    void rejectsWrongDurationAndOversizedPackets() {
+        AudioStreamDecoder decoder; QString error;
+        QVERIFY(decoder.decode({}, error).isEmpty()); QVERIFY(!error.isEmpty());
+        QVERIFY(decoder.decode(QByteArray(1276, '\0'), error).isEmpty());
+        int status = 0;
+        auto* native = opus_encoder_create(48000, 2, OPUS_APPLICATION_AUDIO, &status);
+        QVERIFY(native);
+        std::array<float, 960> samples{};
+        QByteArray packet(1275, Qt::Uninitialized);
+        const int bytes = opus_encode_float(native, samples.data(), 480,
+            reinterpret_cast<unsigned char*>(packet.data()), packet.size());
+        opus_encoder_destroy(native);
+        QVERIFY(bytes > 0); packet.resize(bytes);
+        QVERIFY(decoder.decode(packet, error).isEmpty()); // 10 ms is not the protocol's 20 ms.
+        AudioStreamEncoder encoder; QVERIFY(encoder.initialize(96000, error));
+        std::array<float, 1920> silence{};
+        QVERIFY(!decoder.decode(encoder.encode(silence.data(), error), error).isEmpty());
+        QVERIFY(error.isEmpty());
+    }
+    void protocolHandlesFragmentationAndRejectsInvalidFrames() {
+        const QCborMap expected{{QStringLiteral("type"), QStringLiteral("mute")}, {QStringLiteral("muted"), true}};
+        const auto body = QCborValue(expected).toCbor();
+        QByteArray frame(4, Qt::Uninitialized); qToBigEndian<quint32>(body.size(), frame.data()); frame += body;
+        QByteArray partial; QCborMap actual; bool malformed = false;
+        for (qsizetype index = 0; index < frame.size() - 1; ++index) {
+            partial += frame[index]; QVERIFY(!AudioWorkerProtocol::take(partial, actual, malformed)); QVERIFY(!malformed);
+        }
+        partial += frame.back(); QVERIFY(AudioWorkerProtocol::take(partial, actual, malformed));
+        QCOMPARE(actual, expected); QVERIFY(partial.isEmpty());
+        QByteArray oversized(4, '\0'); qToBigEndian<quint32>(AudioWorkerProtocol::MaximumMessage + 1, oversized.data());
+        QVERIFY(!AudioWorkerProtocol::take(oversized, actual, malformed)); QVERIFY(malformed);
+        QByteArray scalar(5, '\0'); qToBigEndian<quint32>(1, scalar.data()); scalar[4] = char(1);
+        QVERIFY(!AudioWorkerProtocol::take(scalar, actual, malformed)); QVERIFY(malformed);
+        QLocalSocket disconnected; QVERIFY(!AudioWorkerProtocol::sendControl(&disconnected, expected));
+        QCOMPARE(disconnected.state(), QLocalSocket::UnconnectedState);
+    }
+    void timelineRecoversLatencyChanges() {
+        AudioPlaybackTimeline timeline;
+        const qint64 epoch = 900000000;
+        auto decision = timeline.enqueue(epoch, 1000000);
+        QVERIFY(decision.accept && decision.rebuffer);
+        QCOMPARE(timeline.sourceAt(1080000), epoch);
+        for (int frame = 1; frame < 20; ++frame) {
+            decision = timeline.enqueue(epoch + frame * 20000, 1000000 + frame * 20000);
+            QVERIFY(decision.accept && !decision.rebuffer);
+        }
+        // A permanent extra 150 ms of transit delay must not cause every
+        // subsequent packet to miss the old playout anchor indefinitely.
+        int recovered = 0;
+        for (int frame = 20; frame < 30; ++frame) {
+            decision = timeline.enqueue(epoch + frame * 20000, 1150000 + frame * 20000);
+            recovered += decision.accept;
+        }
+        QVERIFY(recovered >= 8);
+        const auto margin = epoch + 29 * 20000 - timeline.sourceAt(1150000 + 29 * 20000);
+        QVERIFY(margin >= 60000 && margin <= 100000);
+        decision = timeline.enqueue(epoch + 30 * 20000, 1160000 + 30 * 20000, true);
+        QVERIFY(decision.accept && decision.rebuffer);
+        timeline.reset();
+        QVERIFY(timeline.enqueue(epoch + 31 * 20000, 3000000).rebuffer);
+    }
+    void timelineControlsLongRunningClockDrift() {
+        AudioPlaybackTimeline timeline;
+        const qint64 epoch = 900000000;
+        for (int frame = 0; frame < 10000; ++frame) {
+            const auto result = timeline.enqueue(epoch + frame * 20000, 1000000 + frame * 20020);
+            QVERIFY(result.accept); // A 0.1% source clock mismatch stays playable.
+            const auto margin = epoch + frame * 20000 - timeline.sourceAt(1000000 + frame * 20020);
+            QVERIFY(margin > 40000 && margin <= 150000);
+        }
+    }
+    void helperHandshakeAndSharedConsumption() {
+        AudioWorkerClient client;
+        QSignalSpy state(&client, &AudioWorkerClient::captureStateChanged);
+        QSignalSpy failure(&client, &AudioWorkerClient::failed);
+        auto preview = client.createPreviewChannel(); QVERIFY(preview && preview->state());
+        QTRY_VERIFY_WITH_TIMEOUT(!state.isEmpty(), 5000);
+        QVERIFY2(failure.isEmpty(), failure.isEmpty() ? "" : qPrintable(failure.first().first().toString()));
+        QCOMPARE(state.first().at(0).toBool(), false); QVERIFY(state.first().at(1).toString().isEmpty());
+        if (QMediaDevices::defaultAudioOutput().isNull()) QSKIP("No audio output; helper handshake verified");
+        QTRY_VERIFY_WITH_TIMEOUT(preview->state()->consumerAvailable.load(), 3000);
+        auto* shared = preview->state();
+        auto& stale = shared->blocks[0];
+        stale.generation.store(1); stale.state.store(2, std::memory_order_release);
+        shared->generation.store(2, std::memory_order_release);
+        // The consumer retires old seeks even while transport is paused.
+        QTRY_COMPARE_WITH_TIMEOUT(stale.state.load(), 0, 1000);
+        const auto start = AudioWorkerClient::nowUs() + 80000;
+        for (int index = 0; index < AudioPreviewBlockCount; ++index) {
+            auto& block = shared->blocks[index];
+            std::fill(block.samples.begin(), block.samples.end(), 0.0f);
+            block.generation.store(2); block.startUs.store(start + index * 50000);
+            block.state.store(2, std::memory_order_release);
+        }
+        shared->playing.store(true, std::memory_order_release);
+        client.setPlaybackMuted(true); // Monitor mute does not mute local previews.
+        QTRY_VERIFY_WITH_TIMEOUT(shared->presented.load(), 1000);
+        QTRY_COMPARE_WITH_TIMEOUT(shared->blocks.back().state.load(), 0, 1500);
+        std::thread([channel = std::move(preview)] {}).join(); // Decoder-job destruction is queued to the owner.
+        QTest::qWait(30);
+        client.shutdown();
+    }
+    void helperRemoteEpochMuteAndClock() {
+        if (QMediaDevices::defaultAudioOutput().isNull()) QSKIP("No audio output");
+        AudioWorkerClient client; QSignalSpy state(&client, &AudioWorkerClient::captureStateChanged);
+        QSignalSpy clocks(&client, &AudioWorkerClient::playbackClock);
+        auto preview = client.createPreviewChannel(); QVERIFY(preview);
+        QTRY_VERIFY_WITH_TIMEOUT(!state.isEmpty(), 5000);
+        AudioStreamEncoder encoder; QString error; QVERIFY(encoder.initialize(96000, error));
+        std::array<float, 1920> silence{};
+        const auto opus = encoder.encode(silence.data(), error); QVERIFY(!opus.isEmpty());
+        QString epoch = QStringLiteral("first"); quint64 sequence = 0;
+        QTimer producer; producer.setInterval(20);
+        connect(&producer, &QTimer::timeout, &client, [&] {
+            client.playPacket(QStringLiteral("endpoint"), epoch, ++sequence, AudioWorkerClient::nowUs(), opus);
+        });
+        producer.start(); QTRY_VERIFY_WITH_TIMEOUT(!clocks.isEmpty(), 3000);
+        QCOMPARE(clocks.last().at(0).toString(), QStringLiteral("endpoint")); QCOMPARE(clocks.last().at(1).toString(), epoch);
+        client.setPlaybackMuted(true); QTest::qWait(80); clocks.clear(); QTest::qWait(150); QVERIFY(clocks.isEmpty());
+        epoch = QStringLiteral("second"); sequence = 0; client.setPlaybackMuted(false);
+        QTRY_VERIFY_WITH_TIMEOUT(!clocks.isEmpty(), 3000); QCOMPARE(clocks.last().at(1).toString(), epoch);
+        producer.stop(); client.resetPlayback(QStringLiteral("endpoint")); QTest::qWait(80);
+        clocks.clear(); QTest::qWait(150); QVERIFY(clocks.isEmpty());
+        client.shutdown();
+    }
+    void nativeCaptureSmokeOptIn() {
+        if (!qEnvironmentVariableIntValue("MOUFFETTE_TEST_SYSTEM_AUDIO_CAPTURE"))
+            QSKIP("Set MOUFFETTE_TEST_SYSTEM_AUDIO_CAPTURE=1 to test the authorized native capture backend");
+        AudioWorkerClient client; QSignalSpy state(&client, &AudioWorkerClient::captureStateChanged);
+        QSignalSpy packets(&client, &AudioWorkerClient::packetReady);
+        const auto epoch = QUuid::createUuid().toString();
+        client.startCapture(epoch);
+        QTRY_VERIFY_WITH_TIMEOUT(!state.isEmpty(), 10000);
+        QVERIFY2(state.last().at(0).toBool(), qPrintable(state.last().at(1).toString()));
+
+        const auto device = QMediaDevices::defaultAudioOutput();
+        QAudioFormat format;
+        format.setSampleRate(48000); format.setChannelCount(2); format.setSampleFormat(QAudioFormat::Float);
+        if (device.isNull() || !device.isFormatSupported(format))
+            QSKIP("Native capture activated; no 48 kHz stereo float output is available for the silent PCM probe");
+        // This stream belongs to the test's main process, which the capture
+        // helper must include. Silence exercises the native PCM/Opus path
+        // without producing an audible test tone or relying on another app.
+        QAudioSink silence(device, format);
+        silence.setBufferSize(format.bytesForDuration(20000));
+        silence.start([](QSpan<float> output) { std::fill(output.begin(), output.end(), 0.0f); });
+        QCOMPARE(silence.error(), QtAudio::NoError);
+        packets.clear();
+        QTRY_VERIFY_WITH_TIMEOUT(packets.size() >= 3, 5000);
+        AudioStreamDecoder decoder; QString error;
+        quint64 previousSequence = 0; qint64 previousTimestamp = -1;
+        for (int index = 0; index < 3; ++index) {
+            const auto packet = packets.at(index);
+            QCOMPARE(packet.at(0).toString(), epoch);
+            const auto sequence = packet.at(1).toULongLong();
+            const auto timestamp = packet.at(2).toLongLong();
+            QVERIFY(sequence > previousSequence); QVERIFY(timestamp > previousTimestamp);
+            QVERIFY(std::abs(AudioWorkerClient::nowUs() - timestamp) < 5000000);
+            const auto decoded = decoder.decode(packet.at(3).toByteArray(), error);
+            QVERIFY2(error.isEmpty(), qPrintable(error));
+            QCOMPARE(decoded.size(), qsizetype(960 * 2 * sizeof(float)));
+            const auto* samples = reinterpret_cast<const float*>(decoded.constData());
+            for (int sample = 0; sample < 960 * 2; ++sample) QVERIFY(std::isfinite(samples[sample]));
+            previousSequence = sequence; previousTimestamp = timestamp;
+        }
+        silence.stop();
+        state.clear(); client.stopCapture(); QTRY_VERIFY_WITH_TIMEOUT(!state.isEmpty(), 3000);
+        QCOMPARE(state.last().at(0).toBool(), false);
+        client.shutdown();
+    }
+};
+
+int main(int argc, char** argv) {
+    if (argc > 1 && QByteArray(argv[1]) == "--audio-worker") return runAudioWorker(argc, argv);
+    QGuiApplication app(argc, argv);
+    app.setProperty("mouffetteAudioWorkerExecutable", qEnvironmentVariable(
+        "MOUFFETTE_TEST_AUDIO_WORKER_EXECUTABLE", QCoreApplication::applicationFilePath()));
+    AudioWorkerTest test; return QTest::qExec(&test, argc, argv);
+}
+#include "tst_AudioWorker.moc"

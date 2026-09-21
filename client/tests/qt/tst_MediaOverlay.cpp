@@ -68,6 +68,7 @@ private slots:
     void mainWindowPointerActivity_data();
     void mainWindowPointerActivity();
     void screenContentButtonTogglesAndPersists();
+    void remoteAudioButtonPersistsAcrossWorkspacesAndPlayback();
     void mediaActionPalette_data();
     void mediaActionPalette();
     void mediaRowsAndProgress();
@@ -403,7 +404,8 @@ QQuickItem* createOverlayButton(QQmlEngine& engine, QQuickWindow& window,
 }
 
 QQuickItem* createCanvasToolbarHarness(QQmlEngine& engine,
-                                       QQuickWindow& window, QString* error)
+                                       QQuickWindow& window, QString* error,
+                                       QObject* controller = nullptr)
 {
     static const QByteArray qml = R"QML(
 import QtQuick
@@ -411,6 +413,7 @@ import "../canvas"
 
 Item {
     property alias fakeSessionHasProject: fakeSession.hasProject
+    property var externalController: null
 
     QtObject {
         id: fakeSession
@@ -428,13 +431,15 @@ Item {
     CanvasToolbar {
         objectName: "canvasToolbar"
         session: fakeSession
+        controller: parent.externalController
     }
 }
 )QML";
     QQmlComponent component(&engine);
     component.setData(qml, QUrl(QStringLiteral(
         "qrc:/qt/qml/Mouffette/App/resources/qml/app/pages/CanvasToolbarHarness.qml")));
-    QObject* object = component.create();
+    QObject* object = component.createWithInitialProperties({
+        {QStringLiteral("externalController"), QVariant::fromValue(controller)}});
     if (!object) {
         if (error) *error = component.errorString();
         return nullptr;
@@ -1969,6 +1974,112 @@ void MediaOverlayTest::screenContentButtonTogglesAndPersists()
     }
 }
 
+void MediaOverlayTest::remoteAudioButtonPersistsAcrossWorkspacesAndPlayback()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const auto previousProfile = RuntimeProfile::context();
+    const auto restoreProfile = qScopeGuard([&] { RuntimeProfile::configure(previousProfile); });
+    RuntimeProfileContext profile;
+    profile.rootPath = directory.filePath(QStringLiteral("runtime"));
+    profile.installationRootPath = directory.filePath(QStringLiteral("installation"));
+    RuntimeProfile::configure(profile);
+    QQmlEngine* previousEngine = QmlRuntime::engine();
+
+    for (int launch = 0; launch < 2; ++launch) {
+        QQmlEngine engine;
+        QmlRuntime::setEngine(&engine);
+        const auto restoreEngine = qScopeGuard([&] { QmlRuntime::setEngine(previousEngine); });
+        ApplicationController controller(profile,
+            {QStringLiteral("remote-audio-ui-test"), QStringLiteral("--server-url=ws://127.0.0.1:1")},
+            nullptr, [] {
+                QPromise<MediaBackendBootstrap::Result> promise;
+                promise.start();
+                promise.addResult({true, {}});
+                promise.finish();
+                return promise.future();
+            });
+        controller.start();
+        QTRY_VERIFY_WITH_TIMEOUT(controller.ready(), 8000);
+        QCOMPARE(controller.remoteAudioMuted(), launch == 1);
+
+        QString error;
+        std::unique_ptr<QuickCanvasHost> host(QuickCanvasHost::create(&error));
+        QVERIFY2(host, qPrintable(error));
+        host->setProjectEditingEnabled(true);
+        QVERIFY(host->document()->addText({100, 100}, QStringLiteral("Audio controls")));
+        ClientWorkspaceViewModel first(QStringLiteral("audio-first-client"), host.get(), [] {}, nullptr,
+            [] { return false; }, [] { return false; }, [] { return true; });
+        ClientWorkspaceViewModel second(QStringLiteral("audio-second-client"), host.get(), [] {}, nullptr,
+            [] { return false; }, [] { return false; }, [] { return true; });
+        first.setLoading(false);
+        second.setLoading(false);
+        QQuickWindow window;
+        window.resize(420, 100);
+        std::unique_ptr<QQuickItem> harness(createCanvasToolbarHarness(engine, window, &error, &controller));
+        QVERIFY2(harness, qPrintable(error));
+        auto* toolbar = findVisualItem(harness.get(), QStringLiteral("canvasToolbar"));
+        QVERIFY(toolbar);
+        toolbar->setProperty("session", QVariant::fromValue<QObject*>(&first));
+        QPointer<QQuickItem> audioButton = findVisualItem(harness.get(), QStringLiteral("canvasRemoteAudioButton"));
+        QVERIFY(audioButton);
+        QCOMPARE(audioButton->width(), 36.0);
+        QCOMPARE(audioButton->height(), 36.0);
+        QVERIFY(audioButton->isEnabled());
+        QCOMPARE(audioButton->property("toggled").toBool(), launch == 0);
+        QCOMPARE(audioButton->property("iconSource").toUrl().fileName(), launch == 0
+            ? QStringLiteral("volume-on.svg") : QStringLiteral("volume-off.svg"));
+        QCOMPARE(audioButton->property("accessibleName").toString(), launch == 0
+            ? QStringLiteral("Mute remote audio") : QStringLiteral("Unmute remote audio"));
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        QTRY_VERIFY(audioButton->isVisible());
+        auto* text = findVisualItem(harness.get(), QStringLiteral("canvasTextToolButton"));
+        QVERIFY(text);
+        QTRY_VERIFY(audioButton->mapToScene({0, 0}).x()
+            >= text->mapToScene({text->width(), 0}).x() + 8.0);
+        if (launch == 1) continue;
+
+        QSignalSpy muteChanges(&controller, &ApplicationController::remoteAudioMutedChanged);
+        const auto clickAudio = [&] {
+            QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier,
+                audioButton->mapToScene({audioButton->width() / 2, audioButton->height() / 2}).toPoint());
+        };
+        clickAudio();
+        QTRY_VERIFY(controller.remoteAudioMuted());
+        QCOMPARE(muteChanges.size(), 1);
+        QTRY_COMPARE(audioButton->property("iconSource").toUrl().fileName(), QStringLiteral("volume-off.svg"));
+        QVERIFY(!audioButton->property("toggled").toBool());
+        QCOMPARE(RuntimeProfile::readSettings().value(QStringLiteral("remoteAudioMuted")).toString(),
+            QStringLiteral("true"));
+
+        // Changing the canvas endpoint reuses the application's one mute
+        // preference. It does not create a separate button/session mute value.
+        toolbar->setProperty("session", QVariant::fromValue<QObject*>(&second));
+        QTRY_COMPARE(toolbar->property("session").value<QObject*>(), &second);
+        QCOMPARE(findVisualItem(harness.get(), QStringLiteral("canvasRemoteAudioButton")), audioButton.data());
+        QVERIFY(controller.remoteAudioMuted());
+        QVERIFY(!audioButton->property("toggled").toBool());
+
+        // The same document lock is held while a remote scene runs. Editing
+        // controls disappear, while listening remains independently usable.
+        host->document()->setEditsLocked(true);
+        QTRY_VERIFY(!second.mediaEditingEnabled());
+        QTRY_VERIFY(!findVisualItem(harness.get(), QStringLiteral("canvasTextToolButton")));
+        QVERIFY(audioButton && audioButton->isVisible() && audioButton->isEnabled());
+        clickAudio();
+        QTRY_VERIFY(!controller.remoteAudioMuted());
+        QCOMPARE(muteChanges.size(), 2);
+        QVERIFY(audioButton->property("toggled").toBool());
+        clickAudio();
+        QTRY_VERIFY(controller.remoteAudioMuted());
+        QCOMPARE(muteChanges.size(), 3);
+        QCOMPARE(RuntimeProfile::readSettings().value(QStringLiteral("remoteAudioMuted")).toString(),
+            QStringLiteral("true"));
+        host->document()->setEditsLocked(false);
+    }
+}
+
 void MediaOverlayTest::mainWindowPointerActivity_data()
 {
     QTest::addColumn<bool>("startsAsTouchpad");
@@ -2201,8 +2312,9 @@ void MediaOverlayTest::toolbarToolsAndGlobalMemoryUsage()
         auto* button = findVisualItem(topBar, QString::fromLatin1(name));
         QVERIFY(button && button->isVisible());
         QCOMPARE(button->mapToScene({0, 0}).y(), toolbarY);
-        QVERIFY(button->mapToScene({0, 0}).x() >= topBar->x());
-        QVERIFY(button->mapToScene({button->width(), 0}).x() <= appWindow->width());
+        // Row positions its children during the next polish after resize.
+        QTRY_VERIFY(button->mapToScene({0, 0}).x() >= topBar->mapToScene({0, 0}).x());
+        QTRY_VERIFY(button->mapToScene({button->width(), 0}).x() <= appWindow->width());
     }
     if (!artifactDir.isEmpty()) {
         QSignalSpy frames(appWindow, &QQuickWindow::frameSwapped);

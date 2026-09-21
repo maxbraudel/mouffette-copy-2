@@ -38,6 +38,7 @@ Dialog {
         id: photoPicker
         title: "Choose profile picture"
         fileMode: FileDialog.OpenFile
+        options: FileDialog.DontUseNativeDialog
         nameFilters: ["Images (*.png *.jpg *.jpeg *.webp)"]
         onAccepted: {
             dialog.validationError = dialog.controller.importProfilePicture(selectedFile)
@@ -154,11 +155,11 @@ Dialog {
                 AppCheckBox {
                     id: screenSharing
                     objectName: "settingsScreenSharingEnabled"
-                    text: "Share my screens with connected clients"
+                    text: "Share my screens and system audio"
                 }
                 Text {
                     Layout.fillWidth: true
-                    text: "Connected clients can see the live content of all your screens. Changes apply when you save."
+                    text: "Connected clients can see your screens and hear system audio, including received scenes. Mouffette controls and local previews are excluded. Changes apply when you save."
                     color: Theme.mutedText
                     font.pixelSize: 12
                     wrapMode: Text.Wrap

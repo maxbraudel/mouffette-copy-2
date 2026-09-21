@@ -1,9 +1,12 @@
 #include "backend/screensharing/MacScreenCapture.h"
 #include "backend/screensharing/ScreenCaptureVideoBuffer.h"
 #include "backend/screensharing/ScreenStreamCodec.h"
+#include "backend/platform/WindowCaptureExclusion.h"
 
 #include <QGuiApplication>
 #include <QScreen>
+#include <QSet>
+#include <QWindow>
 #include <QtGui/qscreen_platform.h>
 #include <algorithm>
 #include <atomic>
@@ -88,6 +91,11 @@ struct NativeState {
     bool started = false;
     bool stopping = false;
     bool updating = false;
+    CGDirectDisplayID displayID = 0;
+    quint64 filterRevision = 1;
+    quint64 appliedFilterRevision = 0;
+    bool updatingFilter = false;
+    std::atomic_bool filterReady{false};
     QSize desiredSize;
     QSize appliedSize;
     int desiredFps = 30;
@@ -145,6 +153,108 @@ void reportNativeError(const std::shared_ptr<NativeState>& state, NSError* error
         .arg(QString::fromLatin1(stage), description, domain.isEmpty() ? QStringLiteral("none") : domain).arg(nativeCode), code);
 }
 
+QSet<quint32> sceneWindowIds() {
+    QSet<quint32> ids;
+    if (QGuiApplication::platformName() != QLatin1String("cocoa")) return ids;
+    for (QWindow* window : WindowCaptureExclusion::instance().sceneWindows()) {
+        // Qt's Cocoa WId is an NSView, not a WindowServer window number. Never
+        // create a native surface while enumerating hidden/prepared scenes.
+        if (!window->handle()) continue;
+        NSView* view = (__bridge NSView*)reinterpret_cast<void*>(window->winId());
+        NSWindow* native = [view window];
+        if (native && native.windowNumber > 0) ids.insert(quint32(native.windowNumber));
+    }
+    return ids;
+}
+
+NSArray<SCWindow*>* sceneExceptionWindows(NSArray<SCWindow*>* windows,
+                                         const QSet<quint32>& sceneIds, pid_t ownPid) {
+    NSMutableArray<SCWindow*>* scenes = [NSMutableArray array];
+    for (SCWindow* window in windows) {
+        if (window.owningApplication.processID == ownPid && sceneIds.contains(window.windowID))
+            [scenes addObject:window];
+    }
+    return scenes;
+}
+
+SCContentFilter* contentFilter(SCShareableContent* content, CGDirectDisplayID displayID,
+                              const QSet<quint32>& sceneIds) {
+    SCDisplay* selected = nil;
+    for (SCDisplay* display in content.displays)
+        if (display.displayID == displayID) { selected = display; break; }
+    SCRunningApplication* ownApplication = nil;
+    const auto ownPid = NSProcessInfo.processInfo.processIdentifier;
+    for (SCRunningApplication* application in content.applications)
+        if (application.processID == ownPid) { ownApplication = application; break; }
+    // Never fall back to an unfiltered display if discovery is incomplete.
+    if (!selected || !ownApplication) return nil;
+    NSArray<SCWindow*>* scenes = sceneExceptionWindows(content.windows, sceneIds, ownPid);
+    // Excluding the process automatically excludes newly created controls.
+    // Explicit exceptions keep received scenes visible. Audio has its own
+    // capture: SCK's audio application filters must not reuse this video policy.
+    return [[SCContentFilter alloc] initWithDisplay:selected
+        excludingApplications:@[ownApplication] exceptingWindows:scenes];
+}
+
+void refreshContentFilter(const std::shared_ptr<NativeState> state);
+
+void applyContentFilter(const std::shared_ptr<NativeState> state,
+                        SCContentFilter* filter, quint64 revision) {
+    [state->stream updateContentFilter:filter completionHandler:^(NSError* error) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            state->updatingFilter = false;
+            if (state->closed.load()) return;
+            if (error) {
+                reportNativeError(state, error, "ScreenCaptureKit window exclusion update failed");
+                return;
+            }
+            state->appliedFilterRevision = revision;
+            state->filterReady.store(revision == state->filterRevision);
+            refreshContentFilter(state);
+        });
+    }];
+}
+
+void refreshContentFilter(const std::shared_ptr<NativeState> state) {
+    if (state->closed.load() || !state->stream || !state->started || state->stopping
+        || state->updatingFilter || state->filterRevision == state->appliedFilterRevision) return;
+    state->updatingFilter = true;
+    const auto revision = state->filterRevision;
+    [SCShareableContent getShareableContentExcludingDesktopWindows:NO onScreenWindowsOnly:NO
+        completionHandler:^(SCShareableContent* content, NSError* nativeError) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (state->closed.load()) { state->updatingFilter = false; return; }
+                if (nativeError || !content) {
+                    state->updatingFilter = false;
+                    reportNativeError(state, nativeError, "ScreenCaptureKit window exclusion discovery failed");
+                    return;
+                }
+                if (revision != state->filterRevision) {
+                    state->updatingFilter = false;
+                    refreshContentFilter(state);
+                    return;
+                }
+                SCContentFilter* filter = contentFilter(content, state->displayID, sceneWindowIds());
+                if (!filter) {
+                    state->updatingFilter = false;
+                    reportError(state, QStringLiteral("Cannot resolve the display and Mouffette windows for safe screen sharing"));
+                    return;
+                }
+                applyContentFilter(state, filter, revision);
+            });
+        }];
+}
+
+void invalidateContentFilter(const std::shared_ptr<NativeState> state) {
+    if (state->closed.load()) return;
+    ++state->filterRevision;
+    state->filterReady.store(false);
+    // Retire a retained frame when a scene becomes a control or its handle is
+    // destroyed. Fresh frames resume only after the latest filter is applied.
+    if (state->frame) state->frame({});
+    dispatch_async(dispatch_get_main_queue(), ^{ refreshContentFilter(state); });
+}
+
 // One native update at a time. A newer desired profile replaces pending work;
 // its callback owns the session and cannot restart a stopped stream.
 void updateConfiguration(const std::shared_ptr<NativeState> state) {
@@ -193,9 +303,9 @@ void stopSession(const std::shared_ptr<NativeState> state) {
 
 @implementation MouffetteScreenCaptureOutput
 - (void)stream:(SCStream*)stream didOutputSampleBuffer:(CMSampleBufferRef)sample ofType:(SCStreamOutputType)type {
-    Q_UNUSED(stream);
     const auto current = state.lock();
-    if (!current || current->closed.load() || type != SCStreamOutputTypeScreen || !CMSampleBufferIsValid(sample)) return;
+    if (!current || current->closed.load() || !current->filterReady.load()
+        || type != SCStreamOutputTypeScreen || !CMSampleBufferIsValid(sample)) return;
     @autoreleasepool {
         const auto array = CMSampleBufferGetSampleAttachmentsArray(sample, false);
         if (!array || CFArrayGetCount(array) == 0) return;
@@ -223,9 +333,13 @@ void stopSession(const std::shared_ptr<NativeState> state) {
         const QSize surfaceSize(int(CVPixelBufferGetWidth(surface)), int(CVPixelBufferGetHeight(surface)));
         if (surfaceSizeKey(surfaceSize) != current->desiredSurfaceSize.load()) return;
         QVideoFrame frame = MacScreenCapture::frameFromPixelBuffer(surface);
-        const auto pts = CMSampleBufferGetPresentationTimeStamp(sample);
+        auto pts = CMSampleBufferGetPresentationTimeStamp(sample);
+        // Audio is captured by an independent SCStream in the helper. Convert
+        // both stream clocks into CoreMedia's host epoch before transport.
+        if (stream.synchronizationClock && CMTIME_IS_NUMERIC(pts))
+            pts = CMSyncConvertTime(pts, stream.synchronizationClock, CMClockGetHostTimeClock());
         if (CMTIME_IS_NUMERIC(pts)) frame.setStartTime(CMTimeConvertScale(pts, 1000000, kCMTimeRoundingMethod_Default).value);
-        if (!current->closed.load()) current->frame(frame);
+        if (!current->closed.load() && current->filterReady.load()) current->frame(frame);
     }
 }
 - (void)stream:(SCStream*)stream didStopWithError:(NSError*)error {
@@ -238,6 +352,7 @@ struct MacScreenCapture::Private {
     std::shared_ptr<NativeState> state;
     ScreenStreamProfile profile;
     QSize sourceSize;
+    QMetaObject::Connection filterConnection;
 };
 MacScreenCapture::MacScreenCapture() : d(std::make_unique<Private>()) {}
 MacScreenCapture::~MacScreenCapture() { stop(); }
@@ -290,25 +405,33 @@ bool MacScreenCapture::start(QScreen* screen, FrameCallback frame, ErrorCallback
     d->sourceSize = QSize(qRound(screen->geometry().width() * screen->devicePixelRatio()),
                           qRound(screen->geometry().height() * screen->devicePixelRatio()));
     const auto state = std::make_shared<NativeState>();
+    state->displayID = displayID;
     state->frame = std::move(frame); state->error = std::move(error);
     state->desiredSize = boundedCaptureSize(d->sourceSize, d->profile.maximumEdge);
     state->desiredFps = d->profile.framesPerSecond;
     state->desiredSurfaceSize.store(surfaceSizeKey(state->desiredSize));
     d->state = state;
+    auto& exclusions = WindowCaptureExclusion::instance();
+    d->filterConnection = QObject::connect(&exclusions, &WindowCaptureExclusion::sceneWindowsChanged,
+        &exclusions, [weak = std::weak_ptr<NativeState>(state)] {
+            if (const auto active = weak.lock()) invalidateContentFilter(active);
+        });
+    const auto initialFilterRevision = state->filterRevision;
     // ScreenCaptureKit performs the OS screen-recording authorization. Never
     // enumerate content until local sharing is enabled and a viewer subscribes.
-    [SCShareableContent getShareableContentExcludingDesktopWindows:NO onScreenWindowsOnly:YES
+    [SCShareableContent getShareableContentExcludingDesktopWindows:NO onScreenWindowsOnly:NO
         completionHandler:^(SCShareableContent* content, NSError* nativeError) {
             dispatch_async(dispatch_get_main_queue(), ^{
                 if (state->closed.load()) return;
                 if (nativeError || !content) {
                     reportNativeError(state, nativeError, "ScreenCaptureKit content discovery failed"); return;
                 }
-                SCDisplay* selected = nil;
-                for (SCDisplay* display in content.displays)
-                    if (display.displayID == displayID) { selected = display; break; }
-                if (!selected) { reportError(state, QStringLiteral("The selected display is no longer available for sharing")); return; }
-                SCContentFilter* filter = [[SCContentFilter alloc] initWithDisplay:selected excludingWindows:@[]];
+                SCContentFilter* filter = contentFilter(content, displayID, sceneWindowIds());
+                if (!filter) {
+                    reportError(state, QStringLiteral("Cannot resolve the display and Mouffette windows for safe screen sharing"));
+                    return;
+                }
+                state->appliedFilterRevision = initialFilterRevision;
                 state->appliedSize = state->desiredSize;
                 state->appliedFps = state->desiredFps;
                 SCStreamConfiguration* config = configuration(state->appliedSize, state->appliedFps);
@@ -329,7 +452,11 @@ bool MacScreenCapture::start(QScreen* screen, FrameCallback frame, ErrorCallback
                         state->started = !startError;
                         if (startError) reportNativeError(state, startError, "ScreenCaptureKit startup failed");
                         if (state->closed.load()) stopSession(state);
-                        else if (state->started) updateConfiguration(state);
+                        else if (state->started) {
+                            state->filterReady.store(state->appliedFilterRevision == state->filterRevision);
+                            refreshContentFilter(state);
+                            updateConfiguration(state);
+                        }
                     });
                 }];
             });
@@ -338,6 +465,8 @@ bool MacScreenCapture::start(QScreen* screen, FrameCallback frame, ErrorCallback
 }
 
 void MacScreenCapture::stop() {
+    QObject::disconnect(d->filterConnection);
+    d->filterConnection = {};
     const auto state = std::exchange(d->state, {});
     if (!state) return;
     state->closed.store(true);

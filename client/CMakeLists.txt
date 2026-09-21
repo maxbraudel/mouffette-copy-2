@@ -157,7 +157,13 @@ set(CMAKE_AUTORCC ON)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET
     libavformat>=61 libavcodec>=61 libavutil libswscale libswresample)
+pkg_check_modules(OPUS REQUIRED IMPORTED_TARGET opus)
 add_library(MouffetteResidentMedia STATIC
+    src/backend/audiosharing/AudioWorker.cpp
+    src/backend/audiosharing/AudioWorkerClient.cpp
+    src/backend/audiosharing/AudioWorkerClient.h
+    src/backend/audiosharing/AudioStreamCodec.cpp
+    src/backend/audiosharing/AudioStreamCodec.h
     src/backend/media/MediaBackendBootstrap.h
     src/backend/media/MediaBackendBootstrap.cpp
     src/backend/media/PlaybackAudio.h
@@ -181,8 +187,20 @@ add_library(MouffetteResidentMedia STATIC
     src/backend/domain/media/MediaFilePolicy.cpp)
 target_include_directories(MouffetteResidentMedia PUBLIC src)
 target_link_libraries(MouffetteResidentMedia PUBLIC
-    Qt6::Core Qt6::Gui Qt6::Multimedia Qt6::Concurrent PkgConfig::FFMPEG)
+    Qt6::Core Qt6::Gui Qt6::Network Qt6::Multimedia Qt6::Concurrent PkgConfig::FFMPEG PkgConfig::OPUS)
 target_link_libraries(MouffetteResidentMedia PUBLIC Qt6::MultimediaPrivate Qt6::GuiPrivate)
+if(APPLE)
+    target_sources(MouffetteResidentMedia PRIVATE src/backend/audiosharing/SystemAudioCapture_mac.mm)
+    set_source_files_properties(src/backend/audiosharing/SystemAudioCapture_mac.mm
+        PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+    target_link_libraries(MouffetteResidentMedia PRIVATE "-framework ScreenCaptureKit"
+        "-framework CoreAudio" "-framework CoreMedia" "-framework CoreGraphics" "-framework AppKit")
+elseif(WIN32)
+    target_sources(MouffetteResidentMedia PRIVATE src/backend/audiosharing/SystemAudioCapture_windows.cpp)
+    target_link_libraries(MouffetteResidentMedia PRIVATE ole32 uuid avrt)
+else()
+    target_sources(MouffetteResidentMedia PRIVATE src/backend/audiosharing/SystemAudioCapture_stub.cpp)
+endif()
 if(WIN32)
     target_link_libraries(MouffetteResidentMedia PRIVATE Psapi)
 endif()
@@ -203,6 +221,9 @@ set(MOUFFETTE_STORAGE_SOURCES
 
 # Source files - Frontend/Backend Architecture
 set(SOURCES
+    src/backend/platform/WindowCaptureExclusion.cpp
+    src/backend/audiosharing/AudioSharingService.cpp
+    src/backend/network/AudioTransport.cpp
     # ═══════════════════════════════════════════════════════
     # CORE
     # ═══════════════════════════════════════════════════════
@@ -682,6 +703,11 @@ endif()
 install(TARGETS MouffetteClient
     BUNDLE DESTINATION .
     RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
+if(APPLE)
+    install(FILES resources/licenses/opus.txt DESTINATION "Mouffette.app/Contents/Resources/licenses")
+else()
+    install(FILES resources/licenses/opus.txt DESTINATION "${CMAKE_INSTALL_BINDIR}/licenses")
+endif()
 
 if(WIN32)
     qt_generate_deploy_app_script(
@@ -707,7 +733,23 @@ endif()
 include(CTest)
 if(BUILD_TESTING)
     find_package(Qt6 REQUIRED COMPONENTS Test)
-
+    add_executable(tst_AudioWorker tests/qt/tst_AudioWorker.cpp)
+    target_link_libraries(tst_AudioWorker PRIVATE MouffetteResidentMedia Qt6::Test)
+    add_test(NAME AudioWorker COMMAND tst_AudioWorker)
+    set_tests_properties(AudioWorker PROPERTIES TIMEOUT 45 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+    add_executable(tst_ScreenAudioClock tests/qt/tst_ScreenAudioClock.cpp)
+    target_include_directories(tst_ScreenAudioClock PRIVATE src)
+    target_link_libraries(tst_ScreenAudioClock PRIVATE Qt6::Core Qt6::Test)
+    add_test(NAME ScreenAudioClock COMMAND tst_ScreenAudioClock)
+    add_executable(tst_WindowCaptureExclusion tests/qt/tst_WindowCaptureExclusion.cpp
+        src/backend/platform/WindowCaptureExclusion.cpp)
+    target_include_directories(tst_WindowCaptureExclusion PRIVATE src)
+    target_link_libraries(tst_WindowCaptureExclusion PRIVATE Qt6::Core Qt6::Gui Qt6::Test)
+    if(WIN32)
+        target_link_libraries(tst_WindowCaptureExclusion PRIVATE user32)
+    endif()
+    add_test(NAME WindowCaptureExclusion COMMAND tst_WindowCaptureExclusion)
+    set_tests_properties(WindowCaptureExclusion PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
     add_executable(tst_ScreenAdaptiveController tests/qt/tst_ScreenAdaptiveController.cpp)
     target_include_directories(tst_ScreenAdaptiveController PRIVATE src)
     target_link_libraries(tst_ScreenAdaptiveController PRIVATE Qt6::Core Qt6::Test)
@@ -720,6 +762,7 @@ if(BUILD_TESTING)
 
     add_executable(tst_ScreenCaptureLayers
         tests/qt/tst_ScreenCaptureLayers.cpp
+        src/backend/platform/WindowCaptureExclusion.cpp
         src/backend/screensharing/ScreenCaptureSource.h
         src/backend/screensharing/ScreenStreamCodec.cpp)
     target_include_directories(tst_ScreenCaptureLayers PRIVATE src)
@@ -735,12 +778,14 @@ if(BUILD_TESTING)
 
     add_executable(tst_ScreenStreamCodec
         tests/qt/tst_ScreenStreamCodec.cpp
+        src/backend/platform/WindowCaptureExclusion.cpp
         src/backend/screensharing/ScreenStreamCodec.cpp)
     target_include_directories(tst_ScreenStreamCodec PRIVATE src)
     target_link_libraries(tst_ScreenStreamCodec PRIVATE
         Qt6::Core Qt6::Gui Qt6::Multimedia Qt6::Test PkgConfig::FFMPEG)
     if(APPLE)
-        target_sources(tst_ScreenStreamCodec PRIVATE src/backend/screensharing/MacScreenCapture.mm)
+        target_sources(tst_ScreenStreamCodec PRIVATE src/backend/screensharing/MacScreenCapture.mm
+            src/backend/platform/macos/MacWindowManager.mm)
         target_link_libraries(tst_ScreenStreamCodec PRIVATE "-framework ScreenCaptureKit"
             "-framework CoreVideo" "-framework CoreMedia" "-framework CoreGraphics" "-framework AppKit")
     endif()
@@ -750,7 +795,8 @@ if(BUILD_TESTING)
         # Compile the native implementation inside this test to exercise its
         # asynchronous lifecycle with a fake stream, without desktop access.
         add_executable(tst_MacScreenCaptureLifecycle
-            tests/qt/tst_MacScreenCaptureLifecycle.mm)
+            tests/qt/tst_MacScreenCaptureLifecycle.mm
+            src/backend/platform/WindowCaptureExclusion.cpp)
         set_source_files_properties(tests/qt/tst_MacScreenCaptureLifecycle.mm
             PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
         target_include_directories(tst_MacScreenCaptureLifecycle PRIVATE src)
@@ -765,6 +811,7 @@ if(BUILD_TESTING)
 
     add_executable(tst_WindowPresentation
         tests/qt/tst_WindowPresentation.cpp
+        src/backend/platform/WindowCaptureExclusion.cpp
         src/frontend/qml/WindowPresentation.cpp
         src/frontend/qml/WindowPresentation.h
         src/backend/platform/WindowStackingCoordinator.cpp
@@ -1004,6 +1051,18 @@ if(BUILD_TESTING)
     target_link_libraries(tst_ClientProfile PRIVATE
         "$<TARGET_PROPERTY:MouffetteClient,LINK_LIBRARIES>" Qt6::Test)
     add_test(NAME ClientProfile COMMAND tst_ClientProfile)
+
+    add_executable(tst_AudioTransport tests/qt/tst_AudioTransport.cpp
+        "$<FILTER:$<TARGET_OBJECTS:MouffetteClient>,EXCLUDE,/src/main[.]cpp[.](o|obj)$>")
+    target_include_directories(tst_AudioTransport PRIVATE
+        "$<TARGET_PROPERTY:MouffetteClient,INCLUDE_DIRECTORIES>")
+    target_compile_definitions(tst_AudioTransport PRIVATE
+        "$<TARGET_PROPERTY:MouffetteClient,COMPILE_DEFINITIONS>"
+        MOUFFETTE_RELAY_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/remote-session-relay.js")
+    target_link_libraries(tst_AudioTransport PRIVATE
+        "$<TARGET_PROPERTY:MouffetteClient,LINK_LIBRARIES>" Qt6::Test)
+    add_test(NAME AudioTransport COMMAND tst_AudioTransport)
+    set_tests_properties(AudioTransport PROPERTIES TIMEOUT 90 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
     add_executable(tst_SystemLifecycleMonitor
         tests/qt/tst_SystemLifecycleMonitor.cpp

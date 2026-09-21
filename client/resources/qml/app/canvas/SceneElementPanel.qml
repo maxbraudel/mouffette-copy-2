@@ -414,7 +414,7 @@ Rectangle {
         ColorDialog {
             id: colorDialog
             title: colorOption.dialogTitle
-            options: ColorDialog.ShowAlphaChannel
+            options: ColorDialog.ShowAlphaChannel | ColorDialog.DontUseNativeDialog
             onAccepted: colorOption.colorEdited(selectedColor.toString())
         }
     }

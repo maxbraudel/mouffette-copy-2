@@ -27,6 +27,7 @@ void SettingsManager::loadSettings() {
     m_screenSharingEnabled = settings->value(QStringLiteral("screenSharingEnabled"), false)
                                  .toString() == QLatin1String("true");
     m_screenContentVisible = settings->value(QStringLiteral("screenContentVisible"), true).toBool();
+    m_remoteAudioMuted = settings->value(QStringLiteral("remoteAudioMuted"), false).toBool();
     if (!ProfileImage::normalizeUsername(settings->value(QStringLiteral("username")).toString(), &m_username))
         m_username.clear();
     const QByteArray encoded = settings->value(QStringLiteral("profilePictureJpeg")).toByteArray();
@@ -157,6 +158,39 @@ bool SettingsManager::setScreenContentVisible(bool visible, QString* error)
     }
     m_screenContentVisible = visible;
     emit screenContentVisibleChanged(visible);
+    emit settingsChanged();
+    return true;
+}
+
+bool SettingsManager::setRemoteAudioMuted(bool muted, QString* error)
+{
+    if (m_remoteAudioMuted == muted) return true;
+    const auto previous = RuntimeStorage::readSettings(RuntimeProfile::profileRoot(),
+                                                       RuntimeProfile::settingsFilePath());
+    if (previous.inspection.state != RuntimeStorage::State::Current
+        && previous.inspection.state != RuntimeStorage::State::Missing) {
+        if (error) *error = previous.inspection.reason;
+        return false;
+    }
+    QVariantMap values = previous.values;
+    if (previous.inspection.state == RuntimeStorage::State::Missing) {
+        values.insert(QStringLiteral("serverUrl"), m_serverUrlConfig);
+        values.insert(QStringLiteral("autoUploadImportedMedia"), m_autoUploadImportedMedia);
+        values.insert(QStringLiteral("appAlwaysOnTop"), m_appAlwaysOnTop);
+        values.insert(QStringLiteral("screenSharingEnabled"), m_screenSharingEnabled);
+        values.insert(QStringLiteral("screenContentVisible"), m_screenContentVisible);
+        values.insert(QStringLiteral("username"), m_username);
+        values.insert(QStringLiteral("profilePictureJpeg"), QString::fromLatin1(m_profilePictureJpeg.toBase64()));
+    }
+    values.insert(QStringLiteral("remoteAudioMuted"), muted);
+    const auto committed = RuntimeStorage::writeSettings(RuntimeProfile::profileRoot(),
+        RuntimeProfile::settingsFilePath(), values, StorageVersions::Settings);
+    if (!committed.succeeded()) {
+        if (error) *error = committed.reason;
+        return false;
+    }
+    m_remoteAudioMuted = muted;
+    emit remoteAudioMutedChanged(muted);
     emit settingsChanged();
     return true;
 }

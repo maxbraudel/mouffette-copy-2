@@ -66,6 +66,7 @@ public:
     int loops() const { return m_loops; }
     void setLoops(int loops);
     void setAudioOutput(QAudioOutput* output);
+    void setAudioRole(PlaybackAudio::Role role) { m_audio.setRole(role); }
     QAudioOutput* audioOutput() const;
     void setVideoSink(QVideoSink* sink);
     QVideoSink* videoSink() const;

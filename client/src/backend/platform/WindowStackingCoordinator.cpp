@@ -1,4 +1,5 @@
 #include "backend/platform/WindowStackingCoordinator.h"
+#include "backend/platform/WindowCaptureExclusion.h"
 
 #include <QEvent>
 #include <QGuiApplication>
@@ -35,6 +36,7 @@ WindowStackingCoordinator& WindowStackingCoordinator::instance()
 
 WindowStackingCoordinator::WindowStackingCoordinator(QObject* parent) : QObject(parent)
 {
+    WindowCaptureExclusion::instance();
     m_timer.setInterval(500);
     m_deferred.setSingleShot(true);
     m_deferred.setInterval(0);
@@ -117,6 +119,7 @@ void WindowStackingCoordinator::registerWindow(QWindow* window, bool scene)
     if (!window) return;
     unregisterWindow(window);
     window->setProperty("mouffetteSceneSurface", scene);
+    WindowCaptureExclusion::instance().setSceneWindow(window, scene);
     Entry entry{window, scene, !scene, {}};
     entry.destroyed = connect(window, &QObject::destroyed, this, [this] {
         m_windows.removeIf([](const Entry& entry) { return entry.window.isNull(); });
@@ -141,6 +144,7 @@ void WindowStackingCoordinator::setSceneWindowActive(QWindow* window, bool activ
 void WindowStackingCoordinator::unregisterWindow(QWindow* window)
 {
     if (window) window->setProperty("mouffetteSceneSurface", false);
+    WindowCaptureExclusion::instance().setSceneWindow(window, false);
     m_windows.removeIf([window](const Entry& entry) {
         if (entry.window && entry.window != window) return false;
         QObject::disconnect(entry.destroyed);

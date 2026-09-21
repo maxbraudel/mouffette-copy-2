@@ -243,7 +243,7 @@ fi
 
 # The resident decoder links these libraries directly, independently of the
 # Qt multimedia plugin. Fail packaging if any of them was not deployed.
-for MEDIA_LIBRARY in avformat avcodec avutil swscale swresample; do
+for MEDIA_LIBRARY in avformat avcodec avutil swscale swresample opus; do
     if ! compgen -G "$APP/Contents/Frameworks/lib${MEDIA_LIBRARY}*.dylib" >/dev/null; then
         echo "Missing resident decoder runtime library: $MEDIA_LIBRARY" >&2
         exit 1

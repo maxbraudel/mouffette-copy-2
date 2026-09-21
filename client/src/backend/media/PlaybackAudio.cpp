@@ -1,6 +1,8 @@
 #include "backend/media/PlaybackAudio.h"
 #include "backend/media/IndexedMediaDecoder.h"
+#include "backend/audiosharing/AudioWorkerClient.h"
 #include <QAudioDevice>
+#include <QCoreApplication>
 #include <QAudioOutput>
 #include <QAudioSink>
 #include <QFutureWatcher>
@@ -21,27 +23,71 @@ std::atomic<quint64> decodeRequests{0};
 static_assert(std::atomic<qint64>::is_always_lock_free && std::atomic<float>::is_always_lock_free
               && std::atomic<void*>::is_always_lock_free, "Audio callback requires lock-free atomics");
 constexpr int BlockCount = 4, MaximumVoices = 256;
+// The same decoder works with local scene buffers or process-shared preview
+// buffers. Preview samples are consumed only by the excluded audio worker.
+template<typename T> struct RoutedAtomic {
+    std::atomic<T> local;
+    std::atomic<T>* value;
+    explicit RoutedAtomic(T initial = {}) : local(initial), value(&local) {}
+    void bind(std::atomic<T>& shared) { value = &shared; }
+    T load(std::memory_order order = std::memory_order_seq_cst) const { return value->load(order); }
+    void store(T next, std::memory_order order = std::memory_order_seq_cst) { value->store(next, order); }
+    T fetch_add(T amount, std::memory_order order = std::memory_order_seq_cst) { return value->fetch_add(amount, order); }
+    bool compare_exchange_strong(T& expected, T desired, std::memory_order order = std::memory_order_seq_cst) { return value->compare_exchange_strong(expected, desired, order); }
+    operator T() const { return load(); }
+    RoutedAtomic& operator=(T next) { store(next); return *this; }
+};
+struct RoutedSamples {
+    std::vector<float> local;
+    float* shared = nullptr;
+    size_t sharedSize = 0;
+    void resize(size_t size) { local.resize(size); }
+    void bind(float* pointer, size_t count) { shared = pointer; sharedSize = count; }
+    size_t size() const { return shared ? sharedSize : local.size(); }
+    float* data() { return shared ? shared : local.data(); }
+    const float* data() const { return shared ? shared : local.data(); }
+    float& operator[](size_t index) { return data()[index]; }
+};
 struct Block {
     // 0 empty, 1 producer owns it, 2 immutable and published to the callback.
-    std::atomic<int> state{0};
-    std::atomic<quint64> generation{0};
-    std::atomic<qint64> startUs{0};
-    std::vector<float> samples;
+    RoutedAtomic<int> state{0};
+    RoutedAtomic<quint64> generation{0};
+    RoutedAtomic<qint64> startUs{0};
+    RoutedSamples samples;
 };
 struct Voice {
     int rate, channels, blockFrames;
     std::array<Block, BlockCount> blocks;
-    std::atomic<quint64> generation{1};
-    std::atomic<bool> playing{false};
-    std::atomic<bool> presented{false};
-    std::atomic<float> gain{1};
-    std::atomic<qint64> clockOffsetUs{0};
-    Voice(int sampleRate, int channelCount) : rate(sampleRate), channels(channelCount), blockFrames(sampleRate / 20) {
-        for (auto& block : blocks) block.samples.resize(size_t(blockFrames) * channels);
+    RoutedAtomic<quint64> generation{1};
+    RoutedAtomic<bool> playing{false};
+    RoutedAtomic<bool> presented{false};
+    RoutedAtomic<float> gain{1};
+    RoutedAtomic<qint64> clockOffsetUs{0};
+    std::shared_ptr<AudioPreviewChannel> preview;
+    Voice(int sampleRate, int channelCount, std::shared_ptr<AudioPreviewChannel> channel = {})
+        : rate(sampleRate), channels(channelCount), blockFrames(sampleRate / 20), preview(std::move(channel)) {
+        if (preview) {
+            auto* shared = preview->state();
+            generation.bind(shared->generation); playing.bind(shared->playing); presented.bind(shared->presented);
+            gain.bind(shared->gain); clockOffsetUs.bind(shared->clockOffsetUs);
+            for (int i = 0; i < BlockCount; ++i) {
+                auto& block = blocks[i]; auto& data = shared->blocks[i];
+                block.state.bind(data.state); block.generation.bind(data.generation); block.startUs.bind(data.startUs);
+                block.samples.bind(data.samples.data(), data.samples.size());
+            }
+        } else for (auto& block : blocks) block.samples.resize(size_t(blockFrames) * channels);
         pcmBytes.fetch_add(quint64(BlockCount) * blockFrames * channels * sizeof(float));
     }
     ~Voice() { pcmBytes.fetch_sub(quint64(BlockCount) * blockFrames * channels * sizeof(float)); }
 };
+bool hasPreparedBlock(const Voice& voice, qint64 positionUs) {
+    const auto generation = voice.generation.load();
+    for (const auto& block : voice.blocks) {
+        if (block.state.load(std::memory_order_acquire) == 2 && block.generation == generation
+            && block.startUs <= positionUs && block.startUs + 50000 > positionUs) return true;
+    }
+    return false;
+}
 class Mixer : public QObject {
 public:
     QAudioFormat format;
@@ -132,8 +178,13 @@ struct PlaybackAudio::Impl {
     bool busy = false;
     bool requestedValid = false;
     bool seeking = false;
+    PlaybackAudio::Role role = PlaybackAudio::Role::ReceivedScene;
     QTimer timer;
-    void detach() { if (mixer && voice) mixer->remove(slot, std::move(voice)); mixer.reset(); slot = -1; }
+    void detach() {
+        if (voice) voice->playing.store(false, std::memory_order_release);
+        if (mixer && voice) mixer->remove(slot, std::move(voice));
+        voice.reset(); mixer.reset(); slot = -1;
+    }
 };
 PlaybackAudio::PlaybackAudio(QObject* parent) : QObject(parent), d(std::make_unique<Impl>()) {
     d->timer.setInterval(10);
@@ -141,6 +192,10 @@ PlaybackAudio::PlaybackAudio(QObject* parent) : QObject(parent), d(std::make_uni
     connect(&d->timer, &QTimer::timeout, this, &PlaybackAudio::refill);
 }
 PlaybackAudio::~PlaybackAudio() { d->timer.stop(); d->detach(); }
+void PlaybackAudio::setRole(Role role) {
+    if (d->role == role) return;
+    d->role = role; rebuildOutput();
+}
 void PlaybackAudio::setAsset(std::shared_ptr<const ResidentMediaAsset> asset) {
     if (d->asset == asset) return;
     pause(); d->detach(); d->asset = std::move(asset); rebuildOutput();
@@ -167,6 +222,19 @@ void PlaybackAudio::rebuildOutput() {
     QAudioDevice device = d->output->device();
     if (device.isNull() || !QMediaDevices::audioOutputs().contains(device)) device = QMediaDevices::defaultAudioOutput();
     if (device.isNull()) return; // Video-only/headless preparation stays usable.
+    if (d->role == Role::ControlPreview) {
+        // Headless/unit-test runtimes do not launch the application executable.
+        // They retain video-only preparation; excluded audio never falls back
+        // to a sink in this process.
+        if (QCoreApplication::instance()->property("mouffetteAudioWorkerExecutable").toString().isEmpty()) return;
+        auto preview = AudioWorkerClient::instance()->createPreviewChannel(device.id());
+        if (!preview) { emit failed(QStringLiteral("The isolated preview audio buffer could not be allocated")); return; }
+        d->voice = std::make_shared<Voice>(48000, 2, std::move(preview));
+        d->voice->gain.store(d->output->isMuted() ? 0.0f : float(d->output->volume()));
+        d->timer.start(); prepare(position);
+        if (playing) play(position);
+        return;
+    }
     auto& shared = devices()[device.id()];
     d->mixer = shared.lock();
     if (!d->mixer) { d->mixer = std::make_shared<Mixer>(device); shared = d->mixer; }
@@ -182,7 +250,7 @@ void PlaybackAudio::prepare(qint64 positionUs) {
     if (!d->voice) { d->requestedUs = positionUs; return; }
     if (d->requestedValid && d->requestedUs == positionUs && d->seeking) { refill(); return; }
     d->requestedUs = positionUs; d->requestedValid = true;
-    if (preparedAt(positionUs)) { d->seeking = false; return; }
+    if (hasPreparedBlock(*d->voice, positionUs)) { d->seeking = false; return; }
     d->seeking = true;
     d->timer.start();
     d->voice->generation.fetch_add(1, std::memory_order_release);
@@ -192,12 +260,8 @@ void PlaybackAudio::prepare(qint64 positionUs) {
 }
 bool PlaybackAudio::preparedAt(qint64 positionUs) const {
     if (!d->voice) return true;
-    const auto generation = d->voice->generation.load();
-    for (const auto& block : d->voice->blocks) {
-        if (block.state.load(std::memory_order_acquire) == 2 && block.generation == generation
-            && block.startUs <= positionUs && block.startUs + 50000 > positionUs) return true;
-    }
-    return false;
+    if (d->voice->preview && !d->voice->preview->state()->consumerAvailable.load()) return true;
+    return hasPreparedBlock(*d->voice, positionUs);
 }
 void PlaybackAudio::play(qint64 positionUs) {
     prepare(positionUs);
@@ -207,8 +271,18 @@ void PlaybackAudio::play(qint64 positionUs) {
     d->voice->clockOffsetUs.store(positionUs - nowUs(), std::memory_order_relaxed);
     d->voice->playing.store(true, std::memory_order_release);
 }
-bool PlaybackAudio::presentedSincePlay() const { return !d->voice || d->voice->presented.load(std::memory_order_relaxed); }
-void PlaybackAudio::pause() { if (d->voice) d->voice->playing.store(false, std::memory_order_release); }
+bool PlaybackAudio::presentedSincePlay() const {
+    return !d->voice || (d->voice->preview && !d->voice->preview->state()->consumerAvailable.load())
+        || d->voice->presented.load(std::memory_order_relaxed);
+}
+void PlaybackAudio::pause() {
+    if (!d->voice) return;
+    d->voice->playing.store(false, std::memory_order_release);
+    if (d->voice->preview) {
+        d->voice->generation.fetch_add(1, std::memory_order_release);
+        d->requestedValid = false; d->seeking = false;
+    }
+}
 void PlaybackAudio::refill() {
     if (!d->voice || d->busy) return;
     auto voice = d->voice;

@@ -59,7 +59,7 @@ jobs:
         run: npm run test:slow-link
 
       - name: Install toolchain
-        run: brew install qt openssl@3 cmake ninja ffmpeg pkg-config
+        run: brew install qt openssl@3 cmake ninja ffmpeg opus pkg-config
 
       - name: Build
         working-directory: client
@@ -149,6 +149,7 @@ jobs:
             mingw-w64-ucrt-x86_64-qt6-imageformats
             mingw-w64-ucrt-x86_64-qt6-svg
             mingw-w64-ucrt-x86_64-ffmpeg
+            mingw-w64-ucrt-x86_64-opus
             mingw-w64-ucrt-x86_64-pkgconf
             mingw-w64-ucrt-x86_64-openssl
 

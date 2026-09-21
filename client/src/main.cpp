@@ -21,6 +21,8 @@
 #include "frontend/qml/ApplicationController.h"
 #include "frontend/qml/QmlRuntime.h"
 #include "frontend/rendering/canvas/CanvasQmlTypes.h"
+#include "backend/audiosharing/AudioWorker.h"
+#include "backend/audiosharing/AudioWorkerClient.h"
 
 // ── Dev flags ────────────────────────────────────────────────────────────────
 // ─────────────────────────────────────────────────────────────────────────────
@@ -57,6 +59,8 @@ void logRuntimeDiagnostics() {
 }
 
 int main(int argc, char *argv[]) {
+    if (argc > 1 && QByteArray(argv[1]) == QByteArrayLiteral("--audio-worker"))
+        return runAudioWorker(argc, argv);
     QStringList arguments;
     arguments.reserve(argc);
     for (int i = 0; i < argc; ++i) {
@@ -72,6 +76,10 @@ int main(int argc, char *argv[]) {
     AppConfig::instance().applyPreApplicationEnvironment();
 
     QApplication app(argc, argv);
+    app.setProperty("mouffetteAudioWorkerExecutable", QCoreApplication::applicationFilePath());
+    QObject::connect(&app, &QCoreApplication::aboutToQuit, &app, [] {
+        AudioWorkerClient::instance()->shutdown();
+    });
 #ifdef Q_OS_MACOS
     // Prefer our bundled Qt backend, including the precise first-seek fix.
     QCoreApplication::addLibraryPath(

@@ -1,6 +1,11 @@
 #include "backend/screensharing/ScreenCaptureSource.h"
 #include "backend/screensharing/ScreenCaptureVideoBuffer.h"
+#include "backend/screensharing/CaptureTimestampMapper.h"
+#include "backend/audiosharing/MediaCaptureClock.h"
 #include "backend/platform/LocalScreenTopology.h"
+#ifdef Q_OS_WIN
+#include "backend/platform/WindowCaptureExclusion.h"
+#endif
 #ifdef Q_OS_MACOS
 #include "backend/screensharing/MacScreenCapture.h"
 #endif
@@ -29,6 +34,8 @@ struct CaptureMailbox {
     QMutex mutex;
     QWaitCondition changed;
     QVideoFrame latest;
+    CaptureTimestampMapper timestampMapper;
+    qint64 capturedAtUs = 0;
     QSize expectedNativeSize;
     quint64 revision = 0;
     quint64 nextLayerEpoch = 0;
@@ -82,6 +89,7 @@ void submitCaptureFrame(CaptureMailbox& state, const QVideoFrame& frame) {
     if (state.closed) return;
     if (frame.isValid() && state.expectedNativeSize.isValid() && frame.size() != state.expectedNativeSize) return;
     state.latest = frame;
+    if (frame.isValid()) state.capturedAtUs = state.timestampMapper.map(frame.startTime(), MediaCaptureClock::nowUs());
     if (!frame.isValid()) {
         for (auto& layer : state.layers) {
             layer.epoch = ++state.nextLayerEpoch;
@@ -123,6 +131,7 @@ public:
             quint64 encodedRevision = 0;
             qint64 lastEncodeUs = -1000000;
             qint64 lastKeyFrameUs = -30000000;
+            qint64 lastMediaUs = -1;
         };
         struct Work {
             QString name;
@@ -147,6 +156,7 @@ public:
             QList<Work> work;
             QList<std::shared_ptr<EncoderLayer>> retired;
             qint64 timestamp = 0;
+            qint64 capturedAtUs = 0;
             {
                 QMutexLocker lock(&state->mutex);
                 while (true) {
@@ -183,6 +193,7 @@ public:
                     }
                     if (!work.isEmpty()) {
                         frame = state->latest;
+                        capturedAtUs = state->capturedAtUs;
                         state->deliveryPending = true;
                         break;
                     }
@@ -214,10 +225,15 @@ public:
                 // Wrappers share one immutable raw surface and have their own
                 // timing metadata; low conversion never mutates main's input.
                 QString error;
-                auto packets = layer.encoder.encode(presentationFrame(frame, timestamp), item.forceKeyFrame, error);
+                // An idle refresh still describes the current unchanged desktop;
+                // do not feed duplicate codec PTS when reusing its native surface.
+                const qint64 mediaUs = capturedAtUs > layer.lastMediaUs ? capturedAtUs
+                    : std::max(layer.lastMediaUs + 1, MediaCaptureClock::nowUs());
+                layer.lastMediaUs = mediaUs;
+                auto packets = layer.encoder.encode(presentationFrame(frame, mediaUs), item.forceKeyFrame, error);
                 for (auto& packet : packets) {
                     packet.layer = item.name;
-                    if (packet.keyFrame) layer.lastKeyFrameUs = std::max(layer.lastKeyFrameUs, packet.timestampUs);
+                    if (packet.keyFrame) layer.lastKeyFrameUs = timestamp;
                 }
                 const auto backend = layer.encoder.backendName();
                 const bool backendChanged = backend != layer.reportedBackend;
@@ -332,6 +348,25 @@ struct ScreenCaptureSource::Private {
 ScreenCaptureSource::ScreenCaptureSource(QObject* parent) : QObject(parent), d(std::make_unique<Private>()) {
     qRegisterMetaType<ScreenStreamPacket>();
     qRegisterMetaType<ScreenCaptureError>();
+#ifdef Q_OS_WIN
+    connect(&WindowCaptureExclusion::instance(), &WindowCaptureExclusion::captureSafetyChanged,
+            this, [this](bool allowed, const QString& error) {
+        if (allowed || !d->mailbox) return;
+        // Fence raw and encoded deliveries synchronously, before the new
+        // unprotected native window can be included by desktop duplication.
+        {
+            QMutexLocker lock(&d->mailbox->mutex);
+            d->mailbox->closed = true;
+            d->mailbox->latest = {};
+            d->mailbox->changed.wakeOne();
+        }
+        QMetaObject::invokeMethod(this, [this, generation = d->mailbox, error] {
+            if (d->mailbox != generation) return;
+            stop();
+            emit errorOccurred(ScreenCaptureError::CaptureFailed, error);
+        }, Qt::QueuedConnection);
+    });
+#endif
 #ifndef Q_OS_MACOS
     d->session.setScreenCapture(&d->capture);
     d->session.setVideoSink(&d->sink);
@@ -363,6 +398,13 @@ bool ScreenCaptureSource::start(QScreen* screen) {
     if (isActive() && d->screen == screen) return true;
     stop();
     if (!screen) { emit errorOccurred(ScreenCaptureError::CaptureFailed, QStringLiteral("No screen was selected for sharing")); return false; }
+#ifdef Q_OS_WIN
+    QString exclusionError;
+    if (!WindowCaptureExclusion::instance().prepareForCapture(&exclusionError)) {
+        emit errorOccurred(ScreenCaptureError::CaptureFailed, exclusionError);
+        return false;
+    }
+#endif
     d->screen = screen;
     d->mailbox = std::make_shared<CaptureMailbox>();
     updateLayerProfiles(*d->mailbox, d->profiles);

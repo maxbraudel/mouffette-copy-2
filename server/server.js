@@ -10,6 +10,7 @@ const { ProtocolMetrics } = require('./protocol_metrics');
 const { isAllowedMediaExtension } = require('./media_format_contract');
 const { normalizeClientProfile } = require('./client_profile');
 const { ScreenShareRelay } = require('./screen_share_relay');
+const { AudioShareRelay } = require('./audio_share_relay');
 const {
     SCENE_PHASES, SceneRunRegistry, computeSceneDigest, isPlainObject,
 } = require('./scene_run_registry');
@@ -231,6 +232,7 @@ class MouffetteServer {
         this.connectionsByEndpoint = new Map(); // endpointId -> Set(connectionId)
         this.sessionAssets = new Map(); // remoteSessionId -> Map(assetId -> validated metadata)
         this.screenShare = new ScreenShareRelay(this);
+        this.audioShare = new AudioShareRelay(this);
 
         this.UPLOAD_TIMEOUT_MS = this.config.uploadIdleTimeoutMs;
         this.UPLOAD_TARGET_ACK_TIMEOUT_MS = this.config.uploadTargetAckTimeoutMs;
@@ -343,6 +345,7 @@ class MouffetteServer {
         this.leaseSweepInterval = setInterval(() => {
             this.sweepRemoteSessionLeases();
             this.screenShare.sweep();
+            this.audioShare.sweep();
         },
             this.config.sessionLeaseSweepIntervalMs);
         console.log(`🧹 Upload timeout cleanup started (timeout: ${this.UPLOAD_TIMEOUT_MS}ms)`);
@@ -353,6 +356,10 @@ class MouffetteServer {
             const url = new URL(req.url || '/', 'ws://dummy');
             const channel = url.searchParams.get('channel');
             const isUploadChannel = (channel === 'upload');
+            if (channel === 'audio') {
+                this.audioShare.acceptSocket(ws, url.searchParams.get('token'));
+                return;
+            }
             if (channel === 'screen') {
                 this.screenShare.acceptSocket(ws, url.searchParams.get('token'));
                 return;
@@ -477,6 +484,7 @@ class MouffetteServer {
                 const protectedByLease = this.handleRemoteSessionDeparture(clientInfo);
                 this.revokeUploadChannelsForClient(clientInfo, protectedByLease);
                 this.screenShare.revokeClient(clientInfo);
+                this.audioShare.revokeClient(clientInfo);
                 if (!protectedByLease) {
                     this.abortUploadsForClient(finalId);
                 }
@@ -498,6 +506,7 @@ class MouffetteServer {
                 const protectedByLease = this.handleRemoteSessionDeparture(clientInfo);
                 this.revokeUploadChannelsForClient(clientInfo, protectedByLease);
                 this.screenShare.revokeClient(clientInfo);
+                this.audioShare.revokeClient(clientInfo);
                 if (!protectedByLease) {
                     this.abortUploadsForClient(finalId);
                 }
@@ -1548,7 +1557,8 @@ class MouffetteServer {
         if (message.type !== 'heartbeat' && message.type !== 'remote_session_state_ack'
             && message.type !== 'upload_chunk' && message.type !== 'upload_progress'
             && message.type !== 'prepare_progress' && message.type !== 'state_snapshot'
-            && message.type !== 'remote_session_cursor' && message.type !== 'media_residency') {
+            && message.type !== 'remote_session_cursor' && message.type !== 'media_residency'
+            && message.type !== 'audio_source_budget' && message.type !== 'audio_view_feedback') {
             this.logProtocolEvent('protocol_message_received', {
                 connectionId: clientId,
                 endpointId: client.endpointId,
@@ -1574,6 +1584,14 @@ class MouffetteServer {
             case 'profile_picture_request':
                 this.handleProfilePictureRequest(clientId, message);
                 break;
+            case 'request_audio_channel':
+            case 'audio_share_consent':
+            case 'audio_share_subscribe':
+            case 'audio_source_budget':
+            case 'audio_publication_status':
+            case 'audio_view_feedback':
+                if (!uploadTransportSocket) this.audioShare.handleControl(clientId, message);
+                break;
             case 'request_screen_channel':
             case 'screen_share_consent':
             case 'screen_share_subscribe':
@@ -1581,6 +1599,7 @@ class MouffetteServer {
             case 'screen_publication_status':
             case 'screen_share_keyframe':
                 this.screenShare.handleControl(clientId, message);
+                this.audioShare.refreshAll();
                 break;
             case 'request_upload_channel':
                 if (!this.issueUploadChannelToken(clientId, message.requestId)) {
@@ -1716,6 +1735,7 @@ class MouffetteServer {
         this.rememberEndpointPresence(client);
         this.revokeUploadChannelsForClient(client, preserveSessionUploads);
         this.screenShare.revokeClient(client);
+        this.audioShare.revokeClient(client);
         if (!preserveSessionUploads) this.abortUploadsForClient(client.id);
         if (client.endpointId) {
             this.unregisterConnectionForEndpoint(client.endpointId, client.id);
@@ -1844,6 +1864,7 @@ class MouffetteServer {
 
         client.ws.send(JSON.stringify({
             type: 'welcome',
+            audioVersion: 1,
             protocolVersion: this.protocolVersion,
             serverBootId: this.serverBootId,
             messageId: uuidv4(),
@@ -1927,6 +1948,7 @@ class MouffetteServer {
                 payload.degradedEndpointId = client.endpointId;
                 this.reconcileSceneAfterRecovery(session);
                 this.screenShare.refreshSession(session);
+                this.audioShare.refreshSession(session);
                 this.sendToEndpoint(session.ownerEndpointId, payload);
                 this.sendToEndpoint(session.targetEndpointId, payload);
             }
@@ -2331,6 +2353,7 @@ class MouffetteServer {
             snapshot,
         };
         this.screenShare.refreshSession(session);
+        this.audioShare.refreshSession(session);
         if (this.flushRemoteSessionSnapshot(session)) this.screenShare.refreshSession(session);
     }
 
@@ -2353,6 +2376,7 @@ class MouffetteServer {
         })) return false;
         delete session.pendingTargetSnapshot;
         this.screenShare.refreshSession(session);
+        this.audioShare.refreshSession(session);
         return true;
     }
 
@@ -2864,6 +2888,7 @@ class MouffetteServer {
                 this.sendToEndpoint(session.targetEndpointId, payload);
                 this.reconcileSceneAfterRecovery(session);
                 this.screenShare.refreshSession(session);
+                this.audioShare.refreshSession(session);
                 this.grantPendingUploadCapacity(session.targetEndpointId);
             }
         }
@@ -2938,6 +2963,7 @@ class MouffetteServer {
             for (const session of sceneSessions) {
                 this.reconcileSceneAfterRecovery(session);
                 this.screenShare.refreshSession(session);
+                this.audioShare.refreshSession(session);
             }
         }
     }
@@ -3020,6 +3046,7 @@ class MouffetteServer {
         if (!session || !session.teardownId || session.teardownDispatchStarted) return false;
         session.teardownDispatchStarted = true;
         this.screenShare.removeSession(session);
+        this.audioShare.removeSession(session);
         delete session.mediaResidency;
         delete session.mediaResidencySummary;
         const run = this.sceneRuns.getForSession(session.remoteSessionId);
@@ -3133,6 +3160,7 @@ class MouffetteServer {
         if (!client || !client.endpointId) return false;
         this.rememberEndpointPresence(client);
         this.screenShare.revokeClient(client);
+        this.audioShare.revokeClient(client);
         const changed = this.remoteSessions.markDisconnected(client.endpointId, now);
         for (const session of changed) {
             if (session.phase === 'Terminating') {

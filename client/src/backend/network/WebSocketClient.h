@@ -20,6 +20,7 @@
 #include "backend/domain/models/ClientInfo.h"
 #include "backend/network/ProtocolConstants.h"
 
+class AudioTransport;
 class DeviceIdentityStore;
 class SceneRunCoordinator;
 class RemoteSessionCoordinator;
@@ -234,9 +235,11 @@ public:
     bool hasUnexpiredLease() const;
     qint64 leaseRemainingMs() const;
     qint64 transportRecoveryRemainingMs() const;
+    bool audioSharingSupported() const { return m_audioSharingSupported; }
     QString getConnectionStatus() const { return m_connectionStatus; }
 
 signals:
+    void audioControlReceived(const QJsonObject& message);
     void screenChannelReady();
     void screenChannelUnavailable();
     void screenPublicationChannelReady();
@@ -311,6 +314,10 @@ signals:
     void sceneStopReceived(const QJsonObject& envelope);
     void sceneStoppedReceived(const QJsonObject& envelope);
     void sceneErrorReceived(const QJsonObject& envelope);
+
+private:
+    friend class AudioTransport;
+    bool m_audioSharingSupported = false;
 
 private slots:
     void onConnected();

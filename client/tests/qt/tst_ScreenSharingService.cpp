@@ -179,10 +179,14 @@ private slots:
         const auto packet = packets.first();
         auto metadata = QJsonObject{{"publicationId", id}, {"screenId", 0}, {"layer", "main"},
             {"sequence", 1}, {"width", 640}, {"height", 360}, {"keyFrame", true},
-            {"codec", "h264"}, {"bitrateBps", 200000}, {"fps", 5}};
+            {"codec", "h264"}, {"bitrateBps", 200000}, {"fps", 5},
+            {"timestampUs", 123456789012.0}};
         QVERIFY(source.sendScreenPublicationFrame(metadata, packet.annexB));
         QTRY_COMPARE_WITH_TIMEOUT(firstFrames.count(), 1, 4000);
         QTRY_COMPARE_WITH_TIMEOUT(secondFrames.count(), 1, 4000);
+        // Relay and decoder preserve the shared source clock, not arrival time.
+        QCOMPARE(qvariant_cast<QVideoFrame>(firstFrames.first().at(2)).startTime(), qint64(123456789012));
+        QCOMPARE(qvariant_cast<QVideoFrame>(secondFrames.first().at(2)).startTime(), qint64(123456789012));
         QTRY_COMPARE_WITH_TIMEOUT(sourceReceipts.count(), 1, 4000);
         bool feedbackSent = false;
         QTRY_VERIFY_WITH_TIMEOUT(feedbackSent || (feedbackSent = first.sendScreenViewFeedback(firstSession,

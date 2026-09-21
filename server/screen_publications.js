@@ -324,11 +324,12 @@ class ScreenPublications {
         let budget = this.receiver(ws).targetBps;
         if ([...(this.server.uploads?.values() || [])].some(upload => upload.targetEndpointId === ws.mouffetteClient?.endpointId))
             budget = Math.max(this.minimumBps, Math.floor(budget * this.uploadPercent / 100));
-        return Math.max(1, Math.min(budget, this.fairEgressBps()));
+        return Math.max(1, Math.min(budget - (this.server.audioShare?.reservationFor(ws.mouffetteClient) || 0),
+            this.fairEgressBps()));
     }
 
     fairEgressBps() {
-        return Math.max(1, Math.floor(this.egressBps / Math.max(1, this.counts().size)));
+        return Math.max(1, Math.floor(Math.max(1, this.egressBps - (this.server.audioShare?.totalReservation() || 0)) / Math.max(1, this.counts().size)));
     }
 
     reserveLegacyEgress(ws, bytes) {

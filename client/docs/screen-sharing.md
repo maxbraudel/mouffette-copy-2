@@ -7,10 +7,13 @@ they are never saved in a project, recorded, or written to the media cache.
 
 ## Consent and lifecycle
 
-In **Settings**, enable **Share my screens with connected clients** and save.
+In **Settings**, enable **Share my screens and system audio** and save.
 The setting is off by default and belongs to the local runtime profile. Cancel
 does not change it. It authorizes all screens for owners of an authenticated
-active remote session. It does not enable audio capture or remote input.
+active remote session. It also authorizes one independent system audio stream,
+but never microphone capture or remote input. Existing saved consent is retained.
+The control interface, its dialogs and local preview audio are excluded; received
+scene windows and their sound remain shared. See [system audio sharing](system-audio-sharing.md).
 
 The top-bar **Hide screen content / Show screen content** button controls the
 viewer's desktop preview. Viewing is on by default. The choice is saved in the
@@ -114,7 +117,8 @@ timeout. Legacy servers retain the original per-viewer-copy mode.
 - macOS uses ScreenCaptureKit with native display IDs and SDR NV12. Capture
   dimensions and requested FPS follow the largest active encoding profile, up to
   the configured 3,840-pixel edge and 30 FPS defaults. Cursor and audio are not
-  captured. An IOSurface-backed CVPixelBuffer reaches VideoToolbox without a
+  captured by these per-monitor streams. A separate audio capture serves the
+  whole endpoint. An IOSurface-backed CVPixelBuffer reaches VideoToolbox without a
   CPU pixel copy when its dimensions match the encoder. A smaller low layer
   uses software scaling of the same native surface; no second desktop capture
   is created. Native reconfiguration

@@ -8,6 +8,33 @@
 
 using StopCompletion = void (^)(NSError*);
 
+@interface CaptureTestApplication : NSObject
+@property pid_t processID;
+@end
+@implementation CaptureTestApplication
+@end
+
+@interface CaptureTestWindow : NSObject
+@property CGWindowID windowID;
+@property(strong) CaptureTestApplication* owningApplication;
+@end
+@implementation CaptureTestWindow
+@end
+
+@interface CaptureTestDisplay : NSObject
+@property CGDirectDisplayID displayID;
+@end
+@implementation CaptureTestDisplay
+@end
+
+@interface CaptureTestContent : NSObject
+@property(strong) NSArray<CaptureTestDisplay*>* displays;
+@property(strong) NSArray<CaptureTestApplication*>* applications;
+@property(strong) NSArray<CaptureTestWindow*>* windows;
+@end
+@implementation CaptureTestContent
+@end
+
 // stopSession only sends this one message to its stream. An NSObject with the
 // same selector lets the test control when the asynchronous completion arrives.
 @interface DeferredCaptureStream : NSObject {
@@ -18,11 +45,15 @@ using StopCompletion = void (^)(NSError*);
     int updateCalls;
     int configuredWidth;
     int configuredFps;
+    StopCompletion filterCompletion;
+    int filterCalls;
 }
 - (void)stopCaptureWithCompletionHandler:(StopCompletion)handler;
 - (void)completeStop;
 - (void)updateConfiguration:(SCStreamConfiguration*)config completionHandler:(StopCompletion)handler;
 - (void)completeUpdate;
+- (void)updateContentFilter:(SCContentFilter*)filter completionHandler:(StopCompletion)handler;
+- (void)completeFilter:(NSError*)error;
 @end
 
 @implementation DeferredCaptureStream
@@ -45,6 +76,16 @@ using StopCompletion = void (^)(NSError*);
     StopCompletion pending = updateCompletion;
     updateCompletion = nil;
     if (pending) pending(nil);
+}
+- (void)updateContentFilter:(SCContentFilter*)filter completionHandler:(StopCompletion)handler {
+    Q_UNUSED(filter);
+    ++filterCalls;
+    filterCompletion = [handler copy];
+}
+- (void)completeFilter:(NSError*)error {
+    StopCompletion pending = filterCompletion;
+    filterCompletion = nil;
+    if (pending) pending(error);
 }
 @end
 
@@ -72,6 +113,126 @@ std::shared_ptr<NativeState> session(DeferredCaptureStream* stream) {
 class MacScreenCaptureLifecycleTest final : public QObject {
     Q_OBJECT
 private slots:
+    void incompleteApplicationDiscoveryFailsClosed() {
+        @autoreleasepool {
+            CaptureTestDisplay* display = [[CaptureTestDisplay alloc] init];
+            display.displayID = 123;
+            CaptureTestContent* content = [[CaptureTestContent alloc] init];
+            content.displays = @[display];
+            content.applications = @[];
+            content.windows = @[];
+            // A headless process can be absent from SCK's inventory. Never
+            // replace its missing application exclusion with a whole display.
+            QVERIFY(contentFilter((SCShareableContent*)content, 123, {}) == nil);
+            CaptureTestApplication* other = [[CaptureTestApplication alloc] init];
+            other.processID = NSProcessInfo.processInfo.processIdentifier + 1;
+            content.applications = @[other];
+            QVERIFY(contentFilter((SCShareableContent*)content, 123, {}) == nil);
+            CaptureTestApplication* own = [[CaptureTestApplication alloc] init];
+            own.processID = NSProcessInfo.processInfo.processIdentifier;
+            content.applications = @[own];
+            QVERIFY(contentFilter((SCShareableContent*)content, 456, {}) == nil);
+        }
+    }
+
+    void onlyCurrentProcessSceneIdsBecomeFilterExceptions() {
+        @autoreleasepool {
+            CaptureTestApplication* own = [[CaptureTestApplication alloc] init];
+            own.processID = 42;
+            CaptureTestApplication* other = [[CaptureTestApplication alloc] init];
+            other.processID = 43;
+            CaptureTestWindow* control = [[CaptureTestWindow alloc] init];
+            control.windowID = 1;
+            control.owningApplication = own;
+            CaptureTestWindow* scene = [[CaptureTestWindow alloc] init];
+            scene.windowID = 2;
+            scene.owningApplication = own;
+            CaptureTestWindow* unrelated = [[CaptureTestWindow alloc] init];
+            unrelated.windowID = 3;
+            unrelated.owningApplication = other;
+            const auto windows = (NSArray<SCWindow*>*)@[control, scene, unrelated];
+            NSArray<SCWindow*>* selected = sceneExceptionWindows(windows, {2, 3, 4}, 42);
+            QCOMPARE(selected.count, NSUInteger(1));
+            QCOMPARE(selected.firstObject.windowID, CGWindowID(2));
+            QCOMPARE(sceneExceptionWindows(windows, {}, 42).count, NSUInteger(0));
+        }
+    }
+
+    void filterCompletionOpensDeliveryOnlyForLatestRevision() {
+        @autoreleasepool {
+            DeferredCaptureStream* stream = [[DeferredCaptureStream alloc] init];
+            auto state = session(stream);
+            state->filterRevision = 7;
+            state->updatingFilter = true;
+            applyContentFilter(state, nil, 7);
+            QCOMPARE(stream->filterCalls, 1);
+            QVERIFY(!state->filterReady.load());
+            [stream completeFilter:nil];
+            QVERIFY(drainMainQueueUntil([&] { return !state->updatingFilter; }));
+            QCOMPARE(state->appliedFilterRevision, quint64(7));
+            QVERIFY(state->filterReady.load());
+
+            state->filterReady.store(false);
+            state->updatingFilter = true;
+            applyContentFilter(state, nil, 8);
+            state->filterRevision = 9;
+            [stream completeFilter:nil];
+            QVERIFY(drainMainQueueUntil([&] { return !state->updatingFilter; }));
+            QCOMPARE(state->appliedFilterRevision, quint64(8));
+            QVERIFY(!state->filterReady.load());
+        }
+    }
+
+    void failedWindowExclusionNeverReopensFrameDelivery() {
+        @autoreleasepool {
+            DeferredCaptureStream* stream = [[DeferredCaptureStream alloc] init];
+            auto state = session(stream);
+            int errors = 0;
+            state->error = [&](ScreenCaptureError, const QString&) { ++errors; };
+            state->updatingFilter = true;
+            applyContentFilter(state, nil, state->filterRevision);
+            [stream completeFilter:[NSError errorWithDomain:@"Mouffette.Test" code:1 userInfo:nil]];
+            QVERIFY(drainMainQueueUntil([&] { return !state->updatingFilter; }));
+            QCOMPARE(errors, 1);
+            QVERIFY(!state->filterReady.load());
+            QCOMPARE(state->appliedFilterRevision, quint64(0));
+        }
+    }
+
+    void stoppedFilterUpdateCannotReopenDelivery() {
+        @autoreleasepool {
+            DeferredCaptureStream* stream = [[DeferredCaptureStream alloc] init];
+            auto state = session(stream);
+            state->updatingFilter = true;
+            applyContentFilter(state, nil, state->filterRevision);
+            state->closed.store(true);
+            [stream completeFilter:nil];
+            QVERIFY(drainMainQueueUntil([&] { return !state->updatingFilter; }));
+            QVERIFY(!state->filterReady.load());
+            QCOMPARE(state->appliedFilterRevision, quint64(0));
+        }
+    }
+
+    void sceneChangesInvalidateRetainedFramesAndCoalesce() {
+        @autoreleasepool {
+            auto state = std::make_shared<NativeState>();
+            state->filterReady.store(true);
+            int invalidations = 0;
+            state->frame = [&](const QVideoFrame& frame) {
+                QVERIFY(!frame.isValid());
+                ++invalidations;
+            };
+            invalidateContentFilter(state);
+            invalidateContentFilter(state);
+            QCOMPARE(state->filterRevision, quint64(3));
+            QCOMPARE(invalidations, 2);
+            QVERIFY(!state->filterReady.load());
+            state->closed.store(true);
+            invalidateContentFilter(state);
+            QCOMPARE(invalidations, 2);
+        }
+    }
+
     void configurationChangesCoalesceAndKeepLatestProfile() {
         @autoreleasepool {
             DeferredCaptureStream* stream = [[DeferredCaptureStream alloc] init];

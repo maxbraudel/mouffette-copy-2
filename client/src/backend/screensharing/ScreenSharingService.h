@@ -20,6 +20,9 @@ public:
     void setViewedEndpoint(const QString& endpoint);
     void setViewedScreens(const QJsonArray& screens);
     void setSuspended(bool suspended);
+    void setAudioReservationBps(int bitrate);
+    void setAudioPlaybackClock(const QString& endpoint, const QString& epoch, qint64 sourceUs);
+    void clearAudioPlaybackClock(const QString& endpoint);
     void refresh();
     void stop();
     QString status() const;
@@ -27,6 +30,7 @@ public:
     bool isRemoteScreenLoading(const QString& endpoint) const;
 
 signals:
+    void sourceBudgetChanged(int totalBps);
     void statusChanged();
     void frameReady(const QString& endpoint, int screenId, const QVideoFrame& frame);
     void frameCleared(const QString& endpoint, int screenId);

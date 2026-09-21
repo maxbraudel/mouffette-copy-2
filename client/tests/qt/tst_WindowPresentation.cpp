@@ -13,6 +13,7 @@
 
 #include "frontend/qml/WindowPresentation.h"
 #include "backend/platform/WindowStackingCoordinator.h"
+#include "backend/platform/WindowCaptureExclusion.h"
 
 #ifdef Q_OS_MACOS
 #import <Cocoa/Cocoa.h>
@@ -69,6 +70,21 @@ class WindowPresentationTest : public QObject
 {
     Q_OBJECT
 private slots:
+    void stackingClassificationAlsoControlsCaptureExceptions()
+    {
+        QWindow control;
+        QWindow scene;
+        auto& stacking = WindowStackingCoordinator::instance();
+        auto& capture = WindowCaptureExclusion::instance();
+        stacking.registerControlWindow(&control);
+        stacking.registerSceneWindow(&scene);
+        QVERIFY(!capture.sceneWindows().contains(&control));
+        QVERIFY(capture.sceneWindows().contains(&scene));
+        stacking.unregisterWindow(&scene);
+        QVERIFY(!capture.sceneWindows().contains(&scene));
+        stacking.unregisterWindow(&control);
+    }
+
     void geometry_data()
     {
         QTest::addColumn<QRect>("available");

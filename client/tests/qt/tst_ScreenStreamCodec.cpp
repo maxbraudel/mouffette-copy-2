@@ -7,9 +7,74 @@
 #include <QtTest>
 #include <cstring>
 #ifdef Q_OS_MACOS
+#include "backend/platform/WindowCaptureExclusion.h"
+#include "backend/platform/macos/MacWindowManager.h"
 #include "backend/screensharing/MacScreenCapture.h"
+#include <QBackingStore>
+#include <QColorSpace>
+#include <QExposeEvent>
+#include <QPainter>
+#include <QScreen>
+#include <QSurfaceFormat>
+#include <QWindow>
+#include <CoreMedia/CoreMedia.h>
 #include <CoreVideo/CoreVideo.h>
 #include <CoreGraphics/CoreGraphics.h>
+
+namespace {
+// A real WindowServer surface is necessary for ScreenCaptureKit to discover
+// this executable as an application. A windowless fixture cannot exercise the
+// production application exclusion policy.
+class CaptureTestSurface final : public QWindow {
+public:
+    explicit CaptureTestSurface(const QColor& color) : m_backingStore(this), m_color(color) {
+        setSurfaceType(QSurface::RasterSurface);
+        setFlags(Qt::Window | Qt::FramelessWindowHint);
+        // Cocoa otherwise tags raster backing stores with the display's
+        // profile. RGB literals on a P3 display then change gamut when SCK
+        // converts to BT.709, despite a correct NV12 matrix/range conversion.
+        // Set the fixture's source space before its native surface is created.
+        QSurfaceFormat surfaceFormat = format();
+        surfaceFormat.setColorSpace(QColorSpace(QColorSpace::SRgb));
+        setFormat(surfaceFormat);
+    }
+
+protected:
+    void exposeEvent(QExposeEvent*) override {
+        if (!isExposed()) return;
+        m_backingStore.resize(size());
+        const QRegion dirty(QRect(QPoint(), size()));
+        m_backingStore.beginPaint(dirty);
+        QPainter painter(m_backingStore.paintDevice());
+        painter.fillRect(QRect(QPoint(), size()), m_color);
+        painter.end();
+        m_backingStore.endPaint();
+        m_backingStore.flush(dirty);
+    }
+
+private:
+    QBackingStore m_backingStore;
+    QColor m_color;
+};
+
+struct CaptureMailbox {
+    QMutex mutex;
+    QVideoFrame latest;
+    QString error;
+    quint64 received = 0;
+};
+
+bool startCapture(MacScreenCapture& capture, const std::shared_ptr<CaptureMailbox>& mailbox) {
+    return capture.start(QGuiApplication::primaryScreen(), [mailbox](const QVideoFrame& frame) {
+        QMutexLocker lock(&mailbox->mutex);
+        mailbox->latest = frame;
+        ++mailbox->received;
+    }, [mailbox](ScreenCaptureError, const QString& message) {
+        QMutexLocker lock(&mailbox->mutex);
+        mailbox->error = message;
+    });
+}
+}
 #endif
 
 class ScreenStreamCodecTest final : public QObject {
@@ -34,10 +99,17 @@ private:
     }
 
     static QColor sample709(QVideoFrame frame, int x, int y) {
+        if (x < 0 || y < 0 || x >= frame.width() || y >= frame.height()) return {};
+        const auto format = frame.pixelFormat();
+        if (format != QVideoFrameFormat::Format_YUV420P && format != QVideoFrameFormat::Format_NV12) return {};
         if (!frame.map(QVideoFrame::ReadOnly)) return {};
         const double luma = (frame.bits(0)[y * frame.bytesPerLine(0) + x] - 16) * 255.0 / 219.0;
-        const double u = (frame.bits(1)[(y / 2) * frame.bytesPerLine(1) + x / 2] - 128) * 255.0 / 224.0;
-        const double v = (frame.bits(2)[(y / 2) * frame.bytesPerLine(2) + x / 2] - 128) * 255.0 / 224.0;
+        const auto* chroma = frame.bits(1) + (y / 2) * frame.bytesPerLine(1);
+        const int uSample = format == QVideoFrameFormat::Format_NV12 ? chroma[(x / 2) * 2] : chroma[x / 2];
+        const int vSample = format == QVideoFrameFormat::Format_NV12 ? chroma[(x / 2) * 2 + 1]
+            : frame.bits(2)[(y / 2) * frame.bytesPerLine(2) + x / 2];
+        const double u = (uSample - 128) * 255.0 / 224.0;
+        const double v = (vSample - 128) * 255.0 / 224.0;
         frame.unmap();
         return QColor(qBound(0, qRound(luma + 1.5748 * v), 255),
             qBound(0, qRound(luma - 0.1873 * u - 0.4681 * v), 255), qBound(0, qRound(luma + 1.8556 * u), 255));
@@ -359,19 +431,39 @@ private slots:
         QCOMPARE(MacScreenCapture::sampleAction(-1), Action::Ignore);
     }
 
+    void nativeDesktopSmokeWhenExplicitlyEnabled_data() {
+        QTest::addColumn<bool>("hideControlBeforeCapture");
+        QTest::newRow("visible-control") << false;
+        QTest::newRow("hidden-control") << true;
+    }
+
     void nativeDesktopSmokeWhenExplicitlyEnabled() {
         if (qEnvironmentVariableIntValue("MOUFFETTE_TEST_SCREEN_CAPTURE") != 1)
             QSKIP("Desktop capture smoke requires explicit MOUFFETTE_TEST_SCREEN_CAPTURE=1");
         if (QGuiApplication::platformName() != QStringLiteral("cocoa")) QSKIP("Requires native Cocoa platform");
         if (!CGPreflightScreenCaptureAccess()) QSKIP("Screen recording access is not already granted; no permission prompt requested");
-        struct Mailbox { QMutex mutex; QVideoFrame latest; QString error; int received = 0; };
-        const auto mailbox = std::make_shared<Mailbox>();
+        QFETCH(bool, hideControlBeforeCapture);
+        auto* screen = QGuiApplication::primaryScreen();
+        QVERIFY(screen);
+        CaptureTestSurface control(QColor(220, 30, 30));
+        control.setTitle(QStringLiteral("Mouffette capture test control"));
+        control.setScreen(screen);
+        QRect geometry(QPoint(), QSize(180, 120));
+        geometry.moveCenter(screen->availableGeometry().center());
+        control.setGeometry(geometry);
+        control.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&control));
+        if (hideControlBeforeCapture) {
+            control.hide();
+            QTRY_VERIFY(!control.isVisible());
+            // Capture must also start with no visible windows: remote clients
+            // can subscribe while Mouffette's control UI is hidden. Keep the
+            // native window alive as the actual application does.
+            QTest::qWait(250);
+        }
+        const auto mailbox = std::make_shared<CaptureMailbox>();
         MacScreenCapture capture;
-        QVERIFY(capture.start(QGuiApplication::primaryScreen(), [mailbox](const QVideoFrame& frame) {
-            QMutexLocker lock(&mailbox->mutex); mailbox->latest = frame; ++mailbox->received;
-        }, [mailbox](ScreenCaptureError, const QString& message) {
-            QMutexLocker lock(&mailbox->mutex); mailbox->error = message;
-        }));
+        QVERIFY(startCapture(capture, mailbox));
         QElapsedTimer timeout; timeout.start();
         QVideoFrame captured;
         QString error;
@@ -386,6 +478,10 @@ private slots:
         QVERIFY(captured.isValid());
         QVERIFY(captured.width() <= ScreenStreamEncoder::MaximumEdge);
         QVERIFY(captured.height() <= ScreenStreamEncoder::MaximumEdge);
+        const auto hostNowUs = CMTimeConvertScale(CMClockGetTime(CMClockGetHostTimeClock()),
+            1000000, kCMTimeRoundingMethod_Default).value;
+        QVERIFY2(qAbs(captured.startTime() - hostNowUs) < 5000000,
+            "Native video timestamps must use the same CoreMedia host epoch as audio");
         ScreenStreamEncoder encoder;
         ScreenStreamDecoder decoder;
         int decoded = 0;
@@ -403,6 +499,95 @@ private slots:
         QVERIFY(decoded > 0);
         qInfo() << "ScreenCaptureKit live smoke: decoded" << decoded << "samples with" << encoder.backendName();
         // Captured samples are never converted to screenshots or persisted.
+    }
+
+    void nativeControlExclusionPreservesScenePixelsWhenExplicitlyEnabled() {
+        if (qEnvironmentVariableIntValue("MOUFFETTE_TEST_SCREEN_CAPTURE") != 1)
+            QSKIP("Desktop capture smoke requires explicit MOUFFETTE_TEST_SCREEN_CAPTURE=1");
+        if (QGuiApplication::platformName() != QStringLiteral("cocoa")) QSKIP("Requires native Cocoa platform");
+        if (!CGPreflightScreenCaptureAccess()) QSKIP("Screen recording access is not already granted; no permission prompt requested");
+        auto* screen = QGuiApplication::primaryScreen();
+        QVERIFY(screen);
+        const QColor sceneColor(30, 210, 60);
+        const QColor controlColor(220, 30, 30);
+        CaptureTestSurface scene(sceneColor);
+        CaptureTestSurface control(controlColor);
+        scene.setTitle(QStringLiteral("Mouffette capture test received scene"));
+        control.setTitle(QStringLiteral("Mouffette capture test excluded control"));
+        scene.setScreen(screen);
+        control.setScreen(screen);
+        QRect geometry(QPoint(), QSize(240, 180));
+        geometry.moveCenter(screen->availableGeometry().center());
+        scene.setGeometry(geometry);
+        control.setGeometry(geometry);
+        // Deliberately cover the scene locally. Successful exclusion must
+        // reveal its green pixels, including behind the opaque red control.
+        // Both fixture windows need the production scene policy (including
+        // fullscreen Spaces), so another active app cannot cover the sample.
+        scene.setFlag(Qt::WindowStaysOnTopHint);
+        control.setFlag(Qt::WindowStaysOnTopHint);
+        auto& exclusions = WindowCaptureExclusion::instance();
+        exclusions.setSceneWindow(&scene, true);
+        MacWindowManager::configureGlobalOverlay(&scene, false);
+        MacWindowManager::configureGlobalOverlay(&control, false);
+        scene.show();
+        MacWindowManager::setWindowAsGlobalOverlay(&scene, false);
+        QVERIFY(QTest::qWaitForWindowExposed(&scene));
+        control.show();
+        MacWindowManager::setWindowAsGlobalOverlay(&control, false);
+        QVERIFY(QTest::qWaitForWindowExposed(&control));
+        QTest::qWait(250);
+
+        const auto mailbox = std::make_shared<CaptureMailbox>();
+        MacScreenCapture capture;
+        QVERIFY(startCapture(capture, mailbox));
+        QString error;
+        QColor observed;
+        quint64 previousFrame = 0;
+        const auto waitForColor = [&](const QColor& expected) {
+            QElapsedTimer timeout;
+            timeout.start();
+            while (timeout.elapsed() < 5000) {
+                QTest::qWait(20);
+                QVideoFrame frame;
+                {
+                    QMutexLocker lock(&mailbox->mutex);
+                    error = mailbox->error;
+                    if (!error.isEmpty()) return false;
+                    if (mailbox->received == previousFrame) continue;
+                    previousFrame = mailbox->received;
+                    frame = mailbox->latest;
+                }
+                if (!frame.isValid()) continue;
+                const QRect display = screen->geometry();
+                bool allMatch = true;
+                for (const QPoint offset : {QPoint(), QPoint(-40, 0), QPoint(40, 0), QPoint(0, -30), QPoint(0, 30)}) {
+                    const QPoint onDisplay = geometry.center() + offset - display.topLeft();
+                    const int x = onDisplay.x() * frame.width() / display.width();
+                    const int y = onDisplay.y() * frame.height() / display.height();
+                    observed = sample709(frame, x, y);
+                    if (!observed.isValid() || qAbs(observed.red() - expected.red()) > 35
+                        || qAbs(observed.green() - expected.green()) > 35
+                        || qAbs(observed.blue() - expected.blue()) > 35) {
+                        allMatch = false;
+                        break;
+                    }
+                }
+                if (allMatch) return true;
+            }
+            return false;
+        };
+        const auto diagnostic = [&] {
+            return error.isEmpty() ? QStringLiteral("Unexpected captured color: %1").arg(observed.name()) : error;
+        };
+        // Directly inspect a few NV12 samples in memory; never write captured
+        // desktops, screenshots, encoded frames, or pixel dumps to disk.
+        QVERIFY2(waitForColor(sceneColor), qPrintable(diagnostic()));
+        exclusions.setSceneWindow(&control, true);
+        QVERIFY2(waitForColor(controlColor), qPrintable(diagnostic()));
+        exclusions.setSceneWindow(&control, false);
+        QVERIFY2(waitForColor(sceneColor), qPrintable(diagnostic()));
+        capture.stop();
     }
 
     void nativeSurface1080pSmoke() {

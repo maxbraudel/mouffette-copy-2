@@ -7,10 +7,12 @@ class QAudioOutput;
 class PlaybackAudio final : public QObject {
     Q_OBJECT
 public:
+    enum class Role { ControlPreview, ReceivedScene };
     explicit PlaybackAudio(QObject* parent = nullptr);
     ~PlaybackAudio() override;
     void setAsset(std::shared_ptr<const ResidentMediaAsset> asset);
     void setOutput(QAudioOutput* output);
+    void setRole(Role role);
     void prepare(qint64 positionUs);
     bool preparedAt(qint64 positionUs) const;
     void play(qint64 positionUs);

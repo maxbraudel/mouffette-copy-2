@@ -32,6 +32,9 @@ relay.sendToEndpoint = (endpoint, payload) => {
 };
 const receive = relay.handleMessage.bind(relay);
 relay.handleMessage = (clientId, payload, ...args) => {
+    if (process.env.MOUFFETTE_TEST_AUDIO_LEGACY === '1'
+        && (payload.type.startsWith('audio_') || payload.type === 'request_audio_channel'))
+        process.stdout.write('TEST_UNEXPECTED_AUDIO\n');
     const endpoint = relay.clients.get(clientId)?.endpointId;
     const key = `${endpoint}:${payload.type}`;
     const rule = droppedIncoming.get(key);
@@ -49,6 +52,10 @@ relay.wss.on('connection', socket => {
     socket.send = (data, ...args) => {
         let payload;
         try { payload = JSON.parse(data.toString()); } catch { return rawSend(data, ...args); }
+        if (process.env.MOUFFETTE_TEST_AUDIO_LEGACY === '1' && payload.type === 'welcome') {
+            delete payload.audioVersion;
+            data = JSON.stringify(payload);
+        }
         const client = [...relay.clients.values()].find(candidate => candidate.ws === socket);
         const key = `${client?.endpointId}:${payload.type}`;
         const count = rawDrops.get(key) || 0;

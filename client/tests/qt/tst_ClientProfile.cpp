@@ -383,6 +383,48 @@ private slots:
         QCOMPARE(reloaded.profilePictureJpeg(), jpeg);
     }
 
+    void remoteAudioMuteIsAtomicAndIndependentOfScreenVisibility()
+    {
+        const auto previous = RuntimeProfile::context();
+        const auto restore = qScopeGuard([&] { RuntimeProfile::configure(previous); });
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        RuntimeProfileContext context;
+        context.rootPath = directory.filePath(QStringLiteral("audio"));
+        QVERIFY(QDir().mkpath(context.rootPath));
+        QVERIFY(QFile::setPermissions(context.rootPath,
+            QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+        RuntimeProfile::configure(context);
+        SettingsManager settings;
+        settings.loadSettings();
+        QVERIFY(!settings.getRemoteAudioMuted());
+        QSignalSpy changes(&settings, &SettingsManager::remoteAudioMutedChanged);
+        QString error;
+        QVERIFY2(settings.setRemoteAudioMuted(true, &error), qPrintable(error));
+        QVERIFY(settings.setScreenContentVisible(false, &error));
+        QVERIFY(settings.commitSettings(QStringLiteral("ws://localhost:8080"), true, false,
+            QStringLiteral("Audio"), {}, true, &error));
+        SettingsManager reloaded;
+        reloaded.loadSettings();
+        QVERIFY(reloaded.getRemoteAudioMuted());
+        QVERIFY(!reloaded.getScreenContentVisible());
+        QVERIFY(reloaded.getScreenSharingEnabled());
+        QVERIFY(settings.setRemoteAudioMuted(true, &error));
+        QCOMPARE(changes.count(), 1);
+        QFile blocker(directory.filePath(QStringLiteral("blocked")));
+        QVERIFY(blocker.open(QIODevice::WriteOnly));
+        blocker.close();
+        context.rootPath = blocker.fileName();
+        RuntimeProfile::configure(context);
+        QVERIFY(!settings.setRemoteAudioMuted(false, &error));
+        QVERIFY(settings.getRemoteAudioMuted());
+        QCOMPARE(changes.count(), 1);
+        context.rootPath = directory.filePath(QStringLiteral("other-profile"));
+        RuntimeProfile::configure(context);
+        reloaded.loadSettings();
+        QVERIFY(!reloaded.getRemoteAudioMuted());
+    }
+
     void peerCacheIsTransientAndIgnoresStalePictures()
     {
         ClientProfileCache cache;

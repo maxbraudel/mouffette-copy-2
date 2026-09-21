@@ -680,6 +680,7 @@ void CanvasMedia::initializeVideoRuntime()
         return;
     }
     m_player = new ResidentVideoPlayer(this);
+    m_player->setAudioRole(PlaybackAudio::Role::ControlPreview);
     connect(m_player, &ResidentVideoPlayer::preparationChanged,
             this, &CanvasMedia::refreshContentAvailability);
     // A view rebind changes only the presentation sink. Keep the initial
