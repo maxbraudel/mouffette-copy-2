@@ -134,6 +134,9 @@ QtObject {
                     statusKind: root.controller.remoteConnectionState
                     auxiliaryText: root.controller.remoteVolumeText
                     auxiliaryVisible: root.controller.remoteVolumeVisible
+                    screenStatusVisible: true
+                    screenContentEnabled: root.controller.screenContentVisible
+                    screenAvailable: root.controller.remoteScreenAvailable
                     busy: root.controller.remoteBusy
                 }
                 Row {

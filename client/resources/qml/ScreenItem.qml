@@ -19,7 +19,6 @@ Rectangle {
     property int  pixelHeight: 0
     property var uiZonesModel: []
     property var frameSource: null
-    property string sharingStatus: ""
 
     x: screenX
     y: screenY
@@ -68,21 +67,6 @@ Rectangle {
         z: 0
         frameSource: root.frameSource
         visible: hasFrame
-    }
-
-    Text {
-        objectName: "remoteScreenSharingStatus"
-        anchors.centerIn: parent
-        width: Math.max(0, Math.min(root.width - 24 / root.safeViewScale,
-                                   340 / root.safeViewScale))
-        visible: !screenVideo.hasFrame && text.length > 0
-        text: root.sharingStatus
-        textFormat: Text.PlainText
-        color: AppStyle.Theme.mix(AppStyle.Theme.canvasScreenText, root.color, 0.5)
-        font.pixelSize: 13 / root.safeViewScale
-        horizontalAlignment: Text.AlignHCenter
-        wrapMode: Text.Wrap
-        z: 1
     }
 
     // Zoom-invariant inner border (always 1 screen pixel)

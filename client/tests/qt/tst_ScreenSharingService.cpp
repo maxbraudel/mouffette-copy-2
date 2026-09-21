@@ -6,6 +6,7 @@
 #include "backend/managers/system/SystemMonitor.h"
 #include "backend/network/RemoteSessionCoordinator.h"
 #include "backend/network/WebSocketClient.h"
+#include "backend/notifications/NotificationCenter.h"
 #include "backend/runtime/ApplicationRuntime.h"
 #include "frontend/rendering/canvas/QuickCanvasController.h"
 #include "frontend/rendering/canvas/QuickCanvasHost.h"
@@ -114,6 +115,7 @@ private slots:
         ScreenSharingService viewer(&owner, &monitor);
         QSignalSpy frames(&viewer, &ScreenSharingService::frameReady);
         QSignalSpy cleared(&viewer, &ScreenSharingService::framesCleared);
+        QSignalSpy issues(&viewer, &ScreenSharingService::remoteIssue);
         QSignalSpy states(&owner, &WebSocketClient::screenShareStateReceived);
         QSignalSpy grants(&target, &WebSocketClient::screenShareRequestReceived);
         QString session;
@@ -123,6 +125,8 @@ private slots:
         QTRY_VERIFY_WITH_TIMEOUT(!states.isEmpty()
             && states.last().first().toJsonObject().value("reason") == QLatin1String("disabled"), 4000);
         QVERIFY(frames.isEmpty());
+        QCOMPARE(issues.count(), 1);
+        QVERIFY(issues.last().at(1).toString().contains(QStringLiteral("disabled")));
 
         target.setScreenSharingEnabled(true);
         QTRY_VERIFY_WITH_TIMEOUT(owner.isScreenChannelConnected() && target.isScreenChannelConnected(), 4000);
@@ -142,6 +146,7 @@ private slots:
         QVERIFY(packet.keyFrame);
         QVERIFY(target.sendScreenFrame(header(firstGrant, packet, 1), packet.annexB));
         QTRY_COMPARE_WITH_TIMEOUT(frames.count(), 1, 4000);
+        QCOMPARE(issues.count(), 1); // First successful frame is silent.
         QCOMPARE(frames.first().at(0).toString(), target.endpointId());
         QCOMPARE(frames.first().at(1).toInt(), 0);
         auto decoded = qvariant_cast<QVideoFrame>(frames.first().at(2));
@@ -167,6 +172,7 @@ private slots:
         QTRY_VERIFY_WITH_TIMEOUT(viewer.findChildren<QFutureWatcherBase*>().isEmpty(), 4000);
         QCOMPARE(frames.count(), 1);
         QVERIFY(!cleared.isEmpty());
+        QCOMPARE(issues.count(), 1); // Intentional detachment is silent.
 
         viewer.setViewedEndpoint(target.endpointId());
         QTRY_VERIFY_WITH_TIMEOUT(!grants.isEmpty()
@@ -183,11 +189,13 @@ private slots:
         target.setScreenSharingEnabled(false);
         QTRY_VERIFY_WITH_TIMEOUT(!states.last().first().toJsonObject().value("enabled").toBool(), 4000);
         QTRY_VERIFY_WITH_TIMEOUT(cleared.count() > oldClears, 4000);
+        QCOMPARE(issues.count(), 2); // Consent was revoked after recovery.
         QVERIFY(!target.sendScreenFrame(header(nextGrant, packet, 2), packet.annexB));
         owner.screenFrameReceived(header(nextGrant, packet, 2), packet.annexB);
         QTest::qWait(100);
         QCOMPARE(frames.count(), 2);
         viewer.stop();
+        QCOMPARE(issues.count(), 2);
         owner.disconnect();
         target.disconnect();
     }
@@ -200,7 +208,7 @@ private slots:
         ScreenSharingService viewer(&owner, &monitor);
         QSignalSpy frames(&viewer, &ScreenSharingService::frameReady);
         QSignalSpy cleared(&viewer, &ScreenSharingService::framesCleared);
-        QSignalSpy statuses(&viewer, &ScreenSharingService::remoteStatusChanged);
+        QSignalSpy issues(&viewer, &ScreenSharingService::remoteIssue);
         QSignalSpy grants(&target, &WebSocketClient::screenShareRequestReceived);
         QSignalSpy states(&owner, &WebSocketClient::screenShareStateReceived);
         QString session;
@@ -213,6 +221,7 @@ private slots:
         const auto grant = grants.last().first().toJsonObject();
         QTRY_VERIFY_WITH_TIMEOUT(!states.isEmpty()
             && states.last().first().toJsonObject().value("streamId") == grant.value("streamId"), 4000);
+        QVERIFY(issues.isEmpty()); // Normal connection progress is silent.
 
         QImage image(640, 360, QImage::Format_RGBA8888);
         image.fill(Qt::green);
@@ -232,14 +241,17 @@ private slots:
             const int oldFrames = frames.count();
             QVERIFY(target.sendScreenFrame(header(grant, packet, ++sequence), packet.annexB));
             QTRY_COMPARE_WITH_TIMEOUT(frames.count(), oldFrames + 1, 4000);
-            QCOMPARE(statuses.last().at(1).toString(), QString());
+            QVERIFY(viewer.isRemoteScreenAvailable(target.endpointId()));
+            const int oldIssues = issues.count();
             const int oldClears = cleared.count();
             QVERIFY(target.sendScreenShareStatus(session,
                 quint64(grant.value("generation").toDouble()), reason));
             QTRY_VERIFY_WITH_TIMEOUT(states.last().first().toJsonObject().value("reason") == reason, 4000);
             QTRY_VERIFY_WITH_TIMEOUT(cleared.count() > oldClears, 4000);
-            QCOMPARE(statuses.last().first().toString(), target.endpointId());
-            const auto message = statuses.last().at(1).toString();
+            QVERIFY(!viewer.isRemoteScreenAvailable(target.endpointId()));
+            QCOMPARE(issues.count(), oldIssues + 1);
+            QCOMPARE(issues.last().first().toString(), target.endpointId());
+            const auto message = issues.last().at(1).toString();
             if (reason == QLatin1String("permission_denied")) {
                 QVERIFY2(message.contains(QStringLiteral("Allow screen recording")), qPrintable(message));
                 QVERIFY2(message.contains(QStringLiteral("system settings")), qPrintable(message));
@@ -252,8 +264,73 @@ private slots:
             QVERIFY(target.sendScreenFrame(header(grant, packet, ++sequence), packet.annexB));
             QTest::qWait(100);
             QCOMPARE(frames.count(), oldFrames + 1);
-            QCOMPARE(statuses.last().at(1).toString(), message);
+            QCOMPARE(issues.last().at(1).toString(), message);
+            // Repeated state broadcasts must not repeat the same toast.
+            owner.screenShareStateReceived(states.last().first().toJsonObject());
+            QCOMPARE(issues.count(), oldIssues + 1);
         }
+        viewer.stop();
+        owner.disconnect();
+        target.disconnect();
+    }
+
+    void missingAndStalledFramesReportOneIssueUntilRecovery() {
+        QTemporaryDir identities;
+        WebSocketClient owner(identities.filePath(QStringLiteral("owner")), false);
+        WebSocketClient target(identities.filePath(QStringLiteral("target")), false);
+        SystemMonitor monitor(nullptr, emptyDesktop());
+        ScreenSharingService viewer(&owner, &monitor);
+        QSignalSpy issues(&viewer, &ScreenSharingService::remoteIssue);
+        QSignalSpy grants(&target, &WebSocketClient::screenShareRequestReceived);
+        QSignalSpy states(&owner, &WebSocketClient::screenShareStateReceived);
+        QString session;
+        connectPeers(owner, target, &session);
+        target.setScreenSharingEnabled(true);
+        viewer.setViewedEndpoint(target.endpointId());
+        QTRY_VERIFY_WITH_TIMEOUT(!grants.isEmpty()
+            && grants.last().first().toJsonObject().value("enabled").toBool(), 4000);
+        const auto grant = grants.last().first().toJsonObject();
+        QTRY_VERIFY_WITH_TIMEOUT(!states.isEmpty()
+            && states.last().first().toJsonObject().value("streamId") == grant.value("streamId"), 4000);
+        QVERIFY(issues.isEmpty());
+        QVERIFY(!viewer.isRemoteScreenAvailable(target.endpointId()));
+        QTRY_COMPARE_WITH_TIMEOUT(issues.count(), 1, 12000);
+        QVERIFY(issues.last().at(1).toString().contains(QStringLiteral("did not respond")));
+        viewer.refresh();
+        QCOMPARE(issues.count(), 1);
+
+        QImage image(640, 360, QImage::Format_RGBA8888);
+        image.fill(Qt::green);
+        ScreenStreamEncoder encoder(false);
+        QString error;
+        const auto packets = encoder.encode(QVideoFrame(image), true, error);
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QCOMPARE(packets.size(), 1);
+        const auto packet = packets.first();
+        QVERIFY(target.sendScreenFrame(header(grant, packet, 1), packet.annexB));
+        QTRY_VERIFY_WITH_TIMEOUT(viewer.isRemoteScreenAvailable(target.endpointId()), 4000);
+        QCOMPARE(issues.count(), 1);
+        QTRY_COMPARE_WITH_TIMEOUT(issues.count(), 2, 6500);
+        QVERIFY(!viewer.isRemoteScreenAvailable(target.endpointId()));
+        QVERIFY(issues.last().at(1).toString().contains(QStringLiteral("stopped updating")));
+        viewer.refresh();
+        QCOMPARE(issues.count(), 2);
+        QVERIFY(target.sendScreenFrame(header(grant, packet, 2), packet.annexB));
+        QTRY_VERIFY_WITH_TIMEOUT(viewer.isRemoteScreenAvailable(target.endpointId()), 4000);
+        QCOMPARE(issues.count(), 2);
+        auto lostChannel = states.last().first().toJsonObject();
+        lostChannel.insert(QStringLiteral("enabled"), false);
+        lostChannel.insert(QStringLiteral("reason"), QStringLiteral("channel_unavailable"));
+        lostChannel.insert(QStringLiteral("streamId"), QString());
+        owner.screenShareStateReceived(lostChannel);
+        QVERIFY(!viewer.isRemoteScreenAvailable(target.endpointId()));
+        QCOMPARE(issues.count(), 3);
+        QVERIFY(issues.last().at(1).toString().contains(QStringLiteral("connection is unavailable")));
+        owner.screenShareStateReceived(lostChannel);
+        QCOMPARE(issues.count(), 3);
+        viewer.setViewedEndpoint({});
+        QVERIFY(!viewer.isRemoteScreenAvailable(target.endpointId()));
+        QCOMPARE(issues.count(), 3); // Hiding the canvas is not a connection error.
         viewer.stop();
         owner.disconnect();
         target.disconnect();
@@ -342,6 +419,18 @@ private slots:
         QVERIFY2(savedSettings.setScreenContentVisible(false, &error), qPrintable(error));
 
         ApplicationRuntime runtime(profile);
+        QSignalSpy toasts(runtime.getNotificationCenter(), &NotificationCenter::toastRequested);
+        const auto screenToasts = [&] {
+            int count = 0;
+            for (const auto& toast : toasts) {
+                const auto entry = qvariant_cast<NotificationEntry>(toast.first());
+                if (entry.category == QLatin1String("Screen sharing")) {
+                    if (entry.severity != NotificationSeverity::Warning) return -1;
+                    ++count;
+                }
+            }
+            return count;
+        };
         runtime.getProjectManager()->stopAutomaticTimersForTesting();
         runtime.setQmlWindowVisible(true);
         runtime.setPointerInsideControlWindow(true);
@@ -380,7 +469,7 @@ private slots:
         QTest::qWait(100);
         QVERIFY(grants.isEmpty());
         QVERIFY(!source->hasFrame());
-        QVERIFY(controller->remoteScreenSharingStatus().isEmpty());
+        QVERIFY(!runtime.remoteScreenAvailable());
 
         QVERIFY2(settings->setScreenContentVisible(true, &error), qPrintable(error));
         QTRY_VERIFY_WITH_TIMEOUT(!grants.isEmpty()
@@ -398,16 +487,27 @@ private slots:
         QVERIFY(target.sendScreenFrame(header(grant, packet, 1), packet.annexB));
         QTRY_VERIFY_WITH_TIMEOUT(source->hasFrame(), 4000);
         QCOMPARE(source->videoFrame().size(), image.size());
-        // A publisher restarting capture can leave its latest frame visible
-        // alongside a waiting status; hiding content must clear both.
+        QVERIFY(runtime.remoteScreenAvailable());
+        QCOMPARE(screenToasts(), 0);
+        QVERIFY(target.sendScreenShareStatus(session,
+            quint64(grant.value("generation").toDouble()), QStringLiteral("permission_denied")));
+        QTRY_COMPARE_WITH_TIMEOUT(screenToasts(), 1, 4000);
+        QVERIFY(!source->hasFrame());
+        QVERIFY(!runtime.remoteScreenAvailable());
+        owner->screenShareStateReceived(states.last().first().toJsonObject());
+        QCOMPARE(screenToasts(), 1);
         QVERIFY(target.sendScreenShareStatus(session,
             quint64(grant.value("generation").toDouble()), QStringLiteral("starting")));
-        QTRY_VERIFY_WITH_TIMEOUT(!controller->remoteScreenSharingStatus().isEmpty(), 4000);
-        QVERIFY(source->hasFrame());
+        QTRY_VERIFY_WITH_TIMEOUT(states.last().first().toJsonObject().value("reason")
+                                == QLatin1String("starting"), 4000);
+        QVERIFY(target.sendScreenFrame(header(grant, packet, 2), packet.annexB));
+        QTRY_VERIFY_WITH_TIMEOUT(source->hasFrame(), 4000);
+        QVERIFY(runtime.remoteScreenAvailable());
+        QCOMPARE(screenToasts(), 1); // Recovery never generates a success toast.
 
         QVERIFY2(settings->setScreenContentVisible(false, &error), qPrintable(error));
         QVERIFY(!source->hasFrame());
-        QVERIFY(controller->remoteScreenSharingStatus().isEmpty());
+        QVERIFY(!runtime.remoteScreenAvailable());
         QTRY_VERIFY_WITH_TIMEOUT(!grants.last().first().toJsonObject().value("enabled").toBool(), 4000);
         QVERIFY(!target.sendScreenFrame(header(grant, packet, 2), packet.annexB));
         QVERIFY(owner->canIssueSessionCommands(session));
@@ -421,7 +521,7 @@ private slots:
         QVERIFY(!settings->getScreenContentVisible());
         QCOMPARE(grants.count(), grantsWhileHidden);
         QVERIFY(!source->hasFrame());
-        QVERIFY(controller->remoteScreenSharingStatus().isEmpty());
+        QVERIFY(!runtime.remoteScreenAvailable());
 
         QVERIFY2(settings->setScreenContentVisible(true, &error), qPrintable(error));
         QTRY_VERIFY_WITH_TIMEOUT(grants.count() > grantsWhileHidden
@@ -434,6 +534,8 @@ private slots:
         QTRY_VERIFY_WITH_TIMEOUT(source->hasFrame(), 4000);
         QVERIFY(!settings->getScreenSharingEnabled());
         QVERIFY(publishingChanges.isEmpty());
+        QVERIFY(runtime.remoteScreenAvailable());
+        QCOMPARE(screenToasts(), 1);
         runtime.handleApplicationAboutToQuit();
         target.disconnect();
     }

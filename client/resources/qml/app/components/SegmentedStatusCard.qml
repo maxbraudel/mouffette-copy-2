@@ -33,6 +33,13 @@ Item {
     property int statusKind: SegmentedStatusCard.Error
     property string auxiliaryText: ""
     property bool auxiliaryVisible: auxiliaryText.length > 0
+    property bool screenStatusVisible: false
+    property bool screenContentEnabled: true
+    property bool screenAvailable: false
+    readonly property string screenStatusText: !screenContentEnabled ? "Screen disabled"
+        : screenAvailable ? "Screen available" : "Screen not available"
+    readonly property color screenStatusColor: screenContentEnabled && screenAvailable
+        ? Theme.connectedText : Theme.mutedText
     property bool busy: false
     property bool profilePictureVisible: false
     property url profilePictureSource: ""
@@ -46,6 +53,8 @@ Item {
     readonly property real statusWidth: statusMetrics.maximumWidth + Theme.segmentPadding * 2
     readonly property real auxiliaryWidth: auxiliaryVisible
         ? Math.max(40, auxiliaryMetrics.maximumWidth + Theme.segmentPadding * 2 + 16 + 4) : 0
+    readonly property real screenStatusWidth: screenStatusVisible
+        ? screenStatusMetrics.maximumWidth + Theme.segmentPadding * 2 + 16 + 4 : 0
     readonly property real busyWidth: busy ? Theme.controlHeight + Theme.segmentPadding : 0
     readonly property bool availableStatus: statusText.trim().toUpperCase() === "AVAILABLE"
 
@@ -76,8 +85,16 @@ Item {
         font: auxiliaryLabel.font
     }
 
+    StateTextMetrics {
+        id: screenStatusMetrics
+        text: root.screenStatusText
+        textVariants: ["Screen available", "Screen not available", "Screen disabled"]
+        font: screenStatusLabel.font
+    }
+
     implicitWidth: primaryWidth + 1 + statusWidth
-                   + (auxiliaryVisible ? 1 + auxiliaryWidth : 0) + busyWidth
+                   + (auxiliaryVisible ? 1 + auxiliaryWidth : 0)
+                   + (screenStatusVisible ? 1 + screenStatusWidth : 0) + busyWidth
     implicitHeight: Theme.controlHeight
     height: Theme.controlHeight
 
@@ -118,9 +135,11 @@ Item {
 
         Rectangle {
             id: primarySegment
+            clip: true
             height: root.height
             width: Math.max(0, root.width - 1 - root.statusWidth
                            - (root.auxiliaryVisible ? 1 + root.auxiliaryWidth : 0)
+                           - (root.screenStatusVisible ? 1 + root.screenStatusWidth : 0)
                            - root.busyWidth)
             color: "transparent"
 
@@ -155,6 +174,61 @@ Item {
         }
 
         Rectangle {
+            visible: root.screenStatusVisible
+            width: visible ? 1 : 0
+            height: root.height
+            color: Theme.border
+        }
+
+        Rectangle {
+            id: screenStatusSegment
+            objectName: "screenAvailabilitySegment"
+            visible: root.screenStatusVisible
+            height: root.height
+            width: root.screenStatusWidth
+            color: "transparent"
+            Accessible.role: Accessible.StaticText
+            Accessible.name: root.screenStatusText
+
+            Image {
+                id: screenStatusIcon
+                objectName: "screenAvailabilityIcon"
+                anchors.left: parent.left
+                anchors.leftMargin: Theme.segmentPadding
+                anchors.verticalCenter: parent.verticalCenter
+                width: 16
+                height: 16
+                source: root.screenContentEnabled && root.screenAvailable
+                    ? "qrc:/icons/icons/screen.svg" : "qrc:/icons/icons/screen-off.svg"
+                sourceSize: Qt.size(width * 4, height * 4)
+                fillMode: Image.PreserveAspectFit
+                layer.enabled: true
+                layer.effect: MultiEffect {
+                    contrast: -1
+                    brightness: 0.5
+                    colorization: 1
+                    colorizationColor: root.screenStatusColor
+                }
+            }
+
+            Text {
+                id: screenStatusLabel
+                objectName: "screenAvailabilityLabel"
+                anchors.left: screenStatusIcon.right
+                anchors.leftMargin: 4
+                anchors.right: parent.right
+                anchors.rightMargin: Theme.segmentPadding
+                height: parent.height
+                text: root.screenStatusText
+                color: root.screenStatusColor
+                font.pixelSize: Theme.controlFontSize
+                font.bold: true
+                verticalAlignment: Text.AlignVCenter
+                horizontalAlignment: Text.AlignHCenter
+            }
+        }
+
+        Rectangle {
             visible: root.auxiliaryVisible
             width: visible ? 1 : 0
             height: root.height
@@ -163,6 +237,7 @@ Item {
 
         Rectangle {
             id: auxiliarySegment
+            objectName: "volumeSegment"
             visible: root.auxiliaryVisible
             height: root.height
             width: root.auxiliaryWidth

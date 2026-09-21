@@ -548,11 +548,8 @@ private slots:
         host.clearRemoteScreenFrame(1);
         QVERIFY(!first->hasFrame());
         QVERIFY(second->hasFrame());
-        host.setRemoteScreenSharingStatus(QStringLiteral("Sharing disabled"));
-        QCOMPARE(controller.remoteScreenSharingStatus(), QStringLiteral("Sharing disabled"));
         host.hideContentPreservingState();
         QVERIFY(!second->hasFrame());
-        QVERIFY(controller.remoteScreenSharingStatus().isEmpty());
         host.setRemoteScreenFrame(2, frame);
         QVERIFY(!second->hasFrame());
         host.showContentAfterReconnect();
@@ -586,6 +583,8 @@ private slots:
         auto* item = qobject_cast<RemoteVideoFrameItem*>(findQuickItemWithProperty(
             fixture.view.rootObject(), "objectName", QStringLiteral("remoteScreenVideo")));
         QVERIFY(item);
+        QVERIFY(!findQuickItemWithProperty(fixture.view.rootObject(), "objectName",
+                                           "remoteScreenSharingStatus"));
         QVERIFY(item->hasFrame());
         QVERIFY(item->isVisible());
         fixture.view.show();

@@ -848,8 +848,6 @@ Rectangle {
                     pixelHeight: modelData.pixelHeight || 0
                     uiZonesModel: root.uiZonesModel
                     frameSource: modelData.frameSource || null
-                    sharingStatus: root.canvasController
-                                   ? root.canvasController.remoteScreenSharingStatus : ""
                 }
             }
 

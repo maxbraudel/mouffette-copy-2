@@ -431,14 +431,25 @@ ApplicationRuntime::ApplicationRuntime(const RuntimeProfileContext& runtimeProfi
     });
     connect(m_screenSharing, &ScreenSharingService::framesCleared, this,
             [this](const QString& endpoint) {
-        if (auto* canvas = canvasForEndpointId(endpoint)) {
-            canvas->clearRemoteScreenFrames();
-            canvas->setRemoteScreenSharingStatus({});
-        }
+        if (auto* canvas = canvasForEndpointId(endpoint)) canvas->clearRemoteScreenFrames();
     });
-    connect(m_screenSharing, &ScreenSharingService::remoteStatusChanged, this,
-            [this](const QString& endpoint, const QString& status) {
-        if (auto* canvas = canvasForEndpointId(endpoint)) canvas->setRemoteScreenSharingStatus(status);
+    connect(m_screenSharing, &ScreenSharingService::remoteAvailabilityChanged,
+            this, &ApplicationRuntime::presentationStateChanged);
+    connect(m_screenSharing, &ScreenSharingService::remoteIssue, this,
+            [this](const QString& endpoint, const QString& message) {
+        if (!m_toastSystem || m_cleanShutdownPrepared || isUserDisconnected()
+            || !m_qmlWindowVisible || m_applicationPage != 1
+            || endpoint != m_activeWorkspaceEndpointId
+            || !m_settingsManager->getScreenContentVisible()) return;
+        NotificationRequest notification;
+        notification.severity = NotificationSeverity::Warning;
+        notification.category = QStringLiteral("Screen sharing");
+        notification.message = message;
+        notification.remoteSessionId = m_webSocketClient->remoteSessionCoordinator()
+                                          ->outgoingForPeer(endpoint).remoteSessionId;
+        notification.peers = {{endpoint, m_selectedClient.getMachineName(),
+                               m_selectedClient.instanceOrdinal(), QStringLiteral("From")}};
+        m_toastSystem->publishNotification(notification);
     });
     connect(this, &ApplicationRuntime::activeWorkspaceChanged, this, &ApplicationRuntime::refreshScreenSharing);
     connect(this, &ApplicationRuntime::applicationPageChanged, this, &ApplicationRuntime::refreshScreenSharing);
@@ -4201,6 +4212,11 @@ void ApplicationRuntime::onDisconnected() {
 QString ApplicationRuntime::screenSharingStatus() const
 {
     return m_screenSharing ? m_screenSharing->status() : QString();
+}
+
+bool ApplicationRuntime::remoteScreenAvailable() const
+{
+    return m_screenSharing && m_screenSharing->isRemoteScreenAvailable(m_activeWorkspaceEndpointId);
 }
 
 void ApplicationRuntime::refreshScreenSharing()

@@ -493,7 +493,6 @@ void QuickCanvasController::setShellActive(bool active)
 {
     if (!active) {
         clearRemoteScreenFrames();
-        setRemoteScreenSharingStatus({});
     }
     if (m_shellActive == active) return;
     m_shellActive = active;
@@ -526,12 +525,6 @@ void QuickCanvasController::clearRemoteScreenFrames()
     for (auto* source : std::as_const(m_screenFrameSources)) source->clear();
 }
 
-void QuickCanvasController::setRemoteScreenSharingStatus(const QString& status)
-{
-    if (m_remoteScreenSharingStatus == status) return;
-    m_remoteScreenSharingStatus = status;
-    emit remoteScreenSharingStatusChanged();
-}
 
 void QuickCanvasController::resetView()
 {

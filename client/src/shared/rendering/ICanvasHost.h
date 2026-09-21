@@ -54,7 +54,6 @@ public:
     virtual void setRemoteScreenFrame(int, const QVideoFrame&) {}
     virtual void clearRemoteScreenFrame(int) {}
     virtual void clearRemoteScreenFrames() {}
-    virtual void setRemoteScreenSharingStatus(const QString&) {}
     virtual void setOverlayActionsEnabled(bool enabled) = 0;
     virtual bool overlayActionsEnabled() const = 0;
     virtual void setProjectEditingEnabled(bool enabled) = 0;

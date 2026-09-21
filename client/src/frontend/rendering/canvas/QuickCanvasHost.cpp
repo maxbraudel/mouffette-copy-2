@@ -427,7 +427,6 @@ void QuickCanvasHost::setRemoteSceneTarget(const QString& id,
 {
     if (m_targetClientId != id) {
         clearRemoteScreenFrames();
-        setRemoteScreenSharingStatus({});
         m_targetHostname.clear();
         m_targetInstanceOrdinal = 1;
     }
@@ -478,7 +477,6 @@ void QuickCanvasHost::recenterWithMargin(int marginPx)
 void QuickCanvasHost::hideContentPreservingState()
 {
     clearRemoteScreenFrames();
-    setRemoteScreenSharingStatus({});
     m_contentAvailable = false;
     m_document->setContentAvailable(false);
 }
@@ -519,10 +517,6 @@ void QuickCanvasHost::clearRemoteScreenFrames()
     if (m_controller) m_controller->clearRemoteScreenFrames();
 }
 
-void QuickCanvasHost::setRemoteScreenSharingStatus(const QString& status)
-{
-    if (m_controller) m_controller->setRemoteScreenSharingStatus(status);
-}
 
 void QuickCanvasHost::setOverlayActionsEnabled(bool enabled)
 {
@@ -1542,7 +1536,6 @@ void QuickCanvasHost::failScene(const QString& message, bool notifyServer, const
 void QuickCanvasHost::handleRemoteConnectionLost()
 {
     clearRemoteScreenFrames();
-    setRemoteScreenSharingStatus({});
     if (m_webSocket && !m_sceneRunId.isEmpty())
         m_webSocket->sceneRunCoordinator()->finishRun(m_sceneRunId, true);
     // The presentation/priming context can belong to a wholly local test.

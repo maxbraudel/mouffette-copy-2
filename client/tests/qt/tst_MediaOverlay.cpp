@@ -57,6 +57,7 @@ private slots:
     void availableStatusUsesNeutralGreyPalette();
     void segmentedStatusKeepsSingleTopBorder();
     void stateLabelsReserveWidthBeforeTransitions();
+    void screenAvailabilitySharesStatusCardWithVolume();
     void mediaPanelWidthSurvivesActionAndUploadTransitions();
     void emptyScreenHintStaysBehindMediaAndCenteredInViewport();
     void mediaPanelVisibilityAnchorInteractionAndScroll();
@@ -691,6 +692,48 @@ void MediaOverlayTest::segmentedStatusKeepsSingleTopBorder()
         image, window.size(),
         QPointF(origin.x() + border->width() / 2.0, origin.y() - 2.0));
     QVERIFY(top != justOutside);
+}
+
+void MediaOverlayTest::screenAvailabilitySharesStatusCardWithVolume()
+{
+    QQmlEngine engine;
+    QQuickWindow window;
+    window.resize(480, 110);
+    std::unique_ptr<QQuickItem> card(createStatusCard(engine, window, true));
+    QVERIFY(card);
+    card->setProperty("primaryText", QStringLiteral("Remote client"));
+    card->setProperty("screenStatusVisible", true);
+    card->setWidth(440);
+    auto* screen = card->findChild<QQuickItem*>(QStringLiteral("screenAvailabilitySegment"));
+    auto* icon = card->findChild<QQuickItem*>(QStringLiteral("screenAvailabilityIcon"));
+    auto* label = card->findChild<QQuickItem*>(QStringLiteral("screenAvailabilityLabel"));
+    auto* volume = card->findChild<QQuickItem*>(QStringLiteral("volumeSegment"));
+    QVERIFY(screen && icon && label && volume);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    const qreal stableWidth = card->implicitWidth();
+    for (const bool available : {false, true}) {
+        card->setProperty("screenAvailable", available);
+        QCOMPARE(label->property("text").toString(), available
+            ? QStringLiteral("Screen available") : QStringLiteral("Screen not available"));
+        QCOMPARE(icon->property("source").toUrl().fileName(), available
+            ? QStringLiteral("screen.svg") : QStringLiteral("screen-off.svg"));
+        QTRY_COMPARE(icon->property("status").toInt(), 1); // Image.Ready.
+        QCOMPARE(card->implicitWidth(), stableWidth);
+        QTRY_VERIFY(screen->x() + screen->width() <= volume->x());
+        QVERIFY(icon->x() + icon->width() <= label->x());
+        QVERIFY(label->property("implicitWidth").toReal() <= label->width());
+        QVERIFY(volume->x() + volume->width() <= card->width());
+        const QString artifactDir = qEnvironmentVariable("MOUFFETTE_OVERLAY_ARTIFACT_DIR");
+        if (!artifactDir.isEmpty()) {
+            QVERIFY(QDir().mkpath(artifactDir));
+            QSignalSpy frames(&window, &QQuickWindow::frameSwapped);
+            window.update();
+            QTRY_VERIFY(!frames.isEmpty());
+            QVERIFY(window.grabWindow().save(QDir(artifactDir).filePath(available
+                ? QStringLiteral("screen-available.png") : QStringLiteral("screen-not-available.png"))));
+        }
+    }
 }
 
 void MediaOverlayTest::stateLabelsReserveWidthBeforeTransitions()

@@ -18,17 +18,25 @@
 #include <utility>
 
 namespace {
-QString statusText(const QString& reason)
+QString issueText(const QString& reason)
 {
     if (reason == QLatin1String("disabled") || reason == QLatin1String("consent_disabled")
         || reason == QLatin1String("not_allowed"))
-        return QObject::tr("Screen sharing is disabled on this client.");
+        return QObject::tr("Screen sharing is disabled on the remote client.");
     if (reason == QLatin1String("permission_denied"))
         return QObject::tr("Allow screen recording in the remote computer's system settings, then restart the sharing app. See its Settings for details.");
     if (reason == QLatin1String("unavailable") || reason == QLatin1String("capture_error")
         || reason == QLatin1String("error"))
         return QObject::tr("The remote screen could not be captured. See Settings on the sharing client for details.");
-    return QObject::tr("Waiting for the remote screen…");
+    if (reason == QLatin1String("channel_unavailable"))
+        return QObject::tr("The remote screen connection is unavailable. Retrying…");
+    if (reason == QLatin1String("timeout"))
+        return QObject::tr("The remote screen did not respond. Check screen sharing on the remote client.");
+    if (reason == QLatin1String("stalled"))
+        return QObject::tr("The remote screen stopped updating. Trying to recover the stream…");
+    if (reason == QLatin1String("decode_error"))
+        return QObject::tr("The remote screen could not be decoded. Trying to recover the stream…");
+    return {};
 }
 }
 
@@ -47,6 +55,9 @@ struct ScreenSharingService::Private {
     quint64 subscribedGeneration = 0;
     QString receivedStream;
     QString status;
+    bool remoteAvailable = false;
+    qint64 waitingSince = -1;
+    QSet<QString> reportedIssues;
     QHash<QString, QJsonObject> grants;
     QHash<QString, QHash<int, quint64>> sequences;
     struct Capture {
@@ -88,9 +99,28 @@ struct ScreenSharingService::Private {
         status = value;
         emit q->statusChanged();
     }
+    void setRemoteAvailable(bool available) {
+        if (remoteAvailable == available) return;
+        remoteAvailable = available;
+        if (available) reportedIssues.clear();
+        emit q->remoteAvailabilityChanged(viewedEndpoint, available);
+    }
+    void reportIssue(const QString& reason) {
+        if (viewedEndpoint.isEmpty() || suspended) return;
+        const QString message = issueText(reason);
+        if (message.isEmpty()) return;
+        waitingSince = -1;
+        if (reportedIssues.contains(reason)) return;
+        reportedIssues.insert(reason);
+        emit q->remoteIssue(viewedEndpoint, message);
+    }
+    void waitForFrame() {
+        if (!remoteAvailable && waitingSince < 0) waitingSince = clock.elapsed();
+    }
     void clearReceived() {
         decoders.clear(); // In-flight results retain their state, never the canvas.
         receivedStream.clear();
+        setRemoteAvailable(false);
         if (!viewedEndpoint.isEmpty()) emit q->framesCleared(viewedEndpoint);
     }
     void stopCaptures() {
@@ -120,13 +150,17 @@ struct ScreenSharingService::Private {
             if (state->epoch == epoch && ready(subscribedSession, false)) {
                 if (frame.isValid() && frame.size() == packet.size) {
                     state->lastFrameAt = clock.elapsed();
+                    waitingSince = -1;
                     emit q->frameReady(viewedEndpoint, screen, frame);
-                    emit q->remoteStatusChanged(viewedEndpoint, QString());
+                    setRemoteAvailable(true);
                 } else {
                     state->pending.clear();
                     state->pendingBytes = 0;
                     state->waitingForKey = true;
                     ++state->epoch;
+                    setRemoteAvailable(false);
+                    emit q->framesCleared(viewedEndpoint);
+                    reportIssue(QStringLiteral("decode_error"));
                     requestKey(screen, state);
                 }
             }
@@ -259,6 +293,9 @@ ScreenSharingService::ScreenSharingService(WebSocketClient* network, SystemMonit
         refresh();
     });
     connect(network, &WebSocketClient::screenChannelUnavailable, this, [this] {
+        const auto binding = d->network->remoteSessionCoordinator()->outgoingForPeer(d->viewedEndpoint);
+        if (!d->viewedEndpoint.isEmpty() && d->ready(binding.remoteSessionId, false))
+            d->reportIssue(QStringLiteral("channel_unavailable"));
         d->channelReady = false;
         d->grants.clear();
         d->sequences.clear();
@@ -284,13 +321,24 @@ ScreenSharingService::ScreenSharingService(WebSocketClient* network, SystemMonit
         const QString stream = state.value("streamId").toString();
         const bool enabled = state.value("enabled").toBool();
         const QString reason = state.value("reason").toString();
+        const bool wasAvailable = d->remoteAvailable;
         const bool failed = reason == QLatin1String("capture_error") || reason == QLatin1String("permission_denied")
             || reason == QLatin1String("unavailable") || reason == QLatin1String("error");
         if (!enabled || d->receivedStream != stream || failed) d->clearReceived();
         // The video and control sockets may deliver out of order. A delayed
         // keyframe must not resurrect the image after a capture failure.
         d->receivedStream = enabled && !failed ? stream : QString();
-        emit remoteStatusChanged(d->viewedEndpoint, statusText(reason));
+        // A channel can be briefly unavailable during the normal handshake.
+        // Notify immediately only when an established stream is interrupted;
+        // initial connection failures are covered by the first-frame timeout.
+        if (reason == QLatin1String("channel_unavailable")) {
+            if (wasAvailable) d->reportIssue(reason);
+        } else if (!issueText(reason).isEmpty()) {
+            d->reportIssue(reason);
+        } else if (enabled || reason == QLatin1String("topology_pending")
+                   || reason == QLatin1String("topology_changed")) {
+            d->waitForFrame();
+        }
     });
     connect(network, &WebSocketClient::screenFrameReceived, this,
             [this](const QJsonObject& header, const QByteArray& bytes) { d->receive(header, bytes); });
@@ -339,6 +387,8 @@ void ScreenSharingService::setViewedEndpoint(const QString& endpoint)
     d->clearReceived();
     d->subscribedSession.clear();
     d->subscribedGeneration = 0;
+    d->waitingSince = -1;
+    d->reportedIssues.clear();
     d->viewedEndpoint = endpoint;
     refresh();
 }
@@ -357,6 +407,7 @@ void ScreenSharingService::refresh()
         d->network->ensureScreenChannel();
     const auto binding = d->network->remoteSessionCoordinator()->outgoingForPeer(d->viewedEndpoint);
     if (d->viewedEndpoint.isEmpty() || !d->ready(binding.remoteSessionId, false)) {
+        d->waitingSince = -1;
         if (!d->subscribedSession.isEmpty()) {
             d->network->setScreenShareSubscription(d->subscribedSession, d->subscribedGeneration, false);
             d->subscribedSession.clear();
@@ -368,7 +419,7 @@ void ScreenSharingService::refresh()
         if (d->network->setScreenShareSubscription(binding.remoteSessionId, binding.generation, true)) {
             d->subscribedSession = binding.remoteSessionId;
             d->subscribedGeneration = binding.generation;
-            emit remoteStatusChanged(d->viewedEndpoint, tr("Waiting for the remote screen…"));
+            d->waitForFrame();
         }
     }
     d->refreshCaptures();
@@ -377,10 +428,13 @@ void ScreenSharingService::refresh()
         stale |= decoder->lastFrameAt >= 0 && d->clock.elapsed() - decoder->lastFrameAt > 5000;
     if (stale) {
         d->decoders.clear();
+        d->setRemoteAvailable(false);
         emit framesCleared(d->viewedEndpoint);
-        emit remoteStatusChanged(d->viewedEndpoint, tr("Waiting for the remote screen…"));
+        d->reportIssue(QStringLiteral("stalled"));
         d->network->requestScreenShareKeyFrame(d->subscribedSession, d->subscribedGeneration);
     }
+    if (d->waitingSince >= 0 && d->clock.elapsed() - d->waitingSince > 10000)
+        d->reportIssue(QStringLiteral("timeout"));
 }
 
 void ScreenSharingService::stop()
@@ -391,3 +445,8 @@ void ScreenSharingService::stop()
 }
 
 QString ScreenSharingService::status() const { return d->status; }
+
+bool ScreenSharingService::isRemoteScreenAvailable(const QString& endpoint) const
+{
+    return !endpoint.isEmpty() && d->viewedEndpoint == endpoint && d->remoteAvailable;
+}

@@ -21,10 +21,24 @@ stream; showing subscribes again to the visible canvas. Monitor outlines, scene
 media and the remote cursor remain available. This preference does not change
 either client's permission to share its own screens.
 
+The remote connection card shows **Screen disabled** when the viewer turns off
+screen content locally. With viewing enabled, it shows **Screen available /
+Screen not available**, with a monitor icon immediately to the left of the
+volume. Availability follows decoded frames for the currently viewed client,
+not just publishing consent. Waiting or losing the stream makes it unavailable.
+There is no permanent status message inside the canvas screens.
+
+Screen-sharing problems use warning toasts and notification history: remote
+sharing disabled, missing OS permission, capture or decode errors, interrupted
+video transport, no first frame after ten seconds, or no updates for five
+seconds. Normal handshakes and successful recovery are silent. Repeated reports
+of the same problem are suppressed until a frame arrives or the user starts a
+new viewing attempt. Intentional hiding and suspension do not create warnings.
+
 macOS also requires the operating system's Screen Recording permission for the
 application. The checkbox only authorizes sharing within Mouffette; it does not
-grant this separate OS permission. Permission denial is distinguished from other
-capture failures on the viewing canvas. The publishing instance's Settings show
+grant this separate OS permission. Permission denial has its own warning toast
+on the viewing client. The publishing instance's Settings show
 the detailed local error and permission recovery advice.
 
 To recover from a macOS permission error:
@@ -212,6 +226,11 @@ Run `npm test` in `server`, then build and run CTest. Focused targets are
 and `CanvasSelectionBackend`. Synthetic tests do not request desktop capture
 permission. Native capture, OS consent, multiple physical displays and Windows
 GPU/driver combinations require the platform smoke tests below.
+
+Viewer feedback regressions cover capture-error toast deduplication, silent
+recovery/hiding, missing and stale frames, and runtime notification routing in
+`ScreenSharingService`. `MediaOverlay::screenAvailabilitySharesStatusCardWithVolume`
+checks both labels/icons and stable geometry at the minimum window width.
 
 1. On two clients, open the target canvas with consent disabled: no pixels.
 2. Enable sharing on the target, grant macOS permission if requested, and save.

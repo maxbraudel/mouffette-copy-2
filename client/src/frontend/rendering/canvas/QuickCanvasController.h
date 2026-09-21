@@ -37,7 +37,6 @@ class QuickCanvasController final : public QObject
     Q_PROPERTY(QVariantList snapGuidesModel READ snapGuidesModel NOTIFY presentationChanged)
     Q_PROPERTY(QVariantMap videoStateModel READ videoStateModel NOTIFY presentationChanged)
     Q_PROPERTY(bool remoteActive READ remoteActive NOTIFY presentationChanged)
-    Q_PROPERTY(QString remoteScreenSharingStatus READ remoteScreenSharingStatus NOTIFY remoteScreenSharingStatusChanged)
     Q_PROPERTY(bool textToolActive READ textToolActive NOTIFY presentationChanged)
     Q_PROPERTY(qreal viewScale READ viewScale NOTIFY presentationChanged)
     Q_PROPERTY(qreal panX READ panX NOTIFY presentationChanged)
@@ -85,7 +84,6 @@ public:
     QVariantList snapGuidesModel() const { return m_snapGuidesModel; }
     QVariantMap videoStateModel() const { return m_videoStateModel; }
     bool remoteActive() const { return m_shellActive; }
-    QString remoteScreenSharingStatus() const { return m_remoteScreenSharingStatus; }
     bool projectEditingEnabled() const { return m_projectEditingEnabled; }
     bool editingEnabled() const { return m_projectEditingEnabled && !editsLocked(); }
     QVariantMap liveTransforms() const { return m_liveTransforms; }
@@ -125,7 +123,6 @@ public:
     void setRemoteScreenFrame(int screenId, const QVideoFrame& frame);
     void clearRemoteScreenFrame(int screenId);
     void clearRemoteScreenFrames();
-    void setRemoteScreenSharingStatus(const QString& status);
     Q_INVOKABLE void resetView();
     Q_INVOKABLE void recenterView(int marginPx = 53);
     Q_INVOKABLE bool fitToScreens(int marginPx = 53);
@@ -153,7 +150,6 @@ signals:
     void pendingEditsCanceled();
     void presentationChanged();
     void remoteCursorChanged();
-    void remoteScreenSharingStatusChanged();
     void liveTransformsChanged();
     void mediaSnapshotChanged();
     void selectionChromeModelChanged();
@@ -286,7 +282,6 @@ private:
     QVariantList m_selectionChromeModel;
     QVariantList m_screensModel;
     QHash<int, RemoteVideoFrameSource*> m_screenFrameSources;
-    QString m_remoteScreenSharingStatus;
     QVariantList m_uiZonesModel;
     QVariantList m_snapGuidesModel;
     QVariantMap m_videoStateModel;

@@ -21,12 +21,14 @@ public:
     void refresh();
     void stop();
     QString status() const;
+    bool isRemoteScreenAvailable(const QString& endpoint) const;
 
 signals:
     void statusChanged();
     void frameReady(const QString& endpoint, int screenId, const QVideoFrame& frame);
     void framesCleared(const QString& endpoint);
-    void remoteStatusChanged(const QString& endpoint, const QString& status);
+    void remoteAvailabilityChanged(const QString& endpoint, bool available);
+    void remoteIssue(const QString& endpoint, const QString& message);
 
 private:
     struct Private;

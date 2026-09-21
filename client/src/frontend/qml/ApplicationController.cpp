@@ -217,6 +217,11 @@ bool ApplicationController::remoteVolumeVisible() const
     return m_runtime && m_runtime->remoteVolumePercent() >= 0;
 }
 
+bool ApplicationController::remoteScreenAvailable() const
+{
+    return m_runtime && m_runtime->remoteScreenAvailable();
+}
+
 bool ApplicationController::remoteBusy() const
 {
     return m_runtime && m_runtime->remoteBusy();
