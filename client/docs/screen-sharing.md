@@ -22,11 +22,14 @@ media and the remote cursor remain available. This preference does not change
 either client's permission to share its own screens.
 
 The remote connection card shows **Screen disabled** when the viewer turns off
-screen content locally. With viewing enabled, it shows **Screen available /
-Screen not available**, with a monitor icon immediately to the left of the
-volume. Availability follows decoded frames for the currently viewed client,
-not just publishing consent. Waiting or losing the stream makes it unavailable.
-There is no permanent status message inside the canvas screens.
+screen content locally. With viewing enabled, it shows **Screen loading** while
+connecting and waiting for the first frame, then **Screen available** once frames
+arrive. Disabled remote sharing, an error, or a timeout shows **Screen not
+available**. A monitor icon sits immediately to the left of the volume. These
+indicators share the connection statuses' font, foreground and background colors:
+amber while loading, green when available, red when unavailable or locally disabled.
+Availability follows decoded frames for the currently viewed client, not just
+publishing consent. There is no permanent status message inside the canvas screens.
 
 Screen-sharing problems use warning toasts and notification history: remote
 sharing disabled, missing OS permission, capture or decode errors, interrupted

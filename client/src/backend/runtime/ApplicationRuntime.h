@@ -152,6 +152,7 @@ public:
     QString remoteDisplayName() const;
     int remoteVolumePercent() const { return m_remoteVolumePercent; }
     bool remoteScreenAvailable() const;
+    bool remoteScreenLoading() const;
     bool remoteBusy() const { return m_remoteBusy; }
     bool canDeleteActiveProject() const;
     bool activeProjectExists() const;

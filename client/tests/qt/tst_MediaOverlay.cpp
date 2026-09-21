@@ -708,15 +708,39 @@ void MediaOverlayTest::screenAvailabilitySharesStatusCardWithVolume()
     auto* icon = card->findChild<QQuickItem*>(QStringLiteral("screenAvailabilityIcon"));
     auto* label = card->findChild<QQuickItem*>(QStringLiteral("screenAvailabilityLabel"));
     auto* volume = card->findChild<QQuickItem*>(QStringLiteral("volumeSegment"));
-    QVERIFY(screen && icon && label && volume);
+    auto* connectionLabel = card->findChild<QQuickItem*>(QStringLiteral("connectionStatusLabel"));
+    auto* connectionSegment = card->findChild<QQuickItem*>(QStringLiteral("statusSegment"));
+    QVERIFY(screen && icon && label && volume && connectionLabel && connectionSegment);
     window.show();
     QVERIFY(QTest::qWaitForWindowExposed(&window));
     const qreal stableWidth = card->implicitWidth();
-    for (const bool available : {false, true}) {
-        card->setProperty("screenAvailable", available);
-        QCOMPARE(label->property("text").toString(), available
-            ? QStringLiteral("Screen available") : QStringLiteral("Screen not available"));
-        QCOMPARE(icon->property("source").toUrl().fileName(), available
+    struct ScreenState {
+        bool enabled;
+        bool loading;
+        bool available;
+        int statusKind;
+        QString label;
+        QString artifact;
+    };
+    const ScreenState states[] = {
+        {true, true, false, 1, QStringLiteral("Screen loading"), QStringLiteral("screen-loading.png")},
+        {true, false, true, 0, QStringLiteral("Screen available"), QStringLiteral("screen-available.png")},
+        {true, false, false, 2, QStringLiteral("Screen not available"), QStringLiteral("screen-not-available.png")},
+        // The viewer's choice takes precedence over a stale remote state.
+        {false, true, true, 2, QStringLiteral("Screen disabled"), QStringLiteral("screen-disabled.png")}
+    };
+    for (const auto& state : states) {
+        card->setProperty("screenContentEnabled", state.enabled);
+        card->setProperty("screenLoading", state.loading);
+        card->setProperty("screenAvailable", state.available);
+        card->setProperty("statusKind", state.statusKind);
+        card->setProperty("statusText", state.statusKind == 0 ? "CONNECTED"
+            : state.statusKind == 1 ? "CONNECTING" : "DISCONNECTED");
+        QCOMPARE(label->property("text").toString(), state.label);
+        QCOMPARE(label->property("color"), connectionLabel->property("color"));
+        QCOMPARE(label->property("font").value<QFont>(), connectionLabel->property("font").value<QFont>());
+        QCOMPARE(screen->property("color"), connectionSegment->property("color"));
+        QCOMPARE(icon->property("source").toUrl().fileName(), state.enabled && (state.available || state.loading)
             ? QStringLiteral("screen.svg") : QStringLiteral("screen-off.svg"));
         QTRY_COMPARE(icon->property("status").toInt(), 1); // Image.Ready.
         QCOMPARE(card->implicitWidth(), stableWidth);
@@ -730,8 +754,7 @@ void MediaOverlayTest::screenAvailabilitySharesStatusCardWithVolume()
             QSignalSpy frames(&window, &QQuickWindow::frameSwapped);
             window.update();
             QTRY_VERIFY(!frames.isEmpty());
-            QVERIFY(window.grabWindow().save(QDir(artifactDir).filePath(available
-                ? QStringLiteral("screen-available.png") : QStringLiteral("screen-not-available.png"))));
+            QVERIFY(window.grabWindow().save(QDir(artifactDir).filePath(state.artifact)));
         }
     }
 }

@@ -137,6 +137,7 @@ QtObject {
                     screenStatusVisible: true
                     screenContentEnabled: root.controller.screenContentVisible
                     screenAvailable: root.controller.remoteScreenAvailable
+                    screenLoading: root.controller.remoteScreenLoading
                     busy: root.controller.remoteBusy
                 }
                 Row {

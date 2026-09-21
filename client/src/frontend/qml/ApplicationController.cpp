@@ -222,6 +222,11 @@ bool ApplicationController::remoteScreenAvailable() const
     return m_runtime && m_runtime->remoteScreenAvailable();
 }
 
+bool ApplicationController::remoteScreenLoading() const
+{
+    return m_runtime && m_runtime->remoteScreenLoading();
+}
+
 bool ApplicationController::remoteBusy() const
 {
     return m_runtime && m_runtime->remoteBusy();

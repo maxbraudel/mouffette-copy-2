@@ -121,9 +121,13 @@ private slots:
         QString session;
         connectPeers(owner, target, &session);
         QVERIFY(!session.isEmpty());
+        states.clear(); // Await the subscription response, not the session's initial snapshot.
         viewer.setViewedEndpoint(target.endpointId());
+        QVERIFY(viewer.isRemoteScreenLoading(target.endpointId()));
+        QVERIFY(!viewer.isRemoteScreenAvailable(target.endpointId()));
         QTRY_VERIFY_WITH_TIMEOUT(!states.isEmpty()
             && states.last().first().toJsonObject().value("reason") == QLatin1String("disabled"), 4000);
+        QVERIFY(!viewer.isRemoteScreenLoading(target.endpointId()));
         QVERIFY(frames.isEmpty());
         QCOMPARE(issues.count(), 1);
         QVERIFY(issues.last().at(1).toString().contains(QStringLiteral("disabled")));
@@ -135,6 +139,7 @@ private slots:
         const QJsonObject firstGrant = grants.last().first().toJsonObject();
         QTRY_VERIFY_WITH_TIMEOUT(!states.isEmpty()
             && states.last().first().toJsonObject().value("streamId") == firstGrant.value("streamId"), 4000);
+        QVERIFY(viewer.isRemoteScreenLoading(target.endpointId()));
         QImage image(640, 360, QImage::Format_RGBA8888);
         image.fill(QColor(30, 190, 70));
         ScreenStreamEncoder encoder(false);
@@ -146,6 +151,8 @@ private slots:
         QVERIFY(packet.keyFrame);
         QVERIFY(target.sendScreenFrame(header(firstGrant, packet, 1), packet.annexB));
         QTRY_COMPARE_WITH_TIMEOUT(frames.count(), 1, 4000);
+        QVERIFY(!viewer.isRemoteScreenLoading(target.endpointId()));
+        QVERIFY(viewer.isRemoteScreenAvailable(target.endpointId()));
         QCOMPARE(issues.count(), 1); // First successful frame is silent.
         QCOMPARE(frames.first().at(0).toString(), target.endpointId());
         QCOMPARE(frames.first().at(1).toInt(), 0);
@@ -169,6 +176,7 @@ private slots:
         // then leave the canvas before the completion callback can run.
         owner.screenFrameReceived(header(firstGrant, packet, 2), packet.annexB);
         viewer.setViewedEndpoint({});
+        QVERIFY(!viewer.isRemoteScreenLoading(target.endpointId()));
         QTRY_VERIFY_WITH_TIMEOUT(viewer.findChildren<QFutureWatcherBase*>().isEmpty(), 4000);
         QCOMPARE(frames.count(), 1);
         QVERIFY(!cleared.isEmpty());
@@ -238,10 +246,12 @@ private slots:
                 quint64(grant.value("generation").toDouble()), QStringLiteral("starting")));
             QTRY_VERIFY_WITH_TIMEOUT(states.last().first().toJsonObject().value("reason")
                                     == QLatin1String("starting"), 4000);
+            QVERIFY(viewer.isRemoteScreenLoading(target.endpointId()));
             const int oldFrames = frames.count();
             QVERIFY(target.sendScreenFrame(header(grant, packet, ++sequence), packet.annexB));
             QTRY_COMPARE_WITH_TIMEOUT(frames.count(), oldFrames + 1, 4000);
             QVERIFY(viewer.isRemoteScreenAvailable(target.endpointId()));
+            QVERIFY(!viewer.isRemoteScreenLoading(target.endpointId()));
             const int oldIssues = issues.count();
             const int oldClears = cleared.count();
             QVERIFY(target.sendScreenShareStatus(session,
@@ -249,6 +259,7 @@ private slots:
             QTRY_VERIFY_WITH_TIMEOUT(states.last().first().toJsonObject().value("reason") == reason, 4000);
             QTRY_VERIFY_WITH_TIMEOUT(cleared.count() > oldClears, 4000);
             QVERIFY(!viewer.isRemoteScreenAvailable(target.endpointId()));
+            QVERIFY(!viewer.isRemoteScreenLoading(target.endpointId()));
             QCOMPARE(issues.count(), oldIssues + 1);
             QCOMPARE(issues.last().first().toString(), target.endpointId());
             const auto message = issues.last().at(1).toString();
@@ -294,7 +305,9 @@ private slots:
             && states.last().first().toJsonObject().value("streamId") == grant.value("streamId"), 4000);
         QVERIFY(issues.isEmpty());
         QVERIFY(!viewer.isRemoteScreenAvailable(target.endpointId()));
+        QVERIFY(viewer.isRemoteScreenLoading(target.endpointId()));
         QTRY_COMPARE_WITH_TIMEOUT(issues.count(), 1, 12000);
+        QVERIFY(!viewer.isRemoteScreenLoading(target.endpointId()));
         QVERIFY(issues.last().at(1).toString().contains(QStringLiteral("did not respond")));
         viewer.refresh();
         QCOMPARE(issues.count(), 1);
@@ -309,9 +322,11 @@ private slots:
         const auto packet = packets.first();
         QVERIFY(target.sendScreenFrame(header(grant, packet, 1), packet.annexB));
         QTRY_VERIFY_WITH_TIMEOUT(viewer.isRemoteScreenAvailable(target.endpointId()), 4000);
+        QVERIFY(!viewer.isRemoteScreenLoading(target.endpointId()));
         QCOMPARE(issues.count(), 1);
         QTRY_COMPARE_WITH_TIMEOUT(issues.count(), 2, 6500);
         QVERIFY(!viewer.isRemoteScreenAvailable(target.endpointId()));
+        QVERIFY(!viewer.isRemoteScreenLoading(target.endpointId()));
         QVERIFY(issues.last().at(1).toString().contains(QStringLiteral("stopped updating")));
         viewer.refresh();
         QCOMPARE(issues.count(), 2);
@@ -470,8 +485,10 @@ private slots:
         QVERIFY(grants.isEmpty());
         QVERIFY(!source->hasFrame());
         QVERIFY(!runtime.remoteScreenAvailable());
+        QVERIFY(!runtime.remoteScreenLoading());
 
         QVERIFY2(settings->setScreenContentVisible(true, &error), qPrintable(error));
+        QVERIFY(runtime.remoteScreenLoading());
         QTRY_VERIFY_WITH_TIMEOUT(!grants.isEmpty()
             && grants.last().first().toJsonObject().value("enabled").toBool(), 4000);
         const auto grant = grants.last().first().toJsonObject();
@@ -488,18 +505,22 @@ private slots:
         QTRY_VERIFY_WITH_TIMEOUT(source->hasFrame(), 4000);
         QCOMPARE(source->videoFrame().size(), image.size());
         QVERIFY(runtime.remoteScreenAvailable());
+        QVERIFY(!runtime.remoteScreenLoading());
         QCOMPARE(screenToasts(), 0);
         QVERIFY(target.sendScreenShareStatus(session,
             quint64(grant.value("generation").toDouble()), QStringLiteral("permission_denied")));
         QTRY_COMPARE_WITH_TIMEOUT(screenToasts(), 1, 4000);
         QVERIFY(!source->hasFrame());
         QVERIFY(!runtime.remoteScreenAvailable());
+        QVERIFY(!runtime.remoteScreenLoading());
         owner->screenShareStateReceived(states.last().first().toJsonObject());
         QCOMPARE(screenToasts(), 1);
         QVERIFY(target.sendScreenShareStatus(session,
             quint64(grant.value("generation").toDouble()), QStringLiteral("starting")));
         QTRY_VERIFY_WITH_TIMEOUT(states.last().first().toJsonObject().value("reason")
                                 == QLatin1String("starting"), 4000);
+        QVERIFY(runtime.remoteScreenLoading());
+        QCOMPARE(screenToasts(), 1); // Loading never generates a toast.
         QVERIFY(target.sendScreenFrame(header(grant, packet, 2), packet.annexB));
         QTRY_VERIFY_WITH_TIMEOUT(source->hasFrame(), 4000);
         QVERIFY(runtime.remoteScreenAvailable());
@@ -508,6 +529,7 @@ private slots:
         QVERIFY2(settings->setScreenContentVisible(false, &error), qPrintable(error));
         QVERIFY(!source->hasFrame());
         QVERIFY(!runtime.remoteScreenAvailable());
+        QVERIFY(!runtime.remoteScreenLoading());
         QTRY_VERIFY_WITH_TIMEOUT(!grants.last().first().toJsonObject().value("enabled").toBool(), 4000);
         QVERIFY(!target.sendScreenFrame(header(grant, packet, 2), packet.annexB));
         QVERIFY(owner->canIssueSessionCommands(session));

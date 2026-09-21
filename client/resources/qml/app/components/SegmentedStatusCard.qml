@@ -36,10 +36,14 @@ Item {
     property bool screenStatusVisible: false
     property bool screenContentEnabled: true
     property bool screenAvailable: false
+    property bool screenLoading: false
     readonly property string screenStatusText: !screenContentEnabled ? "Screen disabled"
-        : screenAvailable ? "Screen available" : "Screen not available"
-    readonly property color screenStatusColor: screenContentEnabled && screenAvailable
-        ? Theme.connectedText : Theme.mutedText
+        : screenLoading ? "Screen loading" : screenAvailable ? "Screen available" : "Screen not available"
+    readonly property int screenStatusKind: !screenContentEnabled ? SegmentedStatusCard.Error
+        : screenLoading ? SegmentedStatusCard.Warning
+        : screenAvailable ? SegmentedStatusCard.Connected : SegmentedStatusCard.Error
+    readonly property color screenStatusColor: foregroundForStatus(screenStatusKind)
+    readonly property color screenStatusBackground: backgroundForStatus(screenStatusKind)
     property bool busy: false
     property bool profilePictureVisible: false
     property url profilePictureSource: ""
@@ -58,18 +62,16 @@ Item {
     readonly property real busyWidth: busy ? Theme.controlHeight + Theme.segmentPadding : 0
     readonly property bool availableStatus: statusText.trim().toUpperCase() === "AVAILABLE"
 
-    readonly property color statusForeground: availableStatus
-                                               ? Theme.availableText
-                                               : statusKind === SegmentedStatusCard.Connected
-                                               ? Theme.connectedText
-                                               : statusKind === SegmentedStatusCard.Warning
-                                                 ? Theme.warningText : Theme.errorText
-    readonly property color statusBackground: availableStatus
-                                               ? Theme.buttonBackground
-                                               : statusKind === SegmentedStatusCard.Connected
-                                               ? Theme.connectedBackground
-                                               : statusKind === SegmentedStatusCard.Warning
-                                                 ? Theme.warningBackground : Theme.errorBackground
+    function foregroundForStatus(kind) {
+        return kind === SegmentedStatusCard.Connected ? Theme.connectedText
+            : kind === SegmentedStatusCard.Warning ? Theme.warningText : Theme.errorText
+    }
+    function backgroundForStatus(kind) {
+        return kind === SegmentedStatusCard.Connected ? Theme.connectedBackground
+            : kind === SegmentedStatusCard.Warning ? Theme.warningBackground : Theme.errorBackground
+    }
+    readonly property color statusForeground: availableStatus ? Theme.availableText : foregroundForStatus(statusKind)
+    readonly property color statusBackground: availableStatus ? Theme.buttonBackground : backgroundForStatus(statusKind)
 
     ConnectionStatusMetrics {
         id: statusMetrics
@@ -88,7 +90,7 @@ Item {
     StateTextMetrics {
         id: screenStatusMetrics
         text: root.screenStatusText
-        textVariants: ["Screen available", "Screen not available", "Screen disabled"]
+        textVariants: ["Screen available", "Screen not available", "Screen disabled", "Screen loading"]
         font: screenStatusLabel.font
     }
 
@@ -114,6 +116,7 @@ Item {
 
             Text {
                 id: statusLabel
+                objectName: "connectionStatusLabel"
                 anchors.fill: parent
                 anchors.leftMargin: Theme.segmentPadding
                 anchors.rightMargin: Theme.segmentPadding
@@ -186,7 +189,9 @@ Item {
             visible: root.screenStatusVisible
             height: root.height
             width: root.screenStatusWidth
-            color: "transparent"
+            color: root.screenStatusBackground
+            topRightRadius: root.auxiliaryVisible || root.busy ? 0 : Theme.controlRadius
+            bottomRightRadius: topRightRadius
             Accessible.role: Accessible.StaticText
             Accessible.name: root.screenStatusText
 
@@ -198,7 +203,7 @@ Item {
                 anchors.verticalCenter: parent.verticalCenter
                 width: 16
                 height: 16
-                source: root.screenContentEnabled && root.screenAvailable
+                source: root.screenContentEnabled && (root.screenAvailable || root.screenLoading)
                     ? "qrc:/icons/icons/screen.svg" : "qrc:/icons/icons/screen-off.svg"
                 sourceSize: Qt.size(width * 4, height * 4)
                 fillMode: Image.PreserveAspectFit
@@ -221,8 +226,7 @@ Item {
                 height: parent.height
                 text: root.screenStatusText
                 color: root.screenStatusColor
-                font.pixelSize: Theme.controlFontSize
-                font.bold: true
+                font: statusLabel.font
                 verticalAlignment: Text.AlignVCenter
                 horizontalAlignment: Text.AlignHCenter
             }

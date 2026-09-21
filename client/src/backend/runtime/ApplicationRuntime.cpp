@@ -433,7 +433,7 @@ ApplicationRuntime::ApplicationRuntime(const RuntimeProfileContext& runtimeProfi
             [this](const QString& endpoint) {
         if (auto* canvas = canvasForEndpointId(endpoint)) canvas->clearRemoteScreenFrames();
     });
-    connect(m_screenSharing, &ScreenSharingService::remoteAvailabilityChanged,
+    connect(m_screenSharing, &ScreenSharingService::remoteStateChanged,
             this, &ApplicationRuntime::presentationStateChanged);
     connect(m_screenSharing, &ScreenSharingService::remoteIssue, this,
             [this](const QString& endpoint, const QString& message) {
@@ -4217,6 +4217,11 @@ QString ApplicationRuntime::screenSharingStatus() const
 bool ApplicationRuntime::remoteScreenAvailable() const
 {
     return m_screenSharing && m_screenSharing->isRemoteScreenAvailable(m_activeWorkspaceEndpointId);
+}
+
+bool ApplicationRuntime::remoteScreenLoading() const
+{
+    return m_screenSharing && m_screenSharing->isRemoteScreenLoading(m_activeWorkspaceEndpointId);
 }
 
 void ApplicationRuntime::refreshScreenSharing()
