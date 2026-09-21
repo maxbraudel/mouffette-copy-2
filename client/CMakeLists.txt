@@ -711,6 +711,23 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME ScreenStreamCodec COMMAND tst_ScreenStreamCodec)
 
+    if(APPLE)
+        # Compile the native implementation inside this test to exercise its
+        # asynchronous lifecycle with a fake stream, without desktop access.
+        add_executable(tst_MacScreenCaptureLifecycle
+            tests/qt/tst_MacScreenCaptureLifecycle.mm)
+        set_source_files_properties(tests/qt/tst_MacScreenCaptureLifecycle.mm
+            PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+        target_include_directories(tst_MacScreenCaptureLifecycle PRIVATE src)
+        target_link_libraries(tst_MacScreenCaptureLifecycle PRIVATE
+            Qt6::Core Qt6::Gui Qt6::Multimedia Qt6::Test PkgConfig::FFMPEG
+            "-framework ScreenCaptureKit" "-framework CoreVideo"
+            "-framework CoreMedia" "-framework CoreGraphics" "-framework AppKit")
+        add_test(NAME MacScreenCaptureLifecycle COMMAND tst_MacScreenCaptureLifecycle)
+        set_tests_properties(MacScreenCaptureLifecycle PROPERTIES TIMEOUT 30
+            ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+    endif()
+
     add_executable(tst_WindowPresentation
         tests/qt/tst_WindowPresentation.cpp
         src/frontend/qml/WindowPresentation.cpp

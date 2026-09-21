@@ -133,6 +133,16 @@ Older targets have no consent and do not publish a stream.
 
 ## Validation
 
+The macOS stop callback retains its capture state by value until native stop
+completion and the subsequent main-queue cleanup finish. Capturing the helper's
+C++ reference parameter previously left that cleanup with a dangling reference,
+causing `EXC_BAD_ACCESS` in `objc_storeStrong` at `MacScreenCapture.mm` when a
+session stopped or was replaced. `MacScreenCaptureLifecycle` exercises this
+deferred lifecycle with a fake native stream and checks resource release without
+requesting screen-recording access. Objective-C blocks preserve C++ references
+instead of copying the referred object; see the
+[Clang Blocks specification](https://clang.llvm.org/docs/BlockLanguageSpec.html#c-extensions).
+
 Automated coverage includes codec dimensions, color planes, native encoder
 selection, orientation, self-contained keyframes, frame lifetime, malformed
 packets, default-off settings, atomic Save/Cancel, per-profile persistence,

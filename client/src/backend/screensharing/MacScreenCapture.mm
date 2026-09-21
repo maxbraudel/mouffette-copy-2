@@ -110,7 +110,10 @@ void reportNativeError(const std::shared_ptr<NativeState>& state, NSError* error
 
 // Main queue only. A revoked session that is still starting is stopped by its
 // start completion; calling stop prematurely can otherwise leave it running.
-void stopSession(const std::shared_ptr<NativeState>& state) {
+// Pass ownership by value: Objective-C blocks preserve C++ reference captures,
+// so a reference parameter would outlive the caller's shared_ptr without
+// retaining NativeState through both asynchronous completion blocks.
+void stopSession(const std::shared_ptr<NativeState> state) {
     if (!state->stream || state->starting || state->stopping) return;
     if (!state->started) { state->stream = nil; state->delegate = nil; state->outputQueue = nil; return; }
     state->stopping = true;
