@@ -170,6 +170,20 @@ Rectangle {
         // clips intersecting the two-dimensional viewport.
         active: clipItem.contentReady && clipItem.inViewport
             && !!clipItem.modelData.thumbnailOwnerId && clipItem.width > 4
+        opacity: 0
+        states: State {
+            name: "revealed"
+            when: clipItem.hasThumbnails
+            PropertyChanges { target: thumbnailLoader; opacity: 1 }
+        }
+        transitions: Transition {
+            to: "revealed"
+            NumberAnimation {
+                property: "opacity"
+                duration: UiTiming.contentFadeDurationMs
+                easing.type: Easing.InOutSine
+            }
+        }
         sourceComponent: TimelineThumbnailItem {
             objectName: "timelineThumbnails"
             ownerId: clipItem.modelData.thumbnailOwnerId
@@ -183,7 +197,7 @@ Rectangle {
         anchors.fill: thumbnailLoader
         visible: clipItem.hasThumbnails
         color: clipItem.selected ? Theme.controlSelectionBackground : "black"
-        opacity: clipItem.selected ? 0.22 : 0.1
+        opacity: thumbnailLoader.opacity * (clipItem.selected ? 0.22 : 0.1)
     }
     HoldRegion {
         objectName: "timelineClipLeadingHold"

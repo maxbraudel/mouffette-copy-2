@@ -164,7 +164,9 @@ FocusScope {
             * Math.max(0, Math.min(50, elapsedMs)) / 1000
         var point = clipViewport.mapFromItem(root, drag.pointerPanelX, drag.pointerPanelY)
         var viewportPoint = trackViewport.mapFromItem(root, drag.pointerPanelX, drag.pointerPanelY)
-        var dy = point.y < 22 ? -step : point.y > clipViewport.height - 22 ? step : 0
+        // Only moving clips can change tracks; trimming stays on the same track.
+        var dy = drag.editEdge === 0
+            ? (point.y < 22 ? -step : point.y > clipViewport.height - 22 ? step : 0) : 0
         var dx = viewportPoint.x < 22 ? -step : viewportPoint.x > trackViewport.width - 22 ? step : 0
         if (dy !== 0) scrollTracks(dy)
         if (dx !== 0) scrollTo(trackViewport.contentX + dx)
