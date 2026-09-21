@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QObject>
+#include <QJsonArray>
 #include <QVideoFrame>
 #include <memory>
 
@@ -17,6 +18,7 @@ public:
     ~ScreenSharingService() override;
     void setSharingEnabled(bool enabled);
     void setViewedEndpoint(const QString& endpoint);
+    void setViewedScreens(const QJsonArray& screens);
     void setSuspended(bool suspended);
     void refresh();
     void stop();
@@ -27,6 +29,7 @@ public:
 signals:
     void statusChanged();
     void frameReady(const QString& endpoint, int screenId, const QVideoFrame& frame);
+    void frameCleared(const QString& endpoint, int screenId);
     void framesCleared(const QString& endpoint);
     void remoteStateChanged(const QString& endpoint);
     void remoteIssue(const QString& endpoint, const QString& message);

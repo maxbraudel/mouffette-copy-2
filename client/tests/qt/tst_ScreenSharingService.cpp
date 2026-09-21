@@ -1,5 +1,6 @@
 #include "backend/screensharing/ScreenSharingService.h"
 #include "backend/screensharing/ScreenStreamCodec.h"
+#include "backend/config/AppConfig.h"
 #include "backend/domain/project/ProjectManager.h"
 #include "backend/managers/app/SettingsManager.h"
 #include "backend/managers/network/ConnectionManager.h"
@@ -16,12 +17,16 @@
 #include <QFile>
 #include <QFutureWatcher>
 #include <QImage>
+#include <QJsonDocument>
 #include <QProcess>
 #include <QRegularExpression>
 #include <QScopeGuard>
 #include <QSignalSpy>
 #include <QStandardPaths>
 #include <QTemporaryDir>
+#include <QTimer>
+#include <QUrlQuery>
+#include <QUuid>
 #include <QtTest>
 
 // Exercise the production control/video relay and decoder without capturing
@@ -33,10 +38,11 @@ private:
     QByteArray m_output;
     QString m_url;
 
-    void configure(WebSocketClient& peer, const QString& name) {
-        const auto advertise = [&peer, name] {
+    void configure(WebSocketClient& peer, const QString& name,
+                   const QList<ScreenInfo>& screens = {ScreenInfo(0, 640, 360, 0, 0, true)}) {
+        const auto advertise = [&peer, name, screens] {
             peer.registerClient(name, QStringLiteral("screen-sharing-test"),
-                                {ScreenInfo(0, 640, 360, 0, 0, true)}, 50);
+                                screens, 50);
         };
         connect(&peer, &WebSocketClient::connected, &peer, advertise);
         connect(&peer, &WebSocketClient::localDeviceSnapshotRequested, &peer, advertise);
@@ -48,9 +54,10 @@ private:
         });
     }
 
-    void connectPeers(WebSocketClient& owner, WebSocketClient& target, QString* session) {
+    void connectPeers(WebSocketClient& owner, WebSocketClient& target, QString* session,
+                      const QList<ScreenInfo>& targetScreens = {ScreenInfo(0, 640, 360, 0, 0, true)}) {
         configure(owner, QStringLiteral("viewer"));
-        configure(target, QStringLiteral("publisher"));
+        configure(target, QStringLiteral("publisher"), targetScreens);
         QSignalSpy registrations(&target, &WebSocketClient::registrationConfirmed);
         QSignalSpy opened(&owner, &WebSocketClient::remoteSessionOpened);
         owner.connectToServer(m_url);
@@ -75,6 +82,21 @@ private:
 
     static SystemMonitor::ScreenProvider emptyDesktop() {
         return [](bool* valid) { *valid = true; return QList<LocalScreenTopology::Screen>{}; };
+    }
+
+    static QWebSocket* videoSocket(WebSocketClient& peer) {
+        for (auto* socket : peer.findChildren<QWebSocket*>())
+            if (QUrlQuery(socket->requestUrl()).queryItemValue(QStringLiteral("channel"))
+                == QLatin1String("screen")) return socket;
+        return nullptr;
+    }
+
+    static QJsonObject authenticatedVideoMessage(const WebSocketClient& peer, QJsonObject message) {
+        message.insert("protocolVersion", WebSocketClient::ProtocolVersion);
+        message.insert("serverBootId", peer.serverBootId());
+        message.insert("messageId", QUuid::createUuid().toString(QUuid::WithoutBraces));
+        message.insert("connectionGeneration", double(peer.connectionGeneration()));
+        return message;
     }
 
 private slots:
@@ -223,6 +245,10 @@ private slots:
         connectPeers(owner, target, &session);
         QVERIFY(!session.isEmpty());
         target.setScreenSharingEnabled(true);
+        // Consent and subscribe use different clients' control sockets. Wait
+        // for the publisher handshake (issued after its consent on the same
+        // ordered socket) before asserting a warning-free viewer handshake.
+        QTRY_VERIFY_WITH_TIMEOUT(target.isScreenChannelConnected(), 4000);
         viewer.setViewedEndpoint(target.endpointId());
         QTRY_VERIFY_WITH_TIMEOUT(!grants.isEmpty()
             && grants.last().first().toJsonObject().value("enabled").toBool(), 4000);
@@ -297,6 +323,7 @@ private slots:
         QString session;
         connectPeers(owner, target, &session);
         target.setScreenSharingEnabled(true);
+        QTRY_VERIFY_WITH_TIMEOUT(target.isScreenChannelConnected(), 4000);
         viewer.setViewedEndpoint(target.endpointId());
         QTRY_VERIFY_WITH_TIMEOUT(!grants.isEmpty()
             && grants.last().first().toJsonObject().value("enabled").toBool(), 4000);
@@ -306,7 +333,7 @@ private slots:
         QVERIFY(issues.isEmpty());
         QVERIFY(!viewer.isRemoteScreenAvailable(target.endpointId()));
         QVERIFY(viewer.isRemoteScreenLoading(target.endpointId()));
-        QTRY_COMPARE_WITH_TIMEOUT(issues.count(), 1, 12000);
+        QTRY_COMPARE_WITH_TIMEOUT(issues.count(), 1, AppConfig::instance().screenFirstFrameTimeoutMs() + 2000);
         QVERIFY(!viewer.isRemoteScreenLoading(target.endpointId()));
         QVERIFY(issues.last().at(1).toString().contains(QStringLiteral("did not respond")));
         viewer.refresh();
@@ -324,7 +351,7 @@ private slots:
         QTRY_VERIFY_WITH_TIMEOUT(viewer.isRemoteScreenAvailable(target.endpointId()), 4000);
         QVERIFY(!viewer.isRemoteScreenLoading(target.endpointId()));
         QCOMPARE(issues.count(), 1);
-        QTRY_COMPARE_WITH_TIMEOUT(issues.count(), 2, 6500);
+        QTRY_COMPARE_WITH_TIMEOUT(issues.count(), 2, AppConfig::instance().screenStaleTimeoutMs() + 2000);
         QVERIFY(!viewer.isRemoteScreenAvailable(target.endpointId()));
         QVERIFY(!viewer.isRemoteScreenLoading(target.endpointId()));
         QVERIFY(issues.last().at(1).toString().contains(QStringLiteral("stopped updating")));
@@ -364,6 +391,7 @@ private slots:
         connectPeers(owner, target, &session);
         QVERIFY(!session.isEmpty());
         target.setScreenSharingEnabled(true);
+        QTRY_VERIFY_WITH_TIMEOUT(target.isScreenChannelConnected(), 4000);
         viewer.setViewedEndpoint(target.endpointId());
         QTRY_VERIFY_WITH_TIMEOUT(!grants.isEmpty()
             && grants.last().first().toJsonObject().value("enabled").toBool(), 4000);
@@ -384,8 +412,8 @@ private slots:
         QVERIFY2(error.isEmpty(), qPrintable(error));
         QCOMPARE(delta.size(), 1);
         QVERIFY(!delta.first().keyFrame);
-        // The relay deliberately debounces keyframe requests for 250 ms.
-        QTest::qWait(300);
+        // The relay deliberately debounces recovery requests for one second.
+        QTest::qWait(1100);
         QSignalSpy keyRequests(&target, &WebSocketClient::screenShareKeyFrameRequested);
         // Exercise the service queue's own discontinuity fence, after the wire
         // validation covered above. P-frames must not use a broken reference.
@@ -411,6 +439,158 @@ private slots:
         owner.screenFrameReceived(header(grant, recovery.first(), 41), recovery.first().annexB);
         QTRY_COMPARE_WITH_TIMEOUT(frames.count(), 3, 4000);
         viewer.stop();
+        owner.disconnect();
+        target.disconnect();
+    }
+
+    void viewportRemovalAndReadditionPreserveSessionAndFenceDecoding() {
+        QTemporaryDir identities;
+        WebSocketClient owner(identities.filePath(QStringLiteral("owner")), false);
+        WebSocketClient target(identities.filePath(QStringLiteral("target")), false);
+        SystemMonitor monitor(nullptr, emptyDesktop());
+        ScreenSharingService viewer(&owner, &monitor);
+        QSignalSpy frames(&viewer, &ScreenSharingService::frameReady);
+        QSignalSpy cleared(&viewer, &ScreenSharingService::frameCleared);
+        QSignalSpy issues(&viewer, &ScreenSharingService::remoteIssue);
+        QSignalSpy grants(&target, &WebSocketClient::screenShareRequestReceived);
+        QSignalSpy states(&owner, &WebSocketClient::screenShareStateReceived);
+        QSignalSpy sourceSamples(&target, &WebSocketClient::screenSourceFeedback);
+        QString session;
+        connectPeers(owner, target, &session);
+        target.setScreenSharingEnabled(true);
+        QTRY_VERIFY_WITH_TIMEOUT(target.isScreenChannelConnected(), 4000);
+        viewer.setViewedEndpoint(target.endpointId());
+        const QJsonArray demand{QJsonObject{{"screenId", 0}, {"maximumEdge", 640}}};
+        viewer.setViewedScreens(demand);
+        QTRY_VERIFY_WITH_TIMEOUT(!grants.isEmpty()
+            && grants.last().first().toJsonObject().value("enabled").toBool()
+            && grants.last().first().toJsonObject().value("screens").toArray() == demand, 4000);
+        const auto grant = grants.last().first().toJsonObject();
+        const auto generation = quint64(grant.value("generation").toDouble());
+        QTRY_VERIFY_WITH_TIMEOUT(!states.isEmpty()
+            && states.last().first().toJsonObject().value("streamId") == grant.value("streamId"), 4000);
+        QImage image(640, 360, QImage::Format_RGBA8888);
+        image.fill(Qt::cyan);
+        ScreenStreamEncoder encoder(false);
+        QString error;
+        const auto packets = encoder.encode(QVideoFrame(image), true, error);
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QCOMPARE(packets.size(), 1);
+        const auto packet = packets.first();
+        QVERIFY(target.sendScreenFrame(header(grant, packet, 1), packet.annexB));
+        QTRY_COMPARE_WITH_TIMEOUT(frames.count(), 1, 4000);
+
+        // Remove the display while its second decode is in flight. The old
+        // completion cannot put its pixels back into the now-hidden canvas.
+        owner.screenFrameReceived(header(grant, packet, 2), packet.annexB);
+        viewer.setViewedScreens({});
+        QCOMPARE(cleared.count(), 1);
+        QCOMPARE(cleared.first().at(1).toInt(), 0);
+        QTRY_VERIFY_WITH_TIMEOUT(viewer.findChildren<QFutureWatcherBase*>().isEmpty(), 4000);
+        QTRY_VERIFY_WITH_TIMEOUT(grants.last().first().toJsonObject().value("screens").toArray().isEmpty()
+            && states.last().first().toJsonObject().value("screens").toArray().isEmpty(), 4000);
+        QCOMPARE(grants.last().first().toJsonObject().value("streamId"), grant.value("streamId"));
+        QVERIFY(grants.last().first().toJsonObject().value("enabled").toBool());
+        QCOMPARE(frames.count(), 1);
+        QVERIFY(!viewer.isRemoteScreenAvailable(target.endpointId()));
+        QVERIFY(!viewer.isRemoteScreenLoading(target.endpointId()));
+        QVERIFY(issues.isEmpty());
+
+        // A packet already in the publisher's video queue is consumed/ACKed
+        // by the relay, but it must not be forwarded after viewport removal.
+        const int previousSamples = sourceSamples.count();
+        QVERIFY(target.sendScreenFrame(header(grant, packet, 2), packet.annexB));
+        QTRY_VERIFY_WITH_TIMEOUT(sourceSamples.count() > previousSamples, 4000);
+        QCOMPARE(frames.count(), 1);
+        QVERIFY(owner.canIssueSessionCommands(session));
+        QVERIFY(target.canIssueSessionCommands(session));
+
+        const QJsonArray smallerDemand{QJsonObject{{"screenId", 0}, {"maximumEdge", 320}}};
+        viewer.setViewedScreens(smallerDemand);
+        QTRY_VERIFY_WITH_TIMEOUT(grants.last().first().toJsonObject().value("screens").toArray() == smallerDemand
+            && states.last().first().toJsonObject().value("screens").toArray() == smallerDemand, 4000);
+        QCOMPARE(grants.last().first().toJsonObject().value("streamId"), grant.value("streamId"));
+        QVERIFY(viewer.isRemoteScreenLoading(target.endpointId()));
+        // The previous encode remains valid during a demand resize; the
+        // negotiated decoder capability is a separate, larger bound.
+        QVERIFY(target.sendScreenFrame(header(grant, packet, 3), packet.annexB));
+        QTRY_COMPARE_WITH_TIMEOUT(frames.count(), 2, 4000);
+        QVERIFY(viewer.isRemoteScreenAvailable(target.endpointId()));
+        QVERIFY(issues.isEmpty());
+        QCOMPARE(owner.remoteSessionCoordinator()->byId(session).generation, generation);
+        viewer.stop();
+        owner.disconnect();
+        target.disconnect();
+    }
+
+    void feedbackUsesExactReceiptsAndLeavesCommandsResponsive() {
+        QTemporaryDir identities;
+        WebSocketClient owner(identities.filePath(QStringLiteral("owner")), false);
+        WebSocketClient target(identities.filePath(QStringLiteral("target")), false);
+        QString session;
+        connectPeers(owner, target, &session);
+        const auto generation = owner.remoteSessionCoordinator()->byId(session).generation;
+        QSignalSpy grants(&target, &WebSocketClient::screenShareRequestReceived);
+        QSignalSpy states(&owner, &WebSocketClient::screenShareStateReceived);
+        QSignalSpy frames(&owner, &WebSocketClient::screenFrameReceived);
+        QSignalSpy sourceSamples(&target, &WebSocketClient::screenSourceFeedback);
+        QSignalSpy downstreamSamples(&target, &WebSocketClient::screenShareFeedbackReceived);
+        QSignalSpy cursor(&owner, &WebSocketClient::remoteCursorReceived);
+        QSignalSpy channelLost(&target, &WebSocketClient::screenChannelUnavailable);
+        QSignalSpy disconnected(&target, &WebSocketClient::disconnected);
+        target.setScreenSharingEnabled(true);
+        QVERIFY(owner.setScreenShareSubscription(session, generation, true,
+            QJsonArray{QJsonObject{{"screenId", 0}, {"maximumEdge", 640}}}));
+        QTRY_VERIFY_WITH_TIMEOUT(!grants.isEmpty()
+            && grants.last().first().toJsonObject().value("enabled").toBool(), 4000);
+        const auto grant = grants.last().first().toJsonObject();
+        QTRY_VERIFY_WITH_TIMEOUT(!states.isEmpty()
+            && states.last().first().toJsonObject().value("streamId") == grant.value("streamId"), 4000);
+        QImage image(640, 360, QImage::Format_RGBA8888);
+        image.fill(Qt::yellow);
+        ScreenStreamEncoder encoder(false);
+        QString error;
+        const auto packets = encoder.encode(QVideoFrame(image), true, error);
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QCOMPARE(packets.size(), 1);
+        const auto packet = packets.first();
+        QVERIFY(target.sendScreenFrame(header(grant, packet, 1), packet.annexB));
+        QTRY_COMPARE_WITH_TIMEOUT(frames.count(), 1, 4000);
+        QTRY_COMPARE_WITH_TIMEOUT(sourceSamples.count(), 1, 4000);
+        QTRY_VERIFY_WITH_TIMEOUT(!downstreamSamples.isEmpty(), 4000);
+        QVERIFY(sourceSamples.first().at(0).toInt() >= 0);
+        QVERIFY(!sourceSamples.first().at(1).toBool());
+        QCOMPARE(downstreamSamples.first().first().toJsonObject().value("streamId"), grant.value("streamId"));
+
+        // Exercise wire parsing at the QWebSocket delivery boundary: forged
+        // and duplicate ACK tuples do not create capacity/RTT samples.
+        auto* socket = videoSocket(target);
+        QVERIFY(socket);
+        for (const int sequence : {999, 1}) {
+            const auto ack = authenticatedVideoMessage(target, {{"type", "screen_frame_ack"},
+                {"streamId", grant.value("streamId")}, {"screenId", 0}, {"sequence", sequence}});
+            socket->textMessageReceived(QString::fromUtf8(QJsonDocument(ack).toJson(QJsonDocument::Compact)));
+        }
+        QCOMPARE(sourceSamples.count(), 1);
+        const int reports = downstreamSamples.count();
+        auto stale = downstreamSamples.first().first().toJsonObject();
+        stale.insert("streamId", QUuid::createUuid().toString(QUuid::WithoutBraces));
+        socket->textMessageReceived(QString::fromUtf8(QJsonDocument(stale).toJson(QJsonDocument::Compact)));
+        QCOMPARE(downstreamSamples.count(), reports);
+
+        QVERIFY(owner.sendScreenViewFeedback(session, generation, 0, 250, 2));
+        for (int i = 0; i < 100; ++i)
+            QVERIFY(!owner.sendScreenViewFeedback(session, generation, 0, 250, 2));
+        QVERIFY(target.sendRemoteCursor(session, generation, 1, true, 0, QPointF(12, 34)));
+        QTRY_COMPARE_WITH_TIMEOUT(cursor.count(), 1, 4000);
+        QTRY_VERIFY_WITH_TIMEOUT(downstreamSamples.last().first().toJsonObject().value("congested").toBool(), 4000);
+        QVERIFY(owner.canIssueSessionCommands(session));
+        QVERIFY(target.canIssueSessionCommands(session));
+        QVERIFY(owner.isScreenChannelConnected());
+        QVERIFY(target.isScreenChannelConnected());
+        QVERIFY(channelLost.isEmpty());
+        QVERIFY(disconnected.isEmpty());
+        QVERIFY(owner.setScreenShareSubscription(session, generation, false));
         owner.disconnect();
         target.disconnect();
     }
@@ -559,6 +739,175 @@ private slots:
         QVERIFY(runtime.remoteScreenAvailable());
         QCOMPARE(screenToasts(), 1);
         runtime.handleApplicationAboutToQuit();
+        target.disconnect();
+    }
+    void captureFailureIsIsolatedToOneScreenAndRecoversIndependently() {
+        QTemporaryDir identities;
+        WebSocketClient owner(identities.filePath(QStringLiteral("owner")), false);
+        WebSocketClient target(identities.filePath(QStringLiteral("target")), false);
+        SystemMonitor monitor(nullptr, emptyDesktop());
+        ScreenSharingService viewer(&owner, &monitor);
+        QSignalSpy frames(&viewer, &ScreenSharingService::frameReady);
+        QSignalSpy screenCleared(&viewer, &ScreenSharingService::frameCleared);
+        QSignalSpy allCleared(&viewer, &ScreenSharingService::framesCleared);
+        QSignalSpy grants(&target, &WebSocketClient::screenShareRequestReceived);
+        QSignalSpy states(&owner, &WebSocketClient::screenShareStateReceived);
+        QString session;
+        connectPeers(owner, target, &session,
+            {ScreenInfo(0, 640, 360, 0, 0, true), ScreenInfo(1, 640, 360, 640, 0, false)});
+        QVERIFY(!session.isEmpty());
+        target.setScreenSharingEnabled(true);
+        QTRY_VERIFY_WITH_TIMEOUT(target.isScreenChannelConnected(), 4000);
+        viewer.setViewedEndpoint(target.endpointId());
+        QTRY_VERIFY_WITH_TIMEOUT(!grants.isEmpty()
+            && grants.last().first().toJsonObject().value("enabled").toBool(), 4000);
+        const auto grant = grants.last().first().toJsonObject();
+        const auto generation = quint64(grant.value("generation").toDouble());
+        QTRY_VERIFY_WITH_TIMEOUT(!states.isEmpty()
+            && states.last().first().toJsonObject().value("streamId") == grant.value("streamId"), 4000);
+
+        QImage image(640, 360, QImage::Format_RGBA8888);
+        image.fill(Qt::green);
+        ScreenStreamEncoder encoder(false);
+        QString error;
+        const auto packets = encoder.encode(QVideoFrame(image), true, error);
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QCOMPARE(packets.size(), 1);
+        const auto packet = packets.first();
+        const auto metadata = [&](int screen, quint64 sequence) {
+            auto value = header(grant, packet, sequence);
+            value.insert(QStringLiteral("screenId"), screen);
+            return value;
+        };
+        const auto frameCount = [&](int screen) {
+            int count = 0;
+            for (const auto& arguments : frames)
+                if (arguments.at(1).toInt() == screen) ++count;
+            return count;
+        };
+        QVERIFY(target.sendScreenFrame(metadata(0, 1), packet.annexB));
+        QVERIFY(target.sendScreenFrame(metadata(1, 1), packet.annexB));
+        QTRY_COMPARE_WITH_TIMEOUT(frames.count(), 2, 4000);
+        QCOMPARE(frameCount(0), 1);
+        QCOMPARE(frameCount(1), 1);
+        QVERIFY(viewer.isRemoteScreenAvailable(target.endpointId()));
+        const int wholeCanvasClears = allCleared.count();
+
+        QVERIFY(target.sendScreenShareStatus(session, generation, QStringLiteral("capture_error"), 0));
+        QTRY_VERIFY_WITH_TIMEOUT(states.last().first().toJsonObject().value("reason") == QLatin1String("capture_error")
+            && states.last().first().toJsonObject().value("screenId").toInt(-1) == 0, 4000);
+        QTRY_COMPARE_WITH_TIMEOUT(screenCleared.count(), 1, 4000);
+        QCOMPARE(screenCleared.first().at(1).toInt(), 0);
+        QCOMPARE(allCleared.count(), wholeCanvasClears);
+        QVERIFY(viewer.isRemoteScreenAvailable(target.endpointId()));
+        QVERIFY(!viewer.isRemoteScreenLoading(target.endpointId()));
+
+        // An obsolete frame can still be in either the video connection or
+        // the decoder queue when the independent control failure arrives.
+        QVERIFY(target.sendScreenFrame(metadata(0, 2), packet.annexB));
+        owner.screenFrameReceived(metadata(0, 3), packet.annexB);
+        QVERIFY(target.sendScreenFrame(metadata(1, 2), packet.annexB));
+        QTRY_COMPARE_WITH_TIMEOUT(frameCount(1), 2, 4000);
+        QTRY_VERIFY_WITH_TIMEOUT(viewer.findChildren<QFutureWatcherBase*>().isEmpty(), 4000);
+        QCOMPARE(frameCount(0), 1);
+        QCOMPARE(allCleared.count(), wholeCanvasClears);
+        QVERIFY(viewer.isRemoteScreenAvailable(target.endpointId()));
+
+        QVERIFY(target.sendScreenShareStatus(session, generation, QStringLiteral("starting"), 0));
+        QTRY_VERIFY_WITH_TIMEOUT(states.last().first().toJsonObject().value("reason") == QLatin1String("starting")
+            && states.last().first().toJsonObject().value("screenId").toInt(-1) == 0, 4000);
+        QVERIFY(viewer.isRemoteScreenAvailable(target.endpointId()));
+        QVERIFY(target.sendScreenFrame(metadata(0, 3), packet.annexB));
+        QTRY_COMPARE_WITH_TIMEOUT(frameCount(0), 2, 4000);
+        QCOMPARE(frameCount(1), 2);
+        QCOMPARE(allCleared.count(), wholeCanvasClears);
+        QVERIFY(owner.canIssueSessionCommands(session));
+        QVERIFY(target.canIssueSessionCommands(session));
+        viewer.stop();
+        owner.disconnect();
+        target.disconnect();
+    }
+
+    void staleScreenDoesNotClearAnotherScreenThatKeepsUpdating() {
+        const AppConfig savedConfig = AppConfig::instance();
+        const auto restoreConfig = qScopeGuard([savedConfig] { AppConfig::instance() = savedConfig; });
+        AppConfig::LoadOptions options;
+        options.arguments = {QStringLiteral("tst_ScreenSharingService")};
+        options.defaultEnvFilePath = QString();
+        options.processEnvironment.insert(QStringLiteral("MOUFFETTE_SCREEN_STALE_TIMEOUT_MS"), QStringLiteral("2000"));
+        options.processEnvironment.insert(QStringLiteral("MOUFFETTE_SCREEN_IDLE_INTERVAL_MS"), QStringLiteral("500"));
+        options.processEnvironment.insert(QStringLiteral("MOUFFETTE_SCREEN_FEEDBACK_INTERVAL_MS"), QStringLiteral("100"));
+        QString error;
+        QVERIFY2(AppConfig::instance().load(options, &error), qPrintable(error));
+
+        QTemporaryDir identities;
+        WebSocketClient owner(identities.filePath(QStringLiteral("owner")), false);
+        WebSocketClient target(identities.filePath(QStringLiteral("target")), false);
+        SystemMonitor monitor(nullptr, emptyDesktop());
+        ScreenSharingService viewer(&owner, &monitor);
+        QSignalSpy frames(&viewer, &ScreenSharingService::frameReady);
+        QSignalSpy screenCleared(&viewer, &ScreenSharingService::frameCleared);
+        QSignalSpy allCleared(&viewer, &ScreenSharingService::framesCleared);
+        QSignalSpy grants(&target, &WebSocketClient::screenShareRequestReceived);
+        QSignalSpy states(&owner, &WebSocketClient::screenShareStateReceived);
+        QString session;
+        connectPeers(owner, target, &session,
+            {ScreenInfo(0, 640, 360, 0, 0, true), ScreenInfo(1, 640, 360, 640, 0, false)});
+        QVERIFY(!session.isEmpty());
+        target.setScreenSharingEnabled(true);
+        QTRY_VERIFY_WITH_TIMEOUT(target.isScreenChannelConnected(), 4000);
+        viewer.setViewedEndpoint(target.endpointId());
+        QTRY_VERIFY_WITH_TIMEOUT(!grants.isEmpty()
+            && grants.last().first().toJsonObject().value("enabled").toBool(), 4000);
+        const auto grant = grants.last().first().toJsonObject();
+        QTRY_VERIFY_WITH_TIMEOUT(!states.isEmpty()
+            && states.last().first().toJsonObject().value("streamId") == grant.value("streamId"), 4000);
+
+        QImage image(640, 360, QImage::Format_RGBA8888);
+        image.fill(Qt::blue);
+        ScreenStreamEncoder encoder(false);
+        const auto packets = encoder.encode(QVideoFrame(image), true, error);
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QCOMPARE(packets.size(), 1);
+        const auto packet = packets.first();
+        const auto metadata = [&](int screen, quint64 sequence) {
+            auto value = header(grant, packet, sequence);
+            value.insert(QStringLiteral("screenId"), screen);
+            return value;
+        };
+        const auto frameCount = [&](int screen) {
+            int count = 0;
+            for (const auto& arguments : frames)
+                if (arguments.at(1).toInt() == screen) ++count;
+            return count;
+        };
+        QVERIFY(target.sendScreenFrame(metadata(0, 1), packet.annexB));
+        QVERIFY(target.sendScreenFrame(metadata(1, 1), packet.annexB));
+        QTRY_COMPARE_WITH_TIMEOUT(frames.count(), 2, 4000);
+        const int wholeCanvasClears = allCleared.count();
+        quint64 sequence = 1;
+        bool sendFailed = false;
+        QTimer refreshHealthyScreen;
+        connect(&refreshHealthyScreen, &QTimer::timeout, &target, [&] {
+            sendFailed |= !target.sendScreenFrame(metadata(1, ++sequence), packet.annexB);
+        });
+        refreshHealthyScreen.start(200);
+        QTRY_VERIFY_WITH_TIMEOUT(!screenCleared.isEmpty(), 4000);
+        refreshHealthyScreen.stop();
+        QVERIFY(!sendFailed);
+        QCOMPARE(screenCleared.count(), 1);
+        QCOMPARE(screenCleared.first().at(1).toInt(), 0);
+        QCOMPARE(allCleared.count(), wholeCanvasClears);
+        QCOMPARE(frameCount(0), 1);
+        QVERIFY(frameCount(1) > 1);
+        QVERIFY(viewer.isRemoteScreenAvailable(target.endpointId()));
+
+        QVERIFY(target.sendScreenFrame(metadata(0, 2), packet.annexB));
+        QTRY_COMPARE_WITH_TIMEOUT(frameCount(0), 2, 4000);
+        QVERIFY(viewer.isRemoteScreenAvailable(target.endpointId()));
+        QCOMPARE(allCleared.count(), wholeCanvasClears);
+        viewer.stop();
+        owner.disconnect();
         target.disconnect();
     }
 };

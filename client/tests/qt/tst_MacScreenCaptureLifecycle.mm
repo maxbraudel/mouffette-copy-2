@@ -14,9 +14,15 @@ using StopCompletion = void (^)(NSError*);
 @public
     int stopCalls;
     StopCompletion completion;
+    StopCompletion updateCompletion;
+    int updateCalls;
+    int configuredWidth;
+    int configuredFps;
 }
 - (void)stopCaptureWithCompletionHandler:(StopCompletion)handler;
 - (void)completeStop;
+- (void)updateConfiguration:(SCStreamConfiguration*)config completionHandler:(StopCompletion)handler;
+- (void)completeUpdate;
 @end
 
 @implementation DeferredCaptureStream
@@ -27,6 +33,17 @@ using StopCompletion = void (^)(NSError*);
 - (void)completeStop {
     StopCompletion pending = completion;
     completion = nil;
+    if (pending) pending(nil);
+}
+- (void)updateConfiguration:(SCStreamConfiguration*)config completionHandler:(StopCompletion)handler {
+    ++updateCalls;
+    configuredWidth = int(config.width);
+    configuredFps = int(config.minimumFrameInterval.timescale / config.minimumFrameInterval.value);
+    updateCompletion = [handler copy];
+}
+- (void)completeUpdate {
+    StopCompletion pending = updateCompletion;
+    updateCompletion = nil;
     if (pending) pending(nil);
 }
 @end
@@ -55,6 +72,55 @@ std::shared_ptr<NativeState> session(DeferredCaptureStream* stream) {
 class MacScreenCaptureLifecycleTest final : public QObject {
     Q_OBJECT
 private slots:
+    void configurationChangesCoalesceAndKeepLatestProfile() {
+        @autoreleasepool {
+            DeferredCaptureStream* stream = [[DeferredCaptureStream alloc] init];
+            auto state = session(stream);
+            state->started = true;
+            state->appliedSize = QSize(1920, 1080);
+            state->appliedFps = 30;
+            state->desiredSize = QSize(1280, 720);
+            state->desiredFps = 15;
+            updateConfiguration(state);
+            QCOMPARE(stream->updateCalls, 1);
+            QCOMPARE(stream->configuredWidth, 1280);
+            QCOMPARE(stream->configuredFps, 15);
+            state->desiredSize = QSize(640, 360);
+            state->desiredFps = 10;
+            updateConfiguration(state);
+            QCOMPARE(stream->updateCalls, 1);
+            [stream completeUpdate];
+            QVERIFY(drainMainQueueUntil([stream] { return stream->updateCalls == 2; }));
+            QCOMPARE(stream->configuredWidth, 640);
+            QCOMPARE(stream->configuredFps, 10);
+            [stream completeUpdate];
+            QVERIFY(drainMainQueueUntil([&state] { return !state->updating; }));
+            QCOMPARE(state->appliedSize, QSize(640, 360));
+            QCOMPARE(state->appliedFps, 10);
+            updateConfiguration(state);
+            QCOMPARE(stream->updateCalls, 2);
+        }
+    }
+
+    void stoppedSessionCannotRestartFromConfigurationCompletion() {
+        @autoreleasepool {
+            DeferredCaptureStream* stream = [[DeferredCaptureStream alloc] init];
+            auto state = session(stream);
+            state->started = true;
+            state->desiredSize = QSize(1280, 720);
+            state->desiredFps = 15;
+            updateConfiguration(state);
+            const std::weak_ptr<NativeState> observed = state;
+            state->desiredSize = QSize(640, 360);
+            state->closed.store(true);
+            state.reset();
+            QVERIFY(!observed.expired());
+            [stream completeUpdate];
+            QVERIFY(drainMainQueueUntil([&observed] { return observed.expired(); }));
+            QCOMPARE(stream->updateCalls, 1);
+        }
+    }
+
     void deferredStopRetainsSessionThroughBothCallbacks() {
         @autoreleasepool {
             DeferredCaptureStream* stream = [[DeferredCaptureStream alloc] init];

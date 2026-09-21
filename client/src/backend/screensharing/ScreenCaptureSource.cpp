@@ -23,12 +23,25 @@ struct CaptureMailbox {
     QMutex mutex;
     QWaitCondition changed;
     QVideoFrame latest;
+    QSize expectedNativeSize;
     quint64 revision = 0;
     quint64 contentEpoch = 0;
+    ScreenStreamProfile profile;
     bool forceKeyFrame = true;
     bool deliveryPending = false;
+    bool backpressured = false;
     bool closed = false;
 };
+
+#ifdef Q_OS_MACOS
+QSize captureSize(QScreen* screen, int maximumEdge) {
+    QSize result(qRound(screen->geometry().width() * screen->devicePixelRatio()),
+                 qRound(screen->geometry().height() * screen->devicePixelRatio()));
+    if (result.width() > maximumEdge || result.height() > maximumEdge)
+        result.scale(maximumEdge, maximumEdge, Qt::KeepAspectRatio);
+    return QSize(std::max(2, result.width() & ~1), std::max(2, result.height() & ~1));
+}
+#endif
 
 // Neither QScreenCapture's high-refresh native delivery nor a blocked GUI can
 // accumulate queued raw frames or H.264 reference frames. The next encode is
@@ -45,12 +58,14 @@ public:
         quint64 encodedRevision = 0;
         quint64 encodedEpoch = 0;
         qint64 lastEncodeUs = -1000000;
+        qint64 lastKeyFrameUs = -30000000;
         const auto state = m_mailbox;
         while (true) {
             QVideoFrame frame;
             bool forceKeyFrame;
             qint64 timestamp;
             quint64 contentEpoch;
+            ScreenStreamProfile profile;
             {
                 QMutexLocker lock(&state->mutex);
                 while (true) {
@@ -58,27 +73,37 @@ public:
                     timestamp = clock.nsecsElapsed() / 1000;
                     const qint64 elapsed = timestamp - lastEncodeUs;
                     const bool changed = state->revision != encodedRevision || state->forceKeyFrame || encoder.hasDelayedKeyFrame();
-                    const qint64 interval = changed ? 1000000 / ScreenStreamEncoder::FramesPerSecond : 1000000;
-                    if (state->latest.isValid() && !state->deliveryPending && elapsed >= interval) break;
-                    const auto waitMs = !state->latest.isValid() || state->deliveryPending
+                    const qint64 interval = changed ? 1000000 / state->profile.framesPerSecond
+                                                   : qint64(state->profile.idleIntervalMs) * 1000;
+                    if (state->latest.isValid() && !state->deliveryPending && !state->backpressured && elapsed >= interval) break;
+                    const auto waitMs = !state->latest.isValid() || state->deliveryPending || state->backpressured
                         ? 1000ul : static_cast<unsigned long>(std::max<qint64>(1, (interval - elapsed + 999) / 1000));
                     state->changed.wait(&state->mutex, waitMs);
                 }
                 frame = state->latest;
                 contentEpoch = state->contentEpoch;
+                profile = state->profile;
                 encodedRevision = state->revision;
-                forceKeyFrame = state->forceKeyFrame;
-                state->forceKeyFrame = false;
+                forceKeyFrame = state->forceKeyFrame
+                    && (contentEpoch != encodedEpoch
+                        || timestamp - lastKeyFrameUs >= qint64(profile.minimumKeyFrameIntervalMs) * 1000);
+                if (forceKeyFrame) state->forceKeyFrame = false;
             }
+            QElapsedTimer encodingClock;
+            encodingClock.start();
             if (encodedEpoch != contentEpoch) {
                 encoder.reset(); forceKeyFrame = true; encodedEpoch = contentEpoch;
             }
+            encoder.setProfile(profile);
             // QVideoFrame is explicitly shared. Do not mutate the native sink's
             // timestamps: a separate presentation wrapper owns this metadata.
             frame = presentationFrame(std::move(frame), timestamp);
             lastEncodeUs = timestamp;
             QString error;
             auto packets = encoder.encode(std::move(frame), forceKeyFrame, error);
+            const int encodingMs = int(std::min<qint64>(60000, encodingClock.elapsed()));
+            for (const auto& packet : packets)
+                if (packet.keyFrame) lastKeyFrameUs = std::max(lastKeyFrameUs, packet.timestampUs);
             const auto backend = encoder.backendName();
             const bool backendChanged = backend != reportedBackend;
             if (backendChanged) reportedBackend = backend;
@@ -90,7 +115,7 @@ public:
                 state->deliveryPending = true;
             }
             QMetaObject::invokeMethod(m_owner, [owner = m_owner, state, packets = std::move(packets), error,
-                                               backend, backendChanged, contentEpoch]() {
+                                               backend, backendChanged, contentEpoch, encodingMs]() {
                 {
                     QMutexLocker lock(&state->mutex);
                     if (state->closed) return;
@@ -98,6 +123,7 @@ public:
                         state->deliveryPending = false; state->changed.wakeOne(); return;
                     }
                 }
+                emit owner->encodingMeasured(encodingMs);
                 if (backendChanged) emit owner->backendChanged(backend);
                 for (const auto& packet : packets) {
                     // A signal handler can disable sharing synchronously.
@@ -119,7 +145,7 @@ public:
                 }
                 if (!error.isEmpty()) {
                     owner->stop();
-                    emit owner->errorOccurred(ScreenCaptureError::CaptureFailed, error);
+                    emit owner->errorOccurred(ScreenCaptureError::EncodingFailed, error);
                     return;
                 }
                 QMutexLocker lock(&state->mutex);
@@ -181,6 +207,8 @@ struct ScreenCaptureSource::Private {
     std::unique_ptr<CaptureWorker> worker;
     QMetaObject::Connection frameConnection;
     QMetaObject::Connection screenConnection;
+    ScreenStreamProfile profile;
+    bool backpressured = false;
 };
 
 ScreenCaptureSource::ScreenCaptureSource(QObject* parent) : QObject(parent), d(std::make_unique<Private>()) {
@@ -219,10 +247,17 @@ bool ScreenCaptureSource::start(QScreen* screen) {
     if (!screen) { emit errorOccurred(ScreenCaptureError::CaptureFailed, QStringLiteral("No screen was selected for sharing")); return false; }
     d->screen = screen;
     d->mailbox = std::make_shared<CaptureMailbox>();
+    d->mailbox->profile = d->profile;
+    d->mailbox->backpressured = d->backpressured;
+#ifdef Q_OS_MACOS
+    d->mailbox->expectedNativeSize = captureSize(screen, d->profile.maximumEdge);
+#endif
     d->worker = std::make_unique<CaptureWorker>(this, d->mailbox);
     const auto submit = [mailbox = d->mailbox](const QVideoFrame& frame) {
             QMutexLocker lock(&mailbox->mutex);
             if (mailbox->closed) return;
+            if (frame.isValid() && mailbox->expectedNativeSize.isValid()
+                && frame.size() != mailbox->expectedNativeSize) return;
             mailbox->latest = frame;
             if (!frame.isValid()) { ++mailbox->contentEpoch; mailbox->forceKeyFrame = true; }
             ++mailbox->revision;
@@ -237,6 +272,7 @@ bool ScreenCaptureSource::start(QScreen* screen) {
     });
     d->worker->start();
 #ifdef Q_OS_MACOS
+    d->capture.setProfile(d->profile);
     d->capture.start(screen, submit, [this, mailbox = d->mailbox](ScreenCaptureError code, const QString& message) {
         // The mutex fences invoking a GUI callback against destruction. Pixels
         // use the independent mailbox and never require the facade to be alive.
@@ -256,6 +292,47 @@ bool ScreenCaptureSource::start(QScreen* screen) {
 }
 
 bool ScreenCaptureSource::isActive() const { return d->mailbox && d->capture.isActive(); }
+
+void ScreenCaptureSource::setProfile(const ScreenStreamProfile& profile) {
+    Q_ASSERT(QThread::currentThread() == thread());
+    const auto value = profile.normalized();
+    if (d->profile == value) return;
+    const bool resized = d->profile.maximumEdge != value.maximumEdge;
+    const bool reconfigured = resized || d->profile.framesPerSecond != value.framesPerSecond
+        || d->profile.bitrateBps != value.bitrateBps || d->profile.keyFrameIntervalMs != value.keyFrameIntervalMs
+        || d->profile.softwarePreset != value.softwarePreset;
+    d->profile = value;
+    if (d->mailbox) {
+        QMutexLocker lock(&d->mailbox->mutex);
+        d->mailbox->profile = value;
+        if (reconfigured) {
+            ++d->mailbox->contentEpoch;
+            d->mailbox->forceKeyFrame = true;
+        }
+#ifdef Q_OS_MACOS
+        // Wait for the surface at the new native size rather than scaling the
+        // previous IOSurface on the CPU during asynchronous reconfiguration.
+        if (resized && d->screen) {
+            d->mailbox->expectedNativeSize = captureSize(d->screen, value.maximumEdge);
+            if (d->mailbox->latest.size() != d->mailbox->expectedNativeSize) d->mailbox->latest = {};
+        }
+#endif
+        d->mailbox->changed.wakeOne();
+    }
+#ifdef Q_OS_MACOS
+    d->capture.setProfile(value);
+#endif
+}
+
+void ScreenCaptureSource::setBackpressured(bool backpressured) {
+    Q_ASSERT(QThread::currentThread() == thread());
+    d->backpressured = backpressured;
+    if (!d->mailbox) return;
+    QMutexLocker lock(&d->mailbox->mutex);
+    if (d->mailbox->backpressured == backpressured) return;
+    d->mailbox->backpressured = backpressured;
+    d->mailbox->changed.wakeOne();
+}
 
 void ScreenCaptureSource::requestKeyFrame() {
     if (!d->mailbox) return;

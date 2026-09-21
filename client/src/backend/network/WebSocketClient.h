@@ -66,9 +66,17 @@ public:
     bool isScreenChannelConnected() const;
     void setScreenSharingEnabled(bool enabled);
     bool setScreenShareSubscription(const QString& remoteSessionId, quint64 generation, bool enabled);
+    bool setScreenShareSubscription(const QString& remoteSessionId, quint64 generation,
+                                    bool enabled, const QJsonArray& screens);
+    bool sendScreenViewFeedback(const QString& remoteSessionId, quint64 generation,
+                                int screenId, int decodeMs, int droppedFrames);
+    bool screenSendWindowOpen() const;
+    void setScreenVideoBudget(int bitsPerSecond);
+    bool outgoingUploadActive() const { return m_uploadSessionActive; }
+    int reserveUploadSendSlot();
     // False means this access unit was dropped; resume this stream with an IDR.
     bool sendScreenFrame(const QJsonObject& metadata, const QByteArray& annexB);
-    bool sendScreenShareStatus(const QString& remoteSessionId, quint64 generation, const QString& reason);
+    bool sendScreenShareStatus(const QString& remoteSessionId, quint64 generation, const QString& reason, int screenId = -1);
     bool requestScreenShareKeyFrame(const QString& remoteSessionId, quint64 generation, int screenId = -1);
 
     // Client registration
@@ -229,6 +237,9 @@ signals:
     void screenShareRequestReceived(const QJsonObject& message);
     void screenShareStateReceived(const QJsonObject& message);
     void screenShareKeyFrameRequested(const QJsonObject& message);
+    void screenSourceFeedback(int roundTripMs, bool congested);
+    void screenSendWindowChanged();
+    void screenShareFeedbackReceived(const QJsonObject& message);
     void screenFrameReceived(const QJsonObject& metadata, const QByteArray& annexB);
     void connected();
     void disconnected();
@@ -305,6 +316,11 @@ private slots:
     void onUploadError(QAbstractSocket::SocketError error);
 
 private:
+    bool sendScreenSubscription(const QString& remoteSessionId, quint64 generation,
+                                bool enabled, const QJsonArray* screens);
+    qint64 screenQueueLimit() const;
+    bool screenTransportWindowOpen() const;
+    void armScreenPacer();
     void onScreenTextMessageReceived(const QString& message);
     void onScreenBinaryMessageReceived(const QByteArray& message);
     void failScreenChannel();
@@ -312,6 +328,7 @@ private:
     bool handleScreenControlMessage(const QJsonObject& message);
     QWebSocket* m_screenSocket = nullptr;
     bool m_screenChannelAuthenticated = false;
+    bool m_screenFeedbackSupported = false;
     bool m_screenChannelWanted = false;
     bool m_screenSharingEnabled = false;
     bool m_screenTokenRequested = false;
@@ -319,15 +336,27 @@ private:
     QString m_screenChannelToken;
     QTimer m_screenChannelTimer;
     QTimer m_screenAckTimer;
+    QTimer m_screenPacingTimer;
+    double m_screenPacingDebtBytes = 0;
+    qint64 m_screenPacingUpdatedAt = -1;
     struct ScreenFrameReceipt { qint64 bytes = 0; qint64 sentAt = 0; };
     QHash<QString, ScreenFrameReceipt> m_screenPendingReceipts;
     qint64 m_screenPendingBytes = 0;
     QList<QString> m_screenWaitingStreams;
-    QHash<QString, qint64> m_screenWaitingSeen;
+    QHash<QString, qint64> m_screenWaitingUntil;
     QHash<QString, QJsonObject> m_screenPublishGrants;
     QHash<QString, QJsonObject> m_screenReceiveGrants;
     QHash<QString, quint64> m_screenFrameSequences;
     QHash<QString, quint64> m_screenSubscriptions;
+    QHash<QString, QJsonArray> m_screenSubscriptionScreens;
+    QHash<QString, qint64> m_screenViewFeedbackAt;
+    int m_screenRetryAttempt = 0;
+    int m_screenBaselineRttMs = -1;
+    qint64 m_screenBaselineAt = -1;
+    int m_screenBudgetBps = 1200000;
+    qint64 m_bulkNextSendAt = 0;
+    qint64 m_controlBaselineRttMs = -1;
+    qint64 m_controlBaselineAt = -1;
     struct ClockSample {
         qint64 receivedAtMs = 0;
         qint64 offsetMs = 0;

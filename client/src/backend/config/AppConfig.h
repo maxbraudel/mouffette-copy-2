@@ -24,6 +24,11 @@ class AppConfig final {
 public:
     enum class Key {
         ServerUrl,
+        ProxyType,
+        ProxyHost,
+        ProxyPort,
+        ProxyUser,
+        ProxyPassword,
         RemoteSessionHiddenTimeoutMs,
         ProjectMediaHiddenTimeoutMs,
         ProjectHiddenRetentionMs,
@@ -50,6 +55,29 @@ public:
         ProjectCheckpointIntervalMs,
         ProjectDeadlinePollIntervalMs,
         ScreenChangeDebounceMs,
+        ScreenAdaptiveEnabled,
+        ScreenMaxEdge,
+        ScreenMaxFps,
+        ScreenIdleIntervalMs,
+        ScreenMinBitrateKbps,
+        ScreenInitialBitrateKbps,
+        ScreenMaxBitrateKbps,
+        ScreenUploadBitrateKbps,
+        ScreenFeedbackIntervalMs,
+        ScreenRecoveryHoldMs,
+        ScreenQueueTargetMs,
+        ScreenAckTimeoutMs,
+        ScreenKeyframeIntervalMs,
+        ScreenMaxBufferedKiB,
+        ScreenMaxInflightFrames,
+        ScreenDecodeQueueMs,
+        ScreenViewportDebounceMs,
+        ScreenViewportOversamplePercent,
+        ScreenRetryInitialMs,
+        ScreenRetryMaxMs,
+        ScreenFirstFrameTimeoutMs,
+        ScreenStaleTimeoutMs,
+        ScreenSoftwarePreset,
         SystemVolumePollIntervalMs,
         FileWatchDebounceMs,
         SceneActivityRefreshIntervalMs,
@@ -167,9 +195,16 @@ public:
     bool isLoaded() const { return m_loaded; }
     QString loadedEnvFilePath() const { return m_loadedEnvFilePath; }
     QString provenance(Key key) const;
+    // Callers must omit these values from configuration diagnostics/exports.
+    static bool isSensitive(Key key);
 
     QString serverUrl() const { return m_serverUrl.toString(QUrl::FullyEncoded); }
     QUrl serverUrlValue() const { return m_serverUrl; }
+    QString proxyType() const { return m_proxyType; }
+    QString proxyHost() const { return m_proxyHost; }
+    int proxyPort() const { return m_proxyPort; }
+    QString proxyUser() const { return m_proxyUser; }
+    QString proxyPassword() const { return m_proxyPassword; }
     qint64 remoteSessionHiddenTimeoutMs() const { return m_remoteSessionHiddenTimeoutMs; }
     qint64 projectMediaHiddenTimeoutMs() const { return m_projectMediaHiddenTimeoutMs; }
     qint64 projectHiddenRetentionMs() const { return m_projectHiddenRetentionMs; }
@@ -196,6 +231,29 @@ public:
     int projectCheckpointIntervalMs() const { return m_projectCheckpointIntervalMs; }
     int projectDeadlinePollIntervalMs() const { return m_projectDeadlinePollIntervalMs; }
     int screenChangeDebounceMs() const { return m_screenChangeDebounceMs; }
+    bool screenAdaptiveEnabled() const { return m_screenAdaptiveEnabled; }
+    int screenMaxEdge() const { return m_screenMaxEdge; }
+    int screenMaxFps() const { return m_screenMaxFps; }
+    int screenIdleIntervalMs() const { return m_screenIdleIntervalMs; }
+    int screenMinBitrateKbps() const { return m_screenMinBitrateKbps; }
+    int screenInitialBitrateKbps() const { return m_screenInitialBitrateKbps; }
+    int screenMaxBitrateKbps() const { return m_screenMaxBitrateKbps; }
+    int screenUploadBitrateKbps() const { return m_screenUploadBitrateKbps; }
+    int screenFeedbackIntervalMs() const { return m_screenFeedbackIntervalMs; }
+    int screenRecoveryHoldMs() const { return m_screenRecoveryHoldMs; }
+    int screenQueueTargetMs() const { return m_screenQueueTargetMs; }
+    int screenAckTimeoutMs() const { return m_screenAckTimeoutMs; }
+    int screenKeyframeIntervalMs() const { return m_screenKeyframeIntervalMs; }
+    int screenMaxBufferedKiB() const { return m_screenMaxBufferedKiB; }
+    int screenMaxInflightFrames() const { return m_screenMaxInflightFrames; }
+    int screenDecodeQueueMs() const { return m_screenDecodeQueueMs; }
+    int screenViewportDebounceMs() const { return m_screenViewportDebounceMs; }
+    int screenViewportOversamplePercent() const { return m_screenViewportOversamplePercent; }
+    int screenRetryInitialMs() const { return m_screenRetryInitialMs; }
+    int screenRetryMaxMs() const { return m_screenRetryMaxMs; }
+    int screenFirstFrameTimeoutMs() const { return m_screenFirstFrameTimeoutMs; }
+    int screenStaleTimeoutMs() const { return m_screenStaleTimeoutMs; }
+    QString screenSoftwarePreset() const { return m_screenSoftwarePreset; }
     int systemVolumePollIntervalMs() const { return m_systemVolumePollIntervalMs; }
     int fileWatchDebounceMs() const { return m_fileWatchDebounceMs; }
     int sceneActivityRefreshIntervalMs() const { return m_sceneActivityRefreshIntervalMs; }
@@ -278,6 +336,11 @@ private:
     std::map<Key, QString> m_provenance;
 
     QUrl m_serverUrl;
+    QString m_proxyType = QStringLiteral("system");
+    QString m_proxyHost;
+    int m_proxyPort = 8080;
+    QString m_proxyUser;
+    QString m_proxyPassword;
     qint64 m_remoteSessionHiddenTimeoutMs = 60000;
     qint64 m_projectMediaHiddenTimeoutMs = 0;
     qint64 m_projectHiddenRetentionMs = 300000;
@@ -304,6 +367,29 @@ private:
     int m_projectCheckpointIntervalMs = 15000;
     int m_projectDeadlinePollIntervalMs = 250;
     int m_screenChangeDebounceMs = 150;
+    bool m_screenAdaptiveEnabled = true;
+    int m_screenMaxEdge = 3840;
+    int m_screenMaxFps = 30;
+    int m_screenIdleIntervalMs = 1000;
+    int m_screenMinBitrateKbps = 128;
+    int m_screenInitialBitrateKbps = 1200;
+    int m_screenMaxBitrateKbps = 12000;
+    int m_screenUploadBitrateKbps = 1000;
+    int m_screenFeedbackIntervalMs = 500;
+    int m_screenRecoveryHoldMs = 5000;
+    int m_screenQueueTargetMs = 150;
+    int m_screenAckTimeoutMs = 3000;
+    int m_screenKeyframeIntervalMs = 4000;
+    int m_screenMaxBufferedKiB = 2048;
+    int m_screenMaxInflightFrames = 64;
+    int m_screenDecodeQueueMs = 200;
+    int m_screenViewportDebounceMs = 200;
+    int m_screenViewportOversamplePercent = 125;
+    int m_screenRetryInitialMs = 500;
+    int m_screenRetryMaxMs = 10000;
+    int m_screenFirstFrameTimeoutMs = 15000;
+    int m_screenStaleTimeoutMs = 8000;
+    QString m_screenSoftwarePreset = QStringLiteral("veryfast");
     int m_systemVolumePollIntervalMs = 1200;
     int m_fileWatchDebounceMs = 500;
     int m_sceneActivityRefreshIntervalMs = 1000;

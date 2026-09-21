@@ -29,7 +29,7 @@ QJsonObject safeFields(const QJsonObject& input) {
     static const QSet<QString> numbers{
         "generation", "connectionGeneration", "stateRevision", "sequence", "expectedGeneration",
         "receivedGeneration", "expectedRevision", "receivedRevision", "protocolVersion", "policyVersion",
-        "rttMs", "heartbeatAgeMs", "proofAgeMs", "controlContactAgeMs", "loopLagMs", "queueBytes", "dataQueueBytes",
+        "budgetBps", "screens", "viewers", "width", "height", "fps", "rttMs", "heartbeatAgeMs", "proofAgeMs", "controlContactAgeMs", "loopLagMs", "queueBytes", "dataQueueBytes",
         "sentBytes", "confirmedBytes", "offset", "size", "windowBytes", "delayMs", "remainingMs",
         "closeCode", "socketError", "count", "dropped", "temporary", "success", "critical",
         "heartbeatIntervalMs", "transportSuspectAfterMs", "transportTimeoutMs", "sessionRecoveryTimeoutMs",

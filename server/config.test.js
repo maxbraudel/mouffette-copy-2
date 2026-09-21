@@ -101,5 +101,32 @@ assert.throws(() => loadServerConfig({ envFile }),
 
 fs.writeFileSync(envFile, 'MOUFFETTE_PEER_HEARTBEAT_INTERVAL_MS=750\nMOUFFETTE_TRANSPORT_TIMEOUT_MS=1500\n');
 assert.throws(() => loadServerConfig({ envFile }), /must exceed two heartbeat intervals/);
+fs.writeFileSync(envFile, '');
+const videoDefaults = loadServerConfig({ envFile });
+assert.equal(videoDefaults.screenFeedbackIntervalMs, 500);
+assert.equal(videoDefaults.screenAckTimeoutMs, 3000);
+assert.equal(videoDefaults.screenMaxBufferedKiB, 2048);
+assert.equal(videoDefaults.screenMaxInflightFrames, 64);
+assert.equal(videoDefaults.screenKeyframeRequestIntervalMs, 1000);
+assert.equal(videoDefaults.screenQueueTargetMs, 150);
+for (const [key, property, value] of [
+    ['MOUFFETTE_SCREEN_FEEDBACK_INTERVAL_MS', 'screenFeedbackIntervalMs', 250],
+    ['MOUFFETTE_SCREEN_ACK_TIMEOUT_MS', 'screenAckTimeoutMs', 5000],
+    ['MOUFFETTE_SCREEN_MAX_BUFFERED_KIB', 'screenMaxBufferedKiB', 64],
+    ['MOUFFETTE_SCREEN_MAX_INFLIGHT_FRAMES', 'screenMaxInflightFrames', 12],
+    ['MOUFFETTE_SCREEN_QUEUE_TARGET_MS', 'screenQueueTargetMs', 300],
+    ['MOUFFETTE_SCREEN_KEYFRAME_REQUEST_INTERVAL_MS', 'screenKeyframeRequestIntervalMs', 2000],
+]) {
+    fs.writeFileSync(envFile, `${key}=${value}\n`);
+    assert.equal(loadServerConfig({ envFile })[property], value);
+    for (const invalid of ['-1', '0', '1000000', '1.5', 'no']) {
+        fs.writeFileSync(envFile, `${key}=${invalid}\n`);
+        assert.throws(() => loadServerConfig({ envFile }), new RegExp(key));
+    }
+}
+fs.writeFileSync(envFile, 'MOUFFETTE_SCREEN_FEEDBACK_INTERVAL_MS=1000\nMOUFFETTE_SCREEN_ACK_TIMEOUT_MS=1000\n');
+assert.throws(() => loadServerConfig({ envFile }), /must exceed MOUFFETTE_SCREEN_FEEDBACK_INTERVAL_MS/);
+fs.writeFileSync(envFile, 'MOUFFETTE_SCREEN_QUEUE_TARGET_MS=1000\nMOUFFETTE_SCREEN_ACK_TIMEOUT_MS=1000\n');
+assert.throws(() => loadServerConfig({ envFile }), /must exceed MOUFFETTE_SCREEN_QUEUE_TARGET_MS/);
 fs.rmSync(temporary, { recursive: true, force: true });
 console.log('server config tests passed');

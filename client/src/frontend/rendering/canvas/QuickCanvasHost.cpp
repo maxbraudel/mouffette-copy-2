@@ -97,6 +97,8 @@ QuickCanvasHost::QuickCanvasHost(CanvasDocument* document,
     m_controller->setParent(this);
     connect(m_controller, &QuickCanvasController::textToolActiveChanged,
             this, &QuickCanvasHost::toolChanged);
+    connect(m_controller, &QuickCanvasController::screenPreviewDemandChanged,
+            this, &ICanvasHost::screenPreviewDemandChanged);
     connect(m_document, &CanvasDocument::pendingImportsChanged, this, [this]() {
         if (m_sceneLaunching && m_document->hasPendingImports())
             failScene(QStringLiteral("Scene preparation was invalidated by a media import still being analyzed"), true);
@@ -186,6 +188,11 @@ QuickCanvasHost* QuickCanvasHost::create(QString* errorMessage)
         return nullptr;
     }
     return new QuickCanvasHost(document, controller);
+}
+
+QJsonValue QuickCanvasHost::screenPreviewDemand() const
+{
+    return m_controller->screenPreviewDemand();
 }
 
 QList<CanvasMedia*> QuickCanvasHost::enumerateMediaItems() const

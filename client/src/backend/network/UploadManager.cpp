@@ -2219,7 +2219,7 @@ void UploadManager::scheduleParallelPump(ParallelOutgoingTransfer* transfer) {
     if (!transfer || !transfer->pumpTimer || transfer->pumpTimer->isActive()
         || transfer->state != OutgoingState::Streaming
         || transfer->payloadCompleteSent) return;
-    transfer->pumpTimer->start();
+    transfer->pumpTimer->start(0);
 }
 
 void UploadManager::stopParallel(ParallelOutgoingTransfer* transfer) {
@@ -2427,6 +2427,11 @@ void UploadManager::pumpParallel(ParallelOutgoingTransfer* transfer) {
         const qint64 requested = std::min({chunkBytes, remaining, transfer->windowBytes - (transfer->sentBytes - transfer->remoteAcknowledgedBytes)});
         if (requested <= 0) {
             failParallel(transfer, QStringLiteral("Invalid source asset state"));
+            return;
+        }
+        const int pacingDelay = m_ws->reserveUploadSendSlot();
+        if (pacingDelay > 0) {
+            transfer->pumpTimer->start(pacingDelay);
             return;
         }
         const QByteArray chunk = transfer->fileHandle.read(requested);
@@ -3216,7 +3221,7 @@ void UploadManager::scheduleOutgoingPump() {
         || m_currentUploadId.isEmpty()) {
         return;
     }
-    m_outgoingPumpTimer->start();
+    m_outgoingPumpTimer->start(0);
 }
 
 void UploadManager::stopOutgoingPump() {
@@ -3356,6 +3361,11 @@ void UploadManager::pumpOutgoingUpload() {
             return;
         }
         const qint64 requestedBytes = std::min({chunkBytes, remaining, m_outgoingWindowBytes - (m_sentBytes - m_remoteAcknowledgedBytes)});
+        const int pacingDelay = m_ws->reserveUploadSendSlot();
+        if (pacingDelay > 0) {
+            m_outgoingPumpTimer->start(pacingDelay);
+            return;
+        }
         const QByteArray chunk = m_outgoingFileHandle.read(requestedBytes);
         if (chunk.size() != requestedBytes
             || m_outgoingFileHandle.error() != QFileDevice::NoError) {

@@ -52,9 +52,9 @@ AVPixelFormat captureFormat(QVideoFrameFormat::PixelFormat format) {
     }
 }
 
-QSize boundedSize(QSize source) {
-    if (source.width() > ScreenStreamEncoder::MaximumEdge || source.height() > ScreenStreamEncoder::MaximumEdge)
-        source.scale(ScreenStreamEncoder::MaximumEdge, ScreenStreamEncoder::MaximumEdge, Qt::KeepAspectRatio);
+QSize boundedSize(QSize source, int maximumEdge) {
+    if (source.width() > maximumEdge || source.height() > maximumEdge)
+        source.scale(maximumEdge, maximumEdge, Qt::KeepAspectRatio);
     return QSize(std::max(2, source.width() & ~1), std::max(2, source.height() & ~1));
 }
 
@@ -152,6 +152,7 @@ private:
 
 struct ScreenStreamEncoder::Private {
     bool preferHardware;
+    ScreenStreamProfile profile;
     Codec context;
     Frame converted;
     Frame orientedInput;
@@ -161,11 +162,11 @@ struct ScreenStreamEncoder::Private {
     QString backend;
     QByteArray sps, pps;
     qint64 lastTimestamp = -1;
-    qint64 lastKeyTimestamp = -2000000;
+    qint64 lastKeyTimestamp = -30000000;
     qint64 pendingKeyTimestamp = -1;
     int pendingFrames = 0;
 
-    explicit Private(bool hardware) : preferHardware(hardware) {}
+    explicit Private(bool hardware, ScreenStreamProfile value = {}) : preferHardware(hardware), profile(std::move(value)) {}
     ~Private() { sws_freeContext(scaler); }
 
     bool open(QSize output, bool nativeInput, QString& error) {
@@ -194,11 +195,11 @@ struct ScreenStreamEncoder::Private {
                 candidate->sw_pix_fmt = AV_PIX_FMT_NV12;
             }
             candidate->time_base = AVRational{1, 1000000};
-            candidate->framerate = AVRational{FramesPerSecond, 1};
-            candidate->bit_rate = 4000000;
-            candidate->rc_max_rate = 5000000;
-            candidate->rc_buffer_size = 1000000;
-            candidate->gop_size = FramesPerSecond * 2;
+            candidate->framerate = AVRational{profile.framesPerSecond, 1};
+            candidate->bit_rate = profile.bitrateBps;
+            candidate->rc_max_rate = profile.bitrateBps;
+            candidate->rc_buffer_size = std::max(32000, profile.bitrateBps / 4);
+            candidate->gop_size = std::max(1, profile.framesPerSecond * profile.keyFrameIntervalMs / 1000);
             candidate->max_b_frames = 0;
             candidate->refs = 1;
             candidate->thread_count = 2;
@@ -228,7 +229,7 @@ struct ScreenStreamEncoder::Private {
                 av_dict_set(&options, "quality", "speed", 0);
                 av_dict_set(&options, "header_insertion_mode", "idr", 0);
             } else if (name == "libx264") {
-                av_dict_set(&options, "preset", "ultrafast", 0);
+                av_dict_set(&options, "preset", profile.softwarePreset.toUtf8().constData(), 0);
                 av_dict_set(&options, "tune", "zerolatency", 0);
                 av_dict_set(&options, "forced-idr", "1", 0);
                 av_dict_set(&options, "x264-params", "repeat-headers=1:annexb=1:scenecut=0", 0);
@@ -255,7 +256,7 @@ struct ScreenStreamEncoder::Private {
             status = candidate->pix_fmt == AV_PIX_FMT_VIDEOTOOLBOX ? 0 : av_frame_get_buffer(converted.get(), 32);
             if (status < 0) { error = failure("Allocate screen encoder planes", status); return false; }
             context = std::move(candidate); size = output; backend = QString::fromLatin1(name);
-            sps.clear(); pps.clear(); lastKeyTimestamp = -2000000;
+            sps.clear(); pps.clear(); lastKeyTimestamp = -qint64(profile.keyFrameIntervalMs) * 1000;
             pendingKeyTimestamp = -1; pendingFrames = 0;
             if (filter->par_out->extradata_size > 0) {
                 const auto headers = inspectAnnexB(QByteArray(reinterpret_cast<const char*>(filter->par_out->extradata), filter->par_out->extradata_size));
@@ -271,7 +272,16 @@ struct ScreenStreamEncoder::Private {
 
 ScreenStreamEncoder::ScreenStreamEncoder(bool preferHardware) : d(std::make_unique<Private>(preferHardware)) {}
 ScreenStreamEncoder::~ScreenStreamEncoder() = default;
-void ScreenStreamEncoder::reset() { d = std::make_unique<Private>(d->preferHardware); }
+void ScreenStreamEncoder::reset() { d = std::make_unique<Private>(d->preferHardware, d->profile); }
+void ScreenStreamEncoder::setProfile(const ScreenStreamProfile& profile) {
+    const auto value = profile.normalized();
+    const auto& current = d->profile;
+    const bool reopen = current.maximumEdge != value.maximumEdge
+        || current.framesPerSecond != value.framesPerSecond || current.bitrateBps != value.bitrateBps
+        || current.keyFrameIntervalMs != value.keyFrameIntervalMs || current.softwarePreset != value.softwarePreset;
+    if (reopen) d = std::make_unique<Private>(d->preferHardware, value);
+    else d->profile = value;
+}
 QString ScreenStreamEncoder::backendName() const { return d->backend; }
 bool ScreenStreamEncoder::hasDelayedKeyFrame() const { return d->pendingKeyTimestamp >= 0; }
 
@@ -284,12 +294,13 @@ QList<ScreenStreamPacket> ScreenStreamEncoder::encode(QVideoFrame frame, bool fo
     const int rotation = (int(surface.rotation()) + (surface.isMirrored() ? -int(frame.rotation()) : int(frame.rotation())) + 360) % 360;
     const bool mirrored = surface.isMirrored() != frame.mirrored();
     const bool transpose = rotation == 90 || rotation == 270;
-    const QSize output = boundedSize(transpose ? frame.size().transposed() : frame.size());
+    const QSize output = boundedSize(transpose ? frame.size().transposed() : frame.size(), d->profile.maximumEdge);
     const QSize scaled = transpose ? output.transposed() : output;
     Frame nativeFrame;
     if (d->preferHardware && rotation == 0 && !mirrored && output == frame.size())
         nativeFrame.reset(screenCaptureNativeFrame(frame));
-    if ((!d->context || d->size != output || (d->context->pix_fmt == AV_PIX_FMT_VIDEOTOOLBOX && !nativeFrame))
+    if ((!d->context || d->size != output || (d->context->pix_fmt == AV_PIX_FMT_VIDEOTOOLBOX && !nativeFrame)
+         || (d->backend == QLatin1String("h264_videotoolbox") && nativeFrame && d->context->pix_fmt != AV_PIX_FMT_VIDEOTOOLBOX))
         && !d->open(output, bool(nativeFrame), error)) return {};
     AVFrame* encodeFrame = d->context->pix_fmt == AV_PIX_FMT_VIDEOTOOLBOX ? nativeFrame.get() : d->converted.get();
     int status = 0;
@@ -336,14 +347,15 @@ QList<ScreenStreamPacket> ScreenStreamEncoder::encode(QVideoFrame frame, bool fo
     }
     const qint64 timestamp = std::max(d->lastTimestamp + 1, std::max<qint64>(0, frame.startTime()));
     d->lastTimestamp = timestamp;
-    forceKeyFrame |= d->pendingKeyTimestamp < 0 && timestamp - d->lastKeyTimestamp >= 2000000;
+    forceKeyFrame |= d->pendingKeyTimestamp < 0
+        && timestamp - d->lastKeyTimestamp >= qint64(d->profile.keyFrameIntervalMs) * 1000;
     if (forceKeyFrame) d->pendingKeyTimestamp = timestamp;
     encodeFrame->pts = timestamp;
     encodeFrame->pict_type = forceKeyFrame ? AV_PICTURE_TYPE_I : AV_PICTURE_TYPE_NONE;
     status = avcodec_send_frame(d->context.get(), encodeFrame);
     if (status < 0) {
         if (d->preferHardware && d->backend.startsWith(QStringLiteral("h264_"))) {
-            d = std::make_unique<Private>(false);
+            d = std::make_unique<Private>(false, d->profile);
             return encode(frame, true, error);
         }
         error = failure("Encode screen", status); return {};
@@ -381,7 +393,7 @@ QList<ScreenStreamPacket> ScreenStreamEncoder::encode(QVideoFrame frame, bool fo
     if (d->pendingFrames > 3 && d->preferHardware && d->backend.startsWith(QStringLiteral("h264_"))) {
         // Do not retain an unbounded sequence of native capture surfaces if a
         // hardware driver stalls. Restart explicitly at an IDR on the CPU.
-        d = std::make_unique<Private>(false);
+        d = std::make_unique<Private>(false, d->profile);
         return encode(frame, true, error);
     }
     return result;
@@ -407,7 +419,7 @@ QVideoFrame ScreenStreamDecoder::decode(const QByteArray& annexB, qint64 timesta
         d->context->thread_count = 2;
         d->context->thread_type = FF_THREAD_SLICE;
         d->context->flags |= AV_CODEC_FLAG_LOW_DELAY;
-        d->context->max_pixels = int64_t(ScreenStreamEncoder::MaximumEdge) * ScreenStreamEncoder::MaximumEdge;
+        d->context->max_pixels = int64_t(ScreenStreamEncoder::MaximumDecodeEdge) * ScreenStreamEncoder::MaximumDecodeEdge;
         d->context->pkt_timebase = AVRational{1, 1000000};
         d->context->err_recognition = AV_EF_CAREFUL | AV_EF_EXPLODE;
         const int status = avcodec_open2(d->context.get(), codec, nullptr);
@@ -425,8 +437,8 @@ QVideoFrame ScreenStreamDecoder::decode(const QByteArray& annexB, qint64 timesta
     if (status < 0) { error = failure("Decode screen", status); reset(); return {}; }
     QVideoFrame latest;
     while ((status = avcodec_receive_frame(d->context.get(), frame.get())) >= 0) {
-        if (frame->width < 2 || frame->height < 2 || frame->width > ScreenStreamEncoder::MaximumEdge
-            || frame->height > ScreenStreamEncoder::MaximumEdge
+        if (frame->width < 2 || frame->height < 2 || frame->width > ScreenStreamEncoder::MaximumDecodeEdge
+            || frame->height > ScreenStreamEncoder::MaximumDecodeEdge
             || (frame->format != AV_PIX_FMT_YUV420P && frame->format != AV_PIX_FMT_YUVJ420P && frame->format != AV_PIX_FMT_NV12)) {
             error = QStringLiteral("Screen decoder returned an unsupported format or dimensions"); reset(); return {};
         }

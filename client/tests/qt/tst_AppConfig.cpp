@@ -35,6 +35,11 @@ class AppConfigTest final : public QObject {
 
 private slots:
     void loadsEmbeddedDefaults();
+    void screenPreviewDefaults();
+    void proxySettingsAreValidatedAndCredentialsStayPrivate();
+    void screenPreviewSourcesAndReload();
+    void screenPreviewRejectsInvalidSettings();
+    void screenPreviewValidatesRelatedSettings();
     void validatesRetentionAndDiagnostics();
     void configuresTimeline();
     void configuresTimelineClipResizeZones();
@@ -55,6 +60,297 @@ private slots:
     void validatesIncomingSessionOrphanTimeoutFromCli();
     void warnsAndIgnoresUnknownNamespacedEnvKey();
 };
+
+void AppConfigTest::proxySettingsAreValidatedAndCredentialsStayPrivate() {
+    AppConfig config;
+    auto options = isolatedOptions(QString());
+    QString error;
+    QVERIFY2(config.load(options, &error), qPrintable(error));
+    QCOMPARE(config.proxyType(), QStringLiteral("system"));
+    QVERIFY(config.proxyHost().isEmpty());
+    QCOMPARE(config.proxyPort(), 8080);
+    QVERIFY(config.proxyUser().isEmpty());
+    QVERIFY(config.proxyPassword().isEmpty());
+    QVERIFY(AppConfig::isSensitive(AppConfig::Key::ProxyUser));
+    QVERIFY(AppConfig::isSensitive(AppConfig::Key::ProxyPassword));
+    QVERIFY(!AppConfig::isSensitive(AppConfig::Key::ProxyType));
+    QTemporaryDir directory;
+    options.defaultEnvFilePath = writeEnvFile(directory, "proxy.env",
+        "MOUFFETTE_PROXY_TYPE=http\n"
+        "MOUFFETTE_PROXY_HOST=secureproxy.example\n"
+        "MOUFFETTE_PROXY_PORT=3128\n"
+        "MOUFFETTE_PROXY_USER=example-user\n"
+        "MOUFFETTE_PROXY_PASSWORD='  private fixture value  '\n");
+    QVERIFY(!options.defaultEnvFilePath.isEmpty());
+    QVERIFY2(config.load(options, &error), qPrintable(error));
+    QCOMPARE(config.proxyType(), QStringLiteral("http"));
+    QCOMPARE(config.proxyHost(), QStringLiteral("secureproxy.example"));
+    QCOMPARE(config.proxyPort(), 3128);
+    QCOMPARE(config.proxyPassword(), QStringLiteral("  private fixture value  "));
+    options.processEnvironment.insert("MOUFFETTE_PROXY_PASSWORD", "process fixture");
+    QVERIFY2(config.load(options, &error), qPrintable(error));
+    QCOMPARE(config.proxyPassword(), QStringLiteral("process fixture"));
+    QCOMPARE(config.provenance(AppConfig::Key::ProxyPassword), QStringLiteral("process:MOUFFETTE_PROXY_PASSWORD"));
+    const struct { const char* key; const char* value; } invalid[] = {
+        {"MOUFFETTE_PROXY_TYPE", "https"}, {"MOUFFETTE_PROXY_TYPE", "system"},
+        {"MOUFFETTE_PROXY_TYPE", "none"}, {"MOUFFETTE_PROXY_HOST", ""},
+        {"MOUFFETTE_PROXY_HOST", "http://secureproxy.example"},
+        {"MOUFFETTE_PROXY_HOST", "fixture-user:fixture-password@secureproxy.example"},
+        {"MOUFFETTE_PROXY_HOST", "proxy example"}, {"MOUFFETTE_PROXY_PORT", "0"},
+        {"MOUFFETTE_PROXY_PORT", "65536"}, {"MOUFFETTE_PROXY_PORT", "abc"},
+        {"MOUFFETTE_PROXY_USER", ""}, {"MOUFFETTE_PROXY_USER", "sensitive-user\n"},
+        {"MOUFFETTE_PROXY_PASSWORD", "sensitive-password\n"}
+    };
+    for (const auto& entry : invalid) {
+        auto invalidOptions = options;
+        invalidOptions.processEnvironment.insert(entry.key, entry.value);
+        QVERIFY2(!config.load(invalidOptions, &error), entry.key);
+        QVERIFY(error.contains("MOUFFETTE_PROXY_"));
+        QVERIFY(!error.contains("fixture-password"));
+        QVERIFY(!error.contains("sensitive-user"));
+        QVERIFY(!error.contains("sensitive-password"));
+        QCOMPARE(config.proxyHost(), QStringLiteral("secureproxy.example"));
+        QCOMPARE(config.proxyPassword(), QStringLiteral("process fixture"));
+    }
+    options.processEnvironment.insert("MOUFFETTE_PROXY_TYPE", "socks5");
+    options.processEnvironment.insert("MOUFFETTE_PROXY_HOST", "2001:db8::1");
+    options.processEnvironment.insert("MOUFFETTE_PROXY_PORT", "1080");
+    options.processEnvironment.insert("MOUFFETTE_PROXY_PASSWORD", QString(128, QChar(0xe9)));
+    QVERIFY(!config.load(options, &error)); // 256 UTF-8 bytes exceeds RFC 1929.
+    QVERIFY(error.contains("255 UTF-8 bytes"));
+    options.processEnvironment.insert("MOUFFETTE_PROXY_PASSWORD", QString(127, QChar(0xe9)));
+    QVERIFY2(config.load(options, &error), qPrintable(error));
+    QCOMPARE(config.proxyType(), QStringLiteral("socks5"));
+    QCOMPARE(config.proxyHost(), QStringLiteral("2001:db8::1"));
+    QCOMPARE(config.proxyPort(), 1080);
+    QVERIFY2(config.load(isolatedOptions(QString()), &error), qPrintable(error));
+    QCOMPARE(config.proxyType(), QStringLiteral("system"));
+    QVERIFY(config.proxyPassword().isEmpty());
+}
+
+void AppConfigTest::screenPreviewDefaults() {
+    AppConfig config;
+    const auto verifyDefaults = [](const AppConfig& value) {
+        QVERIFY(value.screenAdaptiveEnabled());
+        QCOMPARE(value.screenMaxEdge(), 3840);
+        QCOMPARE(value.screenMaxFps(), 30);
+        QCOMPARE(value.screenIdleIntervalMs(), 1000);
+        QCOMPARE(value.screenMinBitrateKbps(), 128);
+        QCOMPARE(value.screenInitialBitrateKbps(), 1200);
+        QCOMPARE(value.screenMaxBitrateKbps(), 12000);
+        QCOMPARE(value.screenUploadBitrateKbps(), 1000);
+        QCOMPARE(value.screenFeedbackIntervalMs(), 500);
+        QCOMPARE(value.screenRecoveryHoldMs(), 5000);
+        QCOMPARE(value.screenQueueTargetMs(), 150);
+        QCOMPARE(value.screenAckTimeoutMs(), 3000);
+        QCOMPARE(value.screenKeyframeIntervalMs(), 4000);
+        QCOMPARE(value.screenMaxBufferedKiB(), 2048);
+        QCOMPARE(value.screenMaxInflightFrames(), 64);
+        QCOMPARE(value.screenDecodeQueueMs(), 200);
+        QCOMPARE(value.screenViewportDebounceMs(), 200);
+        QCOMPARE(value.screenViewportOversamplePercent(), 125);
+        QCOMPARE(value.screenRetryInitialMs(), 500);
+        QCOMPARE(value.screenRetryMaxMs(), 10000);
+        QCOMPARE(value.screenFirstFrameTimeoutMs(), 15000);
+        QCOMPARE(value.screenStaleTimeoutMs(), 8000);
+        QCOMPARE(value.screenSoftwarePreset(), QStringLiteral("veryfast"));
+    };
+    verifyDefaults(config);
+    QString error;
+    QVERIFY2(config.load(isolatedOptions(":/config/client.env"), &error), qPrintable(error));
+    verifyDefaults(config);
+    QVERIFY(config.provenance(AppConfig::Key::ScreenMaxBitrateKbps).startsWith("embedded-env:"));
+}
+
+void AppConfigTest::screenPreviewSourcesAndReload() {
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString path = writeEnvFile(directory, "screen.env",
+        "MOUFFETTE_SCREEN_ADAPTIVE_ENABLED=false\n"
+        "MOUFFETTE_SCREEN_MAX_EDGE=2560\n"
+        "MOUFFETTE_SCREEN_MAX_FPS=60\n"
+        "MOUFFETTE_SCREEN_IDLE_INTERVAL_MS=1500\n"
+        "MOUFFETTE_SCREEN_MIN_BITRATE_KBPS=64\n"
+        "MOUFFETTE_SCREEN_INITIAL_BITRATE_KBPS=2000\n"
+        "MOUFFETTE_SCREEN_MAX_BITRATE_KBPS=20000\n"
+        "MOUFFETTE_SCREEN_UPLOAD_BITRATE_KBPS=500\n"
+        "MOUFFETTE_SCREEN_FEEDBACK_INTERVAL_MS=250\n"
+        "MOUFFETTE_SCREEN_RECOVERY_HOLD_MS=6000\n"
+        "MOUFFETTE_SCREEN_QUEUE_TARGET_MS=200\n"
+        "MOUFFETTE_SCREEN_ACK_TIMEOUT_MS=4000\n"
+        "MOUFFETTE_SCREEN_KEYFRAME_INTERVAL_MS=5000\n"
+        "MOUFFETTE_SCREEN_MAX_BUFFERED_KIB=512\n"
+        "MOUFFETTE_SCREEN_MAX_INFLIGHT_FRAMES=8\n"
+        "MOUFFETTE_SCREEN_DECODE_QUEUE_MS=300\n"
+        "MOUFFETTE_SCREEN_VIEWPORT_DEBOUNCE_MS=400\n"
+        "MOUFFETTE_SCREEN_VIEWPORT_OVERSAMPLE_PERCENT=150\n"
+        "MOUFFETTE_SCREEN_RETRY_INITIAL_MS=1000\n"
+        "MOUFFETTE_SCREEN_RETRY_MAX_MS=20000\n"
+        "MOUFFETTE_SCREEN_FIRST_FRAME_TIMEOUT_MS=20000\n"
+        "MOUFFETTE_SCREEN_STALE_TIMEOUT_MS=10000\n"
+        "MOUFFETTE_SCREEN_SOFTWARE_PRESET=fast\n");
+    QVERIFY(!path.isEmpty());
+    auto options = isolatedOptions(QString());
+    options.processEnvironment.insert("MOUFFETTE_ENV_FILE", path);
+    AppConfig config;
+    QString error;
+    QVERIFY2(config.load(options, &error), qPrintable(error));
+    QVERIFY(!config.screenAdaptiveEnabled());
+    QCOMPARE(config.screenMaxEdge(), 2560);
+    QCOMPARE(config.screenMaxFps(), 60);
+    QCOMPARE(config.screenIdleIntervalMs(), 1500);
+    QCOMPARE(config.screenMinBitrateKbps(), 64);
+    QCOMPARE(config.screenInitialBitrateKbps(), 2000);
+    QCOMPARE(config.screenMaxBitrateKbps(), 20000);
+    QCOMPARE(config.screenUploadBitrateKbps(), 500);
+    QCOMPARE(config.screenFeedbackIntervalMs(), 250);
+    QCOMPARE(config.screenRecoveryHoldMs(), 6000);
+    QCOMPARE(config.screenQueueTargetMs(), 200);
+    QCOMPARE(config.screenAckTimeoutMs(), 4000);
+    QCOMPARE(config.screenKeyframeIntervalMs(), 5000);
+    QCOMPARE(config.screenMaxBufferedKiB(), 512);
+    QCOMPARE(config.screenMaxInflightFrames(), 8);
+    QCOMPARE(config.screenDecodeQueueMs(), 300);
+    QCOMPARE(config.screenViewportDebounceMs(), 400);
+    QCOMPARE(config.screenViewportOversamplePercent(), 150);
+    QCOMPARE(config.screenRetryInitialMs(), 1000);
+    QCOMPARE(config.screenRetryMaxMs(), 20000);
+    QCOMPARE(config.screenFirstFrameTimeoutMs(), 20000);
+    QCOMPARE(config.screenStaleTimeoutMs(), 10000);
+    QCOMPARE(config.screenSoftwarePreset(), QStringLiteral("fast"));
+    QCOMPARE(config.loadedEnvFilePath(), path);
+    QCOMPARE(config.provenance(AppConfig::Key::ScreenMaxFps), "process:MOUFFETTE_ENV_FILE:" + path);
+
+    options.processEnvironment.insert("MOUFFETTE_SCREEN_MAX_FPS", "24");
+    options.processEnvironment.insert("MOUFFETTE_SCREEN_ADAPTIVE_ENABLED", "true");
+    QVERIFY2(config.load(options, &error), qPrintable(error));
+    QCOMPARE(config.screenMaxFps(), 24);
+    QVERIFY(config.screenAdaptiveEnabled());
+    QCOMPARE(config.provenance(AppConfig::Key::ScreenMaxFps), QStringLiteral("process:MOUFFETTE_SCREEN_MAX_FPS"));
+    options.arguments << "--screen-max-fps=15" << "--screen-adaptive-enabled=false";
+    QVERIFY2(config.load(options, &error), qPrintable(error));
+    QCOMPARE(config.screenMaxFps(), 15);
+    QVERIFY(!config.screenAdaptiveEnabled());
+    QCOMPARE(config.provenance(AppConfig::Key::ScreenMaxFps), QStringLiteral("cli:--screen-max-fps"));
+    options.productionEnvFilePath = writeEnvFile(directory, "production.env", "MOUFFETTE_SCREEN_MAX_FPS=12\n");
+    options.applyProductionOverride = true;
+    QVERIFY2(config.load(options, &error), qPrintable(error));
+    QCOMPARE(config.screenMaxFps(), 12);
+    QCOMPARE(config.provenance(AppConfig::Key::ScreenMaxFps), "production-override:" + options.productionEnvFilePath);
+
+    // External files are read again on explicit load; omitted settings reset to defaults.
+    QCOMPARE(writeEnvFile(directory, "screen.env", "MOUFFETTE_SCREEN_MAX_FPS=10\n"), path);
+    options = isolatedOptions(path);
+    QVERIFY2(config.load(options, &error), qPrintable(error));
+    QCOMPARE(config.screenMaxFps(), 10);
+    QCOMPARE(config.screenMaxEdge(), 3840);
+    QCOMPARE(config.screenMaxBitrateKbps(), 12000);
+    QCOMPARE(config.screenSoftwarePreset(), QStringLiteral("veryfast"));
+    QVERIFY(config.screenAdaptiveEnabled());
+    options.defaultEnvFilePath.clear();
+    QVERIFY2(config.load(options, &error), qPrintable(error));
+    QCOMPARE(config.screenMaxFps(), 30);
+    QCOMPARE(config.provenance(AppConfig::Key::ScreenMaxFps), QStringLiteral("compiled-default"));
+}
+
+void AppConfigTest::screenPreviewRejectsInvalidSettings() {
+    const struct { const char* name; int minimum; int maximum; } limits[] = {
+        {"MAX_EDGE", 320, 3840}, {"MAX_FPS", 1, 60}, {"IDLE_INTERVAL_MS", 250, 4000},
+        {"MIN_BITRATE_KBPS", 32, 10000}, {"INITIAL_BITRATE_KBPS", 32, 100000},
+        {"MAX_BITRATE_KBPS", 32, 100000}, {"UPLOAD_BITRATE_KBPS", 32, 100000},
+        {"FEEDBACK_INTERVAL_MS", 100, 2000}, {"RECOVERY_HOLD_MS", 1000, 60000},
+        {"QUEUE_TARGET_MS", 50, 1000}, {"ACK_TIMEOUT_MS", 1000, 15000},
+        {"KEYFRAME_INTERVAL_MS", 500, 10000}, {"MAX_BUFFERED_KIB", 32, 8192},
+        {"MAX_INFLIGHT_FRAMES", 1, 256}, {"DECODE_QUEUE_MS", 50, 2000},
+        {"VIEWPORT_DEBOUNCE_MS", 50, 2000}, {"VIEWPORT_OVERSAMPLE_PERCENT", 100, 200},
+        {"RETRY_INITIAL_MS", 100, 10000}, {"RETRY_MAX_MS", 100, 60000},
+        {"FIRST_FRAME_TIMEOUT_MS", 1000, 60000}, {"STALE_TIMEOUT_MS", 2000, 60000}
+    };
+    AppConfig config;
+    QString error;
+    auto options = isolatedOptions(QString());
+    options.arguments << "--screen-max-edge=1280";
+    QVERIFY2(config.load(options, &error), qPrintable(error));
+    const QString validSource = config.provenance(AppConfig::Key::ScreenMaxEdge);
+    options.arguments.removeLast();
+    for (const auto& limit : limits) {
+        const QString key = "MOUFFETTE_SCREEN_" + QString::fromLatin1(limit.name);
+        for (const QString& value : {QString::number(limit.minimum - 1), QString::number(limit.maximum + 1),
+                                     QStringLiteral("1.5"), QStringLiteral("abc"), QStringLiteral("999999999999999999999")}) {
+            options.processEnvironment.insert(key, value);
+            QVERIFY2(!config.load(options, &error), qPrintable(key + "=" + value));
+            QVERIFY2(error.contains(key), qPrintable(error));
+            QCOMPARE(config.screenMaxEdge(), 1280); // Failed reload must remain atomic.
+            QCOMPARE(config.provenance(AppConfig::Key::ScreenMaxEdge), validSource);
+            QVERIFY(config.isLoaded());
+        }
+        options.processEnvironment.remove(key);
+    }
+    options.processEnvironment.insert("MOUFFETTE_SCREEN_ADAPTIVE_ENABLED", "sometimes");
+    QVERIFY(!config.load(options, &error));
+    QVERIFY(error.contains("MOUFFETTE_SCREEN_ADAPTIVE_ENABLED"));
+    options.processEnvironment.remove("MOUFFETTE_SCREEN_ADAPTIVE_ENABLED");
+    options.processEnvironment.insert("MOUFFETTE_SCREEN_MAX_EDGE", "1281");
+    QVERIFY(!config.load(options, &error));
+    QVERIFY(error.contains("MOUFFETTE_SCREEN_MAX_EDGE"));
+    options.processEnvironment.remove("MOUFFETTE_SCREEN_MAX_EDGE");
+    for (const QString& preset : {QStringLiteral(""), QStringLiteral("slow"), QStringLiteral("FAST"), QStringLiteral("fast;anything")}) {
+        options.processEnvironment.insert("MOUFFETTE_SCREEN_SOFTWARE_PRESET", preset);
+        QVERIFY(!config.load(options, &error));
+        QVERIFY(error.contains("MOUFFETTE_SCREEN_SOFTWARE_PRESET"));
+    }
+    for (const QString& preset : {QStringLiteral("ultrafast"), QStringLiteral("superfast"), QStringLiteral("veryfast"),
+                                   QStringLiteral("faster"), QStringLiteral("fast")}) {
+        options.processEnvironment.insert("MOUFFETTE_SCREEN_SOFTWARE_PRESET", preset);
+        QVERIFY2(config.load(options, &error), qPrintable(error));
+        QCOMPARE(config.screenSoftwarePreset(), preset);
+    }
+}
+
+void AppConfigTest::screenPreviewValidatesRelatedSettings() {
+    const struct { const char* env; const char* expectedKey; } invalid[] = {
+        {"MOUFFETTE_SCREEN_MIN_BITRATE_KBPS=1300\n", "INITIAL_BITRATE_KBPS"},
+        {"MOUFFETTE_SCREEN_MAX_BITRATE_KBPS=1100\n", "INITIAL_BITRATE_KBPS"},
+        {"MOUFFETTE_SCREEN_UPLOAD_BITRATE_KBPS=64\n", "UPLOAD_BITRATE_KBPS"},
+        {"MOUFFETTE_SCREEN_UPLOAD_BITRATE_KBPS=13000\n", "UPLOAD_BITRATE_KBPS"},
+        {"MOUFFETTE_SCREEN_QUEUE_TARGET_MS=1000\nMOUFFETTE_SCREEN_ACK_TIMEOUT_MS=1000\n", "QUEUE_TARGET_MS"},
+        {"MOUFFETTE_SCREEN_RETRY_INITIAL_MS=600\nMOUFFETTE_SCREEN_RETRY_MAX_MS=500\n", "RETRY_INITIAL_MS"},
+        {"MOUFFETTE_SCREEN_IDLE_INTERVAL_MS=2000\nMOUFFETTE_SCREEN_STALE_TIMEOUT_MS=3999\n", "STALE_TIMEOUT_MS"}
+    };
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    AppConfig config;
+    QString error;
+    for (const auto& entry : invalid) {
+        const auto path = writeEnvFile(directory, "invalid-screen.env", entry.env);
+        QVERIFY(!path.isEmpty());
+        QVERIFY(!config.load(isolatedOptions(path), &error));
+        QVERIFY2(error.contains(QString::fromLatin1(entry.expectedKey)), qPrintable(error));
+        QCOMPARE(config.screenInitialBitrateKbps(), 1200);
+        QVERIFY(!config.isLoaded());
+    }
+    // Equality is valid for bitrate budgets, retry bounds and the freshness margin.
+    const auto path = writeEnvFile(directory, "boundary-screen.env",
+        "MOUFFETTE_SCREEN_MAX_BUFFERED_KIB=8192\n"
+        "MOUFFETTE_SCREEN_MAX_INFLIGHT_FRAMES=256\n"
+        "MOUFFETTE_SCREEN_MIN_BITRATE_KBPS=32\n"
+        "MOUFFETTE_SCREEN_INITIAL_BITRATE_KBPS=32\n"
+        "MOUFFETTE_SCREEN_MAX_BITRATE_KBPS=32\n"
+        "MOUFFETTE_SCREEN_UPLOAD_BITRATE_KBPS=32\n"
+        "MOUFFETTE_SCREEN_QUEUE_TARGET_MS=999\n"
+        "MOUFFETTE_SCREEN_ACK_TIMEOUT_MS=1000\n"
+        "MOUFFETTE_SCREEN_RETRY_INITIAL_MS=100\n"
+        "MOUFFETTE_SCREEN_RETRY_MAX_MS=100\n"
+        "MOUFFETTE_SCREEN_IDLE_INTERVAL_MS=4000\n"
+        "MOUFFETTE_SCREEN_STALE_TIMEOUT_MS=8000\n");
+    QVERIFY(!path.isEmpty());
+    QVERIFY2(config.load(isolatedOptions(path), &error), qPrintable(error));
+    QCOMPARE(config.screenMaxBitrateKbps(), 32);
+    QCOMPARE(config.screenMaxBufferedKiB(), 8192);
+    QCOMPARE(config.screenMaxInflightFrames(), 256);
+    QCOMPARE(config.screenRetryMaxMs(), 100);
+    QCOMPARE(config.screenIdleIntervalMs() * 2, config.screenStaleTimeoutMs());
+}
 
 void AppConfigTest::validatesRetentionAndDiagnostics() {
     QTemporaryDir directory;

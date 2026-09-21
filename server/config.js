@@ -33,6 +33,12 @@ const DECLARATIONS = Object.freeze({
     MOUFFETTE_REMOVAL_ACK_TIMEOUT_MS: { type: 'int', default: 30000, min: 1000, max: 120000 },
     MOUFFETTE_ASSET_REMOVAL_TOMBSTONE_TTL_MS: { type: 'int', default: 60000, min: 2000, max: 86400000 },
     MOUFFETTE_STATS_INTERVAL_MS: { type: 'int', default: 30000, min: 1000, max: 3600000 },
+    MOUFFETTE_SCREEN_FEEDBACK_INTERVAL_MS: { type: 'int', default: 500, min: 100, max: 5000 },
+    MOUFFETTE_SCREEN_ACK_TIMEOUT_MS: { type: 'int', default: 3000, min: 500, max: 15000 },
+    MOUFFETTE_SCREEN_MAX_BUFFERED_KIB: { type: 'int', default: 2048, min: 32, max: 8192 },
+    MOUFFETTE_SCREEN_MAX_INFLIGHT_FRAMES: { type: 'int', default: 64, min: 1, max: 256 },
+    MOUFFETTE_SCREEN_QUEUE_TARGET_MS: { type: 'int', default: 150, min: 25, max: 2000 },
+    MOUFFETTE_SCREEN_KEYFRAME_REQUEST_INTERVAL_MS: { type: 'int', default: 1000, min: 250, max: 10000 },
     MOUFFETTE_CURSOR_DEBUG: { type: 'bool', default: false },
 });
 
@@ -175,6 +181,12 @@ function loadServerConfig(options = {}) {
         < values.MOUFFETTE_REMOVAL_ACK_TIMEOUT_MS * 2) {
         throw new Error('MOUFFETTE_ASSET_REMOVAL_TOMBSTONE_TTL_MS must be at least 2x the removal acknowledgement timeout');
     }
+    if (values.MOUFFETTE_SCREEN_ACK_TIMEOUT_MS <= values.MOUFFETTE_SCREEN_FEEDBACK_INTERVAL_MS) {
+        throw new Error('MOUFFETTE_SCREEN_ACK_TIMEOUT_MS must exceed MOUFFETTE_SCREEN_FEEDBACK_INTERVAL_MS');
+    }
+    if (values.MOUFFETTE_SCREEN_ACK_TIMEOUT_MS <= values.MOUFFETTE_SCREEN_QUEUE_TARGET_MS) {
+        throw new Error('MOUFFETTE_SCREEN_ACK_TIMEOUT_MS must exceed MOUFFETTE_SCREEN_QUEUE_TARGET_MS');
+    }
 
     return Object.freeze({
         host: values.MOUFFETTE_SERVER_HOST,
@@ -207,6 +219,12 @@ function loadServerConfig(options = {}) {
         removalAckTimeoutMs: values.MOUFFETTE_REMOVAL_ACK_TIMEOUT_MS,
         assetRemovalTombstoneTtlMs: values.MOUFFETTE_ASSET_REMOVAL_TOMBSTONE_TTL_MS,
         statsIntervalMs: values.MOUFFETTE_STATS_INTERVAL_MS,
+        screenFeedbackIntervalMs: values.MOUFFETTE_SCREEN_FEEDBACK_INTERVAL_MS,
+        screenAckTimeoutMs: values.MOUFFETTE_SCREEN_ACK_TIMEOUT_MS,
+        screenMaxBufferedKiB: values.MOUFFETTE_SCREEN_MAX_BUFFERED_KIB,
+        screenMaxInflightFrames: values.MOUFFETTE_SCREEN_MAX_INFLIGHT_FRAMES,
+        screenQueueTargetMs: values.MOUFFETTE_SCREEN_QUEUE_TARGET_MS,
+        screenKeyframeRequestIntervalMs: values.MOUFFETTE_SCREEN_KEYFRAME_REQUEST_INTERVAL_MS,
         cursorDebug: values.MOUFFETTE_CURSOR_DEBUG,
         policyVersion: 5,
         values: Object.freeze(values),

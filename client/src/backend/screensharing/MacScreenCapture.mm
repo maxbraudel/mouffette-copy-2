@@ -87,7 +87,44 @@ struct NativeState {
     bool starting = false;
     bool started = false;
     bool stopping = false;
+    bool updating = false;
+    QSize desiredSize;
+    QSize appliedSize;
+    int desiredFps = 30;
+    int appliedFps = 0;
+    // The native output queue only reads this atomic, never the main-queue
+    // configuration. Late surfaces from the old size cannot trigger CPU scale.
+    std::atomic<quint64> desiredSurfaceSize{0};
 };
+
+quint64 surfaceSizeKey(QSize size) {
+    return (quint64(quint32(size.width())) << 32) | quint32(size.height());
+}
+
+QSize boundedCaptureSize(QSize source, int maximumEdge) {
+    if (source.width() > maximumEdge || source.height() > maximumEdge)
+        source.scale(maximumEdge, maximumEdge, Qt::KeepAspectRatio);
+    return QSize(std::max(2, source.width() & ~1), std::max(2, source.height() & ~1));
+}
+
+SCStreamConfiguration* configuration(QSize output, int fps) {
+    SCStreamConfiguration* config = [[SCStreamConfiguration alloc] init];
+    config.width = size_t(output.width()); config.height = size_t(output.height());
+    config.minimumFrameInterval = CMTimeMake(1, fps);
+    config.queueDepth = 3;
+    config.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange;
+    config.colorMatrix = kCVImageBufferYCbCrMatrix_ITU_R_709_2;
+    config.colorSpaceName = kCGColorSpaceITUR_709;
+    config.showsCursor = NO;
+    config.scalesToFit = YES;
+    if (@available(macOS 13.0, *)) config.capturesAudio = NO;
+    if (@available(macOS 14.0, *)) config.preservesAspectRatio = YES;
+    if (@available(macOS 15.0, *)) {
+        config.captureDynamicRange = SCCaptureDynamicRangeSDR;
+        config.captureMicrophone = NO;
+    }
+    return config;
+}
 
 void reportError(const std::shared_ptr<NativeState>& state, QString message,
                  ScreenCaptureError code = ScreenCaptureError::CaptureFailed) {
@@ -106,6 +143,29 @@ void reportNativeError(const std::shared_ptr<NativeState>& state, NSError* error
     const auto description = error ? QString::fromNSString(error.localizedDescription) : QStringLiteral("No native error details were provided");
     reportError(state, QStringLiteral("%1: %2 (domain=%3, code=%4)")
         .arg(QString::fromLatin1(stage), description, domain.isEmpty() ? QStringLiteral("none") : domain).arg(nativeCode), code);
+}
+
+// One native update at a time. A newer desired profile replaces pending work;
+// its callback owns the session and cannot restart a stopped stream.
+void updateConfiguration(const std::shared_ptr<NativeState> state) {
+    if (state->closed.load() || !state->stream || !state->started || state->updating || state->stopping
+        || (state->desiredSize == state->appliedSize && state->desiredFps == state->appliedFps)) return;
+    state->updating = true;
+    const auto output = state->desiredSize;
+    const int fps = state->desiredFps;
+    [state->stream updateConfiguration:configuration(output, fps) completionHandler:^(NSError* error) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            state->updating = false;
+            if (state->closed.load()) return;
+            if (error) {
+                reportNativeError(state, error, "ScreenCaptureKit configuration update failed");
+                return;
+            }
+            state->appliedSize = output;
+            state->appliedFps = fps;
+            updateConfiguration(state);
+        });
+    }];
 }
 
 // Main queue only. A revoked session that is still starting is stopped by its
@@ -160,6 +220,8 @@ void stopSession(const std::shared_ptr<NativeState> state) {
             reportError(current, QStringLiteral("ScreenCaptureKit returned an unsupported screen format"));
             return;
         }
+        const QSize surfaceSize(int(CVPixelBufferGetWidth(surface)), int(CVPixelBufferGetHeight(surface)));
+        if (surfaceSizeKey(surfaceSize) != current->desiredSurfaceSize.load()) return;
         QVideoFrame frame = MacScreenCapture::frameFromPixelBuffer(surface);
         const auto pts = CMSampleBufferGetPresentationTimeStamp(sample);
         if (CMTIME_IS_NUMERIC(pts)) frame.setStartTime(CMTimeConvertScale(pts, 1000000, kCMTimeRoundingMethod_Default).value);
@@ -172,10 +234,29 @@ void stopSession(const std::shared_ptr<NativeState> state) {
 }
 @end
 
-struct MacScreenCapture::Private { std::shared_ptr<NativeState> state; };
+struct MacScreenCapture::Private {
+    std::shared_ptr<NativeState> state;
+    ScreenStreamProfile profile;
+    QSize sourceSize;
+};
 MacScreenCapture::MacScreenCapture() : d(std::make_unique<Private>()) {}
 MacScreenCapture::~MacScreenCapture() { stop(); }
 bool MacScreenCapture::isActive() const { return d->state && !d->state->closed.load(); }
+
+void MacScreenCapture::setProfile(const ScreenStreamProfile& profile) {
+    d->profile = profile.normalized();
+    const auto state = d->state;
+    if (!state) return;
+    const auto output = boundedCaptureSize(d->sourceSize, d->profile.maximumEdge);
+    const int fps = d->profile.framesPerSecond;
+    state->desiredSurfaceSize.store(surfaceSizeKey(output));
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (state->closed.load()) return;
+        state->desiredSize = output;
+        state->desiredFps = fps;
+        updateConfiguration(state);
+    });
+}
 
 ScreenCaptureError MacScreenCapture::nativeErrorCode(const QString& domain, qint64 code) {
     return domain == QString::fromNSString(SCStreamErrorDomain) && code == SCStreamErrorUserDeclined
@@ -206,13 +287,13 @@ bool MacScreenCapture::start(QScreen* screen, FrameCallback frame, ErrorCallback
     NSNumber* number = native ? [[native->nativeScreen() deviceDescription] objectForKey:@"NSScreenNumber"] : nil;
     if (!number) { error(ScreenCaptureError::CaptureFailed, QStringLiteral("Cannot resolve the selected macOS display")); return false; }
     const CGDirectDisplayID displayID = number.unsignedIntValue;
-    QSize output(qRound(screen->geometry().width() * screen->devicePixelRatio()),
-                 qRound(screen->geometry().height() * screen->devicePixelRatio()));
-    if (output.width() > ScreenStreamEncoder::MaximumEdge || output.height() > ScreenStreamEncoder::MaximumEdge)
-        output.scale(ScreenStreamEncoder::MaximumEdge, ScreenStreamEncoder::MaximumEdge, Qt::KeepAspectRatio);
-    output = QSize(std::max(2, output.width() & ~1), std::max(2, output.height() & ~1));
+    d->sourceSize = QSize(qRound(screen->geometry().width() * screen->devicePixelRatio()),
+                          qRound(screen->geometry().height() * screen->devicePixelRatio()));
     const auto state = std::make_shared<NativeState>();
     state->frame = std::move(frame); state->error = std::move(error);
+    state->desiredSize = boundedCaptureSize(d->sourceSize, d->profile.maximumEdge);
+    state->desiredFps = d->profile.framesPerSecond;
+    state->desiredSurfaceSize.store(surfaceSizeKey(state->desiredSize));
     d->state = state;
     // ScreenCaptureKit performs the OS screen-recording authorization. Never
     // enumerate content until local sharing is enabled and a viewer subscribes.
@@ -228,21 +309,9 @@ bool MacScreenCapture::start(QScreen* screen, FrameCallback frame, ErrorCallback
                     if (display.displayID == displayID) { selected = display; break; }
                 if (!selected) { reportError(state, QStringLiteral("The selected display is no longer available for sharing")); return; }
                 SCContentFilter* filter = [[SCContentFilter alloc] initWithDisplay:selected excludingWindows:@[]];
-                SCStreamConfiguration* config = [[SCStreamConfiguration alloc] init];
-                config.width = size_t(output.width()); config.height = size_t(output.height());
-                config.minimumFrameInterval = CMTimeMake(1, ScreenStreamEncoder::FramesPerSecond);
-                config.queueDepth = 3;
-                config.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange;
-                config.colorMatrix = kCVImageBufferYCbCrMatrix_ITU_R_709_2;
-                config.colorSpaceName = kCGColorSpaceITUR_709;
-                config.showsCursor = NO;
-                config.scalesToFit = YES;
-                if (@available(macOS 13.0, *)) config.capturesAudio = NO;
-                if (@available(macOS 14.0, *)) config.preservesAspectRatio = YES;
-                if (@available(macOS 15.0, *)) {
-                    config.captureDynamicRange = SCCaptureDynamicRangeSDR;
-                    config.captureMicrophone = NO;
-                }
+                state->appliedSize = state->desiredSize;
+                state->appliedFps = state->desiredFps;
+                SCStreamConfiguration* config = configuration(state->appliedSize, state->appliedFps);
                 auto* delegate = [[MouffetteScreenCaptureOutput alloc] init];
                 delegate->state = state;
                 state->delegate = delegate;
@@ -260,6 +329,7 @@ bool MacScreenCapture::start(QScreen* screen, FrameCallback frame, ErrorCallback
                         state->started = !startError;
                         if (startError) reportNativeError(state, startError, "ScreenCaptureKit startup failed");
                         if (state->closed.load()) stopSession(state);
+                        else if (state->started) updateConfiguration(state);
                     });
                 }];
             });

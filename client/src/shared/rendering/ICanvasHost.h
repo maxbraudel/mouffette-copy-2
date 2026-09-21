@@ -4,6 +4,7 @@
 
 #include <QHash>
 #include <QJsonObject>
+#include <QJsonValue>
 #include <QObject>
 #include <QPointF>
 #include <QStringList>
@@ -54,6 +55,8 @@ public:
     virtual void setRemoteScreenFrame(int, const QVideoFrame&) {}
     virtual void clearRemoteScreenFrame(int) {}
     virtual void clearRemoteScreenFrames() {}
+    // Undefined means this host cannot report a viewport; [] means no screen is visible.
+    virtual QJsonValue screenPreviewDemand() const { return QJsonValue(QJsonValue::Undefined); }
     virtual void setOverlayActionsEnabled(bool enabled) = 0;
     virtual bool overlayActionsEnabled() const = 0;
     virtual void setProjectEditingEnabled(bool enabled) = 0;
@@ -81,6 +84,7 @@ public:
         QStringList* skippedMediaIds = nullptr) = 0;
 
 signals:
+    void screenPreviewDemandChanged();
     void mediaItemAdded(CanvasMedia* mediaItem);
     void mediaItemRemoved(CanvasMedia* mediaItem);
     void mediaItemChanged(CanvasMedia* mediaItem);

@@ -2382,7 +2382,7 @@ void UploadRemovalSecurityTest::protocolTargetedRemovalIsExactAndIdempotent() {
     const QString nonce = QString::fromLatin1(QByteArray(32, 'r').toBase64(
         QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals));
     QPointer<QWebSocket> peer;
-    QList<QJsonObject> clientMessages;
+    QList<QJsonObject> removalReplies;
     connect(&server, &QWebSocketServer::newConnection, this, [&]() {
         QWebSocket* accepted = server.nextPendingConnection();
         if (acceptUploadTestChannel(accepted, peer, bootId)) return;
@@ -2437,10 +2437,11 @@ void UploadRemovalSecurityTest::protocolTargetedRemovalIsExactAndIdempotent() {
                     {"serverMonotonicMs", request.value("clientMonotonicMs")},
                     {"serverEpochMs", 1},
                 }).toJson(QJsonDocument::Compact)));
-            } else {
-                if (request.value("type") != QLatin1String("remote_session_state_ack")
-                    && request.value("type") != QLatin1String("remote_session_reconcile"))
-                    clientMessages.append(request);
+            } else if (type == QLatin1String("upload_removed")) {
+                // Consent replay and other control traffic may arrive before
+                // a removal reply. Wait for this protocol operation's response,
+                // not whichever unrelated control message happened to be last.
+                removalReplies.append(request);
             }
         });
     });
@@ -2517,9 +2518,10 @@ void UploadRemovalSecurityTest::protocolTargetedRemovalIsExactAndIdempotent() {
     malformed.insert("fileId", QString(64, QLatin1Char('0')));
     peer->sendTextMessage(QString::fromUtf8(
         v6Document(malformed).toJson(QJsonDocument::Compact)));
-    QTRY_VERIFY_WITH_TIMEOUT(!clientMessages.isEmpty(), 1000);
-    const QJsonObject rejection = clientMessages.constLast();
+    QTRY_VERIFY_WITH_TIMEOUT(!removalReplies.isEmpty(), 1000);
+    const QJsonObject rejection = removalReplies.constLast();
     QCOMPARE(rejection.value("type").toString(), QStringLiteral("upload_removed"));
+    QCOMPARE(rejection.value("removalId"), malformed.value("removalId"));
     QCOMPARE(rejection.value("result").toString(), QStringLiteral("cleanup_error"));
     QVERIFY(!rejection.value("cacheQuarantined").toBool(true));
     QVERIFY(QFileInfo::exists(validatedPath));
@@ -2530,8 +2532,8 @@ void UploadRemovalSecurityTest::protocolTargetedRemovalIsExactAndIdempotent() {
         QStringLiteral("22222222-3333-4444-8555-666666666677");
     peer->sendTextMessage(QString::fromUtf8(
         v6Document(command(removalId)).toJson(QJsonDocument::Compact)));
-    QTRY_VERIFY_WITH_TIMEOUT(clientMessages.size() >= 2, 1000);
-    const QJsonObject committed = clientMessages.constLast();
+    QTRY_VERIFY_WITH_TIMEOUT(removalReplies.size() >= 2, 1000);
+    const QJsonObject committed = removalReplies.constLast();
     QCOMPARE(committed.value("type").toString(), QStringLiteral("upload_removed"));
     QCOMPARE(committed.value("removalId").toString(), removalId);
     QCOMPARE(committed.value("result").toString(), QStringLiteral("committed"));
@@ -2544,8 +2546,8 @@ void UploadRemovalSecurityTest::protocolTargetedRemovalIsExactAndIdempotent() {
     // not close or recreate the surrounding RemoteSession.
     peer->sendTextMessage(QString::fromUtf8(
         v6Document(command(removalId)).toJson(QJsonDocument::Compact)));
-    QTRY_VERIFY_WITH_TIMEOUT(clientMessages.size() >= 3, 1000);
-    const QJsonObject replay = clientMessages.constLast();
+    QTRY_VERIFY_WITH_TIMEOUT(removalReplies.size() >= 3, 1000);
+    const QJsonObject replay = removalReplies.constLast();
     QCOMPARE(replay.value("type").toString(), QStringLiteral("upload_removed"));
     QCOMPARE(replay.value("result").toString(), QStringLiteral("committed"));
     QCOMPARE(replay.value("quarantinedBytes").toInteger(), assetSize);
@@ -2561,8 +2563,8 @@ void UploadRemovalSecurityTest::protocolTargetedRemovalIsExactAndIdempotent() {
     conflictingReplay.insert("fileId", QString(64, QLatin1Char('9')));
     peer->sendTextMessage(QString::fromUtf8(
         v6Document(conflictingReplay).toJson(QJsonDocument::Compact)));
-    QTRY_VERIFY_WITH_TIMEOUT(clientMessages.size() >= 4, 1000);
-    const QJsonObject conflict = clientMessages.constLast();
+    QTRY_VERIFY_WITH_TIMEOUT(removalReplies.size() >= 4, 1000);
+    const QJsonObject conflict = removalReplies.constLast();
     QCOMPARE(conflict.value("type").toString(), QStringLiteral("upload_removed"));
     QCOMPARE(conflict.value("result").toString(), QStringLiteral("cleanup_error"));
     QVERIFY(!conflict.value("cacheQuarantined").toBool(true));

@@ -432,6 +432,10 @@ ApplicationRuntime::ApplicationRuntime(const RuntimeProfileContext& runtimeProfi
             [this](const QString& endpoint, int screenId, const QVideoFrame& frame) {
         if (auto* canvas = canvasForEndpointId(endpoint)) canvas->setRemoteScreenFrame(screenId, frame);
     });
+    connect(m_screenSharing, &ScreenSharingService::frameCleared, this,
+            [this](const QString& endpoint, int screenId) {
+        if (auto* canvas = canvasForEndpointId(endpoint)) canvas->clearRemoteScreenFrame(screenId);
+    });
     connect(m_screenSharing, &ScreenSharingService::framesCleared, this,
             [this](const QString& endpoint) {
         if (auto* canvas = canvasForEndpointId(endpoint)) canvas->clearRemoteScreenFrames();
@@ -4229,6 +4233,12 @@ void ApplicationRuntime::refreshScreenSharing()
     m_screenSharing->setViewedEndpoint(m_qmlWindowVisible && m_applicationPage == 1
         && !m_applicationSuspended && m_settingsManager->getScreenContentVisible()
             ? m_activeWorkspaceEndpointId : QString());
+    if (auto* canvas = getActiveCanvas()) {
+        connect(canvas, &ICanvasHost::screenPreviewDemandChanged,
+                this, &ApplicationRuntime::refreshScreenSharing, Qt::UniqueConnection);
+        const auto demand = canvas->screenPreviewDemand();
+        if (demand.isArray()) m_screenSharing->setViewedScreens(demand.toArray());
+    }
 }
 
 void ApplicationRuntime::refreshRemoteCursorStreaming()

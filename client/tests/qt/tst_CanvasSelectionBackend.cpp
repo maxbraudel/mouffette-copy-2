@@ -21,6 +21,7 @@
 #include <QQuickStyle>
 #include <QQuickView>
 #include <QScopeGuard>
+#include <QSslConfiguration>
 #include <QSemaphore>
 #include <QStyleHints>
 #include <QTemporaryDir>
@@ -39,6 +40,7 @@
 
 #include "backend/domain/canvas/CanvasDocument.h"
 #include "backend/config/AppConfig.h"
+#include "backend/network/NetworkProxyPolicy.h"
 #include "../fixtures/TimelineTrackRangeConfig.h"
 #include "backend/domain/media/CanvasMedia.h"
 #include "backend/domain/project/ProjectModel.h"
@@ -506,6 +508,157 @@ private slots:
         fixture.controller.hideRemoteCursor();
         QVERIFY(!cursor->isVisible());
         QTRY_VERIFY(cursorPixel() != QColor(Qt::white));
+    }
+
+    void proxyPolicyIsIdempotentAndFencesAuthentication()
+    {
+        auto& config = AppConfig::instance();
+        const AppConfig previous = config;
+        const bool previousSystemProxy = QNetworkProxyFactory::usesSystemConfiguration();
+        const QNetworkProxy previousProxy = QNetworkProxy::applicationProxy();
+        auto restore = qScopeGuard([&] {
+            config = previous;
+            if (previousSystemProxy) QNetworkProxyFactory::setUseSystemConfiguration(true);
+            else QNetworkProxy::setApplicationProxy(previousProxy);
+        });
+        AppConfig::LoadOptions options;
+        options.defaultEnvFilePath.clear();
+        options.processEnvironment.insert("MOUFFETTE_PROXY_TYPE", "http");
+        options.processEnvironment.insert("MOUFFETTE_PROXY_HOST", "proxy.example");
+        options.processEnvironment.insert("MOUFFETTE_PROXY_PORT", "3128");
+        options.processEnvironment.insert("MOUFFETTE_PROXY_USER", "fixture-user");
+        options.processEnvironment.insert("MOUFFETTE_PROXY_PASSWORD", "fixture-password");
+        QString error;
+        QVERIFY2(config.load(options, &error), qPrintable(error));
+        class InspectableSocket : public QWebSocket {
+        public:
+            int authenticationHandlers() const {
+                return receivers(SIGNAL(proxyAuthenticationRequired(QNetworkProxy,QAuthenticator*)));
+            }
+        } socket;
+        const int originalHandlers = socket.authenticationHandlers();
+        const QSslConfiguration tls = socket.sslConfiguration();
+        const QUrl url(QStringLiteral("wss://service.example/socket"));
+        configureNetworkProxy(&socket, url);
+        configureNetworkProxy(&socket, url);
+        QCOMPARE(socket.authenticationHandlers(), originalHandlers + 1);
+        QCOMPARE(socket.proxy().type(), QNetworkProxy::HttpProxy);
+        QCOMPARE(socket.proxy().hostName(), QStringLiteral("proxy.example"));
+        QCOMPARE(socket.proxy().port(), quint16(3128));
+        QCOMPARE(socket.sslConfiguration(), tls);
+        QAuthenticator matching;
+        emit socket.proxyAuthenticationRequired(socket.proxy(), &matching);
+        QCOMPARE(matching.user(), QStringLiteral("fixture-user"));
+        QCOMPARE(matching.password(), QStringLiteral("fixture-password"));
+        QAuthenticator unrelated;
+        emit socket.proxyAuthenticationRequired(QNetworkProxy(QNetworkProxy::HttpProxy, "unrelated.example", 3128), &unrelated);
+        QVERIFY(unrelated.user().isEmpty());
+        QVERIFY(unrelated.password().isEmpty());
+        QAuthenticator wrongPort;
+        emit socket.proxyAuthenticationRequired(QNetworkProxy(QNetworkProxy::HttpProxy, "proxy.example", 8080), &wrongPort);
+        QVERIFY(wrongPort.password().isEmpty());
+        options.processEnvironment.insert("MOUFFETTE_PROXY_PASSWORD", "replacement fixture");
+        QVERIFY2(config.load(options, &error), qPrintable(error));
+        QAuthenticator replaced;
+        emit socket.proxyAuthenticationRequired(socket.proxy(), &replaced);
+        QCOMPARE(replaced.password(), QStringLiteral("replacement fixture"));
+        options.processEnvironment.insert("MOUFFETTE_PROXY_TYPE", "socks5");
+        QVERIFY2(config.load(options, &error), qPrintable(error));
+        configureNetworkProxy(&socket, url);
+        QCOMPARE(socket.proxy().type(), QNetworkProxy::Socks5Proxy);
+        QAuthenticator socks;
+        emit socket.proxyAuthenticationRequired(socket.proxy(), &socks);
+        QCOMPARE(socks.user(), QStringLiteral("fixture-user"));
+        options.processEnvironment.remove("MOUFFETTE_PROXY_USER");
+        options.processEnvironment.remove("MOUFFETTE_PROXY_PASSWORD");
+        options.processEnvironment.insert("MOUFFETTE_PROXY_TYPE", "none");
+        QVERIFY2(config.load(options, &error), qPrintable(error));
+        configureNetworkProxy(&socket, url);
+        QCOMPARE(socket.proxy().type(), QNetworkProxy::NoProxy);
+        QAuthenticator disabled;
+        emit socket.proxyAuthenticationRequired(QNetworkProxy(QNetworkProxy::HttpProxy, "proxy.example", 3128), &disabled);
+        QVERIFY(disabled.password().isEmpty());
+        options.processEnvironment.insert("MOUFFETTE_PROXY_TYPE", "system");
+        QVERIFY2(config.load(options, &error), qPrintable(error));
+        configureNetworkProxy(&socket, url);
+        QCOMPARE(socket.proxy().type(), QNetworkProxy::DefaultProxy);
+        QVERIFY(QNetworkProxyFactory::usesSystemConfiguration());
+        QCOMPARE(socket.sslConfiguration(), tls);
+    }
+
+    void screenPreviewDemandFollowsViewportAndCoalescesChanges()
+    {
+        auto& document = *new CanvasDocument;
+        auto& controller = *new QuickCanvasController(&document);
+        QuickCanvasHost host(&document, &controller);
+        QQuickWindow window;
+        controller.registerWindow(&window);
+        QVERIFY(host.screenPreviewDemand().isUndefined());
+        document.setCamera(0.25, 0, 0);
+        host.setScreens({ScreenInfo(3, 1920, 1080, 0, 0, true),
+                         ScreenInfo(9, 1280, 720, 1920, 0, false)});
+        QSignalSpy changed(&host, &ICanvasHost::screenPreviewDemandChanged);
+        controller.setViewportSize(400, 300);
+        const auto expectedEdge = [&window](int native, qreal scale) {
+            const int maximum = std::min(AppConfig::instance().screenMaxEdge(), native - native % 2);
+            const qreal requested = std::clamp(native * scale * window.effectiveDevicePixelRatio()
+                * AppConfig::instance().screenViewportOversamplePercent() / 100.0,
+                qreal(160), qreal(maximum));
+            return std::min(maximum, int(std::ceil(requested / 160)) * 160);
+        };
+        QTRY_COMPARE(host.screenPreviewDemand().toArray().size(), 1);
+        QCOMPARE(host.screenPreviewDemand().toArray().first().toObject(),
+                 (QJsonObject{{"screenId", 3}, {"maximumEdge", expectedEdge(1920, 0.25)}}));
+        QCOMPARE(changed.count(), 1);
+        // Only the second monitor intersects after panning. Requested pixels
+        // still cover its entire native image rather than the visible slice.
+        controller.updateCamera(0.25, -480, 0);
+        controller.updateCamera(0.25, -485, 0);
+        controller.updateCamera(0.25, -490, 0);
+        QTRY_COMPARE(changed.count(), 2);
+        QCOMPARE(host.screenPreviewDemand().toArray().size(), 1);
+        QCOMPARE(host.screenPreviewDemand().toArray().first().toObject(),
+                 (QJsonObject{{"screenId", 9}, {"maximumEdge", expectedEdge(1280, 0.25)}}));
+        controller.updateCamera(0.25, -500, 0); // Same visibility and resolution bucket.
+        QTest::qWait(AppConfig::instance().screenViewportDebounceMs() + 40);
+        QCOMPARE(changed.count(), 2);
+        controller.updateCamera(0.25, -4000, 0);
+        QTRY_COMPARE(changed.count(), 3);
+        QVERIFY(host.screenPreviewDemand().isArray());
+        QVERIFY(host.screenPreviewDemand().toArray().isEmpty());
+        controller.setViewportSize(0, 0);
+        QTRY_VERIFY(host.screenPreviewDemand().isUndefined());
+        QCOMPARE(changed.count(), 4);
+    }
+
+    void screenPreviewDemandCapsPixelsAndIgnoresFrameDelivery()
+    {
+        auto& document = *new CanvasDocument;
+        auto& controller = *new QuickCanvasController(&document);
+        QuickCanvasHost host(&document, &controller);
+        document.setCamera(10, 0, 0);
+        host.setScreens({ScreenInfo(1, 1919, 1080, 0, 0, true)});
+        controller.setViewportSize(1000, 700);
+        QTRY_VERIFY(host.screenPreviewDemand().isArray());
+        QCOMPARE(host.screenPreviewDemand().toArray().first().toObject().value("maximumEdge").toInt(), 1918);
+        const QJsonObject saved = document.serializeProjectState();
+        const auto screens = controller.screensModel();
+        QSignalSpy changed(&host, &ICanvasHost::screenPreviewDemandChanged);
+        QSignalSpy edits(&document, &CanvasDocument::documentChanged);
+        QSignalSpy presentations(&controller, &QuickCanvasController::presentationChanged);
+        QImage pixels(16, 16, QImage::Format_RGBA8888);
+        pixels.fill(Qt::cyan);
+        for (int i = 0; i < 10; ++i) host.setRemoteScreenFrame(1, QVideoFrame(pixels));
+        QTest::qWait(AppConfig::instance().screenViewportDebounceMs() + 40);
+        QCOMPARE(changed.count(), 0);
+        QCOMPARE(edits.count(), 0);
+        QCOMPARE(presentations.count(), 0);
+        QCOMPARE(document.serializeProjectState(), saved);
+        QCOMPARE(controller.screensModel(), screens);
+        controller.updateCamera(0.001, 0, 0);
+        QTRY_COMPARE(host.screenPreviewDemand().toArray().first().toObject().value("maximumEdge").toInt(), 160);
+        host.setScreens({});
+        QTRY_VERIFY(host.screenPreviewDemand().toArray().isEmpty());
     }
 
     void remoteScreenFramesStayTransientAndRespectMonitorLifecycle()

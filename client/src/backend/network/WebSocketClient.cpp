@@ -1,5 +1,6 @@
 #include "backend/network/WebSocketClient.h"
 #include "backend/network/NetworkDiagnostics.h"
+#include "backend/network/NetworkProxyPolicy.h"
 #include "backend/config/AppConfig.h"
 #include "backend/network/RetryPolicy.h"
 #include "backend/runtime/SuspendInclusiveClock.h"
@@ -158,7 +159,7 @@ bool validScreenFrameMetadata(const QJsonObject& metadata) {
         && readPositiveSafeJsonInteger(metadata.value("sequence"), &sequence)
         && isCanonicalUuid(metadata.value("streamId").toString())
         && isSafeJsonInteger(metadata.value("screenId").toDouble(-1), 0, 1000000)
-        && isSafeJsonInteger(width, 2, 1920) && isSafeJsonInteger(height, 2, 1920)
+        && isSafeJsonInteger(width, 2, 3840) && isSafeJsonInteger(height, 2, 3840)
         && int(width) % 2 == 0 && int(height) % 2 == 0
         && metadata.value("keyFrame").isBool() && metadata.value("codec").toString() == QLatin1String("h264")
         && (!metadata.contains("timestampUs") || isSafeJsonInteger(metadata.value("timestampUs").toDouble(-1), 0, 9007199254740991.0));
@@ -353,8 +354,11 @@ WebSocketClient::WebSocketClient(const QString& identityFallbackDirectory,
         m_screenPublishGrants.remove(id);
         m_screenReceiveGrants.remove(id);
         m_screenSubscriptions.remove(id);
+        m_screenSubscriptionScreens.remove(id);
         for (const QString& key : m_screenFrameSequences.keys())
             if (key.startsWith(streamId + QLatin1Char(':'))) m_screenFrameSequences.remove(key);
+        for (const QString& key : m_screenViewFeedbackAt.keys())
+            if (key.startsWith(streamId + QLatin1Char(':'))) m_screenViewFeedbackAt.remove(key);
     });
     connect(remoteSessionCoordinator(), &RemoteSessionCoordinator::sessionChanged, this,
             [this](const QString& id, quint64 generation, const QString&) {
@@ -374,11 +378,29 @@ WebSocketClient::WebSocketClient(const QString& identityFallbackDirectory,
                 if (key.startsWith(streamId + QLatin1Char(':'))) m_screenFrameSequences.remove(key);
         }
     });
+    m_screenPacingTimer.setSingleShot(true);
+    m_screenPacingTimer.setTimerType(Qt::PreciseTimer);
+    connect(&m_screenPacingTimer, &QTimer::timeout, this, [this] {
+        armScreenPacer();
+        emit screenSendWindowChanged();
+    });
     m_screenAckTimer.setInterval(250);
     connect(&m_screenAckTimer, &QTimer::timeout, this, [this] {
         const qint64 now = suspendInclusiveNowMs();
         for (const auto& pending : std::as_const(m_screenPendingReceipts)) {
-            if (now - pending.sentAt >= 1500) { failScreenChannel(); break; }
+            if (now - pending.sentAt >= AppConfig::instance().screenAckTimeoutMs()) {
+                emit screenSourceFeedback(-1, true);
+                failScreenChannel(); break;
+            }
+        }
+    });
+    connect(this, &WebSocketClient::heartbeatSampleReceived, this,
+            [this](quint64, qint64 rtt, qint64, qint64) {
+        const qint64 now = suspendInclusiveNowMs();
+        if (rtt >= 0 && (m_controlBaselineRttMs < 0 || rtt <= m_controlBaselineRttMs
+                        || now - m_controlBaselineAt >= 30000)) {
+            m_controlBaselineRttMs = rtt;
+            m_controlBaselineAt = now;
         }
     });
     m_screenChannelTimer.setSingleShot(true);
@@ -613,6 +635,7 @@ void WebSocketClient::connectToServer(const QString& serverUrl) {
     m_disconnectSignalEmitted = false;
     setConnectionStatus("Connecting...");
     qDebug() << "Connecting to server:" << serverUrl;
+    configureNetworkProxy(m_webSocket, QUrl(serverUrl));
     m_webSocket->open(QUrl(serverUrl));
 }
 
@@ -740,6 +763,7 @@ bool WebSocketClient::ensureScreenChannel()
     m_screenChannelWanted = true;
     if (!isConnected() || m_endpointDraining) return false;
     if (isScreenChannelConnected()) return true;
+    if (!m_screenSocket && m_screenChannelTimer.isActive()) return true;
     if (!m_screenSocket) {
         m_screenSocket = new QWebSocket(QString(), QWebSocketProtocol::VersionLatest, this);
         auto* const socket = m_screenSocket;
@@ -764,9 +788,9 @@ bool WebSocketClient::ensureScreenChannel()
         if (!m_screenTokenRequested) {
             m_screenTokenRequestId = QUuid::createUuid().toString(QUuid::WithoutBraces);
             m_screenTokenRequested = true;
-            m_screenChannelTimer.start(10000);
+            m_screenChannelTimer.start(AppConfig::instance().screenFirstFrameTimeoutMs());
             if (!sendControlMessage({{"type", "request_screen_channel"},
-                                     {"requestId", m_screenTokenRequestId}})) failScreenChannel();
+                                     {"requestId", m_screenTokenRequestId}, {"feedbackVersion", 1}, {"maximumEdge", 3840}})) failScreenChannel();
         }
         return true;
     }
@@ -778,6 +802,7 @@ bool WebSocketClient::ensureScreenChannel()
     query.addQueryItem(QStringLiteral("token"), m_screenChannelToken);
     url.setQuery(query);
     m_screenChannelToken.clear();
+    configureNetworkProxy(m_screenSocket, url);
     m_screenSocket->open(url);
     return true;
 }
@@ -787,12 +812,17 @@ void WebSocketClient::closeScreenChannel()
     const bool hadState = m_screenSocket || !m_screenPublishGrants.isEmpty() || !m_screenReceiveGrants.isEmpty();
     m_screenChannelTimer.stop();
     m_screenAckTimer.stop();
+    m_screenPacingTimer.stop();
+    m_screenRetryAttempt = 0;
+    m_screenBaselineRttMs = -1;
+    m_screenViewFeedbackAt.clear();
     m_screenPendingReceipts.clear();
     m_screenPendingBytes = 0;
     m_screenWaitingStreams.clear();
-    m_screenWaitingSeen.clear();
+    m_screenWaitingUntil.clear();
     m_screenChannelWanted = false;
     m_screenChannelAuthenticated = false;
+    m_screenFeedbackSupported = false;
     m_screenTokenRequested = false;
     m_screenTokenRequestId.clear();
     m_screenChannelToken.clear();
@@ -811,17 +841,24 @@ void WebSocketClient::closeScreenChannel()
 void WebSocketClient::failScreenChannel()
 {
     const bool wanted = m_screenChannelWanted;
+    const int attempt = std::min(m_screenRetryAttempt + 1, 10);
     closeScreenChannel();
+    m_screenRetryAttempt = attempt;
     m_screenChannelWanted = wanted;
-    if (wanted && isConnected() && !m_endpointDraining) m_screenChannelTimer.start(1000);
+    if (wanted && isConnected() && !m_endpointDraining) {
+        const auto& config = AppConfig::instance();
+        const RetryPolicy policy{config.screenRetryInitialMs(), config.screenRetryMaxMs(),
+                                  config.reconnectJitterPercent()};
+        m_screenChannelTimer.start(policy.delay(attempt - 1));
+    }
 }
 
 void WebSocketClient::clearScreenReceiptEpoch(const QString& streamId)
 {
     if (streamId.isEmpty()) return;
-    for (const QString& key : m_screenWaitingSeen.keys()) {
+    for (const QString& key : m_screenWaitingUntil.keys()) {
         if (key.startsWith(streamId + QLatin1Char(':'))) {
-            m_screenWaitingSeen.remove(key);
+            m_screenWaitingUntil.remove(key);
             m_screenWaitingStreams.removeAll(key);
         }
     }
@@ -839,7 +876,7 @@ void WebSocketClient::setScreenSharingEnabled(bool enabled)
         m_screenPendingReceipts.clear();
         m_screenPendingBytes = 0;
         m_screenWaitingStreams.clear();
-        m_screenWaitingSeen.clear();
+        m_screenWaitingUntil.clear();
     }
     if (!isConnected() || m_endpointDraining) return;
     if (!sendControlMessage({{"type", "screen_share_consent"}, {"enabled", enabled}})) {
@@ -852,12 +889,36 @@ void WebSocketClient::setScreenSharingEnabled(bool enabled)
 
 bool WebSocketClient::setScreenShareSubscription(const QString& remoteSessionId, quint64 generation, bool enabled)
 {
+    return sendScreenSubscription(remoteSessionId, generation, enabled, nullptr);
+}
+
+bool WebSocketClient::setScreenShareSubscription(const QString& remoteSessionId, quint64 generation,
+                                                bool enabled, const QJsonArray& screens)
+{
+    if (screens.size() > 64) return false;
+    QSet<int> seen;
+    for (const auto& value : screens) {
+        const auto screen = value.toObject();
+        if (screen.size() != 2 || !isSafeJsonInteger(screen.value("screenId").toDouble(-1), 0, 1000000)
+            || !isSafeJsonInteger(screen.value("maximumEdge").toDouble(-1), 2, 3840)
+            || screen.value("maximumEdge").toInt() % 2 || seen.contains(screen.value("screenId").toInt())) return false;
+        seen.insert(screen.value("screenId").toInt());
+    }
+    return sendScreenSubscription(remoteSessionId, generation, enabled, &screens);
+}
+
+bool WebSocketClient::sendScreenSubscription(const QString& remoteSessionId, quint64 generation,
+                                             bool enabled, const QJsonArray* screens)
+{
     if (!enabled) {
         m_screenSubscriptions.remove(remoteSessionId);
+        m_screenSubscriptionScreens.remove(remoteSessionId);
         const auto streamId = m_screenReceiveGrants.value(remoteSessionId).value("streamId").toString();
         m_screenReceiveGrants.remove(remoteSessionId);
         for (const QString& key : m_screenFrameSequences.keys())
             if (key.startsWith(streamId + QLatin1Char(':'))) m_screenFrameSequences.remove(key);
+        for (const QString& key : m_screenViewFeedbackAt.keys())
+            if (key.startsWith(streamId + QLatin1Char(':'))) m_screenViewFeedbackAt.remove(key);
     }
     if (!isConnected() || m_endpointDraining || !m_sceneRuns) return false;
     const auto binding = m_sceneRuns->sessionById(remoteSessionId);
@@ -865,10 +926,14 @@ bool WebSocketClient::setScreenShareSubscription(const QString& remoteSessionId,
         || binding.ownerConnectionGeneration != m_connectionGeneration) return false;
     if (enabled) {
         m_screenSubscriptions.insert(remoteSessionId, generation);
+        if (screens) m_screenSubscriptionScreens.insert(remoteSessionId, *screens);
+        else m_screenSubscriptionScreens.remove(remoteSessionId);
         ensureScreenChannel();
     }
-    const bool sent = sendControlMessage({{"type", "screen_share_subscribe"},
-        {"remoteSessionId", remoteSessionId}, {"generation", double(generation)}, {"enabled", enabled}});
+    QJsonObject subscription{{"type", "screen_share_subscribe"}, {"remoteSessionId", remoteSessionId},
+        {"generation", double(generation)}, {"enabled", enabled}};
+    if (screens) subscription.insert("screens", *screens);
+    const bool sent = sendControlMessage(subscription);
     if (!sent) {
         m_screenChannelWanted = true;
         failScreenChannel(); // A lost unsubscribe immediately stops this viewer's pipe.
@@ -894,24 +959,38 @@ bool WebSocketClient::sendScreenFrame(const QJsonObject& metadata, const QByteAr
     const qint64 now = suspendInclusiveNowMs();
     const QString lane = metadata.value("streamId").toString() + QLatin1Char(':')
         + QString::number(metadata.value("screenId").toInt());
-    for (const QString& waiting : m_screenWaitingSeen.keys()) {
-        if (now - m_screenWaitingSeen.value(waiting) >= 500) {
-            m_screenWaitingSeen.remove(waiting);
+    const auto& config = AppConfig::instance();
+    const qint64 fairnessTimeout = std::max<qint64>(config.screenAckTimeoutMs(),
+        qint64(std::ceil(m_screenPacingDebtBytes * 8000.0 / m_screenBudgetBps))
+            + config.screenAckTimeoutMs());
+    for (const QString& waiting : m_screenWaitingUntil.keys()) {
+        if (now >= m_screenWaitingUntil.value(waiting)) {
+            m_screenWaitingUntil.remove(waiting);
             m_screenWaitingStreams.removeAll(waiting);
         }
     }
-    // Fair admission of fresh access units: a fourth display must not lose
-    // every slot to the first three displays in a stable callback order.
-    if ((!m_screenWaitingStreams.isEmpty() && m_screenWaitingStreams.first() != lane)
-        || m_screenPendingReceipts.size() >= 3
-        || (!m_screenPendingReceipts.isEmpty() && m_screenPendingBytes + size > kDataQueueLimit)
-        || queued > kDataQueueLimit || (queued > 0 && queued + size > kDataQueueLimit)) {
-        if (!m_screenWaitingSeen.contains(lane) && m_screenWaitingStreams.size() < 256)
-            m_screenWaitingStreams.append(lane);
-        if (m_screenWaitingStreams.contains(lane)) m_screenWaitingSeen.insert(lane, now);
+    // A single IDR is allowed beyond the normal byte window, but never at
+    // an unbounded serialization cost. Shrink encoding before accepting a burst
+    // that would monopolize this endpoint's configured video budget.
+    const int burstMs = std::min(config.screenAckTimeoutMs() / 2,
+                                 std::max(500, config.screenQueueTargetMs() * 4));
+    if (size * 8000 > qint64(m_screenBudgetBps) * burstMs) {
+        emit screenSourceFeedback(-1, true);
         return false;
     }
-    m_screenWaitingSeen.remove(lane);
+    // Fair admission rotates metadata only. Waiting for another display's turn
+    // or normal ACK credit is not evidence of network congestion.
+    if ((!m_screenWaitingStreams.isEmpty() && m_screenWaitingStreams.first() != lane)
+        || !screenTransportWindowOpen()
+        || (!m_screenPendingReceipts.isEmpty() && m_screenPendingBytes + size > screenQueueLimit())
+        || queued > screenQueueLimit() || (queued > 0 && queued + size > screenQueueLimit())) {
+        if (!m_screenWaitingUntil.contains(lane) && m_screenWaitingStreams.size() < 256)
+            m_screenWaitingStreams.append(lane);
+        if (m_screenWaitingStreams.contains(lane)) m_screenWaitingUntil.insert(lane, now + fairnessTimeout);
+        if (queued > screenQueueLimit()) emit screenSourceFeedback(-1, true);
+        return false;
+    }
+    m_screenWaitingUntil.remove(lane);
     m_screenWaitingStreams.removeAll(lane);
     QByteArray packet;
     packet.reserve(size);
@@ -928,16 +1007,100 @@ bool WebSocketClient::sendScreenFrame(const QJsonObject& metadata, const QByteAr
         m_screenPendingBytes -= m_screenPendingReceipts.take(key).bytes;
         return false;
     }
+    // Charge every wire copy, including keyframes, before admitting more raw
+    // capture work. A bounded already-encoded burst is repaid, never forgiven.
+    armScreenPacer();
+    m_screenPacingDebtBytes += packet.size();
+    armScreenPacer();
+    emit screenSendWindowChanged();
     return true;
 }
 
-bool WebSocketClient::sendScreenShareStatus(const QString& remoteSessionId, quint64 generation, const QString& reason)
+void WebSocketClient::armScreenPacer()
+{
+    const qint64 now = suspendInclusiveNowMs();
+    if (m_screenPacingUpdatedAt >= 0) m_screenPacingDebtBytes = std::max(0.0,
+        m_screenPacingDebtBytes - double(now - m_screenPacingUpdatedAt) * m_screenBudgetBps / 8000.0);
+    m_screenPacingUpdatedAt = now;
+    m_screenPacingTimer.stop();
+    if (m_screenPacingDebtBytes > 0.0 && isScreenChannelConnected()) {
+        const int wait = int(std::clamp(std::ceil(m_screenPacingDebtBytes * 8000.0 / m_screenBudgetBps), 1.0, 60000.0));
+        m_screenPacingTimer.start(wait);
+        // Pacing is a deliberate pause shared by every screen. It must not
+        // expire the fair turn of a lane that could not fit the previous burst.
+        for (auto& until : m_screenWaitingUntil)
+            until = std::max(until, now + wait + AppConfig::instance().screenAckTimeoutMs());
+    }
+}
+
+qint64 WebSocketClient::screenQueueLimit() const
+{
+    const auto& config = AppConfig::instance();
+    const qint64 duration = std::max(50, m_screenBaselineRttMs) + config.screenQueueTargetMs();
+    return std::min<qint64>(config.screenMaxBufferedKiB() * 1024,
+        std::max<qint64>(32768, qint64(m_screenBudgetBps) * duration / 8000));
+}
+
+bool WebSocketClient::screenSendWindowOpen() const
+{
+    return !m_screenPacingTimer.isActive() && screenTransportWindowOpen();
+}
+
+bool WebSocketClient::screenTransportWindowOpen() const
+{
+    if (!isScreenChannelConnected()) return false;
+    const auto& config = AppConfig::instance();
+    if (m_screenPendingReceipts.size() >= config.screenMaxInflightFrames()
+        || m_screenPendingBytes >= screenQueueLimit()
+        || m_screenSocket->bytesToWrite() >= screenQueueLimit()) return false;
+    return true;
+}
+
+void WebSocketClient::setScreenVideoBudget(int bitsPerSecond)
+{
+    armScreenPacer(); // Drain debt at the old rate before changing it.
+    m_screenBudgetBps = std::clamp(bitsPerSecond, 32000, 100000000);
+    armScreenPacer();
+    emit screenSendWindowChanged();
+}
+
+int WebSocketClient::reserveUploadSendSlot()
+{
+    // Apply only when our control RTT has grown, not on a healthy high-RTT link.
+    if (m_controlBaselineRttMs < 0 || m_lastRttMs - m_controlBaselineRttMs
+        <= AppConfig::instance().screenQueueTargetMs()) return 0;
+    const qint64 now = suspendInclusiveNowMs();
+    if (m_bulkNextSendAt > now) return int(std::min<qint64>(500, m_bulkNextSendAt - now));
+    m_bulkNextSendAt = now + std::clamp<qint64>((m_lastRttMs - m_controlBaselineRttMs) * 2, 25, 500);
+    return 0;
+}
+
+bool WebSocketClient::sendScreenViewFeedback(const QString& id, quint64 generation,
+                                             int screenId, int decodeMs, int droppedFrames)
+{
+    const auto grant = m_screenReceiveGrants.value(id);
+    if (!isScreenChannelConnected() || !m_screenFeedbackSupported || !canIssueSessionCommands(id)
+        || grant.value("generation").toDouble() != double(generation)) return false;
+    const QString lane = grant.value("streamId").toString() + QLatin1Char(':') + QString::number(screenId);
+    const qint64 now = suspendInclusiveNowMs();
+    if (m_screenViewFeedbackAt.contains(lane)
+        && now - m_screenViewFeedbackAt.value(lane) < AppConfig::instance().screenFeedbackIntervalMs()) return false;
+    m_screenViewFeedbackAt.insert(lane, now);
+    const QJsonObject message{{"type", "screen_view_feedback"}, {"remoteSessionId", id},
+        {"generation", double(generation)}, {"streamId", grant.value("streamId")}, {"screenId", screenId},
+        {"decodeMs", std::clamp(decodeMs, 0, 60000)}, {"droppedFrames", std::clamp(droppedFrames, 0, 10000)}};
+    return m_screenSocket->sendTextMessage(QString::fromUtf8(QJsonDocument(message).toJson(QJsonDocument::Compact))) >= 0;
+}
+
+bool WebSocketClient::sendScreenShareStatus(const QString& remoteSessionId, quint64 generation, const QString& reason, int screenId)
 {
     const auto grant = m_screenPublishGrants.value(remoteSessionId);
     if (grant.isEmpty() || grant.value("generation").toDouble() != double(generation)
-        || !canIssueSessionCommands(remoteSessionId)) return false;
-    return sendControlMessage({{"type", "screen_share_status"}, {"remoteSessionId", remoteSessionId},
-        {"generation", double(generation)}, {"streamId", grant.value("streamId")}, {"reason", reason}});
+        || !canIssueSessionCommands(remoteSessionId) || screenId < -1 || screenId > 1000000) return false;
+    QJsonObject message{{"type", "screen_share_status"}, {"remoteSessionId", remoteSessionId},
+        {"generation", double(generation)}, {"streamId", grant.value("streamId")}, {"reason", reason}};
+    if (screenId >= 0 && m_screenFeedbackSupported) message.insert("screenId", screenId);
+    return sendControlMessage(message);
 }
 
 bool WebSocketClient::requestScreenShareKeyFrame(const QString& remoteSessionId, quint64 generation, int screenId)
@@ -972,20 +1135,51 @@ void WebSocketClient::onScreenTextMessageReceived(const QString& text)
             || !readPositiveSafeJsonInteger(message.value("sequence"), &sequence)
             || !isSafeJsonInteger(message.value("screenId").toDouble(-1), 0, 1000000)) return;
         const QString key = screenFrameKey(message);
-        m_screenPendingBytes -= m_screenPendingReceipts.take(key).bytes;
+        if (!m_screenPendingReceipts.contains(key)) return;
+        const auto receipt = m_screenPendingReceipts.take(key);
+        m_screenPendingBytes -= receipt.bytes;
+        const int rtt = int(std::clamp<qint64>(suspendInclusiveNowMs() - receipt.sentAt, 0, 60000));
+        const qint64 now = suspendInclusiveNowMs();
+        if (m_screenBaselineRttMs < 0 || rtt <= m_screenBaselineRttMs || now - m_screenBaselineAt >= 30000) {
+            m_screenBaselineRttMs = rtt;
+            m_screenBaselineAt = now;
+        }
+        m_screenRetryAttempt = 0;
+        emit screenSourceFeedback(rtt, false);
+        emit screenSendWindowChanged();
+        return;
+    }
+    if (type == QLatin1String("screen_share_feedback")) {
+        const QString id = message.value("remoteSessionId").toString();
+        const auto grant = m_screenPublishGrants.value(id);
+        const auto binding = m_sceneRuns->sessionById(id);
+        if (!m_screenChannelAuthenticated || !canIssueSessionCommands(id)
+            || binding.targetEndpointId != m_endpointId || grant.isEmpty()
+            || grant.value("streamId") != message.value("streamId")
+            || grant.value("generation") != message.value("generation")
+            || !isSafeJsonInteger(message.value("screenId").toDouble(-1), 0, 1000000)
+            || !isSafeJsonInteger(message.value("deliveryRttMs").toDouble(-1), 0, 60000)
+            || !isSafeJsonInteger(message.value("bufferedBytes").toDouble(-1), 0, 16777216)
+            || !message.value("congested").isBool() || !message.value("uploadActive").isBool()) return;
+        emit screenShareFeedbackReceived(message);
         return;
     }
     if (type != QLatin1String("screen_channel_ready")) { failScreenChannel(); return; }
     m_screenChannelAuthenticated = true;
+    m_screenFeedbackSupported = message.value("feedbackVersion").toInt() == 1;
     m_screenChannelTimer.stop();
     m_screenAckTimer.start();
+    armScreenPacer();
     // Consent and subscriptions are cheap, idempotent control state. Replay
     // after socket replacement; the server always issues a fresh streamId.
     setScreenSharingEnabled(m_screenSharingEnabled);
     if (!isScreenChannelConnected()) return;
     const auto subscriptions = m_screenSubscriptions;
-    for (auto it = subscriptions.cbegin(); it != subscriptions.cend(); ++it)
-        setScreenShareSubscription(it.key(), it.value(), true);
+    for (auto it = subscriptions.cbegin(); it != subscriptions.cend(); ++it) {
+        if (m_screenSubscriptionScreens.contains(it.key()))
+            setScreenShareSubscription(it.key(), it.value(), true, m_screenSubscriptionScreens.value(it.key()));
+        else setScreenShareSubscription(it.key(), it.value(), true);
+    }
     if (isScreenChannelConnected()) emit screenChannelReady();
 }
 
@@ -1023,6 +1217,7 @@ void WebSocketClient::onScreenBinaryMessageReceived(const QByteArray& message)
         return;
     }
     m_screenFrameSequences.insert(streamKey, sequence);
+    m_screenRetryAttempt = 0;
     emit screenFrameReceived(header, payload);
 }
 
@@ -1056,6 +1251,8 @@ bool WebSocketClient::handleScreenControlMessage(const QJsonObject& message)
         if (previous != streamId) {
             for (const QString& key : m_screenFrameSequences.keys())
                 if (key.startsWith(previous + QLatin1Char(':'))) m_screenFrameSequences.remove(key);
+            for (const QString& key : m_screenViewFeedbackAt.keys())
+                if (key.startsWith(previous + QLatin1Char(':'))) m_screenViewFeedbackAt.remove(key);
         }
         if (enabled) m_screenReceiveGrants.insert(id, message);
         else m_screenReceiveGrants.remove(id);
@@ -1189,6 +1386,7 @@ bool WebSocketClient::ensureUploadChannel() {
     url.setQuery(q);
     m_uploadChannelToken.clear(); // server tokens are deliberately one-shot
     m_uploadChannelAuthenticated = false;
+    configureNetworkProxy(m_uploadSocket, url);
     m_uploadSocket->open(url);
     return true;
 }
@@ -2445,6 +2643,8 @@ RemoteSessionCoordinator* WebSocketClient::remoteSessionCoordinator() const
 }
 
 void WebSocketClient::onConnected() {
+    m_controlBaselineRttMs = -1;
+    m_bulkNextSendAt = 0;
     if (m_endpointDraining) {
         abortConnectionAttempt();
         return;

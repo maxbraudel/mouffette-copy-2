@@ -75,3 +75,101 @@ videos use their source duration.
 Transport recovery timing is server authority, advertised by protocol v12 policy
 v5. The client cannot renew its fixed session deadline with a local retry.
 Diagnostics are profile scoped, rate limited and written by a bounded worker.
+
+
+## Adaptive screen preview
+
+Screen preview settings follow normal AppConfig precedence: compiled defaults,
+selected `.env`, process environment, CLI, then any explicit production override.
+They are not persisted user preferences. For example,
+`--screen-max-fps=15` overrides `MOUFFETTE_SCREEN_MAX_FPS`. Rebuild after editing
+the embedded `client/.env`; an external `--env-file <path>` is re-read on the next
+application start without rebuilding. These settings are not watched live.
+Invalid settings reject the complete reload, retaining the last valid config.
+
+Bitrate settings describe the **aggregate publisher video budget**, including all
+screens and all subscriber copies. They use decimal kilobits per second
+(1 kbps = 1000 bits/s), not a per-screen allowance. The upload budget limits the
+preview while file transfers need capacity. Budgets are targets for compressed
+video admission; they are not guarantees of available bandwidth or wire traffic,
+which also includes TLS/TCP headers and retransmissions. Session and control
+recovery deadlines remain server authority.
+
+| Environment variable | Default | Allowed range |
+| --- | ---: | --- |
+| `MOUFFETTE_SCREEN_ADAPTIVE_ENABLED` | true | boolean |
+| `MOUFFETTE_SCREEN_MAX_EDGE` | 3840 | integer 320–3840 (even) |
+| `MOUFFETTE_SCREEN_MAX_FPS` | 30 | integer 1–60 |
+| `MOUFFETTE_SCREEN_IDLE_INTERVAL_MS` | 1000 | integer 250–4000 |
+| `MOUFFETTE_SCREEN_MIN_BITRATE_KBPS` | 128 | integer 32–10000 |
+| `MOUFFETTE_SCREEN_INITIAL_BITRATE_KBPS` | 1200 | integer 32–100000 |
+| `MOUFFETTE_SCREEN_MAX_BITRATE_KBPS` | 12000 | integer 32–100000 |
+| `MOUFFETTE_SCREEN_UPLOAD_BITRATE_KBPS` | 1000 | integer 32–100000 |
+| `MOUFFETTE_SCREEN_FEEDBACK_INTERVAL_MS` | 500 | integer 100–2000 |
+| `MOUFFETTE_SCREEN_RECOVERY_HOLD_MS` | 5000 | integer 1000–60000 |
+| `MOUFFETTE_SCREEN_QUEUE_TARGET_MS` | 150 | integer 50–1000 |
+| `MOUFFETTE_SCREEN_ACK_TIMEOUT_MS` | 3000 | integer 1000–15000 |
+| `MOUFFETTE_SCREEN_KEYFRAME_INTERVAL_MS` | 4000 | integer 500–10000 |
+| `MOUFFETTE_SCREEN_MAX_BUFFERED_KIB` | 2048 | integer 32–8192 |
+| `MOUFFETTE_SCREEN_MAX_INFLIGHT_FRAMES` | 64 | integer 1–256 |
+| `MOUFFETTE_SCREEN_DECODE_QUEUE_MS` | 200 | integer 50–2000 |
+| `MOUFFETTE_SCREEN_VIEWPORT_DEBOUNCE_MS` | 200 | integer 50–2000 |
+| `MOUFFETTE_SCREEN_VIEWPORT_OVERSAMPLE_PERCENT` | 125 | integer 100–200 |
+| `MOUFFETTE_SCREEN_RETRY_INITIAL_MS` | 500 | integer 100–10000 |
+| `MOUFFETTE_SCREEN_RETRY_MAX_MS` | 10000 | integer 100–60000 |
+| `MOUFFETTE_SCREEN_FIRST_FRAME_TIMEOUT_MS` | 15000 | integer 1000–60000 |
+| `MOUFFETTE_SCREEN_STALE_TIMEOUT_MS` | 8000 | integer 2000–60000 |
+| `MOUFFETTE_SCREEN_SOFTWARE_PRESET` | veryfast | ultrafast, superfast, veryfast, faster, fast |
+
+`MAX_EDGE` measures the longest encoded edge in pixels, and `MAX_FPS` measures
+frames per second. `VIEWPORT_OVERSAMPLE_PERCENT` is the requested pixel margin
+above the viewer's displayed size. `MAX_BUFFERED_KIB` uses 1024-byte units per
+video socket; `MAX_INFLIGHT_FRAMES` counts pending video receipts. These are
+hard safety caps, not a desired queue depth. The sender derives its ordinary
+byte allowance from its current video budget, baseline receipt RTT and
+`QUEUE_TARGET_MS`, subject to the byte cap; the duration guard remains active.
+A larger cap accommodates data in transit on high-bandwidth or long-RTT paths
+without authorizing an equally long waiting queue. All `_MS`
+settings use milliseconds. The software preset applies to the CPU encoder;
+faster presets reduce CPU work at a compression cost.
+
+Validation requires `MIN_BITRATE_KBPS <= INITIAL_BITRATE_KBPS <= MAX_BITRATE_KBPS`
+and `MIN_BITRATE_KBPS <= UPLOAD_BITRATE_KBPS <= MAX_BITRATE_KBPS`,
+`QUEUE_TARGET_MS < ACK_TIMEOUT_MS`, `RETRY_INITIAL_MS <= RETRY_MAX_MS`, and
+`2 * IDLE_INTERVAL_MS <= STALE_TIMEOUT_MS`. Lowering video limits cannot extend a
+session lease or grant screen-sharing consent.
+
+
+## Network proxies
+
+The same proxy policy applies to control, upload and screen sockets before each
+connection. Reconnection preserves this policy. TLS certificate verification is
+unchanged; use a valid certificate or the system's trusted enterprise CA.
+
+| Environment variable | Default | Allowed values |
+| --- | --- | --- |
+| `MOUFFETTE_PROXY_TYPE` | system | system, none, http, socks5 |
+| `MOUFFETTE_PROXY_HOST` | empty | hostname or IP address, required for http/socks5 |
+| `MOUFFETTE_PROXY_PORT` | 8080 | integer 1–65535 |
+| `MOUFFETTE_PROXY_USER` | empty | optional explicit-proxy username |
+| `MOUFFETTE_PROXY_PASSWORD` | empty | optional explicit-proxy password; requires username |
+
+`system` delegates discovery to Qt's platform proxy support. `none` connects
+directly. `http` uses an HTTP CONNECT tunnel, including for a `wss://` server;
+it does not mean a separate TLS connection to the proxy. `socks5` supports an
+optional username/password. Explicit proxy authentication is supplied only to a
+challenge from the configured host and port, never to an unrelated discovered
+proxy. System mode uses system proxy credentials where Qt supplies them;
+explicit credentials require http/socks5 mode. PAC and integrated enterprise
+authentication depend on the platform and deployment and require actual testing.
+
+Keep credentials out of this repository and CLI history: set them through the
+process environment or a private external env file. AppConfig marks username
+and password sensitive, never includes their content in its validation errors,
+and does not export them to network diagnostics. Spaces in a process password
+are preserved; use quoting in env files. Control characters are rejected.
+SOCKS5 credentials are bounded to 255 UTF-8 bytes each.
+
+References: [Qt proxy factory](https://doc.qt.io/qt-6/qnetworkproxyfactory.html),
+[Qt proxy types](https://doc.qt.io/qt-6/qnetworkproxy.html),
+[Qt WebSocket authentication](https://doc.qt.io/qt-6/qwebsocket.html#proxyAuthenticationRequired).

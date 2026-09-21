@@ -52,6 +52,7 @@ public:
     void setRemoteScreenFrame(int screenId, const QVideoFrame& frame) override;
     void clearRemoteScreenFrame(int screenId) override;
     void clearRemoteScreenFrames() override;
+    QJsonValue screenPreviewDemand() const override;
     void setOverlayActionsEnabled(bool enabled) override;
     bool overlayActionsEnabled() const override { return m_actionsEnabled; }
     void setProjectEditingEnabled(bool enabled) override;

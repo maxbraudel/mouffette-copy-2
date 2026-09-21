@@ -708,6 +708,11 @@ include(CTest)
 if(BUILD_TESTING)
     find_package(Qt6 REQUIRED COMPONENTS Test)
 
+    add_executable(tst_ScreenAdaptiveController tests/qt/tst_ScreenAdaptiveController.cpp)
+    target_include_directories(tst_ScreenAdaptiveController PRIVATE src)
+    target_link_libraries(tst_ScreenAdaptiveController PRIVATE Qt6::Core Qt6::Test)
+    add_test(NAME ScreenAdaptiveController COMMAND tst_ScreenAdaptiveController)
+
     add_executable(tst_ScreenStreamCodec
         tests/qt/tst_ScreenStreamCodec.cpp
         src/backend/screensharing/ScreenStreamCodec.cpp)

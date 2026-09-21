@@ -24,8 +24,10 @@ either client's permission to share its own screens.
 The remote connection card shows **Screen disabled** when the viewer turns off
 screen content locally. With viewing enabled, it shows **Screen loading** while
 connecting and waiting for the first frame, then **Screen available** once frames
-arrive. Disabled remote sharing, an error, or a timeout shows **Screen not
-available**. A monitor icon sits immediately to the left of the volume. These
+arrive. Disabled remote sharing or a failure leaving no healthy displayed
+monitor shows **Screen not available**. A capture, decode or stale-frame failure
+on one monitor clears only that monitor; another healthy monitor keeps the
+connection card **Screen available**. A monitor icon sits immediately to the left of the volume. These
 indicators share the connection statuses' font, foreground and background colors:
 amber while loading, green when available, red when unavailable or locally disabled.
 Availability follows decoded frames for the currently viewed client, not just
@@ -33,10 +35,12 @@ publishing consent. There is no permanent status message inside the canvas scree
 
 Screen-sharing problems use warning toasts and notification history: remote
 sharing disabled, missing OS permission, capture or decode errors, interrupted
-video transport, no first frame after ten seconds, or no updates for five
-seconds. Normal handshakes and successful recovery are silent. Repeated reports
-of the same problem are suppressed until a frame arrives or the user starts a
-new viewing attempt. Intentional hiding and suspension do not create warnings.
+video transport, no first frame after the configured timeout (15 seconds by
+default), or no decoded updates for the configured stale timeout (8 seconds).
+Normal handshakes and successful recovery are silent. Monitor-specific warnings
+identify the affected screen and suppress duplicate reasons until that screen
+recovers or the viewing attempt changes. Other healthy screens keep their
+images and availability. Intentional hiding and suspension do not create warnings.
 
 macOS also requires the operating system's Screen Recording permission for the
 application. The checkbox only authorizes sharing within Mouffette; it does not
@@ -73,90 +77,189 @@ Capture continues when the publisher's control window is hidden; native system
 lock/sleep suspends sharing.
 
 Only the visible canvas with screen content enabled subscribes. Leaving it,
-hiding screen content, hiding the viewer window,
-disabling consent, losing the session, or disconnecting removes its frames.
-Capture is created only while a permitted subscriber exists. Multiple viewers
-reuse the same capture and encoder for each screen. A static desktop supplies
-a low-rate freshness frame; the viewer clears an image after five seconds
-without decoded frames.
+hiding screen content, hiding the viewer window, disabling consent, losing the
+session, or disconnecting removes its frames. Within that canvas, only monitors
+intersecting the viewport are requested. An offscreen monitor is unsubscribed,
+its decoded image is cleared and its pending decode work is fenced. Capture
+exists only while at least one permitted viewer requests that monitor.
+
+The viewport adapter requests the full monitor image at a useful resolution
+from its displayed size, zoom, effective device pixel ratio and the configured
+oversampling margin (125% by default). Requests round up in 160-pixel steps,
+remain even and respect the native and configured maximum edge where possible.
+Changes are coalesced over 200 ms by default and identical demands emit nothing;
+panning does not crop pixels or change screen coordinates. An empty demand
+means no monitor is visible. A host without a known viewport uses the legacy
+subscription behavior until it can report its demand.
+
+Multiple viewers reuse one capture and encoder per monitor. Each session still
+requires its own uploaded packet copy, which counts against the publisher's
+aggregate video budget. There is no simulcast or independent quality level per
+viewer: a slow viewer can reduce the shared profile. A static desktop supplies
+a freshness sample at the configured idle interval (1 second by default);
+received images expire after the stale timeout.
 
 ## Capture and video path
 
-- macOS uses ScreenCaptureKit with the native display ID, avoiding ambiguous
-  monitor names. It captures SDR NV12, scales at capture time to a maximum
-  1,920-pixel edge, requests 30 fps, and disables cursor/audio capture. Its
-  IOSurface-backed CVPixelBuffer goes directly to VideoToolbox, without a CPU
-  pixel copy or color conversion. The native capture queue has three surfaces.
+- macOS uses ScreenCaptureKit with native display IDs and SDR NV12. Capture
+  dimensions and requested FPS change with the active encoding profile, up to
+  the configured 3,840-pixel edge and 30 FPS defaults. Cursor and audio are not
+  captured. An IOSurface-backed CVPixelBuffer reaches VideoToolbox without a
+  CPU pixel copy when its dimensions match the encoder. Native reconfiguration
+  is coalesced and stale surfaces are rejected. The native queue has three
+  surfaces.
 - Windows uses Qt's FFmpeg-backed QScreenCapture and DXGI Desktop Duplication.
-  Screen IDs come from the same native monitor inventory used for discovery
-  and cursor mapping. Portrait rotation and mirroring are normalized.
-- H.264 prefers VideoToolbox on macOS and NVENC, Quick Sync or AMF on Windows.
-  If a hardware encoder cannot initialize, libx264 or OpenH264 is selected.
-  The nominal bitrate is 4 Mbps per screen with no B frames and periodic
-  self-contained IDR frames. Output dimensions are even and aspect preserving.
-- Capture keeps one latest raw frame and at most one encoded callback pending.
-  Conversion and encoding run on a dedicated worker per captured screen.
-  Changed content is capped at 30 fps; unchanged content is refreshed at 1 fps.
-  An asynchronous encoder awaiting a recovery IDR receives follow-up samples
-  at 30 fps even on a static desktop. More than three pending native frames
-  triggers a software encoder restart at an IDR instead of growing the queue.
-- Decoding uses a two-worker pool, with at most three waiting packets and
-  4 MiB per screen. A gap or overload abandons dependent P frames and requests
-  an IDR. Stopped streams discard results from in-flight work.
-- Decoded FFmpeg YUV planes are retained directly by QVideoFrame and rendered
-  through the existing SharedVideoNode/Qt Quick graphics path. Frame delivery
-  does not rebuild the screen model or invalidate document/project state.
+  Screen IDs use the discovery/cursor monitor inventory. Portrait rotation and
+  mirroring are normalized. Scaling and encoder cadence follow the same profile;
+  the Windows capture backend itself can still produce samples more frequently.
+- H.264 prefers VideoToolbox on macOS and NVENC, Quick Sync or AMF on Windows,
+  with libx264 or OpenH264 as software fallback. The current profile supplies
+  bitrate, dimensions and FPS. There are no B frames. Output dimensions are even
+  and aspect preserving; self-contained IDR frames include SPS/PPS.
+- The software x264 preset defaults to `veryfast` and is configurable. Profile
+  changes that affect encoding reopen the codec and begin with an IDR. Normal
+  keyframes are requested every 4 seconds by default; recovery requests are
+  rate limited to avoid repeated bursts. Encoder failure permits at most three
+  reduced-profile restarts during one capture's lifetime. Reduced edge, FPS and
+  bitrate ceilings remain in force until a new capture is created, so improving
+  network feedback cannot repeatedly restore an already-failed hardware profile.
+  Exhausting this recovery path stops only the affected monitor.
+- Capture keeps one latest raw frame and at most one encoded delivery callback
+  pending. Each captured screen has a worker thread. Backpressure pauses new
+  encoding while keeping the newest raw sample. Changed frames follow the
+  profile's FPS limit; unchanged input uses the idle interval. A delayed native
+  recovery IDR receives follow-up samples at that same profile cadence.
+- Decoding uses two workers, at most three waiting packets and 4 MiB per screen,
+  plus a configurable queue-age limit (200 ms by default). Gaps, stale queued
+  work and overload abandon dependent P frames and request an IDR. Stopped
+  streams discard in-flight results. Slow decoding is reported to the source.
+  Decode errors and stale frames clear and recover the affected screen without
+  clearing other screens. A screen explicitly reported as capture-failed rejects
+  delayed video packets until a matching `starting`/`streaming` state or a new
+  stream authorizes reception again; an old keyframe cannot revive it.
+- Decoded FFmpeg YUV planes remain in QVideoFrame and use the existing
+  SharedVideoNode/Qt Quick graphics path. Video frame delivery does not rebuild
+  the screen model or invalidate document/project state.
 
-The cap is appropriate for a desktop preview in a zoomable canvas. It is not a
-promise of 30 fps on every GPU or network, nor a pixel-perfect 4K/HDR stream.
+## Adaptive policy and network use
 
-## Transport
+The initial aggregate video target is **1.2 Mbit/s**, with a default floor of
+128 kbit/s and ceiling of **12 Mbit/s**. These cover all captured screens and
+all viewer copies from this client; they are not separate allowances per screen.
+When a local upload or a reported remote upload needs capacity, preview is capped
+at **1 Mbit/s** by default. Network headers and TCP retransmissions are additional
+traffic, so these values are not exact wire-rate guarantees.
 
-Screen video uses its own bidirectional WebSocket, separately from control and
-file uploads. The authenticated control connection issues a single-use token,
-valid for 15 seconds and bound to that transport. The video socket inherits the
-server URL's ws/wss scheme. With wss, TLS protects each client/server connection;
-the trusted relay can access the compressed video. This is not end-to-end
-encryption or a peer-to-peer WebRTC connection.
+Source receipts, downstream relay feedback, decoder feedback and control RTT
+feed the policy. Each measured path has its own minimum RTT baseline: a healthy
+long-RTT link is not itself congestion. Growing delay, dropped work, blocked
+transport or sustained encoder overload can lower the target. With adaptation
+on, a congestion step multiplies it by 0.65, at most once per feedback interval
+(500 ms by default). Recovery waits 5 seconds by default, then raises the target
+by 20% or at least 32 kbit/s when recent feedback remains healthy and no upload
+is active. Reconnecting clears old measurements and returns conservatively.
+These are application heuristics over TCP, not libwebrtc's congestion controller
+or a measurement of the subscription's advertised Internet speed.
+
+The policy divides this budget between demanded screens, accounts for viewer
+copies, and updates encoding profiles at most once per second. The current
+compiled quality ladder is:
+
+| Per-screen encoding share | Maximum edge | Moving-content FPS target |
+| --- | ---: | ---: |
+| Below 220 kbit/s | 320 | 5 |
+| From 220 kbit/s | 480 | 8 |
+| From 400 kbit/s | 640 | 12 |
+| From 700 kbit/s | 960 | 15 |
+| From 1.1 Mbit/s | 1280 | 24 |
+| From 2.2 Mbit/s | 1920 | 30 |
+| From 4.5 Mbit/s | 2560 | 30 |
+| From 8 Mbit/s | 3840 | 30 |
+| From 16 Mbit/s | 3840 | 60 |
+
+Viewport demand, native size, receiver capabilities and configured FPS/edge
+limits can lower these values. With the default 12 Mbit/s total ceiling and
+30 FPS cap, 60 FPS is not selected. Raising the ceiling and FPS cap only permits
+it where the path, display demand and hardware support it. A 4K display is no
+longer always forced to 1080p; equally, a 1 Gbit/s link does not justify sending
+4K to a small canvas thumbnail. Codec/profile targets do not guarantee displayed
+FPS, lossless text or HDR. Motion-versus-text classification and AV1 are not
+implemented.
+
+[AppConfig reference](../src/backend/config/README.md#adaptive-screen-preview)
+lists the validated `.env` knobs, units, precedence and bounds. Edit the embedded
+`client/.env` and rebuild, or restart with an external `--env-file <path>`.
+Settings are read at startup; the quality controller adapts continuously during
+the session without rewriting configuration. Disabling `SCREEN_ADAPTIVE_ENABLED`
+uses the maximum configured budget while retaining upload caps, pacing, bounded
+queues and viewport selection. Session recovery deadlines remain server authority.
+
+## Transport and restrictive networks
+
+The implemented transport is **adaptive WebSocket video**, using `wss://` when
+the server URL selects TLS. It has a separate socket from commands and files.
+The control connection issues a single-use token valid for 15 seconds, bound to
+its authenticated identity. TLS protects each client/server leg; the trusted
+relay can access compressed video. There is no end-to-end encryption, UDP,
+WebRTC, TURN, automatic transport selection or ordinary HTTPS polling in this
+implementation.
 
 Each binary message contains `MSV1`, a big-endian 16-bit JSON header length,
-a header of at most 1,024 bytes, and one H.264 Annex B access unit of at most
-2 MiB. The header binds `remoteSessionId`, `generation`, server-issued
-`streamId`, `screenId`, `sequence`, `width`, `height`, `keyFrame` and `codec`.
-No image base64, JPEG polling, temporary video file or per-frame control message
-is involved.
+a header of at most 1,024 bytes and one H.264 Annex B access unit of at most
+2 MiB. The header binds `remoteSessionId`, `generation`, server-issued `streamId`,
+`screenId`, `sequence`, `width`, `height`, `keyFrame` and `codec`. No base64 image,
+temporary video file or per-frame control message is involved. Feedback and
+viewport capabilities are negotiated; older receivers retain a conservative
+1,920-pixel limit rather than receiving unsupported 4K packets.
 
-The relay checks the authenticated publisher role, current connections, session
-lease, opt-in, viewer subscription, monitor inventory and stream generation.
-Revocation, channel replacement and changed screen topology issue a new stream
-identity. This prevents frames already on another TCP connection, or already
-being decoded, from reappearing after an old stream is stopped.
+The relay validates publisher role, current connections, session lease, opt-in,
+monitor inventory, viewport demand and stream generation. Revocation, channel
+replacement and monitor topology changes issue new stream identities, preventing
+old TCP or decoder work from reappearing after teardown. Both video legs use
+exact stream/screen/sequence receipts; an ACK confirms transport consumption,
+not necessarily a displayed frame. Decode feedback is a separate signal.
 
-Both video legs use receipt acknowledgements on the video socket itself.
-Each socket admits at most three unacknowledged access units and 512 KiB,
-including bytes already copied into the OS network buffers. A standalone
-keyframe may use the 2 MiB packet allowance when the window is empty. Only an
-exact stream/screen/sequence acknowledgement releases credit. After 1.5 seconds
-without a receipt, the disposable video connection is aborted and replaced.
-Backlogs are bounded, and congestion drops dependent frames until a fresh IDR.
-Freed slots rotate among waiting display streams so a fourth monitor cannot
-starve behind a fixed capture callback order. This fairness queue contains
-only stream identifiers, never old video frames; inactive entries expire.
-The transport retains TCP reliability; latency on severely constrained links
-still depends on the network. A future WebRTC/QUIC transport can reuse the
-capture, codec, ephemeral stream identity and canvas interfaces, but requires
-separate deployment, negotiation and traversal infrastructure.
+The sender spaces encoded packet admission against the aggregate budget, counting
+every copied payload. Its ordinary byte window uses current bitrate multiplied
+by baseline receipt RTT plus the configured **150 ms** target margin, with a
+32 KiB minimum. Hard caps default to **2,048 KiB and 64 unacknowledged frames**;
+they accommodate data already in transit and are not a desired backlog. A
+standalone packet may exceed the ordinary byte window only within the packet
+and serialization-time guards. The source rejects excessive bursts rather than
+putting them behind a long TCP queue. Relay byte/frame limits are independently
+configured in `server/.env`, with downstream RTT and queue-age guards.
 
-The full Node server suite and all 37 offscreen `ConnectionManager` QtTest
-cases passed locally. Transport tests include actual authenticated video
-sockets, opt-out during queued frames, malformed handshakes, forged receipts,
-source receipt windows, and a simulated 1 Mbps receiver shared fairly by four
-continuously updating screens. The simulation verifies bounded admission and
-progress for every stream; it does not measure real desktop frame rate.
+After the configured receipt timeout (3 seconds by default), the disposable
+video connection is aborted. Retry waits grow exponentially from 500 ms to
+10 seconds by default and reset on successful recovery. Video replacement does
+not recreate a healthy command session or cancel an upload. Fair admission keeps
+only waiting stream identifiers, never a queue of obsolete encoded frames.
+Their expiry includes outstanding pacing debt plus the receipt-timeout margin,
+so a stream waiting during a budgeted send pause does not lose its turn merely
+because no raw frame was admitted. No expired image is retained for that turn.
+Upload sends are also spaced when the control RTT grows above its own baseline.
+TCP reliability still causes head-of-line delays under packet loss, and an
+unrelated application can saturate the shared network.
 
-Both the relay and desktop clients must contain this extension. It uses the
-existing v12 authentication/session envelope without reviving retired messages.
-Older targets have no consent and do not publish a stream.
+The client supports system proxy policy, explicit HTTP CONNECT or SOCKS5, and
+direct mode, consistently across all three sockets. Explicit credentials are
+supplied only for the configured proxy host/port; TLS certificate verification
+remains enabled. See the [proxy settings](../src/backend/config/README.md#network-proxies).
+System discovery and enterprise authentication depend on Qt and the OS and must
+be tested on the target network. The Node service itself listens on WebSocket;
+production WSS requires the deployment's TLS frontend.
+
+If WebRTC is blocked but WSS is allowed, the current implementation is already
+usable because it does not require WebRTC. If the network blocks WSS or access
+to the service, this implementation cannot establish a session via ordinary
+HTTPS instead. A port-443 address alone is not a universal connectivity promise.
+The [adaptability plan](screen-stream-adaptability-plan.md) documents the remaining
+native WebRTC/SFU/TURN, HTTPS session fallback and independent-viewer layers;
+those components are not delivered by these settings.
+
+Both relay and desktop clients should be upgraded together. The extension uses
+the existing v12 authenticated session envelope without reviving retired
+messages; legacy targets without consent do not publish.
 
 ## Validation
 
@@ -177,7 +280,9 @@ Qt Quick rendered pixels, monitor lifecycle, real Qt/Node socket authentication,
 decoding, in-flight cancellation, generation fencing, role/consent checks and
 congestion recovery.
 
-Verified locally on macOS 26.1 with Qt 6.11.2:
+The historical native baseline below was recorded on macOS 26.1 with Qt 6.11.2
+before this adaptive policy. It validates native capture/rendering mechanics;
+its timings and test counts do not benchmark the adaptive release:
 
 - Codec coverage passed 28 cases, with the optional live desktop case skipped.
   This includes both Qt surface and presentation rotations/mirroring, native
@@ -225,10 +330,20 @@ Verified locally on macOS 26.1 with Qt 6.11.2:
   cases passed offscreen.
 
 Run `npm test` in `server`, then build and run CTest. Focused targets are
-`ScreenStreamCodec`, `ScreenSharingService`, `ConnectionManager`, `ClientProfile`
-and `CanvasSelectionBackend`. Synthetic tests do not request desktop capture
+`AppConfig`, `ScreenAdaptiveController`, `ScreenStreamCodec`,
+`ScreenSharingService`, `ConnectionManager`, `ClientProfile` and
+`CanvasSelectionBackend`. Synthetic tests do not request desktop capture
 permission. Native capture, OS consent, multiple physical displays and Windows
 GPU/driver combinations require the platform smoke tests below.
+
+Adaptive regressions cover setting bounds/precedence and atomic reloads,
+healthy high RTT versus growing queues, bitrate reduction/recovery, upload caps,
+viewport selection/coalescence, per-screen clearing, native profile transitions,
+and explicit proxy authentication matching without changing TLS configuration.
+The proxy helper test is synthetic; it does not certify an enterprise proxy.
+The viewport/proxy/transient-frame cases passed offscreen (four test cases plus
+setup/cleanup) during this change. Broader test results and deployment validation
+belong in the implementation plan's current validation record.
 
 Viewer feedback regressions cover capture-error toast deduplication, silent
 recovery/hiding, missing and stale frames, and runtime notification routing in
@@ -245,8 +360,14 @@ checks both labels/icons and stable geometry at the minimum window width.
    disconnect/reconnect, hide/reopen the viewer, and lock/unlock the target.
 5. Unplug/reorder/rotate a monitor during streaming and verify no old monitor
    image is retained under a reassigned ID.
-6. Constrain network throughput, then restore it: verify bounded memory and
-   recovery to current frames rather than a long delayed video queue.
+6. Constrain uplink and downlink independently, add latency/loss, then restore
+   them. Verify profile reduction/recovery, bounded memory and current frames.
+   Measure command RTT and file progress alongside displayed video FPS.
+7. Pan until one or every monitor leaves the viewport; verify unsubscribed
+   capture stops where no other viewer needs it. Zoom back and check recovery.
+8. Test WSS through the actual HTTP/SOCKS5 proxy, authentication and enterprise
+   trust configuration. A WSS-blocked network is an expected unsupported path
+   until the HTTPS session fallback has been implemented.
 
 API references: [Qt QScreenCapture](https://doc.qt.io/qt-6/qscreencapture.html),
 [Qt QVideoSink](https://doc.qt.io/qt-6/qvideosink.html),

@@ -3,6 +3,7 @@
 #include "backend/domain/canvas/CanvasDocument.h"
 
 #include <QImage>
+#include <QJsonValue>
 #include <QHash>
 #include <QObject>
 #include <QPointer>
@@ -123,6 +124,7 @@ public:
     void setRemoteScreenFrame(int screenId, const QVideoFrame& frame);
     void clearRemoteScreenFrame(int screenId);
     void clearRemoteScreenFrames();
+    QJsonValue screenPreviewDemand() const { return m_screenPreviewDemand; }
     Q_INVOKABLE void resetView();
     Q_INVOKABLE void recenterView(int marginPx = 53);
     Q_INVOKABLE bool fitToScreens(int marginPx = 53);
@@ -146,6 +148,7 @@ public:
     Q_INVOKABLE void finishSelectionScaleGesture();
 
 signals:
+    void screenPreviewDemandChanged();
     void editingEnabledChanged();
     void pendingEditsCanceled();
     void presentationChanged();
@@ -201,6 +204,8 @@ public slots:
 private:
     void publishAll();
     void publishCamera();
+    void scheduleScreenPreviewDemand();
+    void publishScreenPreviewDemand();
     void publishMedia();
     void publishSelection();
     void publishScreens();
@@ -247,6 +252,10 @@ private:
     QPointer<QQuickWindow> m_renderWindow;
     MediaListModel* m_mediaListModel = nullptr;
     QTimer* m_videoStateTimer = nullptr;
+    QTimer* m_screenPreviewTimer = nullptr;
+    QMetaObject::Connection m_screenPreviewDprConnection;
+    QMetaObject::Connection m_screenPreviewWindowDestroyedConnection;
+    QJsonValue m_screenPreviewDemand = QJsonValue(QJsonValue::Undefined);
     bool m_textToolActive = false;
     bool m_shellActive = false;
     bool m_projectEditingEnabled = false;

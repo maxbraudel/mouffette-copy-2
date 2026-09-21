@@ -1,6 +1,7 @@
 #include <QtTest>
 
 #include "backend/domain/models/ClientInfo.h"
+#include "backend/config/AppConfig.h"
 #include "backend/managers/network/ConnectionManager.h"
 #include "backend/network/WebSocketClient.h"
 #include "backend/network/RemoteSessionCoordinator.h"
@@ -673,6 +674,12 @@ void ConnectionManagerTest::signedHandshakeAndHeartbeat() {
     const qint64 postEpochJumpUncertainty = postEpochJumpSample.at(3).toLongLong();
     QVERIFY(qAbs(postEpochJumpOffset - serverMonotonicOffsetMs)
             <= postEpochJumpUncertainty);
+    // A control queue that grows by hundreds of milliseconds permits one
+    // bulk chunk, then imposes a bounded pause across all outgoing uploads.
+    QCOMPARE(client.reserveUploadSendSlot(), 0);
+    const int bulkDelay = client.reserveUploadSendSlot();
+    QVERIFY(bulkDelay > 0);
+    QVERIFY(bulkDelay <= 500);
 
     // A replacement transport must never inherit an old clock mapping. Its
     // first (delayed) probe models a cold start over a 120+ ms RTT path; the
@@ -695,6 +702,10 @@ void ConnectionManagerTest::signedHandshakeAndHeartbeat() {
     QVERIFY(client.sceneClockUncertaintyMs() > 50);
     QTRY_VERIFY_WITH_TIMEOUT(!reconnectSelectedUncertainties.isEmpty(), 2000);
     QVERIFY(reconnectSelectedUncertainties.first() > 50);
+    // The new path has its own baseline: an intrinsically slower connection
+    // must not inherit either the old queue-growth penalty or its pacing debt.
+    QCOMPARE(client.reserveUploadSendSlot(), 0);
+    QCOMPARE(client.reserveUploadSendSlot(), 0);
 
     const int probesBeforeRequestedBurst = heartbeatCount;
     QVERIFY(client.requestSceneClockSynchronization());
@@ -1822,7 +1833,7 @@ void ConnectionManagerTest::protocolUploadWireSchemaAndActiveGate() {
     QVERIFY(client.remoteSessionCoordinator()
                 ->incomingForPeer(targetEndpointId).active);
     QCOMPARE(cursorSpy.count(), 2); // inactive outgoing session was ignored
-    // Source-side receipts keep the kernel send buffer inside a three-frame
+    // Source-side receipts keep the kernel send buffer inside the configured
     // window. Only this dedicated socket and the exact tuple free credit.
     client.setScreenSharingEnabled(true);
     const QString publicationStream = QUuid::createUuid().toString(QUuid::WithoutBraces);
@@ -1837,37 +1848,68 @@ void ConnectionManagerTest::protocolUploadWireSchemaAndActiveGate() {
             {"width", 1280}, {"height", 720}, {"keyFrame", true}, {"codec", "h264"}};
     };
     const QByteArray accessUnit = QByteArray::fromHex("000000016588");
-    for (int sequence = 1; sequence <= 3; ++sequence) QVERIFY(client.sendScreenFrame(publication(sequence), accessUnit));
-    QTRY_COMPARE_WITH_TIMEOUT(publishedScreenFrames.size(), 3, 1000);
-    QVERIFY(!client.sendScreenFrame(publication(4), accessUnit));
-    const auto acknowledgePublication = [&](const QString& epoch, int sequence) {
+    const int receiptLimit = AppConfig::instance().screenMaxInflightFrames();
+    QSignalSpy sourceSamples(&client, &WebSocketClient::screenSourceFeedback);
+    const auto measuredReceipts = [&] {
+        int count = 0;
+        for (const auto& sample : sourceSamples)
+            if (sample.first().toInt() >= 0 && !sample.at(1).toBool()) ++count;
+        return count;
+    };
+    for (int sequence = 1; sequence <= receiptLimit; ++sequence) QVERIFY(client.sendScreenFrame(publication(sequence), accessUnit));
+    QTRY_COMPARE_WITH_TIMEOUT(publishedScreenFrames.size(), receiptLimit, 1000);
+    QVERIFY(!client.sendScreenFrame(publication(receiptLimit + 1), accessUnit));
+    const auto acknowledgePublication = [&](const QString& epoch, int sequence, int screenId = 2) {
         screenPeer->sendTextMessage(QString::fromUtf8(QJsonDocument(QJsonObject{
-            {"type", "screen_frame_ack"}, {"streamId", epoch}, {"screenId", 2}, {"sequence", sequence},
+            {"type", "screen_frame_ack"}, {"streamId", epoch}, {"screenId", screenId}, {"sequence", sequence},
             {"protocolVersion", 12}, {"serverBootId", bootId}, {"connectionGeneration", 1},
             {"messageId", QUuid::createUuid().toString(QUuid::WithoutBraces)}
         }).toJson(QJsonDocument::Compact)));
     };
     acknowledgePublication(QUuid::createUuid().toString(QUuid::WithoutBraces), 1);
     QTest::qWait(30);
-    QVERIFY(!client.sendScreenFrame(publication(4), accessUnit));
+    QCOMPARE(measuredReceipts(), 0);
+    QVERIFY(!client.sendScreenFrame(publication(receiptLimit + 1), accessUnit));
+    acknowledgePublication(publicationStream, 1);
+    QTRY_COMPARE_WITH_TIMEOUT(measuredReceipts(), 1, 1000);
     acknowledgePublication(publicationStream, 1);
     QTest::qWait(30);
-    QVERIFY(client.sendScreenFrame(publication(4), accessUnit));
-    acknowledgePublication(publicationStream, 2);
-    acknowledgePublication(publicationStream, 3);
-    acknowledgePublication(publicationStream, 4);
-    QTest::qWait(30);
+    QCOMPARE(measuredReceipts(), 1); // Duplicate ACKs cannot produce an RTT sample.
+    QVERIFY(client.sendScreenFrame(publication(receiptLimit + 1), accessUnit));
+    for (int sequence = 2; sequence <= receiptLimit + 1; ++sequence)
+        acknowledgePublication(publicationStream, sequence);
+    QTRY_COMPARE_WITH_TIMEOUT(measuredReceipts(), receiptLimit + 1, 1000);
+    // Fast ACKs must not forgive bytes already sent at a constrained budget.
+    // The raw-capture gate stays paused while that serialization debt drains.
+    client.setScreenVideoBudget(32000);
+    QByteArray pacedAccessUnit(1600, '\0');
+    pacedAccessUnit.replace(0, accessUnit.size(), accessUnit);
+    QElapsedTimer pacedAt;
+    pacedAt.start();
+    QVERIFY(client.sendScreenFrame(publication(receiptLimit + 2), pacedAccessUnit));
+    acknowledgePublication(publicationStream, receiptLimit + 2);
+    QTRY_COMPARE_WITH_TIMEOUT(measuredReceipts(), receiptLimit + 2, 1000);
+    QVERIFY(!client.screenSendWindowOpen());
+    client.setScreenVideoBudget(32000);
+    QVERIFY(!client.screenSendWindowOpen());
+    QTRY_VERIFY_WITH_TIMEOUT(client.screenSendWindowOpen(), 1500);
+    QVERIFY(pacedAt.elapsed() >= 200);
+    client.setScreenVideoBudget(AppConfig::instance().screenInitialBitrateKbps() * 1000);
+    const int receiptsBeforeFairness = measuredReceipts();
     const auto monitorPublication = [&](int screenId, int sequence) {
         auto packet = publication(sequence); packet.insert("screenId", screenId); return packet;
     };
-    for (int screenId = 0; screenId < 3; ++screenId)
+    for (int screenId = 0; screenId < receiptLimit; ++screenId)
         QVERIFY(client.sendScreenFrame(monitorPublication(screenId, 100), accessUnit));
-    QVERIFY(!client.sendScreenFrame(monitorPublication(3, 100), accessUnit));
-    // Free screen2's slot. Screen0 must yield it to the waiting fourth display.
-    acknowledgePublication(publicationStream, 100);
-    QTest::qWait(30);
+    QVERIFY(!client.sendScreenFrame(monitorPublication(receiptLimit, 100), accessUnit));
+    // A normal long-RTT/pacing interval must not erase the excluded screen's
+    // turn before credit returns (the old 500 ms expiration starved it).
+    QTest::qWait(650);
+    // Free one slot. Screen0 must yield it to the display beyond the window.
+    acknowledgePublication(publicationStream, 100, receiptLimit - 1);
+    QTRY_COMPARE_WITH_TIMEOUT(measuredReceipts(), receiptsBeforeFairness + 1, 1000);
     QVERIFY(!client.sendScreenFrame(monitorPublication(0, 101), accessUnit));
-    QVERIFY(client.sendScreenFrame(monitorPublication(3, 101), accessUnit));
+    QVERIFY(client.sendScreenFrame(monitorPublication(receiptLimit, 101), accessUnit));
     client.setScreenSharingEnabled(false);
     QVERIFY(!client.sendScreenFrame(publication(5), accessUnit));
     QVERIFY(client.sendRemoteCursor(incomingSessionId, 1, 1, true, 2, {12.9, 24.1}));

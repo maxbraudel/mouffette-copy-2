@@ -116,6 +116,129 @@ private slots:
         QCOMPARE(decoder.decode(packets.first().annexB, packets.first().timestampUs, error).size(), QSize(180, 320));
     }
 
+    void adaptiveProfilesPreserveGeometryAndRestartWithIndependentKeyframes() {
+        ScreenStreamEncoder encoder(false);
+        ScreenStreamProfile profile;
+        QString error;
+        qint64 timestamp = 0;
+        for (const int maximumEdge : {640, 1280, 3840, 320}) {
+            profile.maximumEdge = maximumEdge;
+            profile.framesPerSecond = maximumEdge <= 640 ? 10 : 30;
+            profile.bitrateBps = maximumEdge <= 640 ? 300000 : 6000000;
+            encoder.setProfile(profile);
+            const auto packets = encoder.encode(frame(QSize(3840, 2160), timestamp), false, error);
+            QVERIFY2(error.isEmpty(), qPrintable(error));
+            QCOMPARE(packets.size(), 1);
+            QVERIFY(packets.first().keyFrame);
+            QCOMPARE(packets.first().size, QSize(maximumEdge, maximumEdge * 9 / 16));
+            ScreenStreamDecoder decoder;
+            QCOMPARE(decoder.decode(packets.first().annexB, timestamp, error).size(), packets.first().size);
+            QVERIFY2(error.isEmpty(), qPrintable(error));
+            timestamp += 100000;
+        }
+    }
+
+    void rateChangeIsAppliedAtKeyframeAndIdenticalProfileDoesNotRestart() {
+        ScreenStreamEncoder encoder(false);
+        ScreenStreamProfile profile;
+        profile.maximumEdge = 640;
+        profile.bitrateBps = 1000000;
+        QString error;
+        encoder.setProfile(profile);
+        auto packets = encoder.encode(frame(QSize(640, 360), 0), false, error);
+        QCOMPARE(packets.size(), 1);
+        QVERIFY(packets.first().keyFrame);
+        encoder.setProfile(profile);
+        packets = encoder.encode(frame(QSize(640, 360), 33333), false, error);
+        QCOMPARE(packets.size(), 1);
+        QVERIFY(!packets.first().keyFrame);
+        profile.bitrateBps = 200000;
+        encoder.setProfile(profile);
+        packets = encoder.encode(frame(QSize(640, 360), 66666), false, error);
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QCOMPARE(packets.size(), 1);
+        QVERIFY(packets.first().keyFrame);
+        ScreenStreamDecoder fresh;
+        QVERIFY(fresh.decode(packets.first().annexB, 66666, error).isValid());
+        encoder.reset();
+        packets = encoder.encode(frame(QSize(1280, 720), 99999), false, error);
+        QCOMPARE(packets.size(), 1);
+        QCOMPARE(packets.first().size, QSize(640, 360));
+    }
+
+    void stationaryFreshnessDoesNotForceAKeyframeEveryTwoSeconds() {
+        ScreenStreamEncoder encoder(false);
+        ScreenStreamProfile profile;
+        profile.keyFrameIntervalMs = 10000;
+        encoder.setProfile(profile);
+        QString error;
+        for (int second = 0; second <= 10; ++second) {
+            const auto packets = encoder.encode(frame(QSize(320, 180), second * 1000000LL), false, error);
+            QVERIFY2(error.isEmpty(), qPrintable(error));
+            QCOMPARE(packets.size(), 1);
+            QCOMPARE(packets.first().keyFrame, second == 0 || second == 10);
+        }
+    }
+
+    void bitrateBudgetActuallyReducesEncodedTraffic() {
+        const auto encodedBytes = [](int bitrate) {
+            ScreenStreamEncoder encoder(false);
+            ScreenStreamProfile profile;
+            profile.bitrateBps = bitrate;
+            profile.keyFrameIntervalMs = 10000;
+            encoder.setProfile(profile);
+            qint64 bytes = 0;
+            quint32 noise = 12345;
+            for (int index = 0; index < 60; ++index) {
+                QVideoFrame sample(QVideoFrameFormat(QSize(320, 180), QVideoFrameFormat::Format_BGRA8888));
+                if (!sample.map(QVideoFrame::WriteOnly)) return qint64(-1);
+                for (int y = 0; y < sample.height(); ++y) {
+                    auto* row = sample.bits(0) + y * sample.bytesPerLine(0);
+                    for (int x = 0; x < sample.width(); ++x) {
+                        noise = noise * 1664525u + 1013904223u;
+                        row[x * 4] = uchar(noise);
+                        row[x * 4 + 1] = uchar(noise >> 8);
+                        row[x * 4 + 2] = uchar(noise >> 16);
+                        row[x * 4 + 3] = 255;
+                    }
+                }
+                sample.unmap();
+                sample.setStartTime(index * 33333LL);
+                QString error;
+                const auto packets = encoder.encode(sample, false, error);
+                if (!error.isEmpty() || packets.isEmpty()) return qint64(-1);
+                for (const auto& packet : packets) bytes += packet.annexB.size();
+            }
+            return bytes;
+        };
+        const auto high = encodedBytes(2000000);
+        const auto low = encodedBytes(250000);
+        QVERIFY(high > 0);
+        QVERIFY(low > 0);
+        QVERIFY2(low < high / 2, qPrintable(QStringLiteral("Low-rate bytes %1, high-rate bytes %2").arg(low).arg(high)));
+        // The finite two-second run includes its initial IDR and encoder burst.
+        QVERIFY2(low * 8 / 2 < 500000, "The low-rate encoder must honor a bounded traffic budget");
+    }
+
+    void invalidProfilesStayInsideCodecSafetyLimits() {
+        ScreenStreamProfile profile;
+        profile.maximumEdge = 999999;
+        profile.framesPerSecond = 0;
+        profile.bitrateBps = -1;
+        profile.idleIntervalMs = 999999;
+        profile.keyFrameIntervalMs = -1;
+        profile.minimumKeyFrameIntervalMs = -1;
+        profile.softwarePreset = QStringLiteral("untrusted-option");
+        const auto bounded = profile.normalized();
+        QCOMPARE(bounded.maximumEdge, ScreenStreamEncoder::MaximumDecodeEdge);
+        QCOMPARE(bounded.framesPerSecond, 1);
+        QCOMPARE(bounded.bitrateBps, 32000);
+        QCOMPARE(bounded.idleIntervalMs, 4000);
+        QCOMPARE(bounded.keyFrameIntervalMs, 500);
+        QCOMPARE(bounded.minimumKeyFrameIntervalMs, 100);
+        QCOMPARE(bounded.softwarePreset, QStringLiteral("veryfast"));
+    }
+
     void decodedFrameOutlivesDecoder() {
         QVideoFrame decoded;
         QString error;

@@ -10,6 +10,7 @@
 #include <QTextStream>
 
 #include <array>
+#include <algorithm>
 
 namespace {
 
@@ -22,10 +23,16 @@ struct SettingSpec {
     const char* settingsName;
     const char* defaultValue;
     bool boolean;
+    bool sensitive = false;
 };
 
-constexpr std::array<SettingSpec, 97> kSpecs{{
+constexpr std::array<SettingSpec, 125> kSpecs{{
     {Key::ServerUrl, "MOUFFETTE_SERVER_URL", "server-url", "serverUrl", "ws://localhost:8080", false},
+    {Key::ProxyType, "MOUFFETTE_PROXY_TYPE", "proxy-type", nullptr, "system", false},
+    {Key::ProxyHost, "MOUFFETTE_PROXY_HOST", "proxy-host", nullptr, "", false},
+    {Key::ProxyPort, "MOUFFETTE_PROXY_PORT", "proxy-port", nullptr, "8080", false},
+    {Key::ProxyUser, "MOUFFETTE_PROXY_USER", "proxy-user", nullptr, "", false, true},
+    {Key::ProxyPassword, "MOUFFETTE_PROXY_PASSWORD", "proxy-password", nullptr, "", false, true},
     {Key::RemoteSessionHiddenTimeoutMs, "MOUFFETTE_REMOTE_SESSION_HIDDEN_TIMEOUT_MS", "remote-session-hidden-timeout-ms", nullptr, "60000", false},
     {Key::ProjectMediaHiddenTimeoutMs, "MOUFFETTE_PROJECT_MEDIA_HIDDEN_TIMEOUT_MS", "project-media-hidden-timeout-ms", nullptr, "0", false},
     {Key::ProjectHiddenRetentionMs, "MOUFFETTE_PROJECT_HIDDEN_RETENTION_MS", "project-hidden-retention-ms", nullptr, "300000", false},
@@ -52,6 +59,29 @@ constexpr std::array<SettingSpec, 97> kSpecs{{
     {Key::ProjectCheckpointIntervalMs, "MOUFFETTE_PROJECT_CHECKPOINT_INTERVAL_MS", "project-checkpoint-interval-ms", nullptr, "15000", false},
     {Key::ProjectDeadlinePollIntervalMs, "MOUFFETTE_PROJECT_DEADLINE_POLL_INTERVAL_MS", "project-deadline-poll-interval-ms", nullptr, "250", false},
     {Key::ScreenChangeDebounceMs, "MOUFFETTE_SCREEN_CHANGE_DEBOUNCE_MS", "screen-change-debounce-ms", nullptr, "150", false},
+    {Key::ScreenAdaptiveEnabled, "MOUFFETTE_SCREEN_ADAPTIVE_ENABLED", "screen-adaptive-enabled", nullptr, "true", true},
+    {Key::ScreenMaxEdge, "MOUFFETTE_SCREEN_MAX_EDGE", "screen-max-edge", nullptr, "3840", false},
+    {Key::ScreenMaxFps, "MOUFFETTE_SCREEN_MAX_FPS", "screen-max-fps", nullptr, "30", false},
+    {Key::ScreenIdleIntervalMs, "MOUFFETTE_SCREEN_IDLE_INTERVAL_MS", "screen-idle-interval-ms", nullptr, "1000", false},
+    {Key::ScreenMinBitrateKbps, "MOUFFETTE_SCREEN_MIN_BITRATE_KBPS", "screen-min-bitrate-kbps", nullptr, "128", false},
+    {Key::ScreenInitialBitrateKbps, "MOUFFETTE_SCREEN_INITIAL_BITRATE_KBPS", "screen-initial-bitrate-kbps", nullptr, "1200", false},
+    {Key::ScreenMaxBitrateKbps, "MOUFFETTE_SCREEN_MAX_BITRATE_KBPS", "screen-max-bitrate-kbps", nullptr, "12000", false},
+    {Key::ScreenUploadBitrateKbps, "MOUFFETTE_SCREEN_UPLOAD_BITRATE_KBPS", "screen-upload-bitrate-kbps", nullptr, "1000", false},
+    {Key::ScreenFeedbackIntervalMs, "MOUFFETTE_SCREEN_FEEDBACK_INTERVAL_MS", "screen-feedback-interval-ms", nullptr, "500", false},
+    {Key::ScreenRecoveryHoldMs, "MOUFFETTE_SCREEN_RECOVERY_HOLD_MS", "screen-recovery-hold-ms", nullptr, "5000", false},
+    {Key::ScreenQueueTargetMs, "MOUFFETTE_SCREEN_QUEUE_TARGET_MS", "screen-queue-target-ms", nullptr, "150", false},
+    {Key::ScreenAckTimeoutMs, "MOUFFETTE_SCREEN_ACK_TIMEOUT_MS", "screen-ack-timeout-ms", nullptr, "3000", false},
+    {Key::ScreenKeyframeIntervalMs, "MOUFFETTE_SCREEN_KEYFRAME_INTERVAL_MS", "screen-keyframe-interval-ms", nullptr, "4000", false},
+    {Key::ScreenMaxBufferedKiB, "MOUFFETTE_SCREEN_MAX_BUFFERED_KIB", "screen-max-buffered-kib", nullptr, "2048", false},
+    {Key::ScreenMaxInflightFrames, "MOUFFETTE_SCREEN_MAX_INFLIGHT_FRAMES", "screen-max-inflight-frames", nullptr, "64", false},
+    {Key::ScreenDecodeQueueMs, "MOUFFETTE_SCREEN_DECODE_QUEUE_MS", "screen-decode-queue-ms", nullptr, "200", false},
+    {Key::ScreenViewportDebounceMs, "MOUFFETTE_SCREEN_VIEWPORT_DEBOUNCE_MS", "screen-viewport-debounce-ms", nullptr, "200", false},
+    {Key::ScreenViewportOversamplePercent, "MOUFFETTE_SCREEN_VIEWPORT_OVERSAMPLE_PERCENT", "screen-viewport-oversample-percent", nullptr, "125", false},
+    {Key::ScreenRetryInitialMs, "MOUFFETTE_SCREEN_RETRY_INITIAL_MS", "screen-retry-initial-ms", nullptr, "500", false},
+    {Key::ScreenRetryMaxMs, "MOUFFETTE_SCREEN_RETRY_MAX_MS", "screen-retry-max-ms", nullptr, "10000", false},
+    {Key::ScreenFirstFrameTimeoutMs, "MOUFFETTE_SCREEN_FIRST_FRAME_TIMEOUT_MS", "screen-first-frame-timeout-ms", nullptr, "15000", false},
+    {Key::ScreenStaleTimeoutMs, "MOUFFETTE_SCREEN_STALE_TIMEOUT_MS", "screen-stale-timeout-ms", nullptr, "8000", false},
+    {Key::ScreenSoftwarePreset, "MOUFFETTE_SCREEN_SOFTWARE_PRESET", "screen-software-preset", nullptr, "veryfast", false},
     {Key::SystemVolumePollIntervalMs, "MOUFFETTE_SYSTEM_VOLUME_POLL_INTERVAL_MS", "system-volume-poll-interval-ms", nullptr, "1200", false},
     {Key::FileWatchDebounceMs, "MOUFFETTE_FILE_WATCH_DEBOUNCE_MS", "file-watch-debounce-ms", nullptr, "500", false},
     {Key::SceneActivityRefreshIntervalMs, "MOUFFETTE_SCENE_ACTIVITY_REFRESH_INTERVAL_MS", "scene-activity-refresh-interval-ms", nullptr, "1000", false},
@@ -404,6 +434,11 @@ void AppConfig::resetToCompiledDefaults() {
         m_provenance[spec.key] = QStringLiteral("compiled-default");
     }
     m_serverUrl = QUrl(QStringLiteral("ws://localhost:8080"));
+    m_proxyType = QStringLiteral("system");
+    m_proxyHost.clear();
+    m_proxyPort = 8080;
+    m_proxyUser.clear();
+    m_proxyPassword.clear();
     m_remoteSessionHiddenTimeoutMs = 60000;
     m_projectMediaHiddenTimeoutMs = 0;
     m_projectHiddenRetentionMs = 300000;
@@ -430,6 +465,29 @@ void AppConfig::resetToCompiledDefaults() {
     m_projectCheckpointIntervalMs = 15000;
     m_projectDeadlinePollIntervalMs = 250;
     m_screenChangeDebounceMs = 150;
+    m_screenAdaptiveEnabled = true;
+    m_screenMaxEdge = 3840;
+    m_screenMaxFps = 30;
+    m_screenIdleIntervalMs = 1000;
+    m_screenMinBitrateKbps = 128;
+    m_screenInitialBitrateKbps = 1200;
+    m_screenMaxBitrateKbps = 12000;
+    m_screenUploadBitrateKbps = 1000;
+    m_screenFeedbackIntervalMs = 500;
+    m_screenRecoveryHoldMs = 5000;
+    m_screenQueueTargetMs = 150;
+    m_screenAckTimeoutMs = 3000;
+    m_screenKeyframeIntervalMs = 4000;
+    m_screenMaxBufferedKiB = 2048;
+    m_screenMaxInflightFrames = 64;
+    m_screenDecodeQueueMs = 200;
+    m_screenViewportDebounceMs = 200;
+    m_screenViewportOversamplePercent = 125;
+    m_screenRetryInitialMs = 500;
+    m_screenRetryMaxMs = 10000;
+    m_screenFirstFrameTimeoutMs = 15000;
+    m_screenStaleTimeoutMs = 8000;
+    m_screenSoftwarePreset = QStringLiteral("veryfast");
     m_systemVolumePollIntervalMs = 1200;
     m_fileWatchDebounceMs = 500;
     m_sceneActivityRefreshIntervalMs = 1000;
@@ -648,6 +706,55 @@ bool AppConfig::load(const LoadOptions& options, QString* errorMessage) {
     if (!parseServerUrl(rawValues.at(Key::ServerUrl), candidate.m_serverUrl, errorMessage)) {
         return false;
     }
+    candidate.m_proxyType = rawValues.at(Key::ProxyType).value.trimmed().toLower();
+    if (candidate.m_proxyType != QLatin1String("system") && candidate.m_proxyType != QLatin1String("none")
+        && candidate.m_proxyType != QLatin1String("http") && candidate.m_proxyType != QLatin1String("socks5")) {
+        return setError(errorMessage, QStringLiteral("MOUFFETTE_PROXY_TYPE from %1 must be system, none, http or socks5")
+            .arg(rawValues.at(Key::ProxyType).source));
+    }
+    qint64 proxyPort = 0;
+    if (!parseInteger(rawValues.at(Key::ProxyPort), keyName(Key::ProxyPort), 1, 65535, proxyPort, errorMessage))
+        return false;
+    candidate.m_proxyPort = int(proxyPort);
+    candidate.m_proxyHost = rawValues.at(Key::ProxyHost).value.trimmed();
+    candidate.m_proxyUser = rawValues.at(Key::ProxyUser).value;
+    candidate.m_proxyPassword = rawValues.at(Key::ProxyPassword).value;
+    const bool explicitProxy = candidate.m_proxyType == QLatin1String("http")
+        || candidate.m_proxyType == QLatin1String("socks5");
+    QUrl proxyAddress;
+    proxyAddress.setScheme(QStringLiteral("http"));
+    proxyAddress.setHost(candidate.m_proxyHost);
+    static const QRegularExpression invalidProxyHost(QStringLiteral("[\\s/?#@]"));
+    if ((explicitProxy && candidate.m_proxyHost.isEmpty())
+        || (!candidate.m_proxyHost.isEmpty() && (candidate.m_proxyHost.size() > 253
+            || invalidProxyHost.match(candidate.m_proxyHost).hasMatch()
+            || !proxyAddress.isValid() || proxyAddress.host().isEmpty()))) {
+        return setError(errorMessage, QStringLiteral("MOUFFETTE_PROXY_HOST from %1 must be a hostname or IP address without a URL or credentials")
+            .arg(rawValues.at(Key::ProxyHost).source));
+    }
+    const auto validCredential = [](const QString& value) {
+        return value.size() <= 4096 && !std::any_of(value.cbegin(), value.cend(), [](QChar character) {
+            return character.category() == QChar::Other_Control;
+        });
+    };
+    if (!validCredential(candidate.m_proxyUser)) {
+        return setError(errorMessage, QStringLiteral("MOUFFETTE_PROXY_USER from %1 is invalid (value redacted)")
+            .arg(rawValues.at(Key::ProxyUser).source));
+    }
+    if (!validCredential(candidate.m_proxyPassword)) {
+        return setError(errorMessage, QStringLiteral("MOUFFETTE_PROXY_PASSWORD from %1 is invalid (value redacted)")
+            .arg(rawValues.at(Key::ProxyPassword).source));
+    }
+    if ((!candidate.m_proxyUser.isEmpty() || !candidate.m_proxyPassword.isEmpty()) && !explicitProxy) {
+        return setError(errorMessage, QStringLiteral("MOUFFETTE_PROXY_USER and MOUFFETTE_PROXY_PASSWORD require an explicit http or socks5 proxy"));
+    }
+    if (!candidate.m_proxyPassword.isEmpty() && candidate.m_proxyUser.isEmpty()) {
+        return setError(errorMessage, QStringLiteral("MOUFFETTE_PROXY_PASSWORD requires MOUFFETTE_PROXY_USER"));
+    }
+    if (candidate.m_proxyType == QLatin1String("socks5")
+        && (candidate.m_proxyUser.toUtf8().size() > 255 || candidate.m_proxyPassword.toUtf8().size() > 255)) {
+        return setError(errorMessage, QStringLiteral("SOCKS5 MOUFFETTE_PROXY_USER and MOUFFETTE_PROXY_PASSWORD must each fit within 255 UTF-8 bytes"));
+    }
     if (!parseInteger(rawValues.at(Key::RemoteSessionHiddenTimeoutMs),
                       keyName(Key::RemoteSessionHiddenTimeoutMs), 1000, 86400000,
                       candidate.m_remoteSessionHiddenTimeoutMs, errorMessage)) {
@@ -763,6 +870,27 @@ bool AppConfig::load(const LoadOptions& options, QString* errorMessage) {
                             &candidate.m_projectDeadlinePollIntervalMs)
         || !parseIntSetting(Key::ScreenChangeDebounceMs, 10, 5000,
                             &candidate.m_screenChangeDebounceMs)
+        || !parseIntSetting(Key::ScreenMaxEdge, 320, 3840, &candidate.m_screenMaxEdge)
+        || !parseIntSetting(Key::ScreenMaxFps, 1, 60, &candidate.m_screenMaxFps)
+        || !parseIntSetting(Key::ScreenIdleIntervalMs, 250, 4000, &candidate.m_screenIdleIntervalMs)
+        || !parseIntSetting(Key::ScreenMinBitrateKbps, 32, 10000, &candidate.m_screenMinBitrateKbps)
+        || !parseIntSetting(Key::ScreenInitialBitrateKbps, 32, 100000, &candidate.m_screenInitialBitrateKbps)
+        || !parseIntSetting(Key::ScreenMaxBitrateKbps, 32, 100000, &candidate.m_screenMaxBitrateKbps)
+        || !parseIntSetting(Key::ScreenUploadBitrateKbps, 32, 100000, &candidate.m_screenUploadBitrateKbps)
+        || !parseIntSetting(Key::ScreenFeedbackIntervalMs, 100, 2000, &candidate.m_screenFeedbackIntervalMs)
+        || !parseIntSetting(Key::ScreenRecoveryHoldMs, 1000, 60000, &candidate.m_screenRecoveryHoldMs)
+        || !parseIntSetting(Key::ScreenQueueTargetMs, 50, 1000, &candidate.m_screenQueueTargetMs)
+        || !parseIntSetting(Key::ScreenAckTimeoutMs, 1000, 15000, &candidate.m_screenAckTimeoutMs)
+        || !parseIntSetting(Key::ScreenKeyframeIntervalMs, 500, 10000, &candidate.m_screenKeyframeIntervalMs)
+        || !parseIntSetting(Key::ScreenMaxBufferedKiB, 32, 8192, &candidate.m_screenMaxBufferedKiB)
+        || !parseIntSetting(Key::ScreenMaxInflightFrames, 1, 256, &candidate.m_screenMaxInflightFrames)
+        || !parseIntSetting(Key::ScreenDecodeQueueMs, 50, 2000, &candidate.m_screenDecodeQueueMs)
+        || !parseIntSetting(Key::ScreenViewportDebounceMs, 50, 2000, &candidate.m_screenViewportDebounceMs)
+        || !parseIntSetting(Key::ScreenViewportOversamplePercent, 100, 200, &candidate.m_screenViewportOversamplePercent)
+        || !parseIntSetting(Key::ScreenRetryInitialMs, 100, 10000, &candidate.m_screenRetryInitialMs)
+        || !parseIntSetting(Key::ScreenRetryMaxMs, 100, 60000, &candidate.m_screenRetryMaxMs)
+        || !parseIntSetting(Key::ScreenFirstFrameTimeoutMs, 1000, 60000, &candidate.m_screenFirstFrameTimeoutMs)
+        || !parseIntSetting(Key::ScreenStaleTimeoutMs, 2000, 60000, &candidate.m_screenStaleTimeoutMs)
         || !parseIntSetting(Key::SystemVolumePollIntervalMs, 100, 60000,
                             &candidate.m_systemVolumePollIntervalMs)
         || !parseIntSetting(Key::FileWatchDebounceMs, 10, 10000,
@@ -835,6 +963,31 @@ bool AppConfig::load(const LoadOptions& options, QString* errorMessage) {
                             &candidate.m_toastAnimationDurationMs)) {
         return false;
     }
+    if (candidate.m_screenMaxEdge % 2 != 0) {
+        return setError(errorMessage, QStringLiteral("MOUFFETTE_SCREEN_MAX_EDGE must be even"));
+    }
+    if (candidate.m_screenMinBitrateKbps > candidate.m_screenInitialBitrateKbps
+        || candidate.m_screenInitialBitrateKbps > candidate.m_screenMaxBitrateKbps) {
+        return setError(errorMessage, QStringLiteral("MOUFFETTE_SCREEN_MIN_BITRATE_KBPS must be <= "
+            "MOUFFETTE_SCREEN_INITIAL_BITRATE_KBPS <= MOUFFETTE_SCREEN_MAX_BITRATE_KBPS"));
+    }
+    if (candidate.m_screenMinBitrateKbps > candidate.m_screenUploadBitrateKbps
+        || candidate.m_screenUploadBitrateKbps > candidate.m_screenMaxBitrateKbps) {
+        return setError(errorMessage, QStringLiteral("MOUFFETTE_SCREEN_MIN_BITRATE_KBPS must be <= "
+            "MOUFFETTE_SCREEN_UPLOAD_BITRATE_KBPS <= MOUFFETTE_SCREEN_MAX_BITRATE_KBPS"));
+    }
+    if (candidate.m_screenQueueTargetMs >= candidate.m_screenAckTimeoutMs) {
+        return setError(errorMessage, QStringLiteral("MOUFFETTE_SCREEN_QUEUE_TARGET_MS must be less than "
+            "MOUFFETTE_SCREEN_ACK_TIMEOUT_MS"));
+    }
+    if (candidate.m_screenRetryInitialMs > candidate.m_screenRetryMaxMs) {
+        return setError(errorMessage, QStringLiteral("MOUFFETTE_SCREEN_RETRY_INITIAL_MS must be <= "
+            "MOUFFETTE_SCREEN_RETRY_MAX_MS"));
+    }
+    if (candidate.m_screenIdleIntervalMs * 2 > candidate.m_screenStaleTimeoutMs) {
+        return setError(errorMessage, QStringLiteral("MOUFFETTE_SCREEN_STALE_TIMEOUT_MS must be at least twice "
+            "MOUFFETTE_SCREEN_IDLE_INTERVAL_MS"));
+    }
     if (qint64(candidate.m_timelineMaxDurationMs) * candidate.m_timelineSlotsPerSecond < 1000) {
         return setError(errorMessage, QStringLiteral("Timeline maximum duration must contain at least one complete slot"));
     }
@@ -854,7 +1007,8 @@ bool AppConfig::load(const LoadOptions& options, QString* errorMessage) {
     }
     candidate.m_uploadConcurrency = static_cast<int>(uploadConcurrency);
 
-    if (!parseBoolean(rawValues.at(Key::NetworkDiagnostics), keyName(Key::NetworkDiagnostics), candidate.m_networkDiagnostics, errorMessage)
+    if (!parseBoolean(rawValues.at(Key::ScreenAdaptiveEnabled), keyName(Key::ScreenAdaptiveEnabled), candidate.m_screenAdaptiveEnabled, errorMessage)
+        || !parseBoolean(rawValues.at(Key::NetworkDiagnostics), keyName(Key::NetworkDiagnostics), candidate.m_networkDiagnostics, errorMessage)
         || !parseBoolean(rawValues.at(Key::NetworkDiagnosticsVerbose), keyName(Key::NetworkDiagnosticsVerbose), candidate.m_networkDiagnosticsVerbose, errorMessage)
         || !parseBoolean(rawValues.at(Key::AutoUploadImportedMedia),
                       keyName(Key::AutoUploadImportedMedia),
@@ -872,6 +1026,15 @@ bool AppConfig::load(const LoadOptions& options, QString* errorMessage) {
         || !parseBoolean(rawValues.at(Key::CanvasProfiling), keyName(Key::CanvasProfiling),
                          candidate.m_canvasProfiling, errorMessage)) {
         return false;
+    }
+
+    candidate.m_screenSoftwarePreset = rawValues.at(Key::ScreenSoftwarePreset).value.trimmed();
+    const QStringList screenSoftwarePresets = {QStringLiteral("ultrafast"), QStringLiteral("superfast"),
+        QStringLiteral("veryfast"), QStringLiteral("faster"), QStringLiteral("fast")};
+    if (!screenSoftwarePresets.contains(candidate.m_screenSoftwarePreset)) {
+        return setError(errorMessage, QStringLiteral("MOUFFETTE_SCREEN_SOFTWARE_PRESET from %1 must be one of "
+            "ultrafast, superfast, veryfast, faster, fast")
+            .arg(rawValues.at(Key::ScreenSoftwarePreset).source));
     }
 
     candidate.m_qtMediaBackend = rawValues.at(Key::QtMediaBackend).value.trimmed();
@@ -896,4 +1059,11 @@ void AppConfig::applyPreApplicationEnvironment() const {
 QString AppConfig::provenance(Key key) const {
     const auto it = m_provenance.find(key);
     return it == m_provenance.end() ? QStringLiteral("unknown") : it->second;
+}
+
+bool AppConfig::isSensitive(Key key) {
+    for (const SettingSpec& spec : kSpecs) {
+        if (spec.key == key) return spec.sensitive;
+    }
+    return false;
 }

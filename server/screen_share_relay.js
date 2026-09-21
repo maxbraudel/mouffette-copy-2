@@ -5,9 +5,10 @@ const WebSocket = require('ws');
 
 const MAX_FRAME_BYTES = 2 * 1024 * 1024;
 const MAX_HEADER_BYTES = 1024;
-const MAX_BUFFERED_BYTES = 512 * 1024;
-const MAX_INFLIGHT_FRAMES = 3;
-const ACK_TIMEOUT_MS = 1500;
+const MAX_BUFFERED_BYTES = 2048 * 1024;
+const MAX_INFLIGHT_FRAMES = 64;
+const ACK_TIMEOUT_MS = 3000;
+const MAXIMUM_EDGE = 3840;
 const frameKey = frame => `${frame.streamId}:${frame.screenId}:${frame.sequence}`;
 const MAGIC = Buffer.from('MSV1');
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -34,8 +35,8 @@ function parseScreenFrame(data) {
         || Object.keys(header).some(key => !FRAME_KEYS.has(key))
         || !opaque(header.remoteSessionId) || !integer(header.generation, 1)
         || !UUID.test(header.streamId || '') || !integer(header.screenId, 0, 1_000_000)
-        || !integer(header.sequence, 1) || !integer(header.width, 2, 1920) || header.width % 2 !== 0
-        || !integer(header.height, 2, 1920) || header.height % 2 !== 0
+        || !integer(header.sequence, 1) || !integer(header.width, 2, MAXIMUM_EDGE) || header.width % 2 !== 0
+        || !integer(header.height, 2, MAXIMUM_EDGE) || header.height % 2 !== 0
         || (header.timestampUs !== undefined && !integer(header.timestampUs, 0))
         || typeof header.keyFrame !== 'boolean' || header.codec !== 'h264') return null;
     // Annex B starts with a three/four-byte start code; AVCC is not accepted.
@@ -52,6 +53,12 @@ class ScreenShareRelay {
         this.sockets = new Map(); // authenticated control object -> video socket
         this.inflight = new Map(); // video socket -> bounded receipt window
         this.subscriptions = new Map(); // RemoteSession -> ephemeral stream grant
+        this.maxBufferedBytes = (server.config?.screenMaxBufferedKiB ?? MAX_BUFFERED_BYTES / 1024) * 1024;
+        this.maxInflightFrames = server.config?.screenMaxInflightFrames ?? MAX_INFLIGHT_FRAMES;
+        this.ackTimeoutMs = server.config?.screenAckTimeoutMs ?? ACK_TIMEOUT_MS;
+        this.feedbackIntervalMs = server.config?.screenFeedbackIntervalMs ?? 500;
+        this.keyframeRequestIntervalMs = server.config?.screenKeyframeRequestIntervalMs ?? 1000;
+        this.queueTargetMs = server.config?.screenQueueTargetMs ?? 150;
     }
 
     current(client) {
@@ -62,30 +69,39 @@ class ScreenShareRelay {
             && !this.server.clientLeaseExpired(client);
     }
 
-    issueToken(clientId, requestId) {
+    issueToken(clientId, requestId, capabilities = {}) {
         const client = this.server.clients.get(clientId);
         if (!this.current(client) || !opaque(requestId)) return false;
+        if ((capabilities.feedbackVersion !== undefined && capabilities.feedbackVersion !== 1)
+            || (capabilities.maximumEdge !== undefined
+                && (!integer(capabilities.maximumEdge, 2, MAXIMUM_EDGE) || capabilities.maximumEdge % 2))) return false;
         const now = this.server.monotonicNow();
         for (const [token, binding] of this.tokens) {
             if (binding.client === client || binding.expiresAt <= now) this.tokens.delete(token);
         }
         const token = crypto.randomBytes(32).toString('base64url');
-        this.tokens.set(token, { client, expiresAt: now + 15_000 });
+        this.tokens.set(token, { client, expiresAt: now + 15_000,
+            feedbackVersion: capabilities.feedbackVersion === 1 ? 1 : 0,
+            maximumEdge: capabilities.maximumEdge ?? 1920 });
         return this.server.sendToEndpoint(client.endpointId, {
             type: 'screen_channel_token', requestId, token,
         });
     }
 
-    consumeToken(token) {
+    consumeToken(token, ws = null) {
         if (typeof token !== 'string' || token.length !== 43) return null;
         const binding = this.tokens.get(token);
         this.tokens.delete(token);
-        return binding && binding.expiresAt > this.server.monotonicNow()
-            && this.current(binding.client) ? binding.client : null;
+        if (!binding || binding.expiresAt <= this.server.monotonicNow() || !this.current(binding.client)) return null;
+        if (ws) {
+            ws.screenFeedbackVersion = binding.feedbackVersion;
+            ws.screenMaximumEdge = binding.maximumEdge;
+        }
+        return binding.client;
     }
 
     acceptSocket(ws, token) {
-        const client = this.consumeToken(token);
+        const client = this.consumeToken(token, ws);
         if (!client) { ws.close(1008, 'Screen channel authentication failed'); return; }
         const previous = this.sockets.get(client);
         if (previous) {
@@ -108,7 +124,7 @@ class ScreenShareRelay {
                 ws.close(1008, 'Invalid screen frame');
                 return;
             }
-            if ((Number(ws.bufferedAmount) || 0) > MAX_BUFFERED_BYTES) {
+            if ((Number(ws.bufferedAmount) || 0) > this.maxBufferedBytes) {
                 if (typeof ws.terminate === 'function') ws.terminate();
                 else ws.close(1008, 'Screen receipt congestion');
                 return;
@@ -129,41 +145,195 @@ class ScreenShareRelay {
         ws.on('error', lost);
         ws.send(JSON.stringify({ type: 'screen_channel_ready', endpointId: client.endpointId,
             protocolVersion: this.server.protocolVersion, serverBootId: this.server.serverBootId,
-            messageId: crypto.randomUUID(), connectionGeneration: client.connectionGeneration }));
+            messageId: crypto.randomUUID(), connectionGeneration: client.connectionGeneration,
+            feedbackVersion: 1, maximumEdge: MAXIMUM_EDGE }));
         this.refreshForClient(client);
     }
 
     window(ws) {
         let window = this.inflight.get(ws);
-        if (!window) { window = { frames: new Map(), waiting: new Map(), bytes: 0 }; this.inflight.set(ws, window); }
+        if (!window) {
+            window = { frames: new Map(), waiting: new Map(), bytes: 0, baselineRttMs: null, baselineAt: 0 };
+            this.inflight.set(ws, window);
+        }
         return window;
     }
 
     handleAcknowledgement(client, ws, data) {
-        if (!this.current(client) || this.sockets.get(client) !== ws || data.length > 512) return false;
+        if (!this.current(client) || this.sockets.get(client) !== ws || data.length > 1024) return false;
         let ack;
         try { ack = JSON.parse(data.toString()); } catch (_) { return false; }
+        if (ack?.type === 'screen_view_feedback') return this.handleViewerFeedback(client, ack);
         if (!ack || typeof ack !== 'object' || Array.isArray(ack) || Object.keys(ack).length !== 4
             || ack.type !== 'screen_frame_ack' || !UUID.test(ack.streamId || '')
             || !integer(ack.screenId, 0, 1_000_000) || !integer(ack.sequence, 1)) return false;
         const window = this.inflight.get(ws);
         const key = frameKey(ack), pending = window?.frames.get(key);
         // Duplicates and delayed receipts release no other stream's credit.
-        if (pending) { window.bytes -= pending.bytes; window.frames.delete(key); }
+        if (pending) {
+            window.bytes -= pending.bytes;
+            window.frames.delete(key);
+            const now = this.server.monotonicNow();
+            const rtt = Math.min(60000, Math.max(0, Math.round(now - pending.sentAt)));
+            if (window.baselineRttMs === null || now - window.baselineAt >= 30000 || rtt <= window.baselineRttMs) {
+                window.baselineRttMs = rtt;
+                window.baselineAt = now;
+            }
+            const entry = this.subscriptions.get(pending.remoteSessionId);
+            if (entry?.streamId === ack.streamId && this.feedbackReady(entry)) {
+                this.recordFeedback(entry, ack.screenId, {
+                    deliveryRttMs: rtt,
+                    bufferedBytes: Math.max(window.bytes, Number(ws.bufferedAmount) || 0),
+                });
+            }
+        }
         return true;
+    }
+
+    deliveryWindowDelayed(window, now) {
+        // Bytes in flight include healthy propagation/serialization time. Use
+        // observed RTT growth rather than the frame-credit cap as congestion.
+        const limit = window.baselineRttMs === null
+            ? Math.min(1000, this.ackTimeoutMs / 2)
+            : window.baselineRttMs + this.queueTargetMs;
+        return [...window.frames.values()].some(frame => now - frame.sentAt > limit);
+    }
+
+    requested(entry, screenId) {
+        return entry.requestedScreens === null || entry.requestedScreens.some(screen => screen.screenId === screenId);
+    }
+
+    effectiveSelection(entry) {
+        const owner = this.socket(this.endpointClient(entry.session.ownerEndpointId));
+        const target = this.socket(this.endpointClient(entry.session.targetEndpointId));
+        const maximum = Math.min(owner?.screenMaximumEdge ?? 1920, target?.screenMaximumEdge ?? 1920);
+        return this.topology(entry.session).filter(screen => this.requested(entry, screen.id)).map(screen => ({
+            screenId: screen.id,
+            maximumEdge: Math.min(maximum,
+                entry.requestedScreens?.find(request => request.screenId === screen.id)?.maximumEdge ?? maximum),
+        }));
+    }
+
+    topology(session) {
+        const target = this.endpointClient(session.targetEndpointId);
+        return session.latestTargetSnapshot?.generation === session.generation
+            ? session.latestTargetSnapshot.snapshot.screens : target?.screens || [];
+    }
+
+    feedbackReady(entry) {
+        const session = this.server.remoteSessions.get(entry.session.remoteSessionId);
+        if (!entry.enabled || !session || session !== entry.session
+            || session.generation !== entry.generation || !this.server.remoteSessions.commandReady(session)) return false;
+        const owner = this.endpointClient(session.ownerEndpointId), target = this.endpointClient(session.targetEndpointId);
+        return !!this.socket(owner) && !!this.socket(target)
+            && this.server.validateSessionMessage(target.id, {
+                remoteSessionId: session.remoteSessionId, generation: entry.generation,
+                connectionGeneration: target.connectionGeneration,
+            }).ok && target.screenSharingEnabled === true
+            && owner.connectionGeneration === session.ownerConnectionGeneration
+            && target.connectionGeneration === session.targetConnectionGeneration
+            && owner.runtimeId === session.ownerRuntimeId && target.runtimeId === session.targetRuntimeId
+            && entry.topology === JSON.stringify(this.topology(session))
+            && entry.topology === JSON.stringify(target.screens);
+    }
+
+    handleViewerFeedback(client, message) {
+        const keys = ['type', 'remoteSessionId', 'generation', 'streamId', 'screenId', 'decodeMs', 'droppedFrames'];
+        if (!message || Array.isArray(message) || Object.keys(message).length !== keys.length
+            || Object.keys(message).some(key => !keys.includes(key))
+            || !opaque(message.remoteSessionId) || !integer(message.generation, 1)
+            || !UUID.test(message.streamId || '') || !integer(message.screenId, 0, 1_000_000)
+            || !integer(message.decodeMs, 0, 60000) || !integer(message.droppedFrames, 0, 10000)) return false;
+        const session = this.server.remoteSessions.get(message.remoteSessionId);
+        if (session && session.ownerEndpointId !== client.endpointId) return false;
+        const valid = this.server.validateSessionMessage(client.id,
+            { ...message, connectionGeneration: client.connectionGeneration });
+        const entry = this.subscriptions.get(message.remoteSessionId);
+        if (!valid.ok || valid.role !== 'owner' || !entry || entry.streamId !== message.streamId
+            || !this.feedbackReady(entry) || !this.requested(entry, message.screenId)
+            || !this.topology(entry.session).some(screen => screen.id === message.screenId)) {
+            // Control and video queues race naturally during hide, revocation,
+            // topology changes and recovery. Consume stale telemetry without
+            // credit or authority; it must not restart an otherwise healthy pipe.
+            return true;
+        }
+        const feedback = this.feedbackLane(entry, message.screenId);
+        const now = this.server.monotonicNow();
+        if (now - feedback.lastViewerAt < this.feedbackIntervalMs) return true;
+        feedback.lastViewerAt = now;
+        this.recordFeedback(entry, message.screenId,
+            { congested: message.droppedFrames > 0 || message.decodeMs > 100 });
+        return true;
+    }
+
+    feedbackLane(entry, screenId) {
+        let feedback = entry.feedback.get(screenId);
+        if (!feedback) {
+            feedback = { lastSentAt: -Infinity, lastViewerAt: -Infinity,
+                deliveryRttMs: 0, bufferedBytes: 0, congested: false, pending: false };
+            entry.feedback.set(screenId, feedback);
+        }
+        return feedback;
+    }
+
+    recordFeedback(entry, screenId, sample) {
+        if (!this.requested(entry, screenId)) return;
+        const feedback = this.feedbackLane(entry, screenId);
+        if (sample.deliveryRttMs !== undefined) feedback.deliveryRttMs = sample.deliveryRttMs;
+        if (sample.bufferedBytes !== undefined) feedback.bufferedBytes = Math.min(16 * 1024 * 1024, sample.bufferedBytes);
+        feedback.congested ||= sample.congested === true;
+        feedback.pending = true;
+        this.flushFeedback(entry, screenId, feedback);
+    }
+
+    flushFeedback(entry, screenId, feedback) {
+        const now = this.server.monotonicNow();
+        if (!feedback.pending || now - feedback.lastSentAt < this.feedbackIntervalMs
+            || !this.feedbackReady(entry) || !this.requested(entry, screenId)) return;
+        const publisher = this.endpointClient(entry.session.targetEndpointId);
+        const ws = this.socket(publisher);
+        if (ws.screenFeedbackVersion !== 1 || (Number(ws.bufferedAmount) || 0) > this.maxBufferedBytes) return;
+        // Uploads are removed from the live map when terminal. Paused/queued
+        // transfers retain their reservation so video does not impede recovery.
+        const uploadActive = [...(this.server.uploads?.values() || [])].some(upload =>
+            upload.targetEndpointId === entry.session.ownerEndpointId);
+        try {
+            ws.send(JSON.stringify(this.envelope(entry, 'screen_share_feedback', {
+                screenId, deliveryRttMs: feedback.deliveryRttMs, bufferedBytes: feedback.bufferedBytes,
+                congested: feedback.congested, uploadActive,
+                protocolVersion: this.server.protocolVersion, serverBootId: this.server.serverBootId,
+                messageId: crypto.randomUUID(), connectionGeneration: publisher.connectionGeneration,
+            })));
+            feedback.lastSentAt = now;
+            feedback.pending = false;
+            feedback.congested = false;
+        } catch (_) { /* Feedback is expendable; retain its latest sample. */ }
     }
 
     sweep() {
         const now = this.server.monotonicNow();
         for (const [ws, window] of this.inflight) {
-            if ([...window.frames.values()].some(frame => now - frame.sentAt >= ACK_TIMEOUT_MS)) {
+            if ([...window.frames.values()].some(frame => now - frame.sentAt >= this.ackTimeoutMs)) {
                 this.inflight.delete(ws);
                 // close() would put a close frame behind the stale TCP queue.
                 // Terminate the disposable pipe immediately to shed that queue.
                 if (typeof ws.terminate === 'function') ws.terminate();
                 else ws.close(1008, 'Screen receipt timeout');
+            } else if (this.deliveryWindowDelayed(window, now)) {
+                const reported = new Set();
+                for (const pending of window.frames.values()) {
+                    const lane = `${pending.streamId}:${pending.screenId}`;
+                    const entry = this.subscriptions.get(pending.remoteSessionId);
+                    if (reported.has(lane) || entry?.streamId !== pending.streamId) continue;
+                    reported.add(lane);
+                    this.recordFeedback(entry, pending.screenId, {
+                        bufferedBytes: Math.max(window.bytes, Number(ws.bufferedAmount) || 0), congested: true,
+                    });
+                }
             }
         }
+        for (const entry of this.subscriptions.values())
+            for (const [screenId, feedback] of entry.feedback) this.flushFeedback(entry, screenId, feedback);
     }
 
     endpointClient(endpointId) {
@@ -177,7 +347,9 @@ class ScreenShareRelay {
 
     envelope(entry, type, extra = {}) {
         return { type, remoteSessionId: entry.session.remoteSessionId,
-            generation: entry.generation, streamId: entry.streamId || '', ...extra };
+            generation: entry.generation, streamId: entry.streamId || '',
+            receiverMaximumEdge: this.socket(this.endpointClient(entry.session.ownerEndpointId))?.screenMaximumEdge ?? 1920,
+            ...extra };
     }
 
     publish(entry, enabled, reason) {
@@ -197,14 +369,22 @@ class ScreenShareRelay {
             entry.enabled = enabled;
             entry.streamId = enabled ? crypto.randomUUID() : '';
             entry.screens.clear();
+            entry.screenStatuses.clear();
+            entry.feedback.clear();
             entry.status = '';
         }
         // Repeated subscriptions act as bounded state queries, allowing an
         // owner that was not ready to apply the first status to recover.
+        const selection = { screens: this.effectiveSelection(entry) };
         this.server.sendToEndpoint(entry.session.ownerEndpointId,
-            this.envelope(entry, 'screen_share_state', { enabled, reason: enabled && entry.status ? entry.status : reason }));
+            this.envelope(entry, 'screen_share_state', { ...selection, enabled, reason: enabled && entry.status ? entry.status : reason }));
+        if (enabled) {
+            for (const [screenId, status] of entry.screenStatuses)
+                this.server.sendToEndpoint(entry.session.ownerEndpointId,
+                    this.envelope(entry, 'screen_share_state', { enabled: true, screenId, reason: status }));
+        }
         this.server.sendToEndpoint(entry.session.targetEndpointId,
-            this.envelope(entry, 'screen_share_request', { enabled, reason }));
+            this.envelope(entry, 'screen_share_request', { ...selection, enabled, reason }));
     }
 
     refresh(entry) {
@@ -246,7 +426,7 @@ class ScreenShareRelay {
     handleControl(clientId, message) {
         const client = this.server.clients.get(clientId);
         if (!this.current(client)) return false;
-        if (message.type === 'request_screen_channel') return this.issueToken(clientId, message.requestId);
+        if (message.type === 'request_screen_channel') return this.issueToken(clientId, message.requestId, message);
         if (message.type === 'screen_share_consent') {
             if (typeof message.enabled !== 'boolean') return false;
             client.screenSharingEnabled = message.enabled;
@@ -259,15 +439,41 @@ class ScreenShareRelay {
         if (message.type === 'screen_share_subscribe') {
             if (role !== 'owner' || typeof message.enabled !== 'boolean') return false;
             if (!message.enabled) { this.removeSession(session, 'unsubscribed'); return true; }
+            let requestedScreens = null;
+            if (message.screens !== undefined) {
+                if (!Array.isArray(message.screens) || message.screens.length > 64) return false;
+                const topology = this.topology(session), seen = new Set();
+                for (const screen of message.screens) {
+                    if (!screen || typeof screen !== 'object' || Array.isArray(screen)
+                        || Object.keys(screen).length !== 2 || !integer(screen.screenId, 0, 1_000_000)
+                        || seen.has(screen.screenId) || !topology.some(item => item.id === screen.screenId)
+                        || !integer(screen.maximumEdge, 2, MAXIMUM_EDGE) || screen.maximumEdge % 2) return false;
+                    seen.add(screen.screenId);
+                }
+                requestedScreens = message.screens.map(({ screenId, maximumEdge }) => ({ screenId, maximumEdge }));
+            }
             let entry = this.subscriptions.get(session.remoteSessionId);
             if (entry && entry.generation !== session.generation) {
                 this.removeSession(session, 'session_changed'); entry = null;
             }
             if (!entry) {
                 entry = { session, generation: session.generation, enabled: false,
-                    streamId: '', screens: new Map(), lastKeyframeRequest: -Infinity };
+                    streamId: '', screens: new Map(), screenStatuses: new Map(), feedback: new Map(), requestedScreens: null,
+                    lastKeyframeRequest: -Infinity };
                 this.subscriptions.set(session.remoteSessionId, entry);
             }
+            entry.requestedScreens = requestedScreens;
+            for (const screenId of entry.screens.keys()) {
+                if (!this.requested(entry, screenId)) {
+                    entry.screens.delete(screenId);
+                    const lane = `${entry.streamId}:${screenId}`;
+                    for (const window of this.inflight.values()) window.waiting.delete(lane);
+                }
+            }
+            for (const screenId of entry.feedback.keys())
+                if (!this.requested(entry, screenId)) entry.feedback.delete(screenId);
+            for (const screenId of entry.screenStatuses.keys())
+                if (!this.requested(entry, screenId)) entry.screenStatuses.delete(screenId);
             this.refresh(entry);
             return true;
         }
@@ -276,14 +482,29 @@ class ScreenShareRelay {
             || message.streamId !== entry.streamId) return false;
         if (message.type === 'screen_share_status' && role === 'target') {
             const reasons = new Set(['streaming', 'permission_denied', 'unavailable', 'error', 'starting', 'capture_error']);
-            if (!reasons.has(message.reason)) return false;
-            entry.status = message.reason;
+            if (!reasons.has(message.reason) || !this.feedbackReady(entry)) return false;
+            const scoped = message.screenId !== undefined;
+            if (scoped) {
+                if (!integer(message.screenId, 0, 1_000_000) || !this.requested(entry, message.screenId)
+                    || !this.topology(session).some(screen => screen.id === message.screenId)) return false;
+                entry.screenStatuses.set(message.screenId, message.reason);
+                if (message.reason !== 'starting' && message.reason !== 'streaming') {
+                    const stream = entry.screens.get(message.screenId);
+                    if (stream) stream.needsKeyframe = true;
+                    for (const window of this.inflight.values())
+                        window.waiting.delete(`${entry.streamId}:${message.screenId}`);
+                }
+            } else entry.status = message.reason;
             this.server.sendToEndpoint(session.ownerEndpointId,
-                this.envelope(entry, 'screen_share_state', { enabled: true, reason: message.reason }));
+                this.envelope(entry, 'screen_share_state', {
+                    enabled: true, reason: message.reason, ...(scoped ? { screenId: message.screenId } : {}),
+                }));
             return true;
         }
         if (message.type === 'screen_share_keyframe' && role === 'owner'
-            && integer(message.screenId, -1, 1_000_000)) {
+            && integer(message.screenId, -1, 1_000_000)
+            && (message.screenId === -1 || (this.requested(entry, message.screenId)
+                && this.topology(session).some(screen => screen.id === message.screenId)))) {
             return this.requestKeyframe(entry, message.screenId);
         }
         return false;
@@ -291,7 +512,7 @@ class ScreenShareRelay {
 
     requestKeyframe(entry, screenId) {
         const now = this.server.monotonicNow();
-        if (now - entry.lastKeyframeRequest < 250) return false;
+        if (now - entry.lastKeyframeRequest < this.keyframeRequestIntervalMs) return false;
         entry.lastKeyframeRequest = now;
         return this.server.sendToEndpoint(entry.session.targetEndpointId,
             this.envelope(entry, 'screen_share_keyframe', { screenId }));
@@ -306,7 +527,8 @@ class ScreenShareRelay {
         if (!valid.ok || valid.role !== 'target' || client.screenSharingEnabled !== true) return false;
         const { session } = valid;
         const entry = this.subscriptions.get(session.remoteSessionId);
-        if (!entry?.enabled || entry.generation !== frame.generation || entry.streamId !== frame.streamId) return false;
+        if (!entry?.enabled || entry.generation !== frame.generation || entry.streamId !== frame.streamId
+            || !this.requested(entry, frame.screenId)) return false;
         const screens = session.latestTargetSnapshot?.generation === session.generation
             ? session.latestTargetSnapshot.snapshot.screens : client.screens;
         if (!Array.isArray(screens) || !screens.some(screen => screen.id === frame.screenId)
@@ -315,6 +537,10 @@ class ScreenShareRelay {
         const destination = this.socket(owner);
         if (!destination || owner.connectionGeneration !== session.ownerConnectionGeneration
             || owner.runtimeId !== session.ownerRuntimeId) return false;
+        const maximumEdge = Math.min(ws.screenMaximumEdge ?? 1920, destination.screenMaximumEdge ?? 1920);
+        if (frame.width > maximumEdge || frame.height > maximumEdge) return false;
+        const status = entry.screenStatuses.get(frame.screenId);
+        if (status && status !== 'starting' && status !== 'streaming') return false;
         let stream = entry.screens.get(frame.screenId);
         if (!stream) { stream = { sequence: 0, needsKeyframe: true }; entry.screens.set(frame.screenId, stream); }
         if (frame.sequence <= stream.sequence) return false;
@@ -325,14 +551,19 @@ class ScreenShareRelay {
         const window = this.window(destination);
         const now = this.server.monotonicNow();
         const lane = `${frame.streamId}:${frame.screenId}`;
+        const delayed = this.deliveryWindowDelayed(window, now);
         for (const [waiting, seen] of window.waiting)
-            if (now - seen >= 500) window.waiting.delete(waiting);
+            if (now - seen >= this.ackTimeoutMs) window.waiting.delete(waiting);
         const turn = window.waiting.keys().next().value;
-        if ((turn !== undefined && turn !== lane) || window.frames.size >= MAX_INFLIGHT_FRAMES
-            || (window.frames.size > 0 && window.bytes + data.length > MAX_BUFFERED_BYTES)
-            || buffered > MAX_BUFFERED_BYTES || (buffered > 0 && buffered + data.length > MAX_BUFFERED_BYTES)) {
+        if (delayed || (turn !== undefined && turn !== lane) || window.frames.size >= this.maxInflightFrames
+            || (window.frames.size > 0 && window.bytes + data.length > this.maxBufferedBytes)
+            || buffered > this.maxBufferedBytes || (buffered > 0 && buffered + data.length > this.maxBufferedBytes)
+            || (data.length > this.maxBufferedBytes && !frame.keyFrame)) {
             if (window.waiting.has(lane) || window.waiting.size < 256) window.waiting.set(lane, now);
             stream.needsKeyframe = true;
+            if (delayed || buffered > this.maxBufferedBytes)
+                this.recordFeedback(entry, frame.screenId,
+                    { bufferedBytes: Math.max(window.bytes, buffered), congested: true });
             this.requestKeyframe(entry, frame.screenId);
             return false;
         }
@@ -343,12 +574,15 @@ class ScreenShareRelay {
         }
         stream.needsKeyframe = false;
         const key = frameKey(frame);
-        window.frames.set(key, { bytes: data.length, sentAt: this.server.monotonicNow() });
+        window.frames.set(key, { bytes: data.length, sentAt: this.server.monotonicNow(),
+            remoteSessionId: session.remoteSessionId, streamId: frame.streamId, screenId: frame.screenId });
         window.bytes += data.length;
         const failed = () => {
             const pending = window.frames.get(key);
             if (pending) { window.bytes -= pending.bytes; window.frames.delete(key); }
             stream.needsKeyframe = true;
+            this.recordFeedback(entry, frame.screenId,
+                { bufferedBytes: Math.max(window.bytes, Number(destination.bufferedAmount) || 0), congested: true });
             this.requestKeyframe(entry, frame.screenId);
         };
         try {

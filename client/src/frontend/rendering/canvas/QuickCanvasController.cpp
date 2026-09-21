@@ -190,8 +190,13 @@ QuickCanvasController::QuickCanvasController(CanvasDocument* document,
     , m_document(document)
     , m_mediaListModel(new MediaListModel(this))
     , m_videoStateTimer(new QTimer(this))
+    , m_screenPreviewTimer(new QTimer(this))
 {
     Q_ASSERT(document);
+    m_screenPreviewTimer->setSingleShot(true);
+    m_screenPreviewTimer->setInterval(AppConfig::instance().screenViewportDebounceMs());
+    connect(m_screenPreviewTimer, &QTimer::timeout,
+            this, &QuickCanvasController::publishScreenPreviewDemand);
     connect(&MediaResidencyManager::instance(), &MediaResidencyManager::errorOccurred,
             this, [this](const QString& owner, const QString& message) {
         if (!m_document) return;
@@ -281,6 +286,8 @@ void QuickCanvasController::registerWindow(QQuickWindow* window)
     if (m_renderWindow == window) return;
     finishSelectionScaleGesture();
     disconnect(m_scaleFrameConnection);
+    disconnect(m_screenPreviewDprConnection);
+    disconnect(m_screenPreviewWindowDestroyedConnection);
     m_renderWindow = window;
     if (window) {
         // afterAnimating runs on the GUI thread once per rendered frame, before
@@ -288,7 +295,12 @@ void QuickCanvasController::registerWindow(QQuickWindow* window)
         // only the newest preview for that frame.
         m_scaleFrameConnection = connect(window, &QQuickWindow::afterAnimating,
             this, &QuickCanvasController::flushSelectionScalePreview);
+        m_screenPreviewDprConnection = connect(window, &QQuickWindow::devicePixelRatioChanged,
+            this, &QuickCanvasController::scheduleScreenPreviewDemand);
+        m_screenPreviewWindowDestroyedConnection = connect(window, &QObject::destroyed,
+            this, &QuickCanvasController::scheduleScreenPreviewDemand);
     }
+    scheduleScreenPreviewDemand();
 }
 
 QQuickWindow* QuickCanvasController::renderWindow() const
@@ -423,6 +435,7 @@ void QuickCanvasController::publishScreens()
     }
     m_screensModel = screens;
     m_uiZonesModel = zones;
+    scheduleScreenPreviewDemand();
     // Release removed monitors immediately; the deferred QObject deletion lets
     // any old QML delegates disconnect cleanly as their model is replaced.
     for (auto source = m_screenFrameSources.begin(); source != m_screenFrameSources.end();) {
@@ -609,10 +622,17 @@ void QuickCanvasController::ensureInitialFit(int marginPx)
 void QuickCanvasController::setViewportSize(qreal width, qreal height)
 {
     if (!std::isfinite(width) || !std::isfinite(height)
-        || width <= 0.0 || height <= 0.0) return;
+        || width <= 0.0 || height <= 0.0) {
+        if (!m_viewportSize.isEmpty()) {
+            m_viewportSize = {};
+            scheduleScreenPreviewDemand();
+        }
+        return;
+    }
     const QSizeF size(width, height);
     if (m_viewportSize == size) return;
     m_viewportSize = size;
+    scheduleScreenPreviewDemand();
     publishCamera();
     ensureInitialFit(m_initialFitMargin);
 }
@@ -645,7 +665,53 @@ void QuickCanvasController::publishCamera()
     m_viewScale = scale;
     m_panX = panX;
     m_panY = panY;
+    scheduleScreenPreviewDemand();
     emit presentationChanged();
+}
+
+void QuickCanvasController::scheduleScreenPreviewDemand()
+{
+    // Coalesce camera/layout changes without postponing updates indefinitely
+    // during a continuous gesture. Video frame delivery never reaches this path.
+    if (!m_screenPreviewTimer->isActive()) m_screenPreviewTimer->start();
+}
+
+void QuickCanvasController::publishScreenPreviewDemand()
+{
+    QJsonValue demand(QJsonValue::Undefined);
+    if (m_document && !m_viewportSize.isEmpty()
+        && std::isfinite(m_viewScale) && m_viewScale > 0.0) {
+        const QRectF viewport(mapViewPointToScene({0, 0}),
+                              mapViewPointToScene({m_viewportSize.width(), m_viewportSize.height()}));
+        const qreal dpr = m_renderWindow ? m_renderWindow->effectiveDevicePixelRatio() : 1.0;
+        const auto& config = AppConfig::instance();
+        const qreal pixelScale = m_viewScale * (std::isfinite(dpr) && dpr > 0.0 ? dpr : 1.0)
+            * config.screenViewportOversamplePercent() / 100.0;
+        QJsonArray screens;
+        auto ordered = m_document->screens();
+        std::sort(ordered.begin(), ordered.end(), [](const ScreenInfo& a, const ScreenInfo& b) {
+            return a.id < b.id;
+        });
+        const auto rects = m_document->screenRects();
+        for (const auto& screen : ordered) {
+            const QRectF rect = rects.value(screen.id);
+            if (screen.id < 0 || screen.width <= 0 || screen.height <= 0
+                || !rect.isValid() || !viewport.intersects(rect)) continue;
+            const int nativeEdge = std::max(screen.width, screen.height);
+            const int maximum = std::min(config.screenMaxEdge(), std::max(160, nativeEdge - nativeEdge % 2));
+            const qreal requested = std::clamp(std::max(rect.width(), rect.height()) * pixelScale,
+                                               qreal(160), qreal(maximum));
+            // Quantize the whole screen, not its intersection: panning never
+            // crops remote pixels or changes the canvas coordinate contract.
+            const int edge = std::min(maximum, int(std::ceil(requested / 160.0)) * 160);
+            screens.append(QJsonObject{{QStringLiteral("screenId"), screen.id},
+                                       {QStringLiteral("maximumEdge"), edge}});
+        }
+        demand = screens;
+    }
+    if (m_screenPreviewDemand == demand) return;
+    m_screenPreviewDemand = demand;
+    emit screenPreviewDemandChanged();
 }
 
 void QuickCanvasController::updateCamera(qreal scale, qreal panX, qreal panY)

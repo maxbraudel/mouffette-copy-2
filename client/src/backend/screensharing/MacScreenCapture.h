@@ -1,6 +1,7 @@
 #pragma once
 
 #include "backend/screensharing/ScreenCaptureError.h"
+#include "backend/screensharing/ScreenStreamCodec.h"
 #include <QVideoFrame>
 #include <QString>
 #include <functional>
@@ -20,6 +21,7 @@ public:
     bool start(QScreen* screen, FrameCallback frame, ErrorCallback error);
     void stop();
     bool isActive() const;
+    void setProfile(const ScreenStreamProfile& profile);
     // Retains a native NV12 surface without copying. Shared by capture and
     // synthetic codec tests, which never request access to the desktop.
     static QVideoFrame frameFromPixelBuffer(CVPixelBufferRef buffer);
