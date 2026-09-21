@@ -277,7 +277,7 @@ private slots:
         QVERIFY(!host->document()->editsLocked());
     }
 
-    void pendingMetadataImportBlocksReadyCanvasWithoutAutoLaunching()
+    void pendingMetadataImportOnlyBlocksRemoteLaunch()
     {
         QTemporaryDir directory;
         QVERIFY(directory.isValid());
@@ -294,16 +294,15 @@ private slots:
         QVERIFY(!mediaId.isEmpty());
         QVERIFY(host->document()->hasPendingImports());
         QCOMPARE(host->document()->media().size(), 1);
-        QVERIFY(!host->testSceneActionEnabled());
+        QVERIFY(host->testSceneActionEnabled());
         QVERIFY(host->mediaReadinessReason(false).contains(QStringLiteral("analyzed")));
         QVERIFY(host->mediaReadinessReason(true).contains(QStringLiteral("analyzed")));
         host->triggerTestSceneAction();
-        QVERIFY(!host->testSceneLaunched());
+        QVERIFY(host->testSceneLaunched());
+        QVERIFY(host->timelinePlaying());
         QTRY_VERIFY_WITH_TIMEOUT(!host->document()->hasPendingImports(), 5000);
         QVERIFY(host->document()->mediaById(mediaId));
         QTRY_VERIFY_WITH_TIMEOUT(host->testSceneActionEnabled(), 5000);
-        QVERIFY(!host->testSceneLaunched());
-        host->triggerTestSceneAction();
         QVERIFY(host->testSceneLaunched());
         QVERIFY(host->testSceneActionEnabled()); // Stop remains available.
         host->triggerTestSceneAction();
@@ -373,7 +372,7 @@ private slots:
         QCOMPARE(assetRow().value(QStringLiteral("residentBytes")).toULongLong(), quint64(0));
         QVERIFY(!manager.asset(owner));
         QVERIFY(originalAllocation.expired());
-        QVERIFY(!host->testSceneActionEnabled());
+        QVERIFY(host->testSceneActionEnabled()); // A new local run can omit the unavailable media.
         manager.setMemorySnapshotForTesting(healthy);
         QTRY_VERIFY_WITH_TIMEOUT(media->residencyReady(), 5000);
         QVERIFY(host->testSceneActionEnabled());
@@ -600,7 +599,7 @@ private slots:
                 path, image.size(), false, QPointF(4, 5));
             QVERIFY(media);
             QVERIFY(!host->remoteSceneActionEnabled());
-            QVERIFY(!host->testSceneActionEnabled());
+            QVERIFY(host->testSceneActionEnabled()); // Local transport does not wait for residency.
             QTRY_VERIFY_WITH_TIMEOUT(media->residencyReady(), 5000);
             if (uploaded) {
                 files.markFileUploadedToClient(media->fileId(), targetId);

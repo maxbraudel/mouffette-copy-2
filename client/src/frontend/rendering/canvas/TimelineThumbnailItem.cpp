@@ -74,16 +74,14 @@ void TimelineThumbnailItem::setOwnerId(const QString& value) {
 void TimelineThumbnailItem::refresh() {
     auto& manager = MediaResidencyManager::instance();
     const auto asset = manager.asset(m_ownerId);
-    const auto preview = manager.preview(m_ownerId);
     if (m_asset.lock() != asset) {
         clearRequests(); m_samples.clear(); m_failedSamples.clear();
     }
     // A removed, failed or invalidated source must never retain its old image.
-    const QString hash = asset ? asset->sha256 : preview ? preview->sha256 : QString();
-    if ((!asset && !preview) || (!m_sourceHash.isEmpty() && m_sourceHash != hash)) m_tiles.clear();
+    const QString hash = asset ? asset->sha256 : QString();
+    if (!asset || (!m_sourceHash.isEmpty() && m_sourceHash != hash)) m_tiles.clear();
     m_sourceHash = hash;
     m_asset = asset;
-    m_preview = preview;
     rebuildLayout();
     m_requestTimer.start(0);
 }
@@ -142,11 +140,10 @@ quint64 TimelineThumbnailItem::retainedThumbnailBytes() const {
 
 void TimelineThumbnailItem::rebuildLayout() {
     const auto asset = m_asset.lock();
-    const auto preview = m_preview.lock();
     const bool video = !asset || asset->video;
-    const QSize size = asset ? asset->displaySize : preview ? preview->displaySize : QSize();
+    const QSize size = asset ? asset->displaySize : QSize();
     const qreal left = std::max(qreal(0), m_visibleLeft), right = std::min(width(), m_visibleRight);
-    if ((!asset && !preview) || right <= left || height() <= 0 || m_pixelsPerMs <= 0
+    if (!asset || right <= left || height() <= 0 || m_pixelsPerMs <= 0
             || (video && !DecodeScheduler::instance().optionalCachingEnabled())) {
         m_tiles.clear();
     } else {
@@ -161,7 +158,7 @@ void TimelineThumbnailItem::rebuildLayout() {
         QVector<Tile> candidates = m_tiles;
         QHash<int, Tile> previousTargets;
         for (const auto& tile : m_tiles) if (tile.image && tile.frameIndex >= 0) previousTargets.insert(tile.frameIndex, tile);
-        const auto& prepared = asset ? asset->thumbnails : preview->thumbnails;
+        const auto& prepared = asset->thumbnails;
         for (const auto& frame : prepared) {
             if (frame.image.isNull()) continue;
             Tile candidate;

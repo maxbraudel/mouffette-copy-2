@@ -52,6 +52,16 @@ public:
     QString residencyState() const;
     double residencyProgress() const;
     QString residencyError() const;
+    // Initial content admission is shared by the canvas and timeline. Once
+    // admitted it survives ordinary seeks, but never source/runtime failures.
+    bool contentReady() const;
+    QString loadingState() const;
+    QString loadingError() const;
+    bool localPlaybackHidden() const { return m_localPlaybackHidden; }
+    void setLocalPlaybackHidden(bool hidden);
+    void setPlaybackPreparationError(const QString& error);
+    bool playbackWaitingForMemory() const { return m_playbackWaitingForMemory; }
+    void setPlaybackWaitingForMemory(bool waiting);
     // Drop this occurrence's lease and decoded resources without retiring its
     // authoring identity. Shared assets remain available to other owners.
     void setResidencySuspended(bool suspended);
@@ -169,6 +179,7 @@ signals:
     void runtimeStateChanged();
     void audioStateChanged();
     void residencyChanged();
+    void contentAvailabilityChanged();
     void identityReady(const QString& fileId);
     void sourceInvalidated(const QString& reason);
 
@@ -182,6 +193,8 @@ private:
     void requestResidency();
     void releaseResidencyResources();
     void initializeVideoOutputs();
+    void refreshContentAvailability();
+    void resetContentAvailability();
 
     Type m_type;
     QString m_mediaId;
@@ -243,4 +256,12 @@ private:
     qint64 m_sourceDurationMs = 0;
     bool m_hasRenderedFrame = false;
     bool m_firstFramePrimed = false;
+    bool m_contentReady = false;
+    bool m_localPlaybackHidden = false;
+    bool m_playbackWaitingForMemory = false;
+    QString m_playbackPreparationError;
+    QString m_publishedLoadingState;
+    QString m_publishedLoadingError;
+    bool m_publishedContentReady = false;
+    QTimer m_reservationRetryTimer;
 };

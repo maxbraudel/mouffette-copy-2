@@ -24,6 +24,9 @@ Item {
     Loader {
         id: visualLoader
         anchors.fill: parent
+        // Keep video outputs alive to prepare a newly available clip while it
+        // is omitted from local playback.
+        visible: !root.media || root.media.localPlaybackHidden !== true
         sourceComponent: {
             if (!root.media) return null
             if (root.media.mediaType === "video") return videoDelegate
@@ -59,6 +62,10 @@ Item {
             selected: root.selected
             residentFrameSource: root.media ? (root.media.residentFrameSource || null) : null
             residencyReady: !!root.media && root.media.residencyReady === true
+            presentationReady: !!root.media && (root.media.contentReady !== undefined
+                ? root.media.contentReady === true : root.media.residencyReady === true)
+            loadingState: root.media ? (root.media.loadingState || "") : ""
+            loadingError: root.media ? (root.media.loadingError || "") : ""
             requireInitialSkeleton: !!root.media && root.media.canvasMedia === true
         }
     }
@@ -75,12 +82,14 @@ Item {
             mediaZ: 0
             selected: root.selected
             residencyReady: !!root.media && root.media.residencyReady === true
+            presentationReady: !!root.media && (root.media.contentReady !== undefined
+                ? root.media.contentReady === true : root.media.residencyReady === true)
+            loadingState: root.media ? (root.media.loadingState || "") : ""
+            loadingError: root.media ? (root.media.loadingError || "") : ""
             requireInitialSkeleton: !!root.media && root.media.canvasMedia === true
             cppMediaPlayer: root.media ? (root.media.videoPlayerPtr || null) : null
             cppVideoSink: root.media ? (root.media.videoSinkPtr || null) : null
             remoteFrameSource: root.media ? (root.media.remoteFrameSource || null) : null
-            previewFrameSource: root.media && root.media.canvasMedia === true
-                ? (root.media.residentFrameSource || null) : null
             videoPlaybackErrorCode: root.media ? (root.media.videoPlaybackErrorCode || 0) : 0
             videoPlaybackErrorString: root.media ? (root.media.videoPlaybackErrorString || "") : ""
             videoHasRenderedFrame: !!(root.media && root.media.videoHasRenderedFrame)

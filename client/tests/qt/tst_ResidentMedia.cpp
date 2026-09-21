@@ -932,6 +932,12 @@ private slots:
         ResidentVideoPlayer player;
         player.setVideoSink(&sink);
         QSignalSpy errors(&player, &ResidentVideoPlayer::errorOccurred);
+        bool announcedAudiovisualPreparation = false;
+        connect(&player, &ResidentVideoPlayer::preparationChanged, &player, [&] {
+            if (!player.hasPreparedPlayback()) return;
+            QVERIFY(player.preparedAt(player.position()));
+            announcedAudiovisualPreparation = true;
+        });
         player.setAsset(asset);
         QCOMPARE(attempts, 1);
         QCOMPARE(releases, 0);
@@ -941,16 +947,30 @@ private slots:
         QCOMPARE(player.playbackState(), QMediaPlayer::StoppedState);
         QVERIFY(sink.videoFrame().isValid());
         QVERIFY(!player.preparedAt(0));
+        QVERIFY(player.waitingForMemory());
+        QVERIFY(!announcedAudiovisualPreparation);
 
-        // An explicit request can retry the same resident asset once capacity
-        // becomes available; refusal must not poison its cached poster/state.
+        // A sampled-memory retry may still refuse without turning loading into
+        // a terminal error. Recovery prepares the cursor without starting it.
+        player.retryPreparation();
+        QCOMPARE(attempts, 2);
+        QCOMPARE(errors.size(), 0);
+        QVERIFY(player.waitingForMemory());
         admitted = true;
+        player.retryPreparation();
+        QTRY_VERIFY_WITH_TIMEOUT(announcedAudiovisualPreparation, 3000);
+        QVERIFY(player.hasPreparedPlayback());
+        QVERIFY(!player.waitingForMemory());
+        QVERIFY(!player.isPlaying());
+        QCOMPARE(attempts, 3);
         player.play();
         QTRY_VERIFY2_WITH_TIMEOUT(player.position() > 50, qPrintable(player.errorString()), 3000);
-        QCOMPARE(attempts, 2);
+        QCOMPARE(attempts, 3);
         QCOMPARE(errors.size(), 0);
         QCOMPARE(player.error(), QMediaPlayer::NoError);
         player.clearAsset();
+        QVERIFY(!player.hasPreparedPlayback());
+        QVERIFY(!player.waitingForMemory());
         QCOMPARE(releases, 1);
     }
 

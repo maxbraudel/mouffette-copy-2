@@ -940,6 +940,126 @@ private slots:
         QCOMPARE(document.mediaById(id)->sceneRect().center(), QPointF(23, 42));
     }
 
+    void pendingMetadataImportCompletesDuringLocalPlayback_data()
+    {
+        QTest::addColumn<bool>("video");
+        QTest::addColumn<bool>("enableAfterProbe");
+        QTest::newRow("image-in-flight") << false << false;
+        QTest::newRow("video-in-flight") << true << false;
+        QTest::newRow("image-deferred") << false << true;
+        QTest::newRow("video-deferred") << true << true;
+    }
+
+    void pendingMetadataImportCompletesDuringLocalPlayback()
+    {
+        QFETCH(bool, video);
+        QFETCH(bool, enableAfterProbe);
+        QTemporaryDir directory;
+        const QString path = video ? QString::fromUtf8(TEST_VIDEO_FILE)
+                                   : directory.filePath(QStringLiteral("local-playback.png"));
+        if (!video) {
+            QImage image(40, 30, QImage::Format_ARGB32);
+            image.fill(Qt::yellow);
+            QVERIFY(image.save(path));
+        }
+        CanvasDocument document;
+        auto* first = document.addText({}, QStringLiteral("First"));
+        auto* second = document.addText({300, 0}, QStringLiteral("Second"));
+        QVERIFY(first && second);
+        document.select(first->mediaId());
+        document.select(second->mediaId(), true);
+        const auto selected = document.selectedMediaIds();
+        const auto primary = document.primarySelectedMediaId();
+        const auto firstTrack = first->timelineTrack().toJson();
+        const auto secondTrack = second->timelineTrack().toJson();
+        document.setTimelinePosition(2000);
+        const QString id = document.queueFileImport(path, {23, 42});
+        QVERIFY(!id.isEmpty());
+        if (!enableAfterProbe) document.setLocalImportCompletionEnabled(true);
+        document.setEditsLocked(true);
+        QSignalSpy locks(&document, &CanvasDocument::editsLockedChanged);
+        QSignalSpy selectionChanges(&document, &CanvasDocument::selectionChanged);
+        QSignalSpy primaryChanges(&document, &CanvasDocument::primarySelectedMediaChanged);
+        document.setTimelinePosition(4000);
+        if (enableAfterProbe) {
+            QTRY_VERIFY_WITH_TIMEOUT(document.findChildren<QFutureWatcherBase*>().isEmpty(), 5000);
+            QVERIFY(document.hasPendingImports());
+            QVERIFY(!document.mediaById(id));
+            document.setLocalImportCompletionEnabled(true);
+        }
+        QTRY_VERIFY_WITH_TIMEOUT(document.mediaById(id), 5000);
+        const auto* imported = document.mediaById(id);
+        QVERIFY(!document.hasPendingImports());
+        QCOMPARE(imported->isVideo(), video);
+        QCOMPARE(imported->sceneRect().center(), QPointF(23, 42));
+        QCOMPARE(imported->timelineTrack().clip.startSlot, qint64(60));
+        QCOMPARE(imported->sourcePath(), QFileInfo(path).canonicalFilePath());
+        QVERIFY(imported->timelineTrack().trackIndex < first->timelineTrack().trackIndex);
+        QCOMPARE(first->timelineTrack().toJson(), firstTrack);
+        QCOMPARE(second->timelineTrack().toJson(), secondTrack);
+        QCOMPARE(document.selectedMediaIds(), selected);
+        QCOMPARE(document.primarySelectedMediaId(), primary);
+        QCOMPARE(selectionChanges.count(), 0);
+        QCOMPARE(primaryChanges.count(), 0);
+        QVERIFY(document.editsLocked());
+        QCOMPARE(locks.count(), 0);
+        QVERIFY(document.queueFileImport(path, {}).isEmpty());
+        QVERIFY(!document.addText({}, QStringLiteral("Blocked")));
+        QVERIFY(!document.removeMedia(first->mediaId()));
+        QVERIFY(!document.moveTimelineClip(first->timelineTrack().clip.id, 20, 1));
+        document.select(imported->mediaId());
+        QCOMPARE(document.selectedMediaIds(), selected);
+    }
+
+    void disablingLocalImportCompletionRestoresRemoteLock()
+    {
+        QTemporaryDir directory;
+        const QString path = directory.filePath(QStringLiteral("remote-lock.png"));
+        QImage image(40, 30, QImage::Format_ARGB32);
+        image.fill(Qt::cyan);
+        QVERIFY(image.save(path));
+        CanvasDocument document;
+        const QString id = document.queueFileImport(path, {23, 42});
+        QVERIFY(!id.isEmpty());
+        document.setLocalImportCompletionEnabled(true);
+        document.setEditsLocked(true);
+        document.setLocalImportCompletionEnabled(false);
+        QTRY_VERIFY_WITH_TIMEOUT(document.findChildren<QFutureWatcherBase*>().isEmpty(), 5000);
+        QVERIFY(document.hasPendingImports());
+        QVERIFY(!document.mediaById(id));
+        document.setEditsLocked(false);
+        QTRY_VERIFY_WITH_TIMEOUT(document.mediaById(id), 5000);
+    }
+
+    void invalidatedSourceIsRemovedDuringLocalPlaybackWithoutUnlocking()
+    {
+        QTemporaryDir directory;
+        const QString path = directory.filePath(QStringLiteral("changed-during-playback.png"));
+        QImage image(96, 54, QImage::Format_ARGB32);
+        image.fill(Qt::red);
+        QVERIFY(image.save(path));
+        CanvasDocument document;
+        auto* retained = document.addText({}, QStringLiteral("Keep playing"));
+        auto* media = document.addPreparedFile(path, image.size(), false, {});
+        QVERIFY(retained && media);
+        const QString id = media->mediaId();
+        QTRY_VERIFY(media->residencyReady());
+        document.setMediaResidencySuspended(true);
+        image.fill(Qt::green);
+        QVERIFY(image.save(path));
+        document.setLocalImportCompletionEnabled(true);
+        document.setEditsLocked(true);
+        QSignalSpy locks(&document, &CanvasDocument::editsLockedChanged);
+        QSignalSpy invalidated(&document, &CanvasDocument::mediaSourceInvalidated);
+        document.setMediaResidencySuspended(false);
+        QTRY_COMPARE(invalidated.count(), 1);
+        QTRY_VERIFY(!document.mediaById(id));
+        QCOMPARE(document.mediaById(retained->mediaId()), retained);
+        QVERIFY(document.editsLocked());
+        QCOMPARE(locks.count(), 0);
+        QVERIFY(!document.removeMedia(retained->mediaId()));
+    }
+
     void textCreationSizeFollowsCameraSquare_data()
     {
         QTest::addColumn<int>("percent");
@@ -3750,7 +3870,7 @@ private slots:
         QVERIFY2(sawPartialOpacity, "Cached media must fade in after the initial skeleton frame");
     }
 
-    void testSceneRequiresEveryCanvasMediaResident()
+    void localPlaybackDoesNotRequireEveryCanvasMediaResident()
     {
         auto& memory = MediaResidencyManager::instance();
         struct ResetMemory { ~ResetMemory() { MediaResidencyManager::instance().clearMemorySnapshotForTesting(); } } reset;
@@ -3768,9 +3888,13 @@ private slots:
         QVERIFY(image.save(path));
         auto* cold = host->document()->addPreparedFile(path, image.size(), false, {100, 100});
         QVERIFY(cold && !cold->residencyReady());
-        QVERIFY(!host->testSceneActionEnabled());
+        QVERIFY(host->testSceneActionEnabled());
         host->triggerTestSceneAction();
-        QVERIFY(!host->testSceneLaunched());
+        QVERIFY(host->testSceneLaunched());
+        QTRY_VERIFY(host->timelinePositionMs() > 50);
+        QVERIFY(!cold->residencyReady());
+        QVERIFY(host->document()->editsLocked());
+        host->timelinePause();
         QVERIFY(host->document()->removeMedia(cold->mediaId()));
         QVERIFY(host->testSceneActionEnabled());
     }

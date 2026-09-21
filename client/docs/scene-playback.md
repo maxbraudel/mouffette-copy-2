@@ -11,7 +11,9 @@ clock independently of video position notifications.
 timing. Its pure C++ evaluator is shared by `QuickCanvasHost` and
 `RemoteSceneController`. Document authoring state, the uncaptured element draft,
 the evaluated presentation and the transport/player state are separate. Seeking
-and playback never emit document changes or trigger autosave.
+and playback evaluation never emit document changes or trigger autosave. Imports
+accepted before local playback may still complete and persist their authored
+instances while the user edit lock remains active.
 
 Each key captures every intrinsic visual/audio property, excluding media identity,
 loading and video position. Numeric geometry, opacity, volume, colours and text
@@ -57,8 +59,10 @@ independently of Stop. At the final boundary no new instance can be added.
 Existing clips retain their saved timing. Each new canvas instance gets a new
 track above all existing instances, even when an existing track has temporal space.
 Video imports remain pending until metadata or decoded residency supplies a valid
-duration; they are inserted above existing tracks when ready. No instance with an
-empty clip is published.
+duration; they are then inserted above existing tracks as loading shells. No
+instance with an empty clip is published. Accepted imports continue through local
+playback, retaining their captured start slot and identity without changing the
+standby selection. Remote preparation keeps its authoring graph immutable.
 
 Clips define half-open presence intervals `[startSlot, endSlot)`. Outside its clip,
 the instance is absent from rendering, canvas picking, selection chrome and
@@ -128,13 +132,21 @@ the clip entry frame before activation. Paused, absent and held samples stay sil
 
 Play resumes at the head; at or past the effective end it restarts at zero. Pause
 returns to the beginning of the started slot, silently reseeks video and unlocks authoring.
+Local Play starts immediately even with pending metadata or unready images and
+videos. A pending media has no content or skeleton in the playing canvas; its
+timeline clip keeps a pulsating background. When ready, a video joins at the
+current playhead with its matching native image and synchronized audio. Its
+initial imported poster and early thumbnails cannot authorize that transition.
+Preparation errors affect only the failed local media, shown as an error marker;
+the clock and ready media continue. Remote launching retains its strict complete
+preparation barrier.
 Seeking during local playback continues from the new slot, including backward
 jumps and Return to start. On the ruler, pressing the left mouse button freezes
 the clock and silences audio; the image follows the pointer while held. Release
 resumes from the chosen slot only if playback was active before the gesture.
 The presentation, playback reservations and edit lock stay in place throughout
 the gesture. Cancelling the gesture or explicitly pausing leaves playback paused.
-Seeking during initial video preparation updates the pending start position. A
+Seeking during a video's preparation replaces its pending admission position. A
 paused seek stays paused; reaching or releasing at/past Stop ends the preview there.
 Local preview also runs on an empty project. Space toggles Play/Pause from the
 canvas or timeline, except while entering text.
@@ -176,7 +188,10 @@ informational and wheel events navigate the same timeline. Track backgrounds do
 not highlight the active paste destination. Clips fill the entire track height
 without vertical insets. The media name is centered in the intersection
 of its clip with the visible time viewport, including during drag and resize.
-Long names elide to the available width. Resident image/video clips show a thumbnail
+Long names elide to the available width. Unready image/video clips retain their
+label and outline over a pulsating background; their interior thumbnails appear
+only when the media is ready. Paused canvas instances use the same readiness gate
+for skeleton-to-content reveal. Ready image/video clips show a thumbnail
 strip inside the border; image tiles repeat, video tiles sample source time,
 and text clips keep their plain background. Tiles keep the media aspect ratio,
 clamped between 1:2 and 2.4:1 with centered cropping for extreme formats, never

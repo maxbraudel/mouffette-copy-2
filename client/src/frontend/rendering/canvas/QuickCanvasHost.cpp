@@ -63,10 +63,22 @@ QuickCanvasHost::QuickCanvasHost(CanvasDocument* document,
                 [&owner](const CanvasMedia* media) {
                     return media && media->residencyOwnerId() == owner;
                 })) return;
-        if ((m_sceneLaunching || m_sceneLaunched || m_testSceneLaunched)
+        if ((m_sceneLaunching || m_sceneLaunched)
             && !MediaResidencyManager::instance().ready(owner)) {
-            m_testSceneLaunched = false;
             failScene(QStringLiteral("A scene media is no longer fully resident in memory"), true);
+        }
+        if (m_testSceneLaunched && !MediaResidencyManager::instance().ready(owner)) {
+            m_localPinnedOwners.remove(owner);
+            reconcileLocalPins();
+            for (auto* media : items) {
+                if (media->residencyOwnerId() != owner) continue;
+                media->setLocalPlaybackHidden(true);
+                m_localVideoAdmissions.remove(media->mediaId());
+                if (auto* player = media->player()) {
+                    if (player->audioOutput()) player->audioOutput()->setMuted(true);
+                    player->pause();
+                }
+            }
         }
         publishActionState();
     });
@@ -91,7 +103,18 @@ QuickCanvasHost::QuickCanvasHost(CanvasDocument* document,
         publishActionState();
     });
     connect(m_document, &CanvasDocument::mediaSourceInvalidated, this,
-            [this](const QString&, const QString&) { stopScenesForSourceInvalidation(); });
+            [this](const QString& id, const QString& error) {
+        if (m_testSceneLaunched) failLocalMedia(m_document->mediaById(id), error);
+        else stopScenesForSourceInvalidation();
+    });
+    for (auto* media : m_document->media()) observeMedia(media);
+    connect(m_document, &CanvasDocument::mediaAdded, this, &QuickCanvasHost::observeMedia);
+    connect(m_document, &CanvasDocument::mediaAboutToBeRemoved, this, [this](CanvasMedia* media) {
+        m_localVideoAdmissions.remove(media->mediaId());
+        m_localPinnedOwners.remove(media->residencyOwnerId());
+        m_localPinRetryAt.remove(media->residencyOwnerId());
+        reconcileLocalPins();
+    });
     connect(m_document, &CanvasDocument::mediaAdded,
             this, &QuickCanvasHost::mediaItemAdded);
     connect(m_document, &CanvasDocument::mediaAboutToBeRemoved,
@@ -540,7 +563,7 @@ bool QuickCanvasHost::testSceneActionEnabled() const
     if (m_sceneLaunching || m_sceneStopping || m_sceneLaunched) return false;
     if (m_testSceneLaunched) return true;
     // The editor transport also runs on an empty timeline.
-    return m_projectEditingEnabled && !m_sceneContext && mediaReadinessReason(false).isEmpty();
+    return m_projectEditingEnabled && !m_sceneContext;
 }
 
 QStringList QuickCanvasHost::residencyOwners() const
@@ -991,16 +1014,7 @@ void QuickCanvasHost::timelineSeek(qreal positionMs)
         if (m_timelineAnchorPositionMs >= stop) advanceTimeline();
         return;
     }
-    // A seek can also arrive while Play is preparing the initial video frames.
-    // Replace that preparation without cancelling the user's playback request.
-    const bool preparing = m_testSceneLaunched && m_videoPreparation;
-    if (preparing) {
-        delete m_videoPreparation.data();
-        m_videoPreparation = nullptr;
-        m_localVideosPrepared = false;
-    }
     applyTimeline(target, false, true);
-    if (preparing) resumeLocalTimeline();
 }
 
 void QuickCanvasHost::timelineBeginScrub()
@@ -1031,30 +1045,28 @@ void QuickCanvasHost::timelineEndScrub(bool resume)
 
 void QuickCanvasHost::resumeLocalTimeline()
 {
+    m_document->setLocalImportCompletionEnabled(true);
     m_document->setEditsLocked(true);
     if (m_timelineScrubbing) return;
-    prepareSceneVideos([this] {
-        if (m_testSceneLaunched && !m_timelineScrubbing) {
-            if (m_sceneContext) startTimelineClock();
-            else beginScenePresentation(false);
-        }
-        publishActionState();
-    });
+    if (m_sceneContext) startTimelineClock();
+    else beginScenePresentation(false);
+    publishActionState();
 }
 
 void QuickCanvasHost::timelinePlay()
 {
     if (m_sceneLaunching || m_sceneLaunched || m_sceneStopping || m_testSceneLaunched
         || !testSceneActionEnabled()) return;
+    for (auto* media : m_document->media()) {
+        media->setPlaybackPreparationError({});
+        media->setPlaybackWaitingForMemory(false);
+    }
     if (timelinePositionMs() >= timelineStopMs()) timelineSeek(0);
     else timelineSeek(timelinePositionMs()); // Discard unrecorded property edits.
     m_residencyGroup = QStringLiteral("canvas-preview:%1").arg(QUuid::createUuid().toString(QUuid::WithoutBraces));
-    if (!MediaResidencyManager::instance().pinOwners(residencyOwners(), m_residencyGroup)) {
-        m_residencyGroup.clear();
-        sceneToast(NotificationSeverity::Error, QStringLiteral("Insufficient RAM remains for scene playback buffers"),
-                   {}, -1, false);
-        return;
-    }
+    // An empty local run is valid. Ready occurrences extend this group without
+    // making pending imports or one refused reservation a transport barrier.
+    MediaResidencyManager::instance().pinOwners({}, m_residencyGroup);
     m_testSceneLaunched = true;
     m_runningSceneDefinition = m_document->serializeSceneState();
     resumeLocalTimeline();
@@ -1072,12 +1084,185 @@ void QuickCanvasHost::timelinePause()
     publishActionState();
 }
 
+void QuickCanvasHost::observeMedia(CanvasMedia* media)
+{
+    if (m_testSceneLaunched) media->setLocalPlaybackHidden(!media->isText());
+    if (!media->player()) return;
+    const QPointer<CanvasMedia> guarded(media);
+    connect(media->player(), &ResidentVideoPlayer::errorOccurred, this,
+            [this, guarded](QMediaPlayer::Error error, const QString& message) {
+        if (guarded && m_testSceneLaunched && error != QMediaPlayer::NoError
+            && guarded->player()->error() != QMediaPlayer::NoError
+            && !guarded->player()->waitingForMemory())
+            failLocalMedia(guarded, message);
+    }, Qt::QueuedConnection);
+}
+
+void QuickCanvasHost::reconcileLocalPins()
+{
+    if (!m_testSceneLaunched || m_residencyGroup.isEmpty()) return;
+    auto& manager = MediaResidencyManager::instance();
+    QStringList owners;
+    for (const auto& owner : std::as_const(m_localPinnedOwners))
+        if (manager.ready(owner)) owners.append(owner);
+    // Shrinking an existing group never requests a new memory reservation.
+    if (manager.pinOwners(owners, m_residencyGroup))
+        m_localPinnedOwners = QSet<QString>(owners.cbegin(), owners.cend());
+}
+
+bool QuickCanvasHost::pinLocalMedia(CanvasMedia* media)
+{
+    const auto owner = media->residencyOwnerId();
+    if (m_localPinnedOwners.contains(owner)) return true;
+    const qint64 now = MouffetteClock::nowMs();
+    if (now < m_localPinRetryAt.value(owner, 0)) return false;
+    auto& manager = MediaResidencyManager::instance();
+    QStringList owners;
+    for (const auto& pinned : std::as_const(m_localPinnedOwners))
+        if (manager.ready(pinned)) owners.append(pinned);
+    owners.append(owner);
+    if (!manager.pinOwners(owners, m_residencyGroup)) {
+        // Existing pins survive a failed extension. Retry at the memory
+        // monitor cadence, rather than retrying an allocation every frame.
+        m_localPinRetryAt.insert(owner, now + 1000);
+        media->setPlaybackWaitingForMemory(true);
+        return false;
+    }
+    m_localPinnedOwners = QSet<QString>(owners.cbegin(), owners.cend());
+    m_localPinRetryAt.remove(owner);
+    media->setPlaybackWaitingForMemory(false);
+    return media->contentReady();
+}
+
+void QuickCanvasHost::failLocalMedia(CanvasMedia* media, const QString& message)
+{
+    if (!media) return;
+    const bool alreadyFailed = media->loadingState() == QStringLiteral("error")
+        && media->localPlaybackHidden();
+    media->setLocalPlaybackHidden(true);
+    media->setPlaybackPreparationError(message.isEmpty()
+        ? QStringLiteral("The media could not prepare playback") : message);
+    m_localVideoAdmissions.remove(media->mediaId());
+    m_localPinnedOwners.remove(media->residencyOwnerId());
+    reconcileLocalPins();
+    if (auto* player = media->player()) {
+        if (player->audioOutput()) player->audioOutput()->setMuted(true);
+        player->pause();
+    }
+    if (!alreadyFailed)
+        sceneToast(NotificationSeverity::Error,
+                   QStringLiteral("%1: %2").arg(media->displayName(), media->loadingError()),
+                   {}, AppConfig::instance().toastErrorDurationMs(), false);
+}
+
+void QuickCanvasHost::applyLocalVideo(CanvasMedia* media, qreal time, bool forceSeek)
+{
+    auto* player = media->player();
+    const auto id = media->mediaId();
+    const auto track = m_document->timelinePresentationTrack(media);
+    const auto& grid = m_document->timelineSettings();
+    const auto sample = SceneTimeline::evaluateVideo(track, time, player->duration(), grid);
+    const qint64 now = MouffetteClock::nowMs();
+    player->setScrubbing(false);
+    player->prepareEntry(timelineVideoPreparationSourceMs(track, 0, player->duration(), grid));
+    auto* audio = player->audioOutput();
+    if (audio) audio->setVolume(media->volume());
+
+    if (!sample.clipActive) {
+        media->setLocalPlaybackHidden(true);
+        m_localVideoAdmissions.remove(id);
+        if (audio) audio->setMuted(true);
+        // pause() also cancels a deferred play request whose first frame has
+        // not arrived. Such a cursor must never start after leaving the clip.
+        player->pause();
+        if (time < grid.timeMs(track.clip.startSlot)) {
+            const auto entry = timelineVideoPreparationSourceMs(track, time, player->duration(), grid);
+            if (player->position() != entry || !player->preparedAt(entry)) player->prepare(entry);
+        }
+        return;
+    }
+
+    auto found = m_localVideoAdmissions.find(id);
+    const bool drift = found != m_localVideoAdmissions.end()
+        && found->stage == LocalVideoAdmission::Presented && sample.playing
+        && qAbs(player->position() - sample.sourceTimeMs) > AppConfig::instance().sceneVideoSyncPositionToleranceMs()
+        && now >= m_timelineSeekGuards.value(id, 0);
+    if (forceSeek || drift || found == m_localVideoAdmissions.end()
+        || found->clipId != sample.clipId || found->advancing != sample.playing) {
+        media->setLocalPlaybackHidden(true);
+        if (audio) audio->setMuted(true);
+        player->pause();
+        LocalVideoAdmission admission;
+        admission.clipId = sample.clipId;
+        admission.advancing = sample.playing;
+        admission.startedMs = now;
+        m_localVideoAdmissions.insert(id, admission);
+        player->prepare(sample.sourceTimeMs);
+        if (sample.playing) player->play();
+        // prepare() may move within a decoded frame and invalidate lookahead.
+        // Only the resulting cursor, never the readiness before that seek,
+        // can authorize immediate presentation.
+        auto started = m_localVideoAdmissions.find(id);
+        if (started != m_localVideoAdmissions.end() && player->preparedAt(sample.sourceTimeMs)
+            && (!sample.playing || player->isPlaying()))
+            started->stage = LocalVideoAdmission::Presented;
+        m_timelineSeekGuards.insert(id, now + AppConfig::instance().sceneAuthoritativeSeekGuardMs());
+    }
+
+    // Signals can invalidate this occurrence while prepare/play is allocating.
+    found = m_localVideoAdmissions.find(id);
+    if (found == m_localVideoAdmissions.end() || !media->contentReady()) return;
+    auto& admission = found.value();
+    if (admission.stage == LocalVideoAdmission::Preparing) {
+        if (!sample.playing) {
+            if (player->preparedAt(sample.sourceTimeMs)) admission.stage = LocalVideoAdmission::Presented;
+        } else if (player->isPlaying()) {
+            // Start from one stable prepared cursor, then anchor its running
+            // clock once to the live scene. Repeated seeks while preparing
+            // would cancel every decode; its normal tick can now catch up.
+            admission.stage = LocalVideoAdmission::CatchingUp;
+            player->setPosition(sample.sourceTimeMs);
+        }
+    }
+    if (admission.stage == LocalVideoAdmission::CatchingUp
+        && player->preparedAt(sample.sourceTimeMs))
+        admission.stage = LocalVideoAdmission::Presented;
+    const bool presented = admission.stage == LocalVideoAdmission::Presented
+        && (!sample.playing || player->isPlaying());
+    media->setLocalPlaybackHidden(!presented);
+    if (audio) audio->setMuted(!presented || !sample.playing || media->muted());
+    if (!presented && now - admission.startedMs >= 5000 && !player->waitingForMemory())
+        failLocalMedia(media, QStringLiteral("The video did not prepare its current playback position in time"));
+}
+
 void QuickCanvasHost::applyTimeline(qreal positionMs, bool playing, bool forceSeek)
 {
     m_document->setTimelinePosition(positionMs);
     const qreal time = timelinePositionMs();
     const qint64 clock = MouffetteClock::nowMs();
     for (CanvasMedia* media : m_document->media()) {
+        const bool localRun = m_testSceneLaunched && m_sceneContext;
+        if (localRun && !media->isText()) {
+            const bool ready = (media->contentReady() || media->playbackWaitingForMemory())
+                && pinLocalMedia(media);
+            if (!ready) {
+                media->setLocalPlaybackHidden(true);
+                const bool joining = m_localVideoAdmissions.contains(media->mediaId());
+                m_localVideoAdmissions.remove(media->mediaId());
+                if (m_localPinnedOwners.remove(media->residencyOwnerId())) reconcileLocalPins();
+                if (auto* player = media->player()) {
+                    if (player->audioOutput()) player->audioOutput()->setMuted(true);
+                    if (joining || player->isPlaying()) player->pause();
+                }
+                continue;
+            }
+            if (playing && media->isVideo() && media->player()) {
+                applyLocalVideo(media, time, forceSeek);
+                continue;
+            }
+        }
+        media->setLocalPlaybackHidden(false);
+        m_localVideoAdmissions.remove(media->mediaId());
         if (!media->isVideo() || !media->player()) continue;
         media->player()->setScrubbing(m_timelineScrubbing);
         auto* player = media->player();
@@ -1157,6 +1342,7 @@ void QuickCanvasHost::beginScenePresentation(bool remote)
     m_document->setEditsLocked(true);
     m_sceneContext = new QObject(this);
     for (CanvasMedia* media : m_document->media()) {
+        if (!remote) continue; // Local player failures belong to their occurrence.
         if (media->isVideo() && media->player()) {
             const QPointer<QObject> context(m_sceneContext);
             connect(media->player(), &ResidentVideoPlayer::errorOccurred, m_sceneContext,
@@ -1200,6 +1386,14 @@ void QuickCanvasHost::stopScenePresentation()
     if (m_sceneContext) {
         delete m_sceneContext;
         m_sceneContext = nullptr;
+    }
+    m_document->setLocalImportCompletionEnabled(false);
+    m_localVideoAdmissions.clear();
+    m_localPinnedOwners.clear();
+    m_localPinRetryAt.clear();
+    for (auto* media : m_document->media()) {
+        media->setLocalPlaybackHidden(false);
+        media->setPlaybackWaitingForMemory(false);
     }
     applyTimeline(stoppedAt, false, true);
     m_timelineRemote = false;

@@ -5,16 +5,21 @@ BaseMediaItem {
     id: root
     property var residentFrameSource: null
     property bool residencyReady: false
+    property bool presentationReady: residencyReady
+    property string loadingState: ""
+    property string loadingError: ""
     property bool requireInitialSkeleton: true
-    contentReady: root.residencyReady && !!imageLoader.item && imageLoader.item.hasFrame
+    contentReady: root.presentationReady && !!imageLoader.item && imageLoader.item.hasFrame
     initialFramePresented: surface.renderingAllowed
 
     MediaSurface {
         id: surface
         anchors.fill: parent
         requireInitialSkeleton: root.requireInitialSkeleton
-        residencyReady: root.residencyReady
+        residencyReady: root.presentationReady
         contentReady: root.contentReady
+        loadingState: root.loadingState
+        loadingError: root.loadingError
         Loader {
             id: imageLoader
             anchors.fill: parent

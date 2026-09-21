@@ -1,6 +1,5 @@
 import QtQuick
 import QtQuick.Window
-import Mouffette.App as AppStyle
 import Mouffette.Canvas
 
 Item {
@@ -9,6 +8,8 @@ Item {
     property bool contentReady: false
     property bool firstFramePresented: false
     property bool requireInitialSkeleton: true
+    property string loadingState: ""
+    property string loadingError: ""
     property bool initialized: false
     property bool loadingRevealPending: false
     readonly property bool renderingAllowed: initialized && (!loadingRevealPending || firstFramePresented)
@@ -55,20 +56,14 @@ Item {
         function onFrameSwapped() { root.firstFramePresented = true }
     }
 
-    Rectangle {
+    MediaLoadingSkeleton {
         id: skeleton
         objectName: "mediaLoadingSkeleton"
         anchors.fill: parent
         visible: root.revealProgress < 1
-        color: AppStyle.Theme.mediaPlaceholder
-        property real pulseOpacity: 0.28
-        opacity: pulseOpacity * (1 - root.revealProgress)
-        SequentialAnimation on pulseOpacity {
-            running: skeleton.visible
-            loops: Animation.Infinite
-            NumberAnimation { to: 0.5; duration: 700; easing.type: Easing.InOutSine }
-            NumberAnimation { to: 0.28; duration: 700; easing.type: Easing.InOutSine }
-        }
+        failed: root.loadingState === "error"
+        errorText: root.loadingError
+        opacity: 1 - root.revealProgress
     }
 
     Item {

@@ -65,7 +65,6 @@ private:
     QString m_ownerId;
     QString m_sourceHash;
     std::weak_ptr<const ResidentMediaAsset> m_asset;
-    std::weak_ptr<const ResidentMediaPreview> m_preview;
     qreal m_stepMs = 0;
     qreal m_sourceInMs = 0;
     qreal m_pixelsPerMs = 1;

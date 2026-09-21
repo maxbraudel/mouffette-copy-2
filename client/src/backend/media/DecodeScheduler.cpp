@@ -93,6 +93,8 @@ struct DecodeScheduler::Impl {
     };
     std::vector<std::unique_ptr<Worker>> workers;
     QSet<QObject*> owners;
+    struct HeldCompletion { quint64 generation; std::function<void()> deliver; };
+    QHash<QObject*, QList<HeldCompletion>> heldCompletions;
     QHash<QString, std::shared_ptr<Job>> jobs;
     QHash<QString, CacheFrame> frames;
     QHash<QString, std::weak_ptr<const SharedMediaFrame>> live;
@@ -131,6 +133,7 @@ void DecodeScheduler::observeOwner(QObject* owner) {
     d->owners.insert(owner);
     connect(owner, &QObject::destroyed, this, [this, owner] {
         d->owners.remove(owner);
+        d->heldCompletions.remove(owner);
         cancel(nullptr, 0); // QPointer listeners are already null at this point.
     });
 }
@@ -154,6 +157,18 @@ void DecodeScheduler::request(QObject* cursor, quint64 generation, std::shared_p
     Q_ASSERT(QThread::currentThread() == thread());
     if (!cursor || !asset) return;
     observeOwner(cursor);
+    if (d->heldCompletions.contains(cursor)) {
+        completion = [this, owner = QPointer<QObject>(cursor), generation,
+                      original = std::move(completion)](SharedMediaFramePtr frame, const QString& error) {
+            if (!owner) return;
+            auto deliver = [owner, original, frame = std::move(frame), error]() {
+                if (owner) original(frame, error);
+            };
+            const auto held = d->heldCompletions.find(owner);
+            if (held != d->heldCompletions.end()) held->append({generation, std::move(deliver)});
+            else deliver();
+        };
+    }
     if (auto frame = cached(*asset, timestampUs)) { completion(std::move(frame), {}); return; }
     int index = IndexedMediaDecoder::frameAt(*asset, timestampUs);
     if (index < 0) { completion({}, QStringLiteral("Missing video frame index")); return; }
@@ -176,6 +191,12 @@ void DecodeScheduler::request(QObject* cursor, quint64 generation, std::shared_p
     dispatch();
 }
 void DecodeScheduler::cancel(QObject* cursor, quint64 generation) {
+    auto held = d->heldCompletions.find(cursor);
+    if (held != d->heldCompletions.end()) {
+        auto& completions = held.value();
+        completions.erase(std::remove_if(completions.begin(), completions.end(),
+            [generation](const auto& result) { return result.generation == generation; }), completions.end());
+    }
     for (auto it = d->jobs.begin(); it != d->jobs.end();) {
         auto& listeners = it.value()->listeners;
         listeners.erase(std::remove_if(listeners.begin(), listeners.end(), [=](const auto& listener) { return !listener.owner || (listener.owner == cursor && listener.generation == generation); }), listeners.end());
@@ -185,6 +206,17 @@ void DecodeScheduler::cancel(QObject* cursor, quint64 generation) {
         } else ++it;
     }
     dispatch();
+}
+void DecodeScheduler::holdCompletionsForTesting(QObject* owner, bool hold) {
+    Q_ASSERT(QThread::currentThread() == thread());
+    if (!owner) return;
+    if (hold) {
+        observeOwner(owner);
+        if (!d->heldCompletions.contains(owner)) d->heldCompletions.insert(owner, {});
+        return;
+    }
+    const auto completions = d->heldCompletions.take(owner);
+    for (const auto& completion : completions) completion.deliver();
 }
 void DecodeScheduler::retainThumbnailRequests(QObject* owner, const ResidentMediaAsset& asset,
                                              const QSet<int>& desiredFrameIndices) {

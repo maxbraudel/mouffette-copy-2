@@ -51,6 +51,10 @@ signals:
     void optionalCacheAvailabilityChanged();
     void optionalCachesCleared();
 private:
+    friend class VideoPlaybackBackendTest;
+    // Deterministic integration tests delay only one occurrence's results;
+    // real validation, other cursors and the scene clock continue normally.
+    void holdCompletionsForTesting(QObject* owner, bool hold);
     DecodeScheduler();
     struct Impl;
     std::unique_ptr<Impl> d;

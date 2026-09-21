@@ -167,9 +167,13 @@ Dragging or trimming a timeline clip previews its provisional timing in the
 canvas immediately, including video seeking and track order. The saved clip
 changes only on release; cancelling the gesture restores the original preview.
 
-Import displays an immutable local poster and progressive timeline thumbnails
-while complete source validation continues. Play and remote scenes remain gated
-on validated residency. The filmstrip uses a source-time grid with zoom levels
+Imported images and videos display a canvas skeleton and a pulsating timeline
+background until their content is ready. Posters and thumbnails collected during
+validation stay hidden. Local Play starts immediately with ready media; pending
+media are absent from the playing canvas, and late videos join the current
+playhead with synchronized audio. Per-media failures leave an error marker and
+do not stop other local media. Remote scenes still require every media ready.
+The filmstrip uses a source-time grid with zoom levels
 and keeps displayed images until replacements arrive, avoiding empty cells during
 zoom changes. Identical source/frame requests share allocations across occurrences.
 
@@ -212,8 +216,9 @@ opens centered at 90% of the available screen width and height. See
 
 ## Media memory
 
-Images and videos are completely validated before playback or scene execution;
-local import previews can appear earlier. Original files remain the save/transfer
+Images and videos are completely validated before their content is revealed or
+played. Local transport may run while other imports are still preparing; remote
+scene execution requires complete readiness. Original files remain the save/transfer
 identity; validated runtime video/audio packets stay in RAM. Optional disk
 derivatives are disposable and do not replace those originals.
 Lightweight cursors share decoding, native rendering frames and one audio mixer per

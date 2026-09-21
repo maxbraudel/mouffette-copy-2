@@ -8,6 +8,7 @@
 #include <QTimer>
 #include <QElapsedTimer>
 #include <QHash>
+#include <QSet>
 #include <functional>
 
 class CanvasDocument;
@@ -118,6 +119,11 @@ private:
     void sendVideoSnapshot();
     void advanceTimeline();
     void applyTimeline(qreal positionMs, bool playing, bool forceSeek = false);
+    void observeMedia(CanvasMedia* media);
+    bool pinLocalMedia(CanvasMedia* media);
+    void reconcileLocalPins();
+    void failLocalMedia(CanvasMedia* media, const QString& message);
+    void applyLocalVideo(CanvasMedia* media, qreal time, bool forceSeek);
     qreal timelineStopMs() const;
     qreal timelineNowMs() const;
 
@@ -174,4 +180,13 @@ private:
     QHash<QString, QString> m_timelineClipIds;
     QHash<QString, bool> m_timelineVideoPlaying;
     QHash<QString, qint64> m_timelineSeekGuards;
+    struct LocalVideoAdmission {
+        enum Stage { Preparing, CatchingUp, Presented } stage = Preparing;
+        QString clipId;
+        bool advancing = false;
+        qint64 startedMs = 0;
+    };
+    QHash<QString, LocalVideoAdmission> m_localVideoAdmissions;
+    QSet<QString> m_localPinnedOwners;
+    QHash<QString, qint64> m_localPinRetryAt;
 };

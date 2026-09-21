@@ -21,19 +21,27 @@ all-intra encoding and another complete verification decode. Original quality,
 timestamps, SAR, rotation and color metadata are preserved. Both local and remote
 residency use this path; duplicate occurrences share the same allocation.
 
-Local authoring has a separate, display-only `ResidentMediaPreview`. After the
+Import preparation has a separate `ResidentMediaPreview`. After the
 first decoded frame, the worker publishes immutable snapshots containing the
 shared native poster and up to 16 cumulative thumbnails, each at most 192 × 108.
-The canvas can show the poster and the timeline can fill its strip while the
-rest of the source is still being validated. A coalesced mailbox keeps only the
+These intermediate pixels stay hidden until the media is ready. Paused authoring
+shows a canvas skeleton and a pulsating timeline clip; during local playback the
+pending canvas instance is absent while its timeline clip keeps pulsing. The same
+readiness rule applies to images and videos. A coalesced mailbox keeps only the
 latest pending snapshot. Its pixels share the importing asset's allocations;
 they are not counted again as a second asset or copied for each snapshot.
 
 Preview publication checks the original hash, source signature, owner,
 generation and cancellation. Failure, source replacement, owner release and
-memory cancellation remove the preview. `asset()`, `ready()`, local Play,
-scene pins and remote PREPARE still require complete validation and initial
-playback preparation. A visible poster is not a readiness acknowledgement.
+memory cancellation remove the preview. `asset()`, `ready()`, scene pins and
+remote PREPARE still require complete validation. A collected poster is not a
+readiness acknowledgement. Local Play advances immediately with ready media;
+each video also needs its native audiovisual cursor prepared before it is shown
+or heard. A late video joins at the current source time, including its trim and
+clip timing, without delaying the timeline or replaying its initial samples.
+Reservations are admitted per local media. A failed preparation stays local to
+that media with an error marker; other media continue playing. A changed source
+retains the existing invalidation/removal behavior without unlocking local edits.
 The probe's hash supports early content deduplication; the hash made while
 reading resident source bytes remains a second check that decoding uses the
 same content. Removing either pass would require a different admitted-source
@@ -122,9 +130,10 @@ priority; starting or active playback gives it playback priority. All-intra
 lookahead can run independently. Entry images remain pinned separately from the
 moving cursor. Shared images have one allocation per file/frame/format and remain
 alive while required by any cursor or renderer.
-Play checks current versioned readiness; already prepared frames are reused and
-future clips do not block local scene start. Unprepared seeks can require a short
-residual wait. Source/timing/position/output changes invalidate their affected
+Local Play never waits for an unprepared cursor; already prepared frames are
+reused and unavailable media remain hidden and silent until ready at the running
+playhead. Remote scene preparation retains its complete audiovisual barrier.
+Source/timing/position/output changes invalidate their affected
 resources; generation guards reject results after deletion or cancellation.
 
 ## Audio and rendering
@@ -163,7 +172,8 @@ in bounded image quads. Zoom therefore reveals/repeats horizontal content withou
 enlarging it vertically or cutting off its top and bottom. Each cell owns a reused
 node group, and all source rectangles stay inside their texture, including atlases.
 
-Visible thumbnails are requested before the one-viewport margin on either side.
+Once the media content gate is ready, visible thumbnails are requested before
+the one-viewport margin on either side.
 Useful subscriptions survive scroll and zoom. Existing displayed images remain
 pinned until their replacements arrive, with the nearest available image from
 the same source or an import thumbnail as fallback. The per-strip visible pixel
@@ -295,7 +305,8 @@ A development measurement on 20 September 2026, using
 and strict readiness at **6,357 ms**. This was one Debug/offscreen run on macOS
 26.1 with Qt 6.11.2 during the progressive-preview implementation; it did not
 measure mouse-to-screen latency or purge OS caches. It measures the early
-thumbnail publication path, before the subsequent canvas-poster integration.
+thumbnail publication path, before the subsequent canvas-poster integration and
+the current readiness-gated UI. It does not describe when content is now revealed.
 Cold long-GOP scrubbing still depends on original decoding until useful proxy
 frames exist. Windows packaging/performance, native display latency and physical
 audio/video synchronization require their own qualification; neither this run
@@ -327,7 +338,8 @@ cancels outstanding metadata imports and retains their durable intent. Each
 references, and fences queued acquisitions until activity resumes. Source files,
 media IDs, geometry, settings and preview cursors remain intact. On return, the
 same media nodes reacquire residency asynchronously through the normal validation
-and memory-admission path; scene actions remain gated on readiness.
+and memory-admission path. Remote scene actions remain gated on readiness; local
+Play can advance while those media are still rehydrating.
 
 Scene preparation and playback keep their leases until the canvas restores its
 draft and unlocks. An expired media deadline then applies immediately; activity

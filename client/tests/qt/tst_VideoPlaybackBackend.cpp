@@ -34,7 +34,7 @@ class VideoPlaybackBackendTest final : public QObject
     Q_OBJECT
 
 private slots:
-    void authoringPreviewDoesNotAuthorizeRemoteOrPlayback()
+    void authoringPreviewStaysHiddenUntilContentIsReady()
     {
         CanvasDocument document;
         QuickCanvasController controller(&document);
@@ -51,11 +51,13 @@ private slots:
         QCOMPARE(view.status(), QQuickView::Ready);
         view.show(); QVERIFY(QTest::qWaitForWindowExposed(&view));
         auto* item = view.rootObject(); QVERIFY(item);
-        QTRY_VERIFY(item->property("contentReady").toBool());
+        QVERIFY(!item->property("contentReady").toBool());
         QVERIFY(!item->property("residencyReady").toBool());
         QVERIFY(!item->property("cppMediaPlayer").value<QObject*>());
         auto* loader = item->findChild<QQuickItem*>("videoImportPreview"); QVERIFY(loader);
-        QTRY_VERIFY(loader->property("active").toBool());
+        QVERIFY(!loader->property("active").toBool());
+        auto* skeleton = item->findChild<QQuickItem*>("mediaLoadingSkeleton"); QVERIFY(skeleton);
+        QTRY_VERIFY(skeleton->isVisible());
         QTRY_VERIFY(!view.grabWindow().isNull());
         RemoteVideoFrameSource remote;
         remote.setFrame(image);
@@ -63,7 +65,7 @@ private slots:
         QTRY_VERIFY(!item->property("contentReady").toBool());
         QVERIFY(!loader->property("active").toBool());
         item->setProperty("remoteFrameSource", QVariant::fromValue<QObject*>(nullptr));
-        QTRY_VERIFY(item->property("contentReady").toBool());
+        QVERIFY(!item->property("contentReady").toBool());
         preview.clear();
         QTRY_VERIFY(!item->property("contentReady").toBool());
     }
@@ -76,6 +78,174 @@ private slots:
     void cleanup()
     {
         MediaResidencyManager::instance().clearMemorySnapshotForTesting();
+    }
+
+    void contentAvailabilityWaitsForPlayerAndSurvivesSeeks()
+    {
+        CanvasDocument document;
+        auto* video = document.addPreparedFile(videoFixture(), {160, 90}, true, {});
+        QVERIFY(video && video->player());
+        auto& decoder = DecodeScheduler::instance();
+        decoder.holdCompletionsForTesting(video->player(), true);
+        const auto release = qScopeGuard([&] { decoder.holdCompletionsForTesting(video->player(), false); });
+        QSignalSpy changes(video, &CanvasMedia::contentAvailabilityChanged);
+        QTRY_VERIFY_WITH_TIMEOUT(video->residencyReady() && video->player()->asset(), 10000);
+        QVERIFY(!video->contentReady());
+        QCOMPARE(video->loadingState(), QStringLiteral("preparing"));
+        QVERIFY(!video->toModelMap().value("contentReady").toBool());
+        decoder.holdCompletionsForTesting(video->player(), false);
+        QTRY_VERIFY_WITH_TIMEOUT(video->contentReady(), 5000);
+        QCOMPARE(video->loadingState(), QStringLiteral("ready"));
+        QVERIFY(!changes.isEmpty());
+        changes.clear();
+        decoder.holdCompletionsForTesting(video->player(), true);
+        video->setPositionMs(1700);
+        QVERIFY(!video->player()->preparedAt(1700));
+        QVERIFY(video->contentReady());
+        QCOMPARE(changes.count(), 0); // A seek does not re-skeletonize the filmstrip.
+        video->setResidencySuspended(true);
+        QVERIFY(!video->contentReady());
+        QVERIFY(!changes.isEmpty());
+        decoder.holdCompletionsForTesting(video->player(), false);
+        QVERIFY(!video->contentReady()); // Retired results cannot reveal the old asset.
+        video->setResidencySuspended(false);
+        QTRY_VERIFY_WITH_TIMEOUT(video->contentReady(), 10000);
+    }
+
+    void localClockRunsWhileVideoIsPreparing_data()
+    {
+        QTest::addColumn<bool>("withReadyMedia");
+        QTest::addColumn<bool>("seekWhileLoading");
+        QTest::newRow("only-loading-media") << false << false;
+        QTest::newRow("ready-and-loading-media") << true << false;
+        QTest::newRow("pending-position-and-seek") << true << true;
+    }
+
+    void localClockRunsWhileVideoIsPreparing()
+    {
+        QFETCH(bool, withReadyMedia);
+        QFETCH(bool, seekWhileLoading);
+        std::unique_ptr<QuickCanvasHost> host(QuickCanvasHost::create());
+        QVERIFY(host); host->setProjectEditingEnabled(true);
+        auto* doc = host->document();
+        CanvasMedia* text = withReadyMedia ? doc->addText({}, QStringLiteral("Ready")) : nullptr;
+        auto* video = doc->addPreparedFile(videoFixture(), {160, 90}, true, {});
+        QVERIFY(video && video->player());
+        video->setVolume(0);
+        auto track = video->timelineTrack();
+        track.clip.sourceStartSlot = 30; // Join the trimmed source, never frame zero.
+        video->setTimelineTrack(track);
+        auto& decoder = DecodeScheduler::instance();
+        decoder.holdCompletionsForTesting(video->player(), true);
+        const auto release = qScopeGuard([&] { decoder.holdCompletionsForTesting(video->player(), false); });
+        if (seekWhileLoading) video->setPositionMs(1300);
+        bool revealedAtCurrentFrame = false;
+        QObject observer;
+        connect(video, &CanvasMedia::presentationChanged, &observer, [&] {
+            if (video->localPlaybackHidden() || !host->timelinePlaying()) return;
+            const auto sample = SceneTimeline::evaluateVideo(video->timelineTrack(),
+                doc->timelinePositionMs(), video->sourceDurationMs(), doc->timelineSettings());
+            revealedAtCurrentFrame = video->player()->preparedAt(sample.sourceTimeMs);
+        });
+        host->timelinePlay();
+        QVERIFY(host->timelinePlaying());
+        QVERIFY(video->localPlaybackHidden());
+        if (text) QVERIFY(text->contentReady() && !text->localPlaybackHidden());
+        QTRY_VERIFY_WITH_TIMEOUT(video->residencyReady() && video->audioOutput(), 10000);
+        QTRY_VERIFY(doc->timelinePositionMs() >= 200);
+        QVERIFY(!video->contentReady());
+        QVERIFY(video->localPlaybackHidden());
+        QVERIFY(video->audioOutput()->isMuted());
+        if (seekWhileLoading) host->timelineSeek(1700);
+        const auto before = doc->timelinePositionMs();
+        decoder.holdCompletionsForTesting(video->player(), false);
+        QTRY_VERIFY_WITH_TIMEOUT(video->contentReady() && !video->localPlaybackHidden(), 5000);
+        QVERIFY(host->timelinePlaying());
+        QVERIFY(doc->timelinePositionMs() >= before);
+        QVERIFY(revealedAtCurrentFrame);
+        QVERIFY(!video->audioOutput()->isMuted());
+        const auto sample = SceneTimeline::evaluateVideo(track, doc->timelinePositionMs(),
+            video->sourceDurationMs(), doc->timelineSettings());
+        QVERIFY(qAbs(video->positionMs() - sample.sourceTimeMs) < 100);
+        QVERIFY(video->player()->videoSink()->videoFrame().startTime() >= 1000000);
+        host->timelinePause();
+        QVERIFY(!video->localPlaybackHidden());
+        QVERIFY(video->audioOutput()->isMuted());
+    }
+
+    void cancelledLateVideoNeverStartsFromObsoletePosition_data()
+    {
+        QTest::addColumn<QString>("action");
+        QTest::newRow("pause") << QStringLiteral("pause");
+        QTest::newRow("clip-ended") << QStringLiteral("end");
+        QTest::newRow("seek-during-admission") << QStringLiteral("seek");
+        QTest::newRow("scrub-during-admission") << QStringLiteral("scrub");
+    }
+
+    void cancelledLateVideoNeverStartsFromObsoletePosition()
+    {
+        QFETCH(QString, action);
+        std::unique_ptr<QuickCanvasHost> host(QuickCanvasHost::create());
+        QVERIFY(host); host->setProjectEditingEnabled(true);
+        auto* video = host->document()->addPreparedFile(videoFixture(), {160, 90}, true, {});
+        QVERIFY(video); video->setVolume(0);
+        QTRY_VERIFY_WITH_TIMEOUT(video->contentReady(), 10000);
+        auto& decoder = DecodeScheduler::instance();
+        decoder.holdCompletionsForTesting(video->player(), true);
+        const auto release = qScopeGuard([&] { decoder.holdCompletionsForTesting(video->player(), false); });
+        host->timelineSeek(500);
+        host->timelinePlay();
+        QVERIFY(host->timelinePlaying());
+        QVERIFY(video->localPlaybackHidden());
+        QVERIFY(video->audioOutput()->isMuted());
+        if (action == "pause") host->timelinePause();
+        else if (action == "end") host->timelineSeek(host->document()->timelineSettings().timeMs(
+            video->timelineTrack().clip.endSlot() + 30));
+        else {
+            if (action == "scrub") host->timelineBeginScrub();
+            host->timelineSeek(1700);
+            host->timelineSeek(1100); // Backward change invalidates the earlier generation.
+            if (action == "scrub") host->timelineEndScrub();
+        }
+        decoder.holdCompletionsForTesting(video->player(), false);
+        if (action == "pause" || action == "end") {
+            QTest::qWait(150);
+            QVERIFY(!video->isPlaying());
+            QVERIFY(video->audioOutput()->isMuted());
+            QCOMPARE(host->timelinePlaying(), action == "end");
+            if (action == "end") QVERIFY(!video->clipActive());
+        } else {
+            QTRY_VERIFY_WITH_TIMEOUT(!video->localPlaybackHidden(), 5000);
+            QVERIFY(host->timelinePlaying() && video->isPlaying());
+            QVERIFY(video->positionMs() >= 1100);
+            QVERIFY(qAbs(video->positionMs() - host->timelinePositionMs()) < 100);
+            QVERIFY(!video->audioOutput()->isMuted());
+        }
+        host->timelinePause();
+    }
+
+    void localMediaFailureDoesNotStopOtherMedia()
+    {
+        std::unique_ptr<QuickCanvasHost> host(QuickCanvasHost::create());
+        QVERIFY(host); host->setProjectEditingEnabled(true);
+        auto* doc = host->document();
+        auto* ready = doc->addText({}, QStringLiteral("Ready")); QVERIFY(ready);
+        auto* video = doc->addPreparedFile(videoFixture(), {160, 90}, true, {}); QVERIFY(video);
+        QTRY_VERIFY_WITH_TIMEOUT(video->contentReady(), 10000);
+        video->setVolume(0);
+        host->timelinePlay();
+        QVERIFY(host->timelinePlaying());
+        video->setPlaybackPreparationError(QStringLiteral("Controlled preparation failure"));
+        QTRY_VERIFY(video->localPlaybackHidden());
+        QCOMPARE(video->loadingState(), QStringLiteral("error"));
+        QVERIFY(video->audioOutput()->isMuted());
+        QVERIFY(!ready->localPlaybackHidden());
+        const auto time = host->timelinePositionMs();
+        QTRY_VERIFY(host->timelinePositionMs() > time + 100);
+        QVERIFY(host->timelinePlaying());
+        host->timelinePause();
+        QVERIFY(!video->localPlaybackHidden());
+        QCOMPARE(video->loadingState(), QStringLiteral("error"));
     }
 
     void suspensionReleasesVideoAndPreservesPreview_data()
@@ -333,7 +503,7 @@ private slots:
         auto* doc = host->document();
         auto* video = doc->addPreparedFile(videoFixture(), {160, 90}, true, {});
         QVERIFY(video);
-        QTRY_VERIFY_WITH_TIMEOUT(video->residencyReady() && video->audioOutput(), 5000);
+        QTRY_VERIFY_WITH_TIMEOUT(video->contentReady(), 5000);
         auto track = video->timelineTrack();
         track.clip.startSlot = 90; // Timeline 3–9 s, starting at source 1 s.
         track.clip.durationSlots = 180;
@@ -341,12 +511,15 @@ private slots:
         video->setTimelineTrack(track);
         video->setMuted(false);
         video->setVolume(0); // Exercise mute state without audible test playback.
+        auto& decoder = DecodeScheduler::instance();
+        const auto releaseCompletions = qScopeGuard([&] { decoder.holdCompletionsForTesting(video->player(), false); });
+        if (duringPreparation) decoder.holdCompletionsForTesting(video->player(), true);
         host->timelineSeek(4000);
         const auto saved = doc->serializeProjectState();
         host->timelinePlay();
         QVERIFY(host->testSceneLaunched());
-        if (duringPreparation) QVERIFY(!host->timelinePlaying());
-        else QTRY_VERIFY_WITH_TIMEOUT(host->timelinePlaying(), 5000);
+        QVERIFY(host->timelinePlaying());
+        if (duringPreparation) QVERIFY(video->localPlaybackHidden());
         QSignalSpy locks(doc, &CanvasDocument::editsLockedChanged);
         const auto playbackBudget = MediaResidencyManager::instance().summary().value("playbackBudgetBytes");
         QVERIFY(playbackBudget.toULongLong() > 0);
@@ -366,7 +539,8 @@ private slots:
             QCOMPARE(MediaResidencyManager::instance().summary().value("playbackBudgetBytes"), playbackBudget);
             host->timelineEndScrub();
         }
-        QTRY_VERIFY_WITH_TIMEOUT(host->timelinePlaying() && video->isPlaying(), 5000);
+        decoder.holdCompletionsForTesting(video->player(), false);
+        QTRY_VERIFY_WITH_TIMEOUT(host->timelinePlaying() && video->isPlaying() && !video->localPlaybackHidden(), 5000);
         QVERIFY(doc->timelinePositionMs() >= 6000 && doc->timelinePositionMs() < 7000);
         const auto followsTimeline = [&] {
             return qAbs(video->positionMs() - (doc->timelinePositionMs() - 2000)) < 300;
@@ -379,7 +553,7 @@ private slots:
         QVERIFY(!video->isPlaying());
         QVERIFY(video->audioOutput()->isMuted());
         host->timelineSeek(5000);
-        QTRY_VERIFY(video->isPlaying() && followsTimeline());
+        QTRY_VERIFY(video->isPlaying() && !video->localPlaybackHidden() && followsTimeline());
         QVERIFY(!video->audioOutput()->isMuted());
         QTRY_VERIFY(doc->timelinePositionMs() > 5100);
         QVERIFY(doc->timelinePositionMs() < 6000);
@@ -513,34 +687,24 @@ private slots:
         QCOMPARE(video->baseSize(), nativeSize);
         const auto previewCapture = qEnvironmentVariable("MOUFFETTE_PREVIEW_ARTIFACT");
         if (!previewCapture.isEmpty()) {
-            // Opt-in real-source check: the native QML poster must be visible
-            // while validation is still in progress, without enabling Play.
-            const auto previewItem = [&]() -> QQuickItem* {
-                QList<QQuickItem*> pending{view.rootObject()};
-                while (!pending.isEmpty()) {
-                    auto* item = pending.takeLast();
-                    if (item->objectName() == QLatin1String("videoImportPreview")) return item;
-                    pending.append(item->childItems());
-                }
-                return nullptr;
-            };
-            QQuickItem* preview = nullptr;
-            QTRY_VERIFY_WITH_TIMEOUT((preview = previewItem()) && preview->property("active").toBool()
-                && preview->property("item").value<QObject*>(), 10000);
-            QTRY_VERIFY(preview->property("item").value<QObject*>()->property("hasFrame").toBool());
-            auto* surface = preview->parentItem()->parentItem();
-            QVERIFY(surface->property("revealProgress").isValid());
-            QTRY_COMPARE(surface->property("revealProgress").toReal(), 1.0);
-            QSignalSpy presented(&view, &QQuickWindow::frameSwapped);
-            view.update();
-            QTRY_VERIFY(!presented.isEmpty());
-            QVERIFY(!video->residencyReady());
-            QVERIFY(!video->player()->asset());
-            qInfo() << "Authoring QML preview fully revealed after" << importing.elapsed() << "ms; strict ready false";
+            // Opt-in native capture with a long source: internal previews may
+            // exist, but the canvas must still show only its loading skeleton.
+            QTRY_VERIFY_WITH_TIMEOUT(MediaResidencyManager::instance().preview(video->residencyOwnerId()), 10000);
+            QVERIFY(!video->contentReady());
+            QQuickItem* skeleton = nullptr;
+            QList<QQuickItem*> pending{view.rootObject()};
+            while (!pending.isEmpty()) {
+                auto* item = pending.takeLast();
+                if (item->objectName() == QLatin1String("mediaLoadingSkeleton")) { skeleton = item; break; }
+                pending.append(item->childItems());
+            }
+            QVERIFY(skeleton);
+            QVERIFY(skeleton->isVisible());
+            QVERIFY(!skeleton->parentItem()->property("contentReady").toBool());
             const QImage rendered = view.grabWindow();
             QVERIFY(!rendered.isNull());
             QVERIFY(rendered.save(previewCapture));
-            QVERIFY(!video->residencyReady());
+            QVERIFY(!video->contentReady());
         }
         const int importTimeout = qEnvironmentVariableIsSet("MOUFFETTE_TEST_VIDEO_FILE") ? 180000 : 30000;
         QTRY_VERIFY2_WITH_TIMEOUT(video->residencyReady(),

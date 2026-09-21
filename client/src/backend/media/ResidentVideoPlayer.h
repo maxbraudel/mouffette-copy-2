@@ -34,6 +34,11 @@ public:
     ~ResidentVideoPlayer() override;
     void setAsset(std::shared_ptr<const ResidentMediaAsset> asset);
     bool preparedAt(qint64 positionMs) const;
+    bool hasPreparedPlayback() const { return m_playbackPrepared; }
+    bool waitingForMemory() const { return m_waitingForMemory; }
+    // Retry a refused reservation after the residency manager samples memory.
+    // This never retries decoding/device failures or starts playback itself.
+    void retryPreparation();
     // The decoded image for this cursor, including a hold before the first PTS.
     // Returns an invalid frame while loading, on error, or for another cursor.
     QVideoFrame preparedFrame(qint64 positionMs) const;
@@ -84,6 +89,7 @@ signals:
     void loopsChanged();
     void videoOutputChanged();
     void frameReady(qint64 timestampMs); // A validated native frame (shared preparation may satisfy it).
+    void preparationChanged(); // True audiovisual preparation, never a poster/scrub image.
 
 private:
     friend class ResidentMediaTest;
@@ -136,6 +142,7 @@ private:
     bool m_scrubbing = false;
     bool m_playbackReserved = false;
     bool m_playbackPrepared = false;
+    bool m_waitingForMemory = false;
     QMediaPlayer::PlaybackState m_state = QMediaPlayer::StoppedState;
     QMediaPlayer::MediaStatus m_status = QMediaPlayer::NoMedia;
     QMediaPlayer::Error m_error = QMediaPlayer::NoError;

@@ -554,6 +554,7 @@ qt_add_qml_module(MouffetteClient
         resources/qml/InputLayer.qml
         resources/qml/MediaLayer.qml
         resources/qml/MediaNamePill.qml
+        resources/qml/MediaLoadingSkeleton.qml
         resources/qml/MediaSurface.qml
         resources/qml/MediaTextOverlay.qml
         resources/qml/MediaTopOverlay.qml

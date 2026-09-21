@@ -542,13 +542,22 @@ bool MediaResidencyManager::pinOwners(const QStringList& owners, const QString& 
     if (group.isEmpty()) return false;
     for (const auto& id : owners) if (!ready(id)) return false;
     const auto previous = m_pins.value(group);
+    // Removing occurrences cannot increase the group's admitted commitment.
+    // Count duplicate owners too: remote scenes may need several cursors for
+    // the same owner, and adding one of those is still a new allocation.
+    QHash<QString, int> remaining;
+    for (const auto& id : previous) ++remaining[id];
+    bool reusesAdmission = true;
+    for (const auto& id : owners) {
+        if (--remaining[id] < 0) { reusesAdmission = false; break; }
+    }
     m_pins.insert(group, owners);
     // Reserve all scene decoder budgets together before creating any player.
-    if (!owners.isEmpty() && !admitsBudget(0)) {
+    if (!reusesAdmission && !admitsBudget(0)) {
         if (previous.isEmpty()) m_pins.remove(group); else m_pins.insert(group, previous);
         return false;
     }
-    m_stopRequested.remove(group);
+    if (!reusesAdmission || owners.isEmpty()) m_stopRequested.remove(group);
     emit changed();
     return true;
 }

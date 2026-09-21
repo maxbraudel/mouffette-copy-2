@@ -85,11 +85,12 @@ void ResidentVideoPlayer::releasePlayer() {
     const bool reserved = std::exchange(m_playbackReserved, false);
     const bool prepared = std::exchange(m_playbackPrepared, false);
     if (reserved && m_asset && m_asset->releasePlayback) m_asset->releasePlayback(prepared);
+    if (prepared) emit preparationChanged();
 }
 void ResidentVideoPlayer::setAsset(std::shared_ptr<const ResidentMediaAsset> asset) {
     if (m_asset == asset) return;
     if (!asset || !asset->video || asset->frameIndex.isEmpty() || !asset->firstFrame.frame.isValid()) { clearAsset(); return; }
-    releasePlayer(); m_asset = std::move(asset);
+    releasePlayer(); m_asset = std::move(asset); m_waitingForMemory = false;
     m_positionMs = std::clamp<qint64>(m_positionMs, 0, duration());
     setState(QMediaPlayer::StoppedState);
     m_error = QMediaPlayer::NoError; m_errorString.clear(); emit errorChanged();
@@ -98,11 +99,16 @@ void ResidentVideoPlayer::setAsset(std::shared_ptr<const ResidentMediaAsset> ass
     QPointer<ResidentVideoPlayer> self(this);
     const bool admitted = ensurePlayer(false);
     if (!self) return;
-    if (admitted) requestFrame(); else presentPoster();
+    if (admitted) {
+        requestFrame();
+        if (self && !m_scrubbing && !preparedAt(m_positionMs) && !m_preparationTimer.isActive())
+            m_preparationTimer.start();
+    } else presentPoster();
 }
 void ResidentVideoPlayer::clearAsset() {
-    releasePlayer(); m_asset.reset(); setState(QMediaPlayer::StoppedState);
+    releasePlayer(); m_asset.reset(); m_waitingForMemory = false; setState(QMediaPlayer::StoppedState);
     setStatus(QMediaPlayer::NoMedia); emit durationChanged(0); emit seekableChanged(false);
+    emit preparationChanged();
 }
 bool ResidentVideoPlayer::ensurePlayer(bool reportFailure) {
     if (m_playbackReserved) return true;
@@ -115,9 +121,15 @@ bool ResidentVideoPlayer::ensurePlayer(bool reportFailure) {
         return false;
     }
     if (!admitted) {
+        if (!m_waitingForMemory) {
+            m_waitingForMemory = true;
+            emit preparationChanged();
+            if (!self || m_asset != requested) return false;
+        }
         if (reportFailure) fail(QMediaPlayer::ResourceError, QStringLiteral("Insufficient available RAM for prepared video buffers"));
         return false;
     }
+    m_waitingForMemory = false;
     m_playbackReserved = true;
     EditingProxyCache::instance().acquire(this, m_asset);
     EditingProxyCache::instance().setInteractive(this, m_scrubbing || isPlaying());
@@ -126,6 +138,14 @@ bool ResidentVideoPlayer::ensurePlayer(bool reportFailure) {
     if (!self || m_asset != requested || m_error != QMediaPlayer::NoError) return false;
     if (!m_scrubbing) m_audio.prepare(m_positionMs * 1000);
     return self && m_asset == requested && m_error == QMediaPlayer::NoError;
+}
+void ResidentVideoPlayer::retryPreparation() {
+    if (!m_waitingForMemory || !m_asset) return;
+    QPointer<ResidentVideoPlayer> self(this);
+    if (m_error != QMediaPlayer::NoError) releasePlayer();
+    if (!self || !ensurePlayer(false)) return;
+    prepare(m_positionMs);
+    if (self) emit preparationChanged();
 }
 bool ResidentVideoPlayer::preparedAt(qint64 positionMs) const {
     if (!preparedFrame(positionMs).isValid() || (!m_scrubbing && !m_audio.preparedAt(positionMs * 1000))) return false;
@@ -306,6 +326,8 @@ void ResidentVideoPlayer::startPreparedPlayback() {
         QPointer<ResidentVideoPlayer> self(this);
         const auto preparedAsset = m_asset;
         if (preparedAsset->playbackPrepared) preparedAsset->playbackPrepared();
+        if (!self || m_asset != preparedAsset) return;
+        emit preparationChanged();
         if (!self || m_asset != preparedAsset) return;
     }
     if (!m_cursor.starting) return;

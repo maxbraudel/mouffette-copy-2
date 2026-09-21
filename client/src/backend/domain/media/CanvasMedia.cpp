@@ -37,11 +37,25 @@ CanvasMedia::CanvasMedia(Type type, const QSize& baseSize, QObject* parent)
     , m_baseSize(baseSize.expandedTo(QSize(1, 1)))
 {
     m_residencyOwnerId = QStringLiteral("canvas:") + QUuid::createUuid().toString(QUuid::WithoutBraces);
+    m_reservationRetryTimer.setSingleShot(true);
+    m_reservationRetryTimer.setInterval(1000);
+    connect(&m_reservationRetryTimer, &QTimer::timeout, this, [this] {
+        if (m_residencyRetired || m_residencySuspended || !residencyReady()
+            || !m_player || !m_player->waitingForMemory()) return;
+        m_player->retryPreparation();
+        refreshContentAvailability();
+    });
     if (!isText()) {
         m_residentFrameSource = new RemoteVideoFrameSource(this);
         connect(&MediaResidencyManager::instance(), &MediaResidencyManager::ownerChanged,
                 this, [this](const QString& owner) {
             if (owner == m_residencyOwnerId) refreshResidency();
+        });
+        connect(&MediaResidencyManager::instance(), &MediaResidencyManager::changed,
+                this, [this] {
+            if (!m_residencyRetired && !m_residencySuspended && m_player
+                && m_player->waitingForMemory() && !m_reservationRetryTimer.isActive())
+                m_reservationRetryTimer.start();
         });
     }
 }
@@ -63,6 +77,7 @@ void CanvasMedia::releaseResidencyResources()
 {
     // Invalidate queued acquires even if suspension ends before they run.
     ++m_residencyGeneration;
+    resetContentAvailability();
     if (isVideo()) m_pendingPositionMs = positionMs();
     if (m_player) m_player->clearAsset();
     if (m_videoSink) m_videoSink->setVideoFrame({});
@@ -71,6 +86,7 @@ void CanvasMedia::releaseResidencyResources()
     m_residencyAcquired = false;
     m_hasRenderedFrame = false;
     m_firstFramePrimed = false;
+    refreshContentAvailability();
 }
 
 void CanvasMedia::setResidencySuspended(bool suspended)
@@ -131,6 +147,7 @@ void CanvasMedia::setSourcePath(const QString& path, const QString& expectedSha2
     m_sourceSizeBytes = source.isFile() ? source.size() : -1;
     if (!isText()) {
         ++m_residencyGeneration;
+        resetContentAvailability();
         if (m_residencyAcquired) MediaResidencyManager::instance().release(m_residencyOwnerId);
         m_residencyAcquired = false;
         if (!path.isEmpty()) requestResidency();
@@ -179,6 +196,105 @@ QString CanvasMedia::residencyError() const
     return isText() ? QString() : MediaResidencyManager::instance().errorString(m_residencyOwnerId);
 }
 
+bool CanvasMedia::contentReady() const
+{
+    if (isText()) return true;
+    return m_contentReady && !m_residencyRetired && !m_residencySuspended
+        && residencyReady() && !m_playbackWaitingForMemory
+        && m_playbackPreparationError.isEmpty()
+        && (!isVideo() || (m_player && m_player->error() == QMediaPlayer::NoError
+                          && !m_player->waitingForMemory()));
+}
+
+QString CanvasMedia::loadingState() const
+{
+    if (contentReady()) return QStringLiteral("ready");
+    const QString state = residencyState();
+    if (m_residencySuspended) return QStringLiteral("suspended");
+    if (state == QLatin1String("error") || state == QLatin1String("capacity_insufficient")
+        || !m_playbackPreparationError.isEmpty()) return QStringLiteral("error");
+    if (m_playbackWaitingForMemory || state == QLatin1String("waiting_for_memory")
+        || (m_player && m_player->waitingForMemory())) return QStringLiteral("waiting");
+    if (m_player && m_player->asset() && m_player->error() != QMediaPlayer::NoError)
+        return QStringLiteral("error");
+    return QStringLiteral("preparing");
+}
+
+QString CanvasMedia::loadingError() const
+{
+    if (contentReady()) return {};
+    if (!m_playbackPreparationError.isEmpty()) return m_playbackPreparationError;
+    if (m_playbackWaitingForMemory || (m_player && m_player->waitingForMemory()))
+        return QStringLiteral("Waiting for available RAM to prepare playback");
+    if (m_player && m_player->asset() && m_player->error() != QMediaPlayer::NoError)
+        return m_player->errorString();
+    return residencyError();
+}
+
+void CanvasMedia::setLocalPlaybackHidden(bool hidden)
+{
+    if (m_localPlaybackHidden == hidden) return;
+    m_localPlaybackHidden = hidden;
+    emit presentationChanged();
+}
+
+void CanvasMedia::setPlaybackPreparationError(const QString& error)
+{
+    if (m_playbackPreparationError == error) return;
+    m_playbackPreparationError = error;
+    refreshContentAvailability();
+}
+
+void CanvasMedia::setPlaybackWaitingForMemory(bool waiting)
+{
+    if (m_playbackWaitingForMemory == waiting) return;
+    m_playbackWaitingForMemory = waiting;
+    refreshContentAvailability();
+}
+
+void CanvasMedia::resetContentAvailability()
+{
+    m_contentReady = false;
+    m_playbackPreparationError.clear();
+    m_playbackWaitingForMemory = false;
+    m_reservationRetryTimer.stop();
+    if (m_residentFrameSource) m_residentFrameSource->clear();
+}
+
+void CanvasMedia::refreshContentAvailability()
+{
+    const auto asset = isText() ? nullptr : MediaResidencyManager::instance().asset(m_residencyOwnerId);
+    if (!isText()) {
+        if (!asset || m_residencyRetired || m_residencySuspended) {
+            m_contentReady = false;
+        } else if (!isVideo()) {
+            m_contentReady = !asset->image.isNull();
+        } else if (!m_player || m_player->asset() != asset
+                   || m_player->error() != QMediaPlayer::NoError) {
+            m_contentReady = false;
+        } else if (m_audioOutput && m_videoSink && m_player->hasPreparedPlayback()
+                   && m_player->preparedAt(m_player->position())) {
+            m_contentReady = true;
+        }
+    }
+    const bool ready = contentReady();
+    if (m_residentFrameSource) {
+        if (!ready) m_residentFrameSource->clear();
+        else if (!m_residentFrameSource->hasFrame() && asset) {
+            if (isVideo()) m_residentFrameSource->setVideoFrame(m_player->preparedFrame(m_player->position()));
+            else m_residentFrameSource->setFrame(asset->image);
+        }
+    }
+    const QString state = loadingState(), error = loadingError();
+    if (m_publishedContentReady == ready && m_publishedLoadingState == state
+        && m_publishedLoadingError == error) return;
+    m_publishedContentReady = ready;
+    m_publishedLoadingState = state;
+    m_publishedLoadingError = error;
+    emit contentAvailabilityChanged();
+    emit presentationChanged();
+}
+
 void CanvasMedia::refreshResidency()
 {
     if (isText() || m_residencyRetired || m_residencySuspended) return;
@@ -199,9 +315,6 @@ void CanvasMedia::refreshResidency()
     if (manager.ready(m_residencyOwnerId) && asset) {
         m_nativeSourceSize = asset->displaySize;
         if (isVideo()) {
-            // Authoring can present the immutable first image independently of
-            // audio/player preparation. It never changes residency readiness.
-            if (m_residentFrameSource) m_residentFrameSource->setVideoFrame(asset->firstFrame.frame);
             // setAsset() can emit runtime signals before durationChanged().
             // Those signals publish the default clip, so its source bounds
             // must already be available to the document and timeline model.
@@ -209,21 +322,18 @@ void CanvasMedia::refreshResidency()
             initializeVideoRuntime();
             // Publish a playable asset only after audio discovery completes,
             // so the first Play never starts silently and changes clocks later.
-            if (m_audioOutput && m_player->asset() != asset) m_player->setAsset(asset);
-        } else if (m_residentFrameSource) {
-            m_residentFrameSource->setFrame(asset->image);
+            if (m_audioOutput && m_player->asset() != asset) {
+                m_contentReady = false;
+                m_player->setAsset(asset);
+            }
         }
     } else {
         if (m_player && m_player->asset()) m_player->clearAsset();
-        if (m_residentFrameSource) {
-            const auto preview = manager.preview(m_residencyOwnerId);
-            if (isVideo() && preview && preview->poster.isValid())
-                m_residentFrameSource->setVideoFrame(preview->poster);
-            else m_residentFrameSource->clear();
-        }
+        resetContentAvailability();
         m_hasRenderedFrame = false;
         m_firstFramePrimed = false;
     }
+    refreshContentAvailability();
     emit residencyChanged();
     emit runtimeStateChanged();
 }
@@ -570,6 +680,12 @@ void CanvasMedia::initializeVideoRuntime()
         return;
     }
     m_player = new ResidentVideoPlayer(this);
+    connect(m_player, &ResidentVideoPlayer::preparationChanged,
+            this, &CanvasMedia::refreshContentAvailability);
+    connect(m_player, &ResidentVideoPlayer::videoOutputChanged, this, [this] {
+        m_contentReady = false;
+        refreshContentAvailability();
+    });
     connect(m_player, &ResidentVideoPlayer::playbackStateChanged,
             this, &CanvasMedia::runtimeStateChanged);
     connect(m_player, &ResidentVideoPlayer::positionChanged,
@@ -589,8 +705,10 @@ void CanvasMedia::initializeVideoRuntime()
         if (duration > 0) m_sourceDurationMs = duration;
         emit runtimeStateChanged();
     });
-    connect(m_player, &ResidentVideoPlayer::errorChanged,
-            this, &CanvasMedia::runtimeStateChanged);
+    connect(m_player, &ResidentVideoPlayer::errorChanged, this, [this] {
+        refreshContentAvailability();
+        emit runtimeStateChanged();
+    });
     initializeVideoOutputs();
 }
 
@@ -705,6 +823,11 @@ QVariantMap CanvasMedia::toModelMap(qreal unit) const
         {QStringLiteral("residencyState"), residencyState()},
         {QStringLiteral("residencyProgress"), residencyProgress()},
         {QStringLiteral("residencyError"), residencyError()},
+        {QStringLiteral("contentReady"), contentReady()},
+        {QStringLiteral("loadingState"), loadingState()},
+        {QStringLiteral("loadingError"), loadingError()},
+        {QStringLiteral("localPlaybackHidden"), m_localPlaybackHidden},
+        {QStringLiteral("playbackWaitingForMemory"), m_playbackWaitingForMemory},
         {QStringLiteral("residentFrameSource"), QVariant::fromValue<QObject*>(m_residentFrameSource)},
         {QStringLiteral("sourceSizeBytes"), m_sourceSizeBytes},
         {QStringLiteral("fileId"), m_fileId},

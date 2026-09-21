@@ -129,6 +129,9 @@ public:
 
     void setEditsLocked(bool locked);
     bool editsLocked() const { return m_editsLocked; }
+    // Local transport locks user edits, but accepted imports and source
+    // invalidation cleanup may still finish. Remote scenes leave this disabled.
+    void setLocalImportCompletionEnabled(bool enabled);
     void setContentAvailable(bool available);
     bool contentAvailable() const { return m_contentAvailable; }
     // Runtime-only: preserve the project and pending import intents while
@@ -182,13 +185,18 @@ private:
     void startPendingImport(const QString& mediaId);
     void cancelPendingImportTasks();
     void finishPendingImport(const QString& mediaId);
+    enum class MediaPlanPurpose { UserEdit, PendingImport };
+    enum class RemovalReason { UserEdit, InvalidatedSource };
+    bool removeMediaInternal(const QString& mediaId, RemovalReason reason);
     QJsonObject timelineMediaSnapshot(const CanvasMedia* media) const;
-    bool insertMediaAbove(CanvasMedia* media, QString* error = nullptr);
+    bool insertMediaAbove(CanvasMedia* media, QString* error = nullptr,
+                          MediaPlanPurpose purpose = MediaPlanPurpose::UserEdit);
     bool applyTimelinePlacement(const QJsonObject& snapshot, const QString& sourcePath, bool freshInstance,
                                 QString* error, PlacementMode mode);
     bool applyMediaPlan(const QJsonArray& items, const QHash<QString, QString>& sourcePaths,
                         const QString& primaryId, bool selectOnly, QString* error, const QStringList& selectedIds = {},
-                        CanvasMedia* preparedMedia = nullptr);
+                        CanvasMedia* preparedMedia = nullptr,
+                        MediaPlanPurpose purpose = MediaPlanPurpose::UserEdit);
     CanvasMedia* createMediaFromSnapshot(const QJsonObject& snapshot, const QString& sourcePath) const;
     void adoptMedia(CanvasMedia* media);
     QStringList insertProjectMedia(const QJsonObject& state,
@@ -225,6 +233,7 @@ private:
     int m_remoteCursorScreenId = -1;
     QPointF m_remoteCursorScreenPosition;
     bool m_editsLocked = false;
+    bool m_localImportCompletionEnabled = false;
     bool m_contentAvailable = true;
     bool m_mediaResidencySuspended = false;
 };

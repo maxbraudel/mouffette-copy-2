@@ -7,7 +7,6 @@ BaseMediaItem {
     property var cppMediaPlayer: null
     property var cppVideoSink: null
     property var remoteFrameSource: null
-    property var previewFrameSource: null
     property var boundMediaPlayer: null
     property var boundFallbackSink: null
     property var boundVideoOutput: null
@@ -16,15 +15,16 @@ BaseMediaItem {
     property bool videoHasRenderedFrame: false
     property bool videoFirstFramePrimed: false
     property bool residencyReady: false
+    property bool presentationReady: residencyReady
+    property string loadingState: ""
+    property string loadingError: ""
     property bool requireInitialSkeleton: true
     readonly property bool remoteFrameMode: remoteFrameSource !== null
     readonly property bool hasLiveFrame: remoteFrameMode
         ? !!remoteFrameLoader.item && remoteFrameLoader.item.hasFrame
         : !!localVideoLoader.item && localFrameSeen
     property bool localFrameSeen: false
-    readonly property bool hasPreviewFrame: !remoteFrameMode && previewFrameSource !== null
-        && previewFrameSource.hasFrame === true
-    contentReady: (root.residencyReady && hasLiveFrame) || hasPreviewFrame
+    contentReady: root.presentationReady && root.residencyReady && hasLiveFrame
     initialFramePresented: mediaSurface.renderingAllowed
 
     function restoreBoundPlayer() {
@@ -91,24 +91,17 @@ BaseMediaItem {
         id: mediaSurface
         anchors.fill: parent
         requireInitialSkeleton: root.requireInitialSkeleton
-        // This gate controls authoring visibility only. Play and remote scene
-        // readiness continue to use the validated root.residencyReady value.
-        residencyReady: root.residencyReady || root.hasPreviewFrame
+        residencyReady: root.presentationReady
         contentReady: root.contentReady
-
-        Loader {
-            objectName: "videoImportPreview"
-            anchors.fill: parent
-            active: root.hasPreviewFrame && !root.hasLiveFrame && mediaSurface.renderingAllowed
-            sourceComponent: RemoteVideoFrameItem {
-                frameSource: root.previewFrameSource
-            }
-        }
+        loadingState: root.loadingState
+        loadingError: root.loadingError
 
         Loader {
             id: localVideoLoader
             anchors.fill: parent
             z: 1
+            // Prepare the output while the common presentation gate is closed.
+            // Otherwise waiting for its first frame would deadlock the reveal.
             active: !root.remoteFrameMode && root.residencyReady && root.cppVideoSink !== null
                     && mediaSurface.renderingAllowed
             onItemChanged: {

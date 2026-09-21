@@ -135,7 +135,7 @@ QString CanvasDocument::queueFileImport(const QString& sourcePath,
 
 void CanvasDocument::startPendingImport(const QString& mediaId)
 {
-    if (m_editsLocked || m_mediaResidencySuspended || !m_pendingImports.contains(mediaId)
+    if ((m_editsLocked && !m_localImportCompletionEnabled) || m_mediaResidencySuspended || !m_pendingImports.contains(mediaId)
         || m_activeImports.contains(mediaId)) return;
     auto& stored = m_pendingImports[mediaId];
     if (stored.candidate) { finishPendingImport(mediaId); return; }
@@ -151,8 +151,9 @@ void CanvasDocument::startPendingImport(const QString& mediaId)
         if (generation != m_importGeneration || pending.cancelled->load()
             || !m_pendingImports.contains(pending.mediaId)) return;
         m_activeImports.remove(pending.mediaId);
-        // A locked document retains the durable intent and retries after unlock.
-        if (m_editsLocked || m_mediaResidencySuspended) return;
+        // Remote scene locks retain the durable intent until unlock. Local
+        // transport permits only this already accepted asynchronous import.
+        if ((m_editsLocked && !m_localImportCompletionEnabled) || m_mediaResidencySuspended) return;
         const QString error = sourceSignature(pending.sourcePath) != pending.sourceSignature
             ? QStringLiteral("The source file changed or disappeared during import.")
             : probe.error;
@@ -194,7 +195,8 @@ void CanvasDocument::startPendingImport(const QString& mediaId)
 void CanvasDocument::finishPendingImport(const QString& mediaId)
 {
     auto found = m_pendingImports.find(mediaId);
-    if (found == m_pendingImports.end() || !found->candidate || m_editsLocked || m_mediaResidencySuspended) return;
+    if (found == m_pendingImports.end() || !found->candidate
+        || (m_editsLocked && !m_localImportCompletionEnabled) || m_mediaResidencySuspended) return;
     auto* media = found->candidate.data();
     const bool unknownDuration = media->isVideo() && media->sourceDurationMs() <= 0;
     const bool sourceChanged = sourceSignature(found->sourcePath) != found->sourceSignature;
@@ -215,7 +217,7 @@ void CanvasDocument::finishPendingImport(const QString& mediaId)
     found->candidate.clear();
     m_pendingImports.remove(mediaId);
     QString error;
-    if (!insertMediaAbove(media, &error)) {
+    if (!insertMediaAbove(media, &error, MediaPlanPurpose::PendingImport)) {
         const QString path = media->sourcePath();
         media->retireResidency(); media->deleteLater();
         emit mediaImportFailed(mediaId, path, error);
@@ -268,8 +270,12 @@ void CanvasDocument::adoptMedia(CanvasMedia* media)
     connect(media, &CanvasMedia::sourceInvalidated, this, [this, media](const QString& reason) {
         if (!m_media.contains(media)) return;
         const QString id = media->mediaId();
+        const QPointer<CanvasMedia> invalidated(media);
         emit mediaSourceInvalidated(id, reason);
-        QMetaObject::invokeMethod(this, [this, id] { removeMedia(id); }, Qt::QueuedConnection);
+        QMetaObject::invokeMethod(this, [this, id, invalidated] {
+            if (invalidated && mediaById(id) == invalidated)
+                removeMediaInternal(id, RemovalReason::InvalidatedSource);
+        }, Qt::QueuedConnection);
     });
     if (m_fileManager && media->residencyReady() && !media->fileId().isEmpty()) {
         m_fileManager->registerVerifiedLocalFile(media->fileId(), media->sourcePath());
@@ -340,7 +346,13 @@ CanvasMedia* CanvasDocument::addPreparedFile(
 
 bool CanvasDocument::removeMedia(const QString& mediaId)
 {
-    if (m_editsLocked) return false;
+    return removeMediaInternal(mediaId, RemovalReason::UserEdit);
+}
+
+bool CanvasDocument::removeMediaInternal(const QString& mediaId, RemovalReason reason)
+{
+    if (m_editsLocked
+        && !(reason == RemovalReason::InvalidatedSource && m_localImportCompletionEnabled)) return false;
     if (auto found = m_pendingImports.find(mediaId); found != m_pendingImports.end()) {
         if (found->cancelled) found->cancelled->store(true);
         auto candidate = found->candidate;
@@ -620,6 +632,14 @@ void CanvasDocument::setEditsLocked(bool locked)
     if (locked) clearTimelineClipPreview();
     emit editsLockedChanged();
     if (!locked)
+        for (const QString& id : m_pendingImports.keys()) startPendingImport(id);
+}
+
+void CanvasDocument::setLocalImportCompletionEnabled(bool enabled)
+{
+    if (m_localImportCompletionEnabled == enabled) return;
+    m_localImportCompletionEnabled = enabled;
+    if (enabled)
         for (const QString& id : m_pendingImports.keys()) startPendingImport(id);
 }
 
@@ -1009,15 +1029,17 @@ CanvasDocument::ClipPlacement CanvasDocument::previewTimelineClip(const QString&
     return timelinePlacementFree(clipId, requested) ? requested : anchor;
 }
 
-bool CanvasDocument::insertMediaAbove(CanvasMedia* media, QString* error)
+bool CanvasDocument::insertMediaAbove(CanvasMedia* media, QString* error, MediaPlanPurpose purpose)
 {
     QJsonArray items;
     for (auto* existing : m_media) items.append(timelineMediaSnapshot(existing));
     auto track = media->timelineTrack();
     track.trackIndex = m_media.isEmpty() ? 0 : qMin(0, firstTimelineTrack()) - 1;
     items.append(withTimeline(timelineMediaSnapshot(media), track));
-    return applyMediaPlan(items, {{media->mediaId(), media->sourcePath()}}, media->mediaId(), true,
-                          error, {}, media);
+    const bool preserveSelection = m_editsLocked && purpose == MediaPlanPurpose::PendingImport;
+    return applyMediaPlan(items, {{media->mediaId(), media->sourcePath()}},
+                          preserveSelection ? m_primarySelectedMediaId : media->mediaId(), !preserveSelection,
+                          error, {}, media, purpose);
 }
 
 QJsonObject CanvasDocument::timelineMediaSnapshot(const QString& mediaId) const
@@ -1075,9 +1097,12 @@ CanvasMedia* CanvasDocument::createMediaFromSnapshot(const QJsonObject& item, co
 
 bool CanvasDocument::applyMediaPlan(const QJsonArray& items,
     const QHash<QString, QString>& paths, const QString& primaryId, bool selectOnly, QString* error,
-    const QStringList& selectedIds, CanvasMedia* preparedMedia)
+    const QStringList& selectedIds, CanvasMedia* preparedMedia, MediaPlanPurpose purpose)
 {
-    if (m_editsLocked || m_publishingTimelineEdit) return timelineFailure(error, "Timeline editing is locked.");
+    const bool completingLocalImport = purpose == MediaPlanPurpose::PendingImport
+        && m_localImportCompletionEnabled && preparedMedia;
+    if ((m_editsLocked && !completingLocalImport) || m_publishingTimelineEdit)
+        return timelineFailure(error, "Timeline editing is locked.");
     if (items.size() + m_pendingImports.size() > SceneTimeline::MaximumMediaCount)
         return timelineFailure(error, "A scene cannot contain more than 512 instances.");
     auto scene = serializeSceneState();

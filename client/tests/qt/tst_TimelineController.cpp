@@ -1,5 +1,6 @@
 #include <QApplication>
 #include <QClipboard>
+#include <QFile>
 #include <QFontMetricsF>
 #include <QJsonDocument>
 #include <QMimeData>
@@ -87,7 +88,7 @@ class TimelineControllerTest final : public QObject
 {
     Q_OBJECT
 private slots:
-    void loadingVideoHasAThumbnailOwnerBeforeReadiness()
+    void loadingVideoKeepsSkeletonUntilContentReady()
     {
         TimelineFixture f; QVERIFY(f.initialize());
         const QString path = QString::fromUtf8(TEST_VIDEO_FILE);
@@ -99,16 +100,55 @@ private slots:
         const auto clips = f.timeline.clips();
         QCOMPARE(clips.size(), 1);
         QCOMPARE(clips.first().toMap().value("thumbnailOwnerId").toString(), media->residencyOwnerId());
+        QVERIFY(!clips.first().toMap().value("contentReady").toBool());
+        auto* clip = f.item("timelineClip"); QVERIFY(clip);
+        auto* skeleton = f.item("timelineClipLoadingSkeleton"); QVERIFY(skeleton);
+        QVERIFY(skeleton->isVisible());
+        QVERIFY(skeleton->property("pulsing").toBool());
+        QVERIFY(!clip->property("hasThumbnails").toBool());
+        QVERIFY(timelineItems(clip, "timelineThumbnails").isEmpty());
         bool previewBeforeReady = false;
         auto& manager = MediaResidencyManager::instance();
-        const auto connection = connect(&manager, &MediaResidencyManager::ownerChanged, this, [&](const QString& owner) {
-            if (owner == media->residencyOwnerId() && manager.preview(owner) && !manager.ready(owner))
+        QObject observer;
+        const auto connection = connect(&manager, &MediaResidencyManager::ownerChanged, &observer, [&](const QString& owner) {
+            if (owner == media->residencyOwnerId() && manager.preview(owner) && !manager.ready(owner)) {
                 previewBeforeReady = true;
+                QVERIFY(!clip->property("hasThumbnails").toBool());
+                QVERIFY(skeleton->isVisible());
+            }
         });
-        QTRY_VERIFY_WITH_TIMEOUT(media->residencyReady(), 15000);
+        const auto loadingCapture = qEnvironmentVariable("MOUFFETTE_TIMELINE_LOADING_SCREENSHOT");
+        if (!loadingCapture.isEmpty()) {
+            QVERIFY(f.view.grabWindow().save(loadingCapture));
+            QVERIFY(!media->contentReady());
+        }
+        QTRY_VERIFY_WITH_TIMEOUT(media->contentReady(), 15000);
         disconnect(connection);
         QVERIFY(previewBeforeReady);
-        QTRY_VERIFY(f.item("timelineClip")->property("hasThumbnails").toBool());
+        QTRY_VERIFY(clip->property("hasThumbnails").toBool());
+        QVERIFY(!skeleton->isVisible());
+        QVERIFY(!skeleton->property("pulsing").toBool());
+    }
+    void failedMediaStopsLoadingPulseAndKeepsClip()
+    {
+        TimelineFixture f; QVERIFY(f.initialize());
+        QTemporaryDir temporary;
+        QFile invalid(temporary.filePath("invalid.png"));
+        QVERIFY(invalid.open(QIODevice::WriteOnly));
+        invalid.write("not an image");
+        invalid.close();
+        auto* media = f.host->document()->addPreparedFile(invalid.fileName(), {160, 90}, false, {});
+        QVERIFY(media);
+        QTRY_COMPARE(media->loadingState(), QString("error"));
+        auto* clip = f.item("timelineClip"); QVERIFY(clip);
+        auto* skeleton = f.item("timelineClipLoadingSkeleton"); QVERIFY(skeleton);
+        QVERIFY(skeleton->isVisible());
+        QVERIFY(skeleton->property("failed").toBool());
+        QVERIFY(!skeleton->property("pulsing").toBool());
+        QVERIFY(!skeleton->property("errorText").toString().isEmpty());
+        QVERIFY(!clip->property("hasThumbnails").toBool());
+        QVERIFY(timelineItems(clip, "timelineThumbnails").isEmpty());
+        QVERIFY(f.item("timelineClipTitle")->property("text").toString().startsWith("! "));
     }
     void videoThumbnailsSurviveDuplicateAndCacheReclaim()
     {
@@ -163,6 +203,7 @@ private slots:
         QTRY_VERIFY(clip->property("hasThumbnails").toBool());
         doc->setMediaResidencySuspended(true);
         QTRY_VERIFY(!clip->property("hasThumbnails").toBool());
+        QVERIFY(f.item("timelineClipLoadingSkeleton")->property("pulsing").toBool());
         doc->setMediaResidencySuspended(false);
         QTRY_VERIFY(clip->property("hasThumbnails").toBool());
         QVERIFY(doc->removeMedia(media->mediaId()));
@@ -170,6 +211,7 @@ private slots:
         clip = f.item("timelineClip"); QVERIFY(clip);
         QVERIFY(!clip->property("hasThumbnails").toBool());
         QVERIFY(timelineItems(clip, "timelineThumbnails").isEmpty());
+        QVERIFY(!f.item("timelineClipLoadingSkeleton")->isVisible());
         QVERIFY(doc->removeMedia(text->mediaId()));
         auto* video = doc->addPreparedFile(QString::fromUtf8(TEST_VIDEO_FILE), {320, 180}, true, {}); QVERIFY(video);
         QTRY_VERIFY_WITH_TIMEOUT(video->residencyReady(), 15000);

@@ -2,6 +2,12 @@
 
 20 septembre 2026. Implémentation dans le workspace existant, en conservant les modifications qui étaient déjà présentes. L’[audit initial](MEDIA_INTERACTION_AUDIT_2026-09-20.md) reste un état historique du problème. Le contrat technique courant est décrit dans [MEDIA_RESIDENCY.md](MEDIA_RESIDENCY.md).
 
+Le comportement d’import décrit ci-dessous est historique : les aperçus anticipés
+sont désormais conservés en interne, le canvas et la timeline affichent un skeleton
+jusqu’à la disponibilité du média, et Play local avance sans attendre les imports.
+Les médias prêts rejoignent la position courante ; la préparation distante reste
+complète. Voir le contrat courant cité ci-dessus.
+
 ## Comportement implémenté
 
 | Problème | Correction |

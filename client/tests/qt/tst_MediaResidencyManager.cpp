@@ -510,6 +510,31 @@ private slots:
         manager.unpinGroup("scene");
         QCOMPARE(manager.summary().value("playbackBudgetBytes").toULongLong(), quint64(0));
     }
+    void existingScenePinsCanShrinkBelowMemoryReserve() {
+        MediaResidencyManager manager;
+        manager.setMemorySnapshotForTesting(memory());
+        manager.setSafetyReserve(0, 512);
+        manager.acquire("video", QString::fromUtf8(TEST_VIDEO_FILE));
+        QTRY_VERIFY_WITH_TIMEOUT(manager.ready("video"), 10000);
+        QVERIFY(manager.pinOwners({"video", "video", "video"}, "scene"));
+        const auto three = manager.summary().value("pendingPlaybackBudgetBytes").toULongLong();
+        manager.setMemorySnapshotForTesting(memory(256 * MiB));
+        QVERIFY(manager.ready("video"));
+
+        QVERIFY(manager.pinOwners({"video", "video"}, "scene"));
+        const auto two = manager.summary().value("pendingPlaybackBudgetBytes").toULongLong();
+        QVERIFY(two < three);
+        QVERIFY(manager.pinOwners({"video", "video"}, "scene"));
+        QVERIFY(!manager.pinOwners({"video", "video", "video"}, "scene"));
+        QVERIFY(!manager.pinOwners({"video"}, "new-scene"));
+        QVERIFY(!manager.pinOwners({"missing"}, "scene"));
+        QCOMPARE(manager.summary().value("pendingPlaybackBudgetBytes").toULongLong(), two);
+        QVERIFY(manager.assets().first().toMap().value("protected").toBool());
+
+        QVERIFY(manager.pinOwners({}, "scene"));
+        QCOMPARE(manager.summary().value("pendingPlaybackBudgetBytes").toULongLong(), quint64(0));
+        QVERIFY(!manager.assets().first().toMap().value("protected").toBool());
+    }
     void preparedPlaybackDoesNotReserveAlreadyAllocatedMemory() {
         MediaResidencyManager manager;
         manager.setMemorySnapshotForTesting(memory());

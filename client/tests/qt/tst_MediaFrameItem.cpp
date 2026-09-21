@@ -339,6 +339,31 @@ private slots:
         manager.release("thumbnail-shared");
     }
 
+    void thumbnailIgnoresPreviewBeforeResidency() {
+        auto& manager = MediaResidencyManager::instance();
+        const QString owner = "thumbnail-loading-test";
+        auto cleanup = qScopeGuard([&] { manager.release(owner); });
+        Scene<ObservedThumbnailItem> scene;
+        scene.item->setSize({240, 44});
+        scene.item->setVisibleRight(240);
+        scene.item->setOwnerId(owner);
+        QVERIFY(scene.initialize());
+        bool sawPreview = false;
+        QObject observer;
+        const auto connection = connect(&manager, &MediaResidencyManager::ownerChanged, &observer,
+            [&](const QString& changed) {
+                if (changed != owner || manager.ready(owner) || !manager.preview(owner)) return;
+                sawPreview = true;
+                QVERIFY(!scene.item->hasThumbnails());
+                QCOMPARE(scene.item->retainedThumbnailBytes(), quint64(0));
+            });
+        manager.acquire(owner, QString::fromUtf8(TEST_VIDEO_FILE));
+        QTRY_VERIFY_WITH_TIMEOUT(manager.ready(owner), 15000);
+        disconnect(connection);
+        QVERIFY(sawPreview);
+        QTRY_VERIFY(scene.item->hasThumbnails());
+    }
+
     void thumbnailVideoSourceTimeAndHolds() {
         auto& manager = MediaResidencyManager::instance();
         const QString owner = "thumbnail-video-test";

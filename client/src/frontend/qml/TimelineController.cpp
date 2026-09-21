@@ -75,6 +75,9 @@ QVariantMap clipRow(const SceneTimeline::Clip& clip, const CanvasMedia* media, c
         {QStringLiteral("mediaId"), media->mediaId()},
         {QStringLiteral("mediaName"), media->displayName()},
         {QStringLiteral("selected"), media->selected()},
+        {QStringLiteral("contentReady"), media->contentReady()},
+        {QStringLiteral("loadingState"), media->loadingState()},
+        {QStringLiteral("loadingError"), media->loadingError()},
         {QStringLiteral("thumbnailOwnerId"), !media->isText() && !media->residencySuspended()
             ? media->residencyOwnerId() : QString()},
         {QStringLiteral("trackIndex"), media->timelineTrack().trackIndex},
@@ -131,6 +134,7 @@ void TimelineController::setHost(QuickCanvasHost* host)
         const auto observe = [this](CanvasMedia* media) {
             connect(media, &CanvasMedia::draftChanged, this, &TimelineController::transportChanged);
             connect(media, &CanvasMedia::residencyChanged, this, &TimelineController::refresh);
+            connect(media, &CanvasMedia::contentAvailabilityChanged, this, &TimelineController::refresh);
             connect(media, &CanvasMedia::runtimeStateChanged, this,
                     [this, media, duration = media->sourceDurationMs()]() mutable {
                 if (duration == media->sourceDurationMs()) return;

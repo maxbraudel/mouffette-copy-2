@@ -44,6 +44,12 @@ Rectangle {
     readonly property real shownStart: dragging ? previewStart : linkedPreview ? linkedPreview.startMs : modelData.startMs
     readonly property real shownEnd: dragging ? previewEnd : linkedPreview ? linkedPreview.endMs : modelData.endMs
     readonly property bool selected: interactive && panel.editable && modelData.selected
+    readonly property bool contentReady: modelData.contentReady === true
+    readonly property bool loadingFailed: modelData.loadingState === "error"
+    readonly property bool loadingPending: !contentReady && !loadingFailed
+    readonly property bool inViewport: panel.visible && panel.expanded
+        && x < panel.visibleEndX && x + width > panel.visibleStartX
+        && y < panel.visibleTrackBottom && y + height > panel.visibleTrackTop
     // Time zoom changes clip geometry, not the item scale: these stay in viewport pixels.
     readonly property real resizeHandleWidth: panel.timeline ? panel.timeline.clipResizeHandleWidthPx : 8
     readonly property real minResizeWidth: panel.timeline ? panel.timeline.clipMinResizeWidthPx : 24
@@ -130,7 +136,7 @@ Rectangle {
     width: Math.max(2, (shownEnd - shownStart) * panel.pixelsPerMs)
     height: Math.max(0, trackHeight)
     radius: 3
-    color: selected
+    color: !contentReady ? "transparent" : selected
         ? Theme.controlSelectionBackground : interactive ? Theme.overlayHover : Theme.overlayPressed
     border.width: 1
     border.color: interactive ? Theme.overlayText : Theme.overlayBorder
@@ -145,6 +151,16 @@ Rectangle {
     readonly property real trailingHoldMs: modelData.isVideo
         ? Math.min(shownDuration, Math.max(0, shownSourceIn + shownDuration - modelData.actualSourceDurationMs)) : 0
     readonly property bool hasThumbnails: !!thumbnailLoader.item && thumbnailLoader.item.hasThumbnails
+    MediaLoadingSkeleton {
+        objectName: "timelineClipLoadingSkeleton"
+        anchors.fill: parent
+        anchors.margins: 2
+        visible: !clipItem.contentReady && clipItem.inViewport
+        color: clipItem.selected ? Theme.controlSelectionBackground : Theme.mediaPlaceholder
+        failed: clipItem.loadingFailed
+        errorText: clipItem.modelData.loadingError || ""
+        showErrorIndicator: false
+    }
     Loader {
         id: thumbnailLoader
         objectName: "timelineThumbnailLoader"
@@ -152,9 +168,8 @@ Rectangle {
         anchors.margins: 2
         // Keep interaction delegates alive, but allocate graphics only for
         // clips intersecting the two-dimensional viewport.
-        active: panel.visible && panel.expanded && !!clipItem.modelData.thumbnailOwnerId && clipItem.width > 4
-            && clipItem.x < panel.visibleEndX && clipItem.x + clipItem.width > panel.visibleStartX
-            && clipItem.y < panel.visibleTrackBottom && clipItem.y + clipItem.height > panel.visibleTrackTop
+        active: clipItem.contentReady && clipItem.inViewport
+            && !!clipItem.modelData.thumbnailOwnerId && clipItem.width > 4
         sourceComponent: TimelineThumbnailItem {
             objectName: "timelineThumbnails"
             ownerId: clipItem.modelData.thumbnailOwnerId
@@ -181,6 +196,7 @@ Rectangle {
     }
     ToolTip.visible: clipHover.hovered
     ToolTip.text: modelData.mediaName
+        + (loadingFailed && modelData.loadingError ? "\n" + modelData.loadingError : "")
         + (leadingHoldMs > 0 ? "\nFirst frame held silently for " + leadingHoldMs.toFixed(3) + " ms" : "")
         + (trailingHoldMs > 0 ? "\nLast frame held silently for " + trailingHoldMs.toFixed(3) + " ms" : "")
     HoverHandler { id: clipHover }
@@ -207,15 +223,16 @@ Rectangle {
             objectName: "timelineClipTitle"
             width: parent.width
             height: parent.height
-            text: clipItem.modelData.mediaName
+            text: (clipItem.loadingFailed ? "! " : "") + clipItem.modelData.mediaName
             textFormat: Text.PlainText
-            font.pixelSize: 10; color: clipItem.hasThumbnails ? "#ffffff" : Theme.overlayText
+            font.pixelSize: 10
+            color: clipItem.loadingFailed ? Theme.errorText : clipItem.hasThumbnails ? "#ffffff" : Theme.overlayText
             verticalAlignment: Text.AlignVCenter; elide: Text.ElideRight
         }
     }
     component HoldRegion: Rectangle {
         height: clipItem.height
-        visible: width > 0
+        visible: clipItem.contentReady && width > 0
         color: Theme.overlayText
         opacity: 0.12
     }

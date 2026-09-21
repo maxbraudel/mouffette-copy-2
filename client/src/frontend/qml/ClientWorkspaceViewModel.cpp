@@ -334,8 +334,10 @@ QString ClientWorkspaceViewModel::testSceneUnavailableReason() const
     if (!hasProject()) return QStringLiteral("Create a project first");
     if (!m_canvas) return QStringLiteral("Canvas is unavailable");
     if (m_canvas->remoteSceneLaunched()) return QStringLiteral("Stop the remote scene first");
-    if (const auto* host = qobject_cast<const QuickCanvasHost*>(m_canvas.data()))
-        return host->mediaReadinessReason(false);
+    if (m_canvas->remoteSceneLaunching() || m_canvas->remoteSceneStopping())
+        return QStringLiteral("Wait for the remote scene operation to finish");
+    if (!m_canvas->testSceneActionEnabled())
+        return QStringLiteral("Wait for the current preview to finish closing");
     return {};
 }
 
