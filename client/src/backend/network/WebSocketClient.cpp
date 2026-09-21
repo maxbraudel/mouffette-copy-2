@@ -14,6 +14,9 @@
 #include <QRegularExpression>
 #include <QDateTime>
 #include <QDir>
+#include <QBuffer>
+#include <QCryptographicHash>
+#include <QImageReader>
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -22,6 +25,9 @@
 namespace {
 constexpr qint64 kControlQueueLimit = 256 * 1024;
 constexpr qint64 kDataQueueLimit = 512 * 1024;
+constexpr int kProfilePictureByteLimit = 128 * 1024;
+constexpr int kProfilePictureEncodedLimit = ((kProfilePictureByteLimit + 2) / 3) * 4;
+constexpr int kProfilePictureRequestTimeoutMs = 30000;
 bool dataWireType(const QString& type) {
     static const QSet<QString> types {"upload_start", "upload_resume", "upload_chunk", "upload_complete",
         "upload_ready", "upload_resume_ready", "upload_progress", "upload_finished"};
@@ -77,6 +83,42 @@ bool isUploadOpaqueId(const QString& value) {
 bool isUploadSha256(const QString& value) {
     static const QRegularExpression pattern(QStringLiteral("^[0-9a-f]{64}$"));
     return pattern.match(value).hasMatch();
+}
+
+bool isValidProfileMetadata(const QJsonObject& value) {
+    if (value.contains(QStringLiteral("username"))) {
+        if (!value.value(QStringLiteral("username")).isString()) return false;
+        const QString username = value.value(QStringLiteral("username")).toString();
+        if (username.toUcs4().size() > 64) return false;
+        for (const QChar character : username) {
+            const ushort code = character.unicode();
+            if (code < 0x20 || (code >= 0x7f && code <= 0x9f)) return false;
+        }
+    }
+    if (value.contains(QStringLiteral("profilePictureHash"))) {
+        if (!value.value(QStringLiteral("profilePictureHash")).isString()) return false;
+        const QString hash = value.value(QStringLiteral("profilePictureHash")).toString();
+        if (!hash.isEmpty() && !isUploadSha256(hash)) return false;
+    }
+    return true;
+}
+
+QByteArray verifiedProfilePicture(const QJsonValue& encodedValue, const QString& hash) {
+    if (!encodedValue.isString()) return {};
+    const QString encoded = encodedValue.toString();
+    if (encoded.isEmpty() || encoded.size() > kProfilePictureEncodedLimit) return {};
+    QByteArray jpeg = QByteArray::fromBase64(encoded.toLatin1(),
+                                            QByteArray::AbortOnBase64DecodingErrors);
+    if (jpeg.isEmpty() || jpeg.size() > kProfilePictureByteLimit
+        || QString::fromLatin1(jpeg.toBase64()) != encoded
+        || QString::fromLatin1(QCryptographicHash::hash(jpeg, QCryptographicHash::Sha256).toHex()) != hash)
+        return {};
+    QBuffer buffer(&jpeg);
+    buffer.open(QIODevice::ReadOnly);
+    QImageReader reader(&buffer);
+    if (reader.format() != QByteArrayLiteral("jpeg") || reader.size() != QSize(250, 250)
+        || reader.read().isNull()) return {};
+    return jpeg;
 }
 
 bool isSafeJsonInteger(double value, double minimum, double maximum) {
@@ -745,7 +787,9 @@ void WebSocketClient::closeUploadChannel() {
     obsoleteSocket->deleteLater();
 }
 
-void WebSocketClient::registerClient(const QString& machineName, const QString& platform, const QList<ScreenInfo>& screens, int volumePercent) {
+void WebSocketClient::registerClient(const QString& machineName, const QString& platform,
+                                    const QList<ScreenInfo>& screens, int volumePercent,
+                                    const QString& username, const QByteArray& profilePictureJpeg) {
     if (!isConnected()) {
         qWarning() << "Cannot register client: not connected to server";
         return;
@@ -760,6 +804,8 @@ void WebSocketClient::registerClient(const QString& machineName, const QString& 
     QJsonObject message;
     message["type"] = "endpoint_snapshot";
     message["machineName"] = machineName;
+    message["username"] = username.trimmed();
+    message["profilePictureJpeg"] = QString::fromLatin1(profilePictureJpeg.toBase64());
     message["platform"] = platform;
     message["instanceOrdinal"] = m_instanceOrdinal;
     message["volumePercent"] = volumePercent >= 0 && volumePercent <= 100
@@ -787,6 +833,35 @@ void WebSocketClient::registerClient(const QString& machineName, const QString& 
     
     m_registeredEndpointSnapshot = message;
     publishDeviceSnapshots();
+}
+
+QString WebSocketClient::requestProfilePicture(const QString& endpointId, const QString& profilePictureHash)
+{
+    if (!isConnected() || m_endpointDraining || !isUploadSha256(profilePictureHash)
+        || base64UrlDecode(endpointId).size() != 32
+        || base64UrlEncode(base64UrlDecode(endpointId)) != endpointId) return {};
+    int pendingPictures = 0;
+    for (auto it = m_pendingControl.cbegin(); it != m_pendingControl.cend(); ++it) {
+        if (it->message.value(QStringLiteral("type")).toString()
+            != QLatin1String("profile_picture_request")) continue;
+        ++pendingPictures;
+        if (it->message.value(QStringLiteral("endpointId")).toString() == endpointId
+            && it->message.value(QStringLiteral("profilePictureHash")).toString() == profilePictureHash)
+            return it.key();
+    }
+    if (pendingPictures >= 32) return {};
+    const QString requestId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    if (!sendTrackedControl({{QStringLiteral("type"), QStringLiteral("profile_picture_request")},
+                             {QStringLiteral("requestId"), requestId},
+                             {QStringLiteral("endpointId"), endpointId},
+                             {QStringLiteral("profilePictureHash"), profilePictureHash}})) return {};
+    QTimer::singleShot(kProfilePictureRequestTimeoutMs, this,
+                      [this, requestId, endpointId, profilePictureHash]() {
+        if (!m_pendingControl.contains(requestId)) return;
+        completeControlRequest(requestId);
+        emit profilePictureReceived(requestId, endpointId, profilePictureHash, {});
+    });
+    return requestId;
 }
 
 void WebSocketClient::invalidateLocalDeviceSnapshot()
@@ -852,9 +927,18 @@ void WebSocketClient::completeControlRequest(const QString& id)
 
 void WebSocketClient::clearControlRequests()
 {
+    const auto pending = m_pendingControl;
     m_pendingControl.clear();
     m_controlRetries.cancelAll();
     m_registrationRequestId.clear();
+    for (auto it = pending.cbegin(); it != pending.cend(); ++it) {
+        if (it->message.value(QStringLiteral("type")).toString()
+            == QLatin1String("profile_picture_request")) {
+            emit profilePictureReceived(it.key(),
+                it->message.value(QStringLiteral("endpointId")).toString(),
+                it->message.value(QStringLiteral("profilePictureHash")).toString(), {});
+        }
+    }
 }
 
 bool WebSocketClient::sessionRecoveryInProgress(const QString& sessionId) const
@@ -2508,6 +2592,21 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
         }
     }
     else if (type == "error") {
+        const QString profileRequestId = message.value(QStringLiteral("requestId")).toString();
+        const auto pendingProfile = m_pendingControl.constFind(profileRequestId);
+        if (pendingProfile != m_pendingControl.cend()
+            && pendingProfile->message.value(QStringLiteral("type")).toString()
+                == QLatin1String("profile_picture_request")) {
+            quint64 generation = 0;
+            if (!readPositiveSafeJsonInteger(message.value(QStringLiteral("connectionGeneration")), &generation)
+                || generation != m_connectionGeneration) return;
+            const QJsonObject request = pendingProfile->message;
+            completeControlRequest(profileRequestId);
+            emit profilePictureReceived(profileRequestId,
+                request.value(QStringLiteral("endpointId")).toString(),
+                request.value(QStringLiteral("profilePictureHash")).toString(), {});
+            return;
+        }
         if (message.value("scope").toString() == QLatin1String("scene")) {
             const auto run = m_sceneRuns->run(message.value("sceneRunId").toString());
             quint64 generation = 0;
@@ -2590,6 +2689,7 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
         const QString requestId = message.value(QStringLiteral("requestId")).toString();
         if (!requestId.isEmpty() && requestId != m_registrationRequestId) return;
         const QJsonObject clientInfoObj = message["snapshot"].toObject();
+        if (!isValidProfileMetadata(clientInfoObj)) return;
         ClientInfo clientInfo = ClientInfo::fromJson(clientInfoObj);
         if (clientInfo.installationId() != m_installationId
             || clientInfo.endpointId() != m_endpointId
@@ -2631,6 +2731,24 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
             failUploadChannelAttempt(QStringLiteral("Server returned an invalid upload channel token"));
         }
     }
+    else if (type == "profile_picture_response") {
+        const QString requestId = message.value(QStringLiteral("requestId")).toString();
+        const auto pending = m_pendingControl.constFind(requestId);
+        quint64 generation = 0;
+        if (m_dispatchingData || pending == m_pendingControl.cend()
+            || pending->message.value(QStringLiteral("type")).toString()
+                != QLatin1String("profile_picture_request")
+            || !readPositiveSafeJsonInteger(message.value(QStringLiteral("connectionGeneration")), &generation)
+            || generation != m_connectionGeneration
+            || pending->transport != m_connectionGeneration || pending->boot != m_serverBootId) return;
+        const QString endpointId = pending->message.value(QStringLiteral("endpointId")).toString();
+        const QString hash = pending->message.value(QStringLiteral("profilePictureHash")).toString();
+        if (message.value(QStringLiteral("endpointId")).toString() != endpointId
+            || message.value(QStringLiteral("profilePictureHash")).toString() != hash) return;
+        const QByteArray jpeg = verifiedProfilePicture(message.value(QStringLiteral("profilePictureJpeg")), hash);
+        completeControlRequest(requestId);
+        emit profilePictureReceived(requestId, endpointId, hash, jpeg);
+    }
     else if (type == "client_list") {
         quint64 revision = 0;
         if (!readPositiveSafeJsonInteger(message.value(QStringLiteral("revision")), &revision)
@@ -2659,7 +2777,8 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
                 QStringLiteral("enabled"), QStringLiteral("transport_suspect"),
                 QStringLiteral("transport_lost"), QStringLiteral("disabled"),
                 QStringLiteral("offline")};
-            if (base64UrlDecode(installationId).size() != 32
+            if (!isValidProfileMetadata(entry)
+                || base64UrlDecode(installationId).size() != 32
                 || base64UrlEncode(base64UrlDecode(installationId)) != installationId
                 || instanceId.isEmpty() || entry.value("instanceId").toString() != instanceId
                 || endpointId != DeviceIdentityStore::endpointIdForInstallation(installationId, instanceId)

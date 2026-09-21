@@ -231,6 +231,69 @@ private slots:
         QVERIFY(!store.load(&data));
     }
 
+    void peersSurvivePersistenceAndToastWithoutStoringProfiles()
+    {
+        QTemporaryDir temporary;
+        HistoryStore store(temporary.filePath(QStringLiteral("history.json")));
+        NotificationCenter center(&store);
+        QSignalSpy toasts(&center, &NotificationCenter::toastRequested);
+        auto notification = request(QStringLiteral("Media uploaded and loaded into RAM"), 1);
+        notification.peers = {{QStringLiteral("endpoint-42"), QStringLiteral("Studio"),
+                               2, QStringLiteral("To")}};
+        notification.toastDurationMs = 4567;
+        QVERIFY(!center.publish(notification).isEmpty());
+        QCOMPARE(toasts.size(), 1);
+        const NotificationEntry toasted = toasts.first().first().value<NotificationEntry>();
+        QCOMPARE(toasted.peers.size(), 1);
+        QCOMPARE(toasted.peers.first().endpointId, QStringLiteral("endpoint-42"));
+        QCOMPARE(toasts.first().at(1).toInt(), 4567);
+
+        NotificationCenter restored(&store);
+        QCOMPARE(restored.entries().size(), 1);
+        const auto entry = restored.entries().first();
+        QCOMPARE(entry.message, notification.message);
+        QCOMPARE(entry.peers.first().machineName, QStringLiteral("Studio"));
+        QCOMPARE(entry.peers.first().instanceOrdinal, 2);
+        QCOMPARE(entry.peers.first().role, QStringLiteral("To"));
+        const QVariantMap peer = notificationPeersToVariant(entry.peers).first().toMap();
+        QCOMPARE(peer.size(), 4);
+        QVERIFY(!peer.contains(QStringLiteral("username")));
+        QVERIFY(!peer.contains(QStringLiteral("profilePictureJpeg")));
+
+        // Even unexpected optional fields in an input document cannot flow
+        // through the durable peer codec into a later saved history file.
+        QJsonObject input = entry.toJson();
+        QJsonObject unsafePeer = input.value("peers").toArray().first().toObject();
+        unsafePeer.insert("username", "Private username");
+        unsafePeer.insert("profilePictureJpeg", "Private photo");
+        unsafePeer.insert("profilePictureHash", "Private photo hash");
+        input.insert("peers", QJsonArray{unsafePeer});
+        NotificationEntry sanitized;
+        QVERIFY(NotificationEntry::fromJson(input, &sanitized));
+        const QByteArray serialized = QJsonDocument(sanitized.toJson()).toJson();
+        QVERIFY(!serialized.contains("Private"));
+        QVERIFY(!serialized.contains("username"));
+        QVERIFY(!serialized.contains("profilePicture"));
+    }
+
+    void rejectsInvalidPeerReferencesBeforeCommit()
+    {
+        QTemporaryDir temporary;
+        HistoryStore store(temporary.filePath(QStringLiteral("history.json")));
+        NotificationCenter center(&store);
+        auto notification = request(QStringLiteral("Rejected reference"), 1);
+        notification.peers = {{QString(), QStringLiteral("Studio"), 1, QStringLiteral("To")}};
+        QVERIFY(center.publish(notification).isEmpty());
+        notification.peers.first().endpointId = QStringLiteral("endpoint");
+        notification.peers.first().instanceOrdinal = 0;
+        QVERIFY(center.publish(notification).isEmpty());
+        notification.peers.first().instanceOrdinal = 1;
+        notification.peers.first().role = QStringLiteral("Unsupported role");
+        QVERIFY(center.publish(notification).isEmpty());
+        QVERIFY(center.entries().isEmpty());
+        QVERIFY(!QFile::exists(store.filePath()));
+    }
+
     void neverDisplaysToastBeforeAtomicHistoryCommit()
     {
         QTemporaryDir temporary;

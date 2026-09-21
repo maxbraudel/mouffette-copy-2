@@ -150,6 +150,33 @@ a bounded 4,096-entry presence cache. Pair cleanup and scene ownership remain
 private and do not label an endpoint Busy. Offline entries retain the entire
 authenticated identity tuple; `lastSeenAt` uses epoch milliseconds.
 
+### Optional client profiles
+
+An authenticated `endpoint_snapshot` may include `username` (at most 64 Unicode
+code points, no control characters) and `profilePictureJpeg` (canonical base64,
+250×250 JPEG, at most 128 KiB decoded). Missing fields and empty strings clear the
+corresponding setting. The server validates the complete snapshot before updating
+the live connection. Neither field changes the hostname or authenticated identity.
+
+The owner persists its profile locally. This server holds the current JPEG only
+in the live connection's memory and computes its SHA-256 hex `profilePictureHash`.
+`endpoint_snapshot_applied` and usable `client_list` entries carry `username` and
+`profilePictureHash`, including empty strings to propagate removal. They never
+carry JPEG bytes. Unavailable/degraded/offline entries omit both profile fields;
+the offline presence cache stores neither username, hash, nor image. Retirement
+also clears the closed socket's profile, and restarting the server restores none.
+
+Peers retrieve an advertised hash using `profile_picture_request` with
+`requestId`, `endpointId`, and `profilePictureHash`. The authenticated
+`profile_picture_response` echoes those fields and contains `profilePictureJpeg`.
+A removed/changed image or unavailable owner returns an empty string. Normal
+boot and connection-generation fencing applies; a RemoteSession is not required.
+Clients keep received profiles only in RAM, deduplicate image requests by hash,
+validate the hash and decoded JPEG before display, and use their bundled default
+picture when an image is absent. An existing observer may retain an offline
+profile in RAM; a restarted observer falls back to hostname/default until the
+owner advertises again. Raw image bytes and usernames are not protocol log fields.
+
 Protocol v12 is a coordinated client/server cut-over. Older versions receive an
 explicit protocol-version rejection; the server does not silently translate
 lease or cleanup semantics. Run `npm test` before deploying both artifacts.

@@ -13,6 +13,7 @@
 class CanvasDocument;
 class CanvasMedia;
 class QuickCanvasController;
+enum class NotificationSeverity;
 
 class QuickCanvasHost final : public ICanvasHost
 {
@@ -110,6 +111,9 @@ private:
                    const QString& reason = QStringLiteral("client_scene_failure"));
     bool matchesScene(const QJsonObject& envelope) const;
     void publishActionState();
+    void sceneToast(NotificationSeverity severity, const QString& message,
+                    const QString& runId = {}, int duration = -1,
+                    bool identifyTarget = true);
     void connectWebSocketSignals();
     void sendVideoSnapshot();
     void advanceTimeline();
@@ -126,6 +130,8 @@ private:
     FileManager* m_fileManager = nullptr;
     QString m_targetClientId;
     QString m_targetMachineName;
+    QString m_targetHostname;
+    int m_targetInstanceOrdinal = 1;
     bool m_actionsEnabled = false;
     bool m_projectEditingEnabled = false;
     bool m_contentAvailable = true;

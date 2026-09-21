@@ -34,7 +34,13 @@ Item {
     property string auxiliaryText: ""
     property bool auxiliaryVisible: auxiliaryText.length > 0
     property bool busy: false
-    readonly property real primaryWidth: Math.max(20, primaryLabel.implicitWidth + Theme.segmentPadding * 2)
+    property bool profilePictureVisible: false
+    property url profilePictureSource: ""
+    property var profileController: null
+    property string profileEndpointId: ""
+    readonly property real profilePictureWidth: profilePictureVisible ? 24 + 8 : 0
+    readonly property real primaryWidth: Math.max(20, primaryLabel.implicitWidth
+                                                 + profilePictureWidth + Theme.segmentPadding * 2)
     readonly property real statusWidth: statusMetrics.maximumWidth + Theme.segmentPadding * 2
     readonly property real auxiliaryWidth: auxiliaryVisible
         ? Math.max(40, auxiliaryMetrics.maximumWidth + Theme.segmentPadding * 2 + 16 + 4) : 0
@@ -116,12 +122,27 @@ Item {
                            - root.busyWidth)
             color: "transparent"
 
+            ProfilePicture {
+                id: profilePicture
+                objectName: "statusProfilePicture"
+                visible: root.profilePictureVisible
+                anchors.left: parent.left
+                anchors.leftMargin: Theme.segmentPadding
+                anchors.verticalCenter: parent.verticalCenter
+                width: 24
+                height: 24
+                source: root.profilePictureSource
+                controller: root.profileController
+                endpointId: root.profileEndpointId
+            }
+
             Text {
                 id: primaryLabel
                 anchors.fill: parent
-                anchors.leftMargin: Theme.segmentPadding
+                anchors.leftMargin: Theme.segmentPadding + root.profilePictureWidth
                 anchors.rightMargin: Theme.segmentPadding
                 text: root.primaryText
+                textFormat: Text.PlainText
                 color: Theme.text
                 font.pixelSize: Theme.titleFontSize
                 font.bold: true

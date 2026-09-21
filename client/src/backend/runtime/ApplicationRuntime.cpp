@@ -4,6 +4,7 @@
 #include "backend/runtime/ApplicationActivityMonitor.h"
 #include "backend/network/WebSocketClient.h"
 #include "backend/domain/models/ClientInfo.h"
+#include "backend/domain/profile/ClientProfileCache.h"
 #include "frontend/rendering/navigation/ScreenNavigationManager.h"
 #include "backend/network/UploadManager.h"
 #include "backend/network/RemoteSessionCoordinator.h"
@@ -327,6 +328,7 @@ ApplicationRuntime::ApplicationRuntime(const RuntimeProfileContext& runtimeProfi
           runtimeProfile.ordinal)),
       m_connectionManager(new ConnectionManager(m_webSocketClient, this)),
       m_settingsManager(new SettingsManager(this)),
+      m_profileCache(new ClientProfileCache(this)),
       m_webSocketMessageHandler(new WebSocketMessageHandler(this, this)),
       m_screenEventHandler(new ScreenEventHandler(this, this)),
       m_uploadEventHandler(new UploadEventHandler(this, this)),
@@ -415,6 +417,19 @@ ApplicationRuntime::ApplicationRuntime(const RuntimeProfileContext& runtimeProfi
     });
 
     m_settingsManager->loadSettings();
+    m_profileCache->setPictureRequester([this](const QString& endpoint, const QString& hash) {
+        return m_webSocketClient->requestProfilePicture(endpoint, hash);
+    });
+    connect(m_webSocketClient, &WebSocketClient::clientListReceived,
+            m_profileCache, &ClientProfileCache::observe);
+    connect(m_webSocketClient, &WebSocketClient::profilePictureReceived,
+            m_profileCache, &ClientProfileCache::acceptPicture);
+    connect(m_webSocketClient, &WebSocketClient::disconnected,
+            m_profileCache, &ClientProfileCache::transportReset);
+    connect(m_webSocketClient, &WebSocketClient::connected,
+            m_profileCache, &ClientProfileCache::transportReset);
+    connect(m_settingsManager, &SettingsManager::serverUrlChanged,
+            m_profileCache, &ClientProfileCache::clearPeers);
     if (m_projectManager) {
         connect(m_projectManager, &ProjectManager::projectCheckpointDue,
                 this, &ApplicationRuntime::persistProjectCanvas);
@@ -1166,6 +1181,7 @@ QList<ClientInfo> ApplicationRuntime::buildDisplayClientList(const QList<ClientI
     if (!m_projectManager) {
         m_displayClients = ClientListBuilder::buildDisplayClientList(
             this, connectedClients, localDiscoveryUsable);
+        for (ClientInfo& client : m_displayClients) client = m_profileCache->apply(client);
         emit displayClientsChanged(m_displayClients);
         refreshRemoteConnectionPresentation(false);
         return m_displayClients;
@@ -1176,7 +1192,7 @@ QList<ClientInfo> ApplicationRuntime::buildDisplayClientList(const QList<ClientI
     QList<ClientInfo> result;
     result.reserve(entries.size());
     for (const ProjectClientEntry& entry : entries) {
-        ClientInfo client = entry.client;
+        ClientInfo client = m_profileCache->apply(entry.client);
         client.setEndpointId(entry.endpointId);
         client.setOnline(entry.online);
         client.setFromMemory(entry.hasProject);
@@ -1206,11 +1222,19 @@ QList<ClientInfo> ApplicationRuntime::buildDisplayClientList(const QList<ClientI
             if (session->canvas) {
                 session->canvas->setRemoteSceneTarget(
                     entry.endpointId, client.getInstanceDisplayName());
+                session->canvas->updateRemoteSceneTargetFromClientList({client});
             }
         }
         result.append(client);
     }
     m_displayClients = result;
+    for (const ClientInfo& client : result) {
+        if (client.endpointId() == m_activeWorkspaceEndpointId) {
+            m_selectedClient = client;
+            m_remoteDisplayName = client.getInstanceDisplayName();
+            break;
+        }
+    }
     emit displayClientsChanged(m_displayClients);
     refreshRemoteConnectionPresentation(false);
     return m_displayClients;

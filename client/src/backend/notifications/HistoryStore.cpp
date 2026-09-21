@@ -11,6 +11,8 @@
 #include <QSet>
 #include <QUuid>
 #include <cmath>
+#include <limits>
+#include <algorithm>
 #include <utility>
 
 namespace {
@@ -75,9 +77,48 @@ bool notificationSeverityFromString(const QString& value, NotificationSeverity* 
     return true;
 }
 
+bool NotificationPeer::isValid() const
+{
+    return !endpointId.trimmed().isEmpty() && instanceOrdinal >= 1
+        && (role.isEmpty() || role == QLatin1String("From") || role == QLatin1String("To"));
+}
+
+QJsonObject NotificationPeer::toJson() const
+{
+    return {{QStringLiteral("endpointId"), endpointId},
+            {QStringLiteral("machineName"), machineName},
+            {QStringLiteral("instanceOrdinal"), instanceOrdinal},
+            {QStringLiteral("role"), role}};
+}
+
+bool NotificationPeer::fromJson(const QJsonObject& json, NotificationPeer* peer)
+{
+    if (!peer || !json.value(QStringLiteral("endpointId")).isString()
+        || !json.value(QStringLiteral("machineName")).isString()
+        || !json.value(QStringLiteral("role")).isString()) return false;
+    const qint64 ordinal = jsonInteger(json, "instanceOrdinal");
+    if (ordinal < 1 || ordinal > std::numeric_limits<int>::max()) return false;
+    NotificationPeer parsed{json.value(QStringLiteral("endpointId")).toString(),
+                            json.value(QStringLiteral("machineName")).toString(),
+                            static_cast<int>(ordinal),
+                            json.value(QStringLiteral("role")).toString()};
+    if (!parsed.isValid()) return false;
+    *peer = parsed;
+    return true;
+}
+
+QVariantList notificationPeersToVariant(const QList<NotificationPeer>& peers)
+{
+    QVariantList result;
+    for (const auto& peer : peers) result.append(peer.toJson().toVariantMap());
+    return result;
+}
+
 bool NotificationEntry::isValid() const
 {
-    return isCanonicalUuid(id) && timestampMs >= 0 && !message.trimmed().isEmpty();
+    return isCanonicalUuid(id) && timestampMs >= 0 && !message.trimmed().isEmpty()
+        && std::all_of(peers.cbegin(), peers.cend(),
+                       [](const NotificationPeer& peer) { return peer.isValid(); });
 }
 
 QJsonObject NotificationEntry::toJson() const
@@ -94,6 +135,9 @@ QJsonObject NotificationEntry::toJson() const
     json.insert(QStringLiteral("remoteSessionId"), remoteSessionId);
     json.insert(QStringLiteral("sceneRunId"), sceneRunId);
     json.insert(QStringLiteral("terminal"), terminal);
+    QJsonArray references;
+    for (const auto& peer : peers) references.append(peer.toJson());
+    json.insert(QStringLiteral("peers"), references);
     return json;
 }
 
@@ -113,7 +157,8 @@ bool NotificationEntry::fromJson(const QJsonObject& json, NotificationEntry* ent
         || !json.value(QStringLiteral("projectId")).isString()
         || !json.value(QStringLiteral("remoteSessionId")).isString()
         || !json.value(QStringLiteral("sceneRunId")).isString()
-        || !json.value(QStringLiteral("terminal")).isBool()) {
+        || !json.value(QStringLiteral("terminal")).isBool()
+        || !json.value(QStringLiteral("peers")).isArray()) {
         setError(error, QStringLiteral("Notification contains invalid field types"));
         return false;
     }
@@ -132,6 +177,14 @@ bool NotificationEntry::fromJson(const QJsonObject& json, NotificationEntry* ent
     parsed.remoteSessionId = json.value(QStringLiteral("remoteSessionId")).toString();
     parsed.sceneRunId = json.value(QStringLiteral("sceneRunId")).toString();
     parsed.terminal = json.value(QStringLiteral("terminal")).toBool(false);
+    for (const auto& value : json.value(QStringLiteral("peers")).toArray()) {
+        NotificationPeer peer;
+        if (!value.isObject() || !NotificationPeer::fromJson(value.toObject(), &peer)) {
+            setError(error, QStringLiteral("Notification contains an invalid peer reference"));
+            return false;
+        }
+        parsed.peers.append(peer);
+    }
     if (!parsed.isValid()) {
         setError(error, QStringLiteral("Notification record is incomplete"));
         return false;

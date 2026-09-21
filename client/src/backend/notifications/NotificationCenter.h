@@ -18,6 +18,7 @@ struct NotificationRequest {
     QString sceneRunId;
     bool terminal = false;
     qint64 timestampMs = -1;
+    QList<NotificationPeer> peers;
 };
 
 // Keep terminal identities scoped by protocol object. Uploads, SceneRuns and
@@ -55,7 +56,7 @@ signals:
     void historyChanged();
     void unreadCountChanged(int count);
     void historyCleared();
-    void toastRequested(const QString& message, NotificationSeverity severity, int durationMs);
+    void toastRequested(const NotificationEntry& entry, int durationMs);
     void persistenceError(const QString& message);
 
 private:

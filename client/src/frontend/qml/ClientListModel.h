@@ -25,7 +25,8 @@ public:
         PlatformRole,
         ProjectIdRole,
         HasProjectRole,
-        IdentifierRole
+        IdentifierRole,
+        IdentityPrefixRole
     };
 
     explicit ClientListModel(QObject* parent = nullptr);

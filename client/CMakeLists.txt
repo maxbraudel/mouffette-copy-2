@@ -197,6 +197,7 @@ set(MOUFFETTE_STORAGE_SOURCES
     src/backend/runtime/storage/StorageIO.cpp
     src/backend/runtime/storage/StorageRegistry.cpp
     src/backend/runtime/storage/migrations/settings/v0_to_v1.cpp
+    src/backend/runtime/storage/migrations/history/v1_to_v2.cpp
     src/backend/runtime/storage/migrations/projects/v6_to_v7.cpp
 )
 
@@ -273,6 +274,8 @@ set(SOURCES
 
     # Domain - Models
     src/backend/domain/models/ClientInfo.cpp
+    src/backend/domain/profile/ProfileImage.cpp
+    src/backend/domain/profile/ClientProfileCache.cpp
 
     # Domain - Projects
     src/backend/domain/project/ProjectModel.cpp
@@ -520,6 +523,8 @@ qt_add_qml_module(MouffetteClient
         resources/qml/app/Theme.qml
         resources/qml/app/Main.qml
         resources/qml/app/components/AppButton.qml
+        resources/qml/app/components/ProfilePicture.qml
+        resources/qml/app/components/NotificationPeers.qml
         resources/qml/app/components/AppCheckBox.qml
         resources/qml/app/components/AppDialog.qml
         resources/qml/app/components/AppPanel.qml
@@ -786,7 +791,7 @@ if(BUILD_TESTING)
     )
     target_include_directories(tst_ConnectionManager PRIVATE src)
     target_link_libraries(tst_ConnectionManager PRIVATE
-        Qt6::Core Qt6::Network Qt6::WebSockets Qt6::Test OpenSSL::Crypto)
+        Qt6::Core Qt6::Gui Qt6::Network Qt6::WebSockets Qt6::Test OpenSSL::Crypto)
     if(APPLE)
         target_link_libraries(tst_ConnectionManager PRIVATE "-framework Security")
     elseif(WIN32)
@@ -851,6 +856,8 @@ if(BUILD_TESTING)
 
     add_executable(tst_RuntimeStorageBootstrap
         tests/qt/tst_RuntimeStorageBootstrap.cpp
+        src/backend/notifications/NotificationCenter.cpp
+        src/backend/notifications/NotificationCenter.h
         ${MOUFFETTE_STORAGE_SOURCES}
         src/backend/runtime/RuntimeStorageBootstrap.h
         src/backend/runtime/RuntimeProfile.cpp
@@ -898,6 +905,17 @@ if(BUILD_TESTING)
     target_link_libraries(tst_ClientConnectionFlow PRIVATE
         "$<TARGET_PROPERTY:MouffetteClient,LINK_LIBRARIES>" Qt6::Test)
     add_test(NAME ClientConnectionFlow COMMAND tst_ClientConnectionFlow)
+
+    add_executable(tst_ClientProfile
+        tests/qt/tst_ClientProfile.cpp
+        "$<FILTER:$<TARGET_OBJECTS:MouffetteClient>,EXCLUDE,/src/main[.]cpp[.](o|obj)$>")
+    target_include_directories(tst_ClientProfile PRIVATE
+        "$<TARGET_PROPERTY:MouffetteClient,INCLUDE_DIRECTORIES>")
+    target_compile_definitions(tst_ClientProfile PRIVATE
+        "$<TARGET_PROPERTY:MouffetteClient,COMPILE_DEFINITIONS>")
+    target_link_libraries(tst_ClientProfile PRIVATE
+        "$<TARGET_PROPERTY:MouffetteClient,LINK_LIBRARIES>" Qt6::Test)
+    add_test(NAME ClientProfile COMMAND tst_ClientProfile)
 
     add_executable(tst_SystemLifecycleMonitor
         tests/qt/tst_SystemLifecycleMonitor.cpp

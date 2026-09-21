@@ -624,12 +624,12 @@ private slots:
                 QStringLiteral("remote_session_unavailable"));
         QCOMPARE(toasts.size(), codes.size() + 1);
         for (const auto& toast : toasts) {
-            QVERIFY(toast.first().toString().contains(QLatin1Char(' ')));
-            QVERIFY(!toast.first().toString().contains(QLatin1Char('_')));
+            QVERIFY(toast.first().value<NotificationEntry>().message.contains(QLatin1Char(' ')));
+            QVERIFY(!toast.first().value<NotificationEntry>().message.contains(QLatin1Char('_')));
         }
         runtime.getUploadManager()->uploadRejected(QStringLiteral("readable-upload"),
             QStringLiteral("Not enough disk space"));
-        QCOMPARE(toasts.last().first().toString(), QStringLiteral("Upload failed: Not enough disk space"));
+        QCOMPARE(toasts.last().first().value<NotificationEntry>().message, QStringLiteral("Upload failed: Not enough disk space"));
         runtime.handleApplicationAboutToQuit();
     }
 
@@ -930,17 +930,44 @@ private slots:
         QTRY_COMPARE(connections->state(), ConnectionManager::State::Connected);
         ClientInfo first = onlineClient(fixtureEndpoint(QLatin1Char('A')), "Same host");
         ClientInfo second = onlineClient(fixtureEndpoint(QLatin1Char('B')), "Same host");
+        first.setUsername(QStringLiteral("Shared username"));
+        second.setUsername(QStringLiteral("Shared username"));
         const auto publish = [&] {
+            const auto presenceJson = [](const ClientInfo& client) {
+                QJsonObject json = client.toJson();
+                if (!client.canAcceptSession()) {
+                    json.remove(QStringLiteral("username"));
+                    json.remove(QStringLiteral("profilePictureHash"));
+                }
+                return json;
+            };
             return server.send(QJsonObject{{"type", "client_list"},
-                {"clients", QJsonArray{first.toJson(), second.toJson()}}});
+                {"clients", QJsonArray{presenceJson(first), presenceJson(second)}}});
         };
         QSignalSpy presence(runtime.getWebSocketClient(), &WebSocketClient::clientListReceived);
         QVERIFY(publish());
         QTRY_COMPARE(runtime.displayClients().size(), 2);
+        for (const auto& shown : runtime.displayClients())
+            QCOMPARE(shown.username(), QStringLiteral("Shared username"));
         QVERIFY(!runtime.getProjectManager()->createProjectFromSnapshot(
             ProjectTargetReference::fromClientInfo(first), first.getScreens(), 57,
             1, 1).isEmpty());
         QCOMPARE(runtime.getProjectManager()->projectCount(), 1);
+
+        const auto displayedUsername = [&] {
+            for (const auto& shown : runtime.displayClients())
+                if (shown.endpointId() == first.endpointId()) return shown.username();
+            return QString();
+        };
+        first.setUsername(QStringLiteral("Renamed live"));
+        QVERIFY(publish());
+        QTRY_COMPARE(displayedUsername(), QStringLiteral("Renamed live"));
+        first.setUsername({});
+        QVERIFY(publish());
+        QTRY_VERIFY(displayedUsername().isEmpty());
+        first.setUsername(QStringLiteral("Retained offline"));
+        QVERIFY(publish());
+        QTRY_COMPARE(displayedUsername(), QStringLiteral("Retained offline"));
 
         auto* workspaces = runtime.getWorkspaceManager();
         QVERIFY(workspaces->getOrCreateWorkspace(first.endpointId(), first));
@@ -1002,6 +1029,7 @@ private slots:
         QTRY_COMPARE(runtime.displayClients().size(), 1);
         QVERIFY(runtime.displayClients().first().hasProject());
         QCOMPARE(runtime.displayClients().first().getVolumePercent(), 57);
+        QCOMPARE(runtime.displayClients().first().username(), QStringLiteral("Retained offline"));
         QVERIFY(runtime.getProjectManager()->deleteProject(first.endpointId()));
         QVERIFY(runtime.displayClients().isEmpty()); // no new presence required
         runtime.handleApplicationAboutToQuit();

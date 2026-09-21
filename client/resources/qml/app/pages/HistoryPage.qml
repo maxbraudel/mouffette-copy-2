@@ -21,7 +21,7 @@ Item {
             Item { Layout.fillWidth: true }
             AppButton {
                 text: "Clear History"
-                enabled: root.controller.historyModel.count > 0
+                enabled: historyList.count > 0
                 onClicked: root.controller.requestClearHistory()
             }
         }
@@ -43,6 +43,7 @@ Item {
                 required property int severityKind
                 required property string severityLabel
                 required property string category
+                required property var peers
                 required property string message
                 required property string timestampText
                 width: historyList.width - 6
@@ -91,6 +92,11 @@ Item {
                             text: card.timestampText
                             color: Theme.mutedText
                         }
+                    }
+                    NotificationPeers {
+                        Layout.fillWidth: true
+                        controller: root.controller
+                        peers: card.peers
                     }
                     TextEdit {
                         Layout.fillWidth: true

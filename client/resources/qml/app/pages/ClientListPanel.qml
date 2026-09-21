@@ -7,6 +7,7 @@ AppPanel {
     id: root
 
     property var detailProvider: null
+    property var controller: null
     property var model: null
     property bool sceneMode: false
     property string emptyText: ""
@@ -27,6 +28,9 @@ AppPanel {
             id: row
             required property int index
             required property string identifier
+            required property string endpointId
+            required property string platform
+            required property string identityPrefix
             required property string primaryText
             required property string secondaryText
             required property string badgeText
@@ -53,8 +57,8 @@ AppPanel {
             hoverEnabled: true
             property string connectionDetail: ""
             onHoveredChanged: if (hovered && root.detailProvider) connectionDetail = root.detailProvider(rowIdentifier)
-            ToolTip.visible: hovered && connectionDetail.length > 0
-            ToolTip.text: connectionDetail
+            ToolTip.visible: hovered && (platform.length > 0 || connectionDetail.length > 0)
+            ToolTip.text: [platform, connectionDetail].filter(value => value.length > 0).join("\n")
             ToolTip.delay: 400
             Timer {
                 interval: 500
@@ -72,15 +76,41 @@ AppPanel {
                 anchors.fill: parent
 
                 Text {
-                    id: primary
+                    id: prefix
                     anchors.left: parent.left
                     anchors.leftMargin: 12
+                    anchors.top: parent.top
+                    anchors.topMargin: row.mainLineTopMargin
+                    height: 22
+                    text: row.identityPrefix
+                    textFormat: Text.PlainText
+                    color: Theme.mutedText
+                    verticalAlignment: Text.AlignVCenter
+                }
+
+                ProfilePicture {
+                    id: profilePicture
+                    objectName: "clientProfilePicture_" + row.index
+                    anchors.left: prefix.right
+                    anchors.leftMargin: prefix.text.length > 0 ? 8 : 0
+                    anchors.verticalCenter: root.sceneMode ? prefix.verticalCenter : parent.verticalCenter
+                    width: root.sceneMode ? 24 : 32
+                    height: width
+                    controller: root.controller
+                    endpointId: row.endpointId
+                }
+
+                Text {
+                    id: primary
+                    anchors.left: profilePicture.right
+                    anchors.leftMargin: 8
                     anchors.right: trailingContent.left
                     anchors.rightMargin: 10
                     anchors.top: parent.top
                     anchors.topMargin: row.mainLineTopMargin
                     height: 22
                     text: row.primaryValue
+                    textFormat: Text.PlainText
                     color: Theme.text
                     font.weight: Font.DemiBold
                     verticalAlignment: Text.AlignVCenter

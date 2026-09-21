@@ -23,6 +23,13 @@ QList<CanvasMedia*> currentMediaForSource(ApplicationRuntime::ClientWorkspace* s
     return matches;
 }
 
+QList<NotificationPeer> uploadPeers(const ApplicationRuntime::ClientWorkspace* workspace)
+{
+    if (!workspace || workspace->targetEndpointId.isEmpty()) return {};
+    return {{workspace->targetEndpointId, workspace->lastClientInfo.getMachineName(),
+             qMax(1, workspace->lastClientInfo.instanceOrdinal()), QStringLiteral("To")}};
+}
+
 QString uploadFailureDetail(const QString& reason)
 {
     const QString detail = reason.trimmed();
@@ -49,7 +56,8 @@ QString uploadFailureDetail(const QString& reason)
 void publishTerminalUploadNotification(const QString& uploadId,
                                        NotificationSeverity severity,
                                        const QString& message,
-                                       int durationMs = -1)
+                                       int durationMs = -1,
+                                       const QList<NotificationPeer>& peers = {})
 {
     ToastNotificationSystem* system = ToastNotificationSystem::instance();
     if (!system) return;
@@ -58,6 +66,7 @@ void publishTerminalUploadNotification(const QString& uploadId,
     notification.severity = severity;
     notification.category = QStringLiteral("Upload");
     notification.message = message;
+    notification.peers = peers;
     notification.toastDurationMs = durationMs;
     notification.correlationId = NotificationCorrelation::upload(uploadId);
     notification.terminal = true;
@@ -133,12 +142,10 @@ void UploadSignalConnector::connectAllSignals(
     connect(uploadManager, &UploadManager::uploadFinished, mainWindow,
             [mainWindow](const QString& uploadId) {
         if (ApplicationRuntime::ClientWorkspace* session = mainWindow->workspaceForUploadId(uploadId)) {
-            const QString label = session->lastClientInfo.getDisplayText().isEmpty()
-                ? session->targetEndpointId
-                : session->lastClientInfo.getDisplayText();
             publishTerminalUploadNotification(
                 uploadId, NotificationSeverity::Success,
-                QStringLiteral("Media uploaded and loaded into RAM on %1").arg(label));
+                QStringLiteral("Media uploaded and loaded into RAM"), -1,
+                uploadPeers(session));
             session->upload.remoteFilesPresent = true;
             session->knownRemoteFileIds.unite(session->upload.fileIds);
             mainWindow->clearUploadTracking(*session);
@@ -151,6 +158,7 @@ void UploadSignalConnector::connectAllSignals(
 
     connect(uploadManager, &UploadManager::uploadRamFailed, mainWindow,
             [mainWindow, uploadManager](const QString& uploadId, int failedFiles) {
+        const auto peers = uploadPeers(mainWindow->workspaceForUploadId(uploadId));
         if (auto* session = mainWindow->workspaceForUploadId(uploadId)) {
             for (const QString& fileId : session->upload.fileIds) {
                 const bool ready = uploadManager->remoteMediaReady(session->targetEndpointId, fileId);
@@ -168,11 +176,12 @@ void UploadSignalConnector::connectAllSignals(
             uploadId, NotificationSeverity::Error,
             QStringLiteral("%1 media could not be loaded into remote RAM. Click Upload to retry.")
                 .arg(failedFiles),
-            AppConfig::instance().toastErrorDurationMs());
+            AppConfig::instance().toastErrorDurationMs(), peers);
     });
 
     connect(uploadManager, &UploadManager::uploadCancelled, mainWindow,
             [mainWindow](const QString& uploadId) {
+        const auto peers = uploadPeers(mainWindow->workspaceForUploadId(uploadId));
         if (ApplicationRuntime::ClientWorkspace* session = mainWindow->workspaceForUploadId(uploadId)) {
             for (const QString& fileId : session->upload.fileIds) {
                 for (CanvasMedia* item : currentMediaForSource(session, fileId)) {
@@ -184,7 +193,7 @@ void UploadSignalConnector::connectAllSignals(
         }
         publishTerminalUploadNotification(
             uploadId, NotificationSeverity::Warning,
-            QStringLiteral("Upload cancelled; remote data is being removed"));
+            QStringLiteral("Upload cancelled; remote data is being removed"), -1, peers);
     });
 
     // Signal: the target rejected the transfer. Roll back only this batch; files
@@ -192,6 +201,7 @@ void UploadSignalConnector::connectAllSignals(
     connect(uploadManager, &UploadManager::uploadRejected, mainWindow,
             [mainWindow](const QString& uploadId, const QString& reason) {
         ApplicationRuntime::ClientWorkspace* session = mainWindow->workspaceForUploadId(uploadId);
+        const auto peers = uploadPeers(session);
         if (session) {
             for (const QString& fileId : session->upload.fileIds) {
                 for (CanvasMedia* item : currentMediaForSource(session, fileId)) {
@@ -206,7 +216,7 @@ void UploadSignalConnector::connectAllSignals(
         publishTerminalUploadNotification(
             uploadId, NotificationSeverity::Error,
             QStringLiteral("Upload failed: %1").arg(detail),
-            AppConfig::instance().toastErrorDurationMs());
+            AppConfig::instance().toastErrorDurationMs(), peers);
     });
 
     // Signal: Upload completed file IDs - mark files as uploaded

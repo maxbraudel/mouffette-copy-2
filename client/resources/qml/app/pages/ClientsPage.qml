@@ -15,6 +15,7 @@ Item {
         ClientListPanel {
             Layout.fillWidth: true
             Layout.fillHeight: true
+            controller: root.controller
             model: root.controller.clientsModel
             detailProvider: endpoint => root.controller.clientConnectionDetail(endpoint)
             emptyText: "No clients connected. Make sure other devices are running Mouffette and connected to the same server."
@@ -33,6 +34,7 @@ Item {
         ClientListPanel {
             Layout.fillWidth: true
             Layout.fillHeight: true
+            controller: root.controller
             model: root.controller.sceneActivitiesModel
             sceneMode: true
             emptyText: "No current ongoing scenes."

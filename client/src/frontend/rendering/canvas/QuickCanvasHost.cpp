@@ -28,9 +28,8 @@
 
 #include <algorithm>
 
-namespace {
-void sceneToast(NotificationSeverity severity, const QString& message,
-                const QString& runId = {}, int duration = -1)
+void QuickCanvasHost::sceneToast(NotificationSeverity severity, const QString& message,
+                                  const QString& runId, int duration, bool identifyTarget)
 {
     ToastNotificationSystem* system = ToastNotificationSystem::instance();
     if (!system) return;
@@ -38,6 +37,8 @@ void sceneToast(NotificationSeverity severity, const QString& message,
     request.severity = severity;
     request.category = QStringLiteral("Scene");
     request.message = message;
+    if (identifyTarget && !m_targetClientId.isEmpty())
+        request.peers = {{m_targetClientId, m_targetHostname, m_targetInstanceOrdinal, QStringLiteral("To")}};
     request.toastDurationMs = duration;
     request.sceneRunId = runId;
     if (!runId.isEmpty()) {
@@ -46,7 +47,6 @@ void sceneToast(NotificationSeverity severity, const QString& message,
             || severity == NotificationSeverity::Error;
     }
     system->publishNotification(request);
-}
 }
 
 QuickCanvasHost::QuickCanvasHost(CanvasDocument* document,
@@ -401,6 +401,10 @@ void QuickCanvasHost::setFileManager(FileManager* manager)
 void QuickCanvasHost::setRemoteSceneTarget(const QString& id,
                                            const QString& machineName)
 {
+    if (m_targetClientId != id) {
+        m_targetHostname.clear();
+        m_targetInstanceOrdinal = 1;
+    }
     m_targetClientId = id;
     m_targetMachineName = machineName;
     publishActionState();
@@ -412,6 +416,8 @@ void QuickCanvasHost::updateRemoteSceneTargetFromClientList(
     for (const ClientInfo& client : clients) {
         if (client.endpointId() == m_targetClientId) {
             m_targetMachineName = client.getInstanceDisplayName();
+            m_targetHostname = client.getMachineName();
+            m_targetInstanceOrdinal = qMax(1, client.instanceOrdinal());
             break;
         }
     }
@@ -622,19 +628,16 @@ QJsonArray QuickCanvasHost::buildSceneManifest(const QJsonObject& scene,
             names.append(QStringLiteral("and %1 more")
                              .arg(missingUploads.size() - names.size()));
         }
-        const QString target = m_targetMachineName.trimmed().isEmpty()
-            ? QStringLiteral("the remote client")
-            : QStringLiteral("remote client \"%1\"").arg(m_targetMachineName.left(120));
         if (errorMessage) {
             *errorMessage = missingUploads.size() == 1
                 ? QStringLiteral(
-                    "Cannot launch the remote scene: %1 has not been uploaded to %2. "
+                    "Cannot launch the remote scene: %1 has not been uploaded. "
                     "Upload it and try again.")
-                      .arg(names.constFirst(), target)
+                      .arg(names.constFirst())
                 : QStringLiteral(
                     "Cannot launch the remote scene: %1 media files have not been uploaded "
-                    "to %2 (%3). Upload them and try again.")
-                      .arg(missingUploads.size()).arg(target, names.join(QStringLiteral(", ")));
+                    "(%2). Upload them and try again.")
+                      .arg(missingUploads.size()).arg(names.join(QStringLiteral(", ")));
         }
         return {};
     }
@@ -1048,7 +1051,8 @@ void QuickCanvasHost::timelinePlay()
     m_residencyGroup = QStringLiteral("canvas-preview:%1").arg(QUuid::createUuid().toString(QUuid::WithoutBraces));
     if (!MediaResidencyManager::instance().pinOwners(residencyOwners(), m_residencyGroup)) {
         m_residencyGroup.clear();
-        sceneToast(NotificationSeverity::Error, QStringLiteral("Insufficient RAM remains for scene playback buffers"));
+        sceneToast(NotificationSeverity::Error, QStringLiteral("Insufficient RAM remains for scene playback buffers"),
+                   {}, -1, false);
         return;
     }
     m_testSceneLaunched = true;
@@ -1280,6 +1284,7 @@ bool QuickCanvasHost::matchesScene(const QJsonObject& envelope) const
 
 void QuickCanvasHost::failScene(const QString& message, bool notifyServer, const QString& reason)
 {
+    const bool remote = m_sceneLaunching || m_sceneLaunched || m_sceneStopping || !m_sceneRunId.isEmpty();
     m_testSceneLaunched = false;
     const QString runId = m_sceneRunId;
     if (notifyServer && m_webSocket && !runId.isEmpty()) {
@@ -1302,7 +1307,7 @@ void QuickCanvasHost::failScene(const QString& message, bool notifyServer, const
     publishActionState();
     sceneToast(NotificationSeverity::Error,
                QStringLiteral("Scene launch failed: %1").arg(message),
-               runId, AppConfig::instance().toastErrorDurationMs());
+               runId, AppConfig::instance().toastErrorDurationMs(), remote);
 }
 
 void QuickCanvasHost::handleRemoteConnectionLost()

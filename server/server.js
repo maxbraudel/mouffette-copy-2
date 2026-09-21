@@ -8,6 +8,7 @@ const { MAXIMUM_DURATION_MS, isCanonicalElement, isCanonicalTimelineSettings, is
 const { RemoteSessionRegistry, TERMINAL_PHASES } = require('./remote_session_registry');
 const { ProtocolMetrics } = require('./protocol_metrics');
 const { isAllowedMediaExtension } = require('./media_format_contract');
+const { normalizeClientProfile } = require('./client_profile');
 const {
     SCENE_PHASES, SceneRunRegistry, computeSceneDigest, isPlainObject,
 } = require('./scene_run_registry');
@@ -1559,6 +1560,9 @@ class MouffetteServer {
             case 'request_client_list':
                 this.sendClientList(clientId);
                 break;
+            case 'profile_picture_request':
+                this.handleProfilePictureRequest(clientId, message);
+                break;
             case 'request_upload_channel':
                 if (!this.issueUploadChannelToken(clientId, message.requestId)) {
                     this.sendError(clientId, 'Upload channel requires a registered control connection');
@@ -1708,6 +1712,13 @@ class MouffetteServer {
     forgetCurrentTransport(client) {
         if (client && this.currentTransportByEndpoint.get(client.endpointId) === client) {
             this.currentTransportByEndpoint.delete(client.endpointId);
+        }
+        // A socket can remain referenced during its close handshake. Never
+        // retain profile content through that transport or offline tombstones.
+        if (client) {
+            delete client.username;
+            delete client.profilePictureJpeg;
+            delete client.profilePictureHash;
         }
     }
 
@@ -3248,9 +3259,11 @@ class MouffetteServer {
             return;
         }
 
+        const profile = normalizeClientProfile(message);
         // endpoint_snapshot is an authoritative replacement, never a partial
         // patch. Validate the complete snapshot before mutating advertised state.
         const invalidSnapshot = (() => {
+            if (profile.error) return profile.error;
             if (typeof message.machineName !== 'string'
                 || message.machineName.trim().length === 0
                 || message.machineName.length > 255) {
@@ -3295,6 +3308,9 @@ class MouffetteServer {
         this.registerConnectionForEndpoint(client.endpointId, client.id);
 
         client.machineName = message.machineName;
+        client.username = profile.username;
+        client.profilePictureJpeg = profile.profilePictureJpeg;
+        client.profilePictureHash = profile.profilePictureHash;
         client.platform = message.platform;
         client.screens = normalizeScreens(message.screens, this.MAX_REMOTE_SCENE_SCREENS);
         client.systemUI = message.systemUI.map(normalizeUiZone);
@@ -3321,6 +3337,8 @@ class MouffetteServer {
                 instanceOrdinal: client.instanceOrdinal,
                 runtimeId: client.runtimeId,
                 machineName: client.machineName,
+                username: client.username,
+                profilePictureHash: client.profilePictureHash,
                 screens: client.screens,
                 platform: client.platform,
                 systemUI: client.systemUI || [],
@@ -3344,6 +3362,35 @@ class MouffetteServer {
         // Broadcast updated client list only after terminal catch-up has been
         // enqueued on the registering socket.
         this.broadcastClientList();
+    }
+
+    handleProfilePictureRequest(clientId, message) {
+        const requester = this.clients.get(clientId);
+        if (!requester || !requester.authenticated || !requester.endpointId) return;
+        if (!this.isValidOpaqueId(message.requestId)
+            || typeof message.endpointId !== 'string'
+            || !/^[A-Za-z0-9_-]{43}$/.test(message.endpointId)
+            || typeof message.profilePictureHash !== 'string'
+            || !SHA256_PATTERN.test(message.profilePictureHash)) {
+            this.sendError(clientId, 'Invalid profile picture request',
+                'invalid_profile_picture_request', { requestId: message.requestId });
+            return;
+        }
+        const ownerId = this.resolveClientId(message.endpointId);
+        const owner = ownerId ? this.clients.get(ownerId) : null;
+        const now = this.monotonicNow();
+        const available = owner && owner.machineName && !owner.draining
+            && owner.ws?.readyState === WebSocket.OPEN
+            && now - (owner.lastHeartbeatMonotonicAt ?? now) < this.config.leaseTimeoutMs
+            && owner.profilePictureHash === message.profilePictureHash
+            && typeof owner.profilePictureJpeg === 'string';
+        // Idempotent lookup: a stale hash or unavailable owner has a correlated
+        // empty response so callers can finish without indefinite retries.
+        this.sendToEndpoint(requester.endpointId, {
+            type: 'profile_picture_response', requestId: message.requestId,
+            endpointId: message.endpointId, profilePictureHash: message.profilePictureHash,
+            profilePictureJpeg: available ? owner.profilePictureJpeg : '',
+        });
     }
 
     handleEndpointDisable(clientId, message = {}) {
@@ -3418,6 +3465,12 @@ class MouffetteServer {
                 instanceId: entry.instanceId, instanceOrdinal: entry.instanceOrdinal,
                 runtimeId: entry.runtimeId,
                 endpointId: entry.endpointId, machineName: entry.machineName,
+                // Offline entries deliberately omit metadata. Existing peers
+                // may keep their RAM cache; newly connected peers learn none.
+                ...(usable ? {
+                    username: entry.client.username || '',
+                    profilePictureHash: entry.client.profilePictureHash || '',
+                } : {}),
                 platform: entry.platform, lastSeenAt: entry.lastSeenAt,
                 status: usable ? 'Available' : recovering ? 'Degraded' : 'Disconnected',
                 canAcceptSession: !!usable,

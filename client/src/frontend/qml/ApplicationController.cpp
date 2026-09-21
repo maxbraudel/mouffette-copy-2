@@ -6,6 +6,11 @@
 #include "backend/domain/scene/SceneActivityModel.h"
 #include "backend/domain/project/ProjectManager.h"
 #include "backend/managers/app/SettingsManager.h"
+#include "backend/domain/profile/ClientProfileCache.h"
+#include "backend/domain/profile/ProfileImage.h"
+#include "frontend/qml/ProfilePictureProvider.h"
+#include "frontend/qml/QmlRuntime.h"
+#include <QQmlEngine>
 #include "backend/notifications/NotificationCenter.h"
 #include "backend/runtime/RuntimeProfile.h"
 #include "frontend/qml/ClientWorkspaceViewModel.h"
@@ -84,6 +89,102 @@ ApplicationController::ConnectionState ApplicationController::localConnectionSta
 QString ApplicationController::remoteDisplayName() const
 {
     return m_runtime ? m_runtime->remoteDisplayName() : QString();
+}
+
+QString ApplicationController::remoteEndpointId() const
+{
+    return m_runtime ? m_runtime->activeWorkspaceEndpointId() : QString();
+}
+
+QString ApplicationController::remoteProfilePictureSource() const
+{
+    return profilePictureSource(remoteEndpointId());
+}
+
+QString ApplicationController::profilePictureSource(const QString& endpointId) const
+{
+    return m_runtime ? m_runtime->profileCache()->pictureSource(endpointId)
+                     : ClientProfileCache::defaultSource();
+}
+
+void ApplicationController::requestProfilePicture(const QString& endpointId)
+{
+    if (m_runtime) m_runtime->profileCache()->requestPicture(endpointId);
+}
+
+QString ApplicationController::clientDisplayName(const QString& endpointId, const QString& hostname, int ordinal) const
+{
+    const ClientInfo known = m_clientsModel->client(endpointId);
+    const QString machineName = known.getMachineName().isEmpty() ? hostname : known.getMachineName();
+    const int instance = known.endpointId().isEmpty() ? ordinal : known.instanceOrdinal();
+    const QString fallback = machineName.isEmpty()
+        ? QStringLiteral("Device %1").arg(endpointId.left(8)) : machineName;
+    if (m_runtime) return m_runtime->profileCache()->displayName(endpointId, fallback, instance);
+    ClientInfo client(endpointId, fallback, {});
+    client.setInstanceOrdinal(instance);
+    return client.getInstanceDisplayName();
+}
+
+QString ApplicationController::settingsUsername() const
+{
+    return m_runtime ? m_runtime->getSettingsManager()->username() : QString();
+}
+
+QString ApplicationController::settingsHostname() const
+{
+    return m_runtime ? m_runtime->getMachineName() : QString();
+}
+
+QString ApplicationController::settingsProfilePictureSource() const
+{
+    return m_runtime ? m_runtime->profileCache()->localPictureSource(QStringLiteral("saved"))
+                     : ClientProfileCache::defaultSource();
+}
+
+QString ApplicationController::settingsProfilePictureDraftSource() const
+{
+    return m_runtime && m_profileEditing
+        ? m_runtime->profileCache()->localPictureSource(QStringLiteral("draft"))
+        : settingsProfilePictureSource();
+}
+
+void ApplicationController::beginProfileEdit()
+{
+    if (!m_runtime) return;
+    m_profileEditing = true;
+    m_draftProfilePicture = m_runtime->getSettingsManager()->profilePictureJpeg();
+    m_runtime->profileCache()->setLocalPicture(QStringLiteral("draft"), m_draftProfilePicture);
+    emit profileDraftChanged();
+}
+
+QString ApplicationController::importProfilePicture(const QUrl& file)
+{
+    if (!m_runtime || m_clearingStorage) return QStringLiteral("Settings are not ready yet.");
+    QByteArray jpeg;
+    QString error;
+    if (!ProfileImage::importFile(file, &jpeg, &error)) return error;
+    if (!m_profileEditing) beginProfileEdit();
+    m_draftProfilePicture = jpeg;
+    m_runtime->profileCache()->setLocalPicture(QStringLiteral("draft"), jpeg);
+    emit profileDraftChanged();
+    return {};
+}
+
+void ApplicationController::removeProfilePicture()
+{
+    if (!m_runtime) return;
+    if (!m_profileEditing) beginProfileEdit();
+    m_draftProfilePicture.clear();
+    m_runtime->profileCache()->setLocalPicture(QStringLiteral("draft"), {});
+    emit profileDraftChanged();
+}
+
+void ApplicationController::cancelProfileEdit()
+{
+    m_profileEditing = false;
+    m_draftProfilePicture.clear();
+    if (m_runtime) m_runtime->profileCache()->setLocalPicture(QStringLiteral("draft"), {});
+    emit profileDraftChanged();
 }
 
 QString ApplicationController::remoteStatusText() const
@@ -245,13 +346,26 @@ void ApplicationController::initializeBackend()
 {
     if (m_runtime) return;
     m_runtime = std::make_unique<ApplicationRuntime>(m_runtimeProfile);
+    auto* profiles = m_runtime->profileCache();
+    profiles->setLocalPicture(QStringLiteral("saved"), m_runtime->getSettingsManager()->profilePictureJpeg());
+    QmlRuntime::engine()->addImageProvider(QStringLiteral("profiles"), new ProfilePictureProvider(profiles));
+    connect(profiles, &ClientProfileCache::profilesChanged, this, [this] {
+        ++m_profileRevision;
+        emit profilesChanged();
+    });
 
     connect(m_runtime.get(), &ApplicationRuntime::displayClientsChanged,
             this, [this](const QList<ClientInfo>& clients) {
         m_clientsModel->setClients(clients);
+        ++m_profileRevision;
+        emit profilesChanged();
     });
     connect(m_runtime.get(), &ApplicationRuntime::presentationStateChanged,
             this, &ApplicationController::refreshPresentation);
+    connect(m_runtime.get(), &ApplicationRuntime::activeWorkspaceChanged, this, [this] {
+        ++m_profileRevision;
+        emit profilesChanged();
+    });
     connect(m_runtime.get(), &ApplicationRuntime::applicationPageChanged,
             this, [this](int page) {
         setApplicationPage(static_cast<ApplicationPage>(page));
@@ -317,9 +431,6 @@ void ApplicationController::openOngoingScene(const QString& sceneRunId)
     }
 
     const ClientInfo peer = m_clientsModel->client(activity.peerEndpointId);
-    const QString peerName = peer.getMachineName().trimmed().isEmpty()
-        ? QStringLiteral("Device %1").arg(activity.peerEndpointId.left(8))
-        : peer.getInstanceDisplayName();
     const qint64 elapsedSeconds = qMax<qint64>(0,
         QDateTime::currentMSecsSinceEpoch() - activity.startedAtEpochMs) / 1000;
     const QString duration = elapsedSeconds >= 3600
@@ -329,14 +440,17 @@ void ApplicationController::openOngoingScene(const QString& sceneRunId)
         : QStringLiteral("%1:%2").arg(elapsedSeconds / 60)
               .arg(elapsedSeconds % 60, 2, 10, QLatin1Char('0'));
     showDialog(DialogKind::IncomingSceneInfo, QStringLiteral("Ongoing Scene"),
-               QStringLiteral("Received from %1\n\nStarted: %2\nDuration: %3\nNetwork: %4\n\nThis incoming scene is read-only.")
-                   .arg(peerName,
-                        QDateTime::fromMSecsSinceEpoch(activity.startedAtEpochMs)
+               QStringLiteral("Started: %1\nDuration: %2\nNetwork: %3\n\nThis incoming scene is read-only.")
+                   .arg(QDateTime::fromMSecsSinceEpoch(activity.startedAtEpochMs)
                             .toString(QStringLiteral("HH:mm:ss")),
                         duration,
                         activity.degraded ? QStringLiteral("Degraded")
                                           : QStringLiteral("Healthy")),
-               QStringLiteral("OK"), QString(), false, false);
+               QStringLiteral("OK"), QString(), false, false,
+               {QVariantMap{{QStringLiteral("endpointId"), activity.peerEndpointId},
+                            {QStringLiteral("machineName"), peer.getMachineName()},
+                            {QStringLiteral("instanceOrdinal"), peer.instanceOrdinal()},
+                            {QStringLiteral("role"), QStringLiteral("From")}}});
 }
 
 void ApplicationController::goBack()
@@ -400,7 +514,8 @@ void ApplicationController::rejectDialog()
 }
 
 QString ApplicationController::saveSettings(const QString& serverUrl,
-                                            bool autoUpload, bool appAlwaysOnTop)
+                                            bool autoUpload, bool appAlwaysOnTop,
+                                            const QString& username)
 {
     if (m_clearingStorage) return QStringLiteral("The application is closing.");
     if (!m_runtime || !m_runtime->getSettingsManager()) {
@@ -414,13 +529,13 @@ QString ApplicationController::saveSettings(const QString& serverUrl,
     SettingsManager* settings = m_runtime->getSettingsManager();
     const QString canonical = normalized.toString(QUrl::FullyEncoded);
     const bool reconnect = canonical != settings->getServerUrl();
-    settings->setServerUrl(canonical);
-    settings->setAutoUploadImportedMedia(autoUpload);
-    settings->setAppAlwaysOnTop(appAlwaysOnTop);
-    settings->saveSettings();
+    const QByteArray picture = m_profileEditing ? m_draftProfilePicture : settings->profilePictureJpeg();
+    if (!settings->commitSettings(canonical, autoUpload, appAlwaysOnTop, username, picture, &error)) return error;
+    m_runtime->profileCache()->setLocalPicture(QStringLiteral("saved"), picture);
+    cancelProfileEdit();
     if (reconnect) {
         m_runtime->connectToServer();
-    }
+    } else m_runtime->syncRegistration();
     emit settingsChanged();
     return {};
 }
@@ -540,6 +655,7 @@ void ApplicationController::clearDialog()
     m_dialogKind = DialogKind::None;
     m_dialogTitle.clear();
     m_dialogMessage.clear();
+    m_dialogPeers.clear();
     emit dialogChanged();
 }
 
@@ -547,11 +663,12 @@ void ApplicationController::showDialog(DialogKind kind, const QString& title,
                                        const QString& message,
                                        const QString& acceptText,
                                        const QString& rejectText,
-                                       bool destructive, bool showReject)
+                                       bool destructive, bool showReject, const QVariantList& peers)
 {
     m_dialogKind = kind;
     m_dialogTitle = title;
     m_dialogMessage = message;
+    m_dialogPeers = peers;
     m_dialogAcceptText = acceptText;
     m_dialogRejectText = rejectText;
     m_dialogDestructive = destructive;

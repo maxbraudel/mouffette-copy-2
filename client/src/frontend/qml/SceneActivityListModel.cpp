@@ -35,9 +35,9 @@ QVariant SceneActivityListModel::data(const QModelIndex& index, int role) const
     const QString peer = peerDisplayName(activity.peerEndpointId);
     switch (role) {
     case SceneRunIdRole: return activity.sceneRunId;
-    case PrimaryTextRole:
-        return outgoing ? QStringLiteral("Sent to %1").arg(peer)
-                        : QStringLiteral("Received from %1").arg(peer);
+    case PrimaryTextRole: return peer;
+    case IdentityPrefixRole:
+        return outgoing ? QStringLiteral("Sent to") : QStringLiteral("Received from");
     case SecondaryTextRole: {
         QString value = QStringLiteral("Started %1 · %2")
             .arg(QDateTime::fromMSecsSinceEpoch(activity.startedAtEpochMs)
@@ -57,6 +57,10 @@ QVariant SceneActivityListModel::data(const QModelIndex& index, int role) const
     case DegradedRole: return activity.degraded;
     case HasProjectRole: return false;
     case IdentifierRole: return activity.sceneRunId;
+    case EndpointIdRole: return activity.peerEndpointId;
+    case PlatformRole:
+        return m_clientsModel
+            ? m_clientsModel->client(activity.peerEndpointId).getPlatform() : QString();
     default: return {};
     }
 }
@@ -75,7 +79,10 @@ QHash<int, QByteArray> SceneActivityListModel::roleNames() const
         { StartedAtRole, QByteArrayLiteral("startedAt") },
         { DegradedRole, QByteArrayLiteral("degraded") },
         { HasProjectRole, QByteArrayLiteral("hasProject") },
-        { IdentifierRole, QByteArrayLiteral("identifier") }
+        { IdentifierRole, QByteArrayLiteral("identifier") },
+        { EndpointIdRole, QByteArrayLiteral("endpointId") },
+        { PlatformRole, QByteArrayLiteral("platform") },
+        { IdentityPrefixRole, QByteArrayLiteral("identityPrefix") }
     };
 }
 
@@ -93,10 +100,33 @@ void SceneActivityListModel::setSource(SceneActivityModel* source)
 
 void SceneActivityListModel::setClientsModel(ClientListModel* clientsModel)
 {
+    if (m_clientsModel == clientsModel) return;
+    if (m_clientsModel) disconnect(m_clientsModel, nullptr, this, nullptr);
     m_clientsModel = clientsModel;
+    if (m_clientsModel) {
+        connect(m_clientsModel, &QAbstractItemModel::modelReset,
+                this, &SceneActivityListModel::refreshPeerPresentation);
+        connect(m_clientsModel, &QAbstractItemModel::dataChanged,
+                this, [this](const QModelIndex&, const QModelIndex&,
+                             const QList<int>& roles) {
+            if (roles.isEmpty() || roles.contains(ClientListModel::PrimaryTextRole)
+                || roles.contains(ClientListModel::PlatformRole)) {
+                refreshPeerPresentation();
+            }
+        });
+        connect(m_clientsModel, &QObject::destroyed, this, [this]() {
+            m_clientsModel = nullptr;
+            refreshPeerPresentation();
+        });
+    }
+    refreshPeerPresentation();
+}
+
+void SceneActivityListModel::refreshPeerPresentation()
+{
     if (!m_rows.isEmpty()) {
         emit dataChanged(index(0), index(m_rows.size() - 1),
-                         { PrimaryTextRole });
+                         { PrimaryTextRole, PlatformRole });
     }
 }
 
@@ -112,7 +142,7 @@ QString SceneActivityListModel::peerDisplayName(const QString& endpointId) const
 {
     if (m_clientsModel) {
         const ClientInfo client = m_clientsModel->client(endpointId);
-        if (!client.getMachineName().trimmed().isEmpty()) {
+        if (!client.endpointId().isEmpty() || !client.getId().isEmpty()) {
             return client.getInstanceDisplayName();
         }
     }

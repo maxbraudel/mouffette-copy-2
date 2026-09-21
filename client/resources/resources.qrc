@@ -4,6 +4,7 @@
         <file alias="client.production.env">../.env.production</file>
     </qresource>
     <qresource prefix="/icons">
+    <file alias="default-profile-picture.jpg">icons/default-profile-picture.jpg</file>
     <file alias="logo/mouffette-16.png">icons/logo/mouffette-16.png</file>
     <file alias="logo/mouffette-20.png">icons/logo/mouffette-20.png</file>
     <file alias="logo/mouffette-24.png">icons/logo/mouffette-24.png</file>

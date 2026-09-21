@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Layouts
 import Mouffette.App
 
 Item {
@@ -23,6 +24,7 @@ Item {
                 id: toast
                 required property int index
                 required property int severityKind
+                required property var peers
                 required property string message
                 required property bool dismissing
                 property bool entered: false
@@ -37,8 +39,10 @@ Item {
                     : toast.severityKind === 2 ? Theme.warningText
                                                : Theme.brandBlue
                 objectName: "toastBase_" + index
-                width: Math.min(420, Math.max(1, Math.ceil(toastMetrics.advanceWidth + 28)))
-                height: toastText.implicitHeight + 20
+                width: Math.min(Math.max(1, root.width - Theme.toastMarginLeft * 2),
+                                Math.min(420, Math.max(peers.length > 0 ? 280 : 1,
+                                    Math.ceil(toastMetrics.advanceWidth + 28))))
+                height: toastContent.implicitHeight + 20
                 radius: Theme.toastRadius
                 color: Theme.toastBackground
                 opacity: entered && !dismissing ? 1 : 0
@@ -58,20 +62,33 @@ Item {
                     font: toastText.font
                 }
 
-                Text {
-                    id: toastText
-                    objectName: "toastText_" + toast.index
+                ColumnLayout {
+                    id: toastContent
                     anchors.left: parent.left
                     anchors.right: parent.right
                     anchors.verticalCenter: parent.verticalCenter
                     anchors.leftMargin: 14
                     anchors.rightMargin: 14
-                    text: toast.message
-                    color: toast.accentColor
-                    font.pixelSize: Theme.toastTextSize
-                    font.bold: true
-                    wrapMode: Text.Wrap
-                    verticalAlignment: Text.AlignVCenter
+                    spacing: 7
+
+                    NotificationPeers {
+                        Layout.fillWidth: true
+                        controller: root.controller
+                        peers: toast.peers
+                        textColor: toast.accentColor
+                    }
+                    Text {
+                        id: toastText
+                        objectName: "toastText_" + toast.index
+                        Layout.fillWidth: true
+                        text: toast.message
+                        textFormat: Text.PlainText
+                        color: toast.accentColor
+                        font.pixelSize: Theme.toastTextSize
+                        font.bold: true
+                        wrapMode: Text.Wrap
+                        verticalAlignment: Text.AlignVCenter
+                    }
                 }
 
                 transform: Translate {

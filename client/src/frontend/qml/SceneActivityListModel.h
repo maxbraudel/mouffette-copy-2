@@ -26,7 +26,10 @@ public:
         StartedAtRole,
         DegradedRole,
         HasProjectRole,
-        IdentifierRole
+        IdentifierRole,
+        EndpointIdRole,
+        PlatformRole,
+        IdentityPrefixRole
     };
 
     explicit SceneActivityListModel(QObject* parent = nullptr);
@@ -40,6 +43,7 @@ public:
 
 private:
     void reload();
+    void refreshPeerPresentation();
     QString peerDisplayName(const QString& endpointId) const;
     static QString formatDuration(qint64 elapsedMs);
 

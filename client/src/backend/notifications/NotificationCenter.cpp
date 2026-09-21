@@ -115,6 +115,8 @@ QString NotificationCenter::publish(const NotificationRequest& request)
     entry.remoteSessionId = request.remoteSessionId;
     entry.sceneRunId = request.sceneRunId;
     entry.terminal = request.terminal;
+    entry.peers = request.peers;
+    if (!entry.isValid()) return {};
 
     m_history.entries.prepend(entry);
     while (m_history.entries.size() > HistoryStore::MaximumEntries) {
@@ -140,7 +142,7 @@ QString NotificationCenter::publish(const NotificationRequest& request)
     emit entryAdded(entry);
     emit historyChanged();
     emitUnreadIfChanged(previousUnread);
-    emit toastRequested(entry.message, entry.severity, request.toastDurationMs);
+    emit toastRequested(entry, request.toastDurationMs);
     return entry.id;
 }
 

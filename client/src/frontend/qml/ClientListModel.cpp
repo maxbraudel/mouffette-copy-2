@@ -34,7 +34,7 @@ QVariant ClientListModel::data(const QModelIndex& index, int role) const
     const QString status = client.availabilityBadgeText();
     switch (role) {
     case EndpointIdRole: return endpointId;
-    case PrimaryTextRole: return client.getIdentityDisplayText();
+    case PrimaryTextRole: return client.getInstanceDisplayName();
     case SecondaryTextRole:
         return client.getProjectDeadlineText(MouffetteClock::anchoredEpochMs());
     case BadgeTextRole: return status;
@@ -45,6 +45,7 @@ QVariant ClientListModel::data(const QModelIndex& index, int role) const
     case ProjectIdRole: return client.projectId();
     case HasProjectRole: return client.hasProject();
     case IdentifierRole: return endpointId;
+    case IdentityPrefixRole: return QString();
     default: return {};
     }
 }
@@ -62,7 +63,8 @@ QHash<int, QByteArray> ClientListModel::roleNames() const
         { PlatformRole, QByteArrayLiteral("platform") },
         { ProjectIdRole, QByteArrayLiteral("projectId") },
         { HasProjectRole, QByteArrayLiteral("hasProject") },
-        { IdentifierRole, QByteArrayLiteral("identifier") }
+        { IdentifierRole, QByteArrayLiteral("identifier") },
+        { IdentityPrefixRole, QByteArrayLiteral("identityPrefix") }
     };
 }
 

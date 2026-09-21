@@ -5,6 +5,7 @@
 #include <QJsonObject>
 #include <QString>
 #include <QStringList>
+#include <QVariantList>
 #include "backend/runtime/storage/StorageVersions.h"
 #include "backend/runtime/storage/StorageUpgradeEngine.h"
 
@@ -19,6 +20,21 @@ enum class NotificationSeverity {
 QString notificationSeverityToString(NotificationSeverity severity);
 bool notificationSeverityFromString(const QString& value, NotificationSeverity* severity);
 
+// Durable references contain technical identity only. Usernames and pictures
+// are resolved from the current in-memory profile when the UI displays them.
+struct NotificationPeer {
+    QString endpointId;
+    QString machineName;
+    int instanceOrdinal = 1;
+    QString role;
+
+    bool isValid() const;
+    QJsonObject toJson() const;
+    static bool fromJson(const QJsonObject& json, NotificationPeer* peer);
+};
+
+QVariantList notificationPeersToVariant(const QList<NotificationPeer>& peers);
+
 struct NotificationEntry {
     QString id;
     qint64 timestampMs = -1;
@@ -31,6 +47,7 @@ struct NotificationEntry {
     QString remoteSessionId;
     QString sceneRunId;
     bool terminal = false;
+    QList<NotificationPeer> peers;
 
     bool isValid() const;
     QJsonObject toJson() const;

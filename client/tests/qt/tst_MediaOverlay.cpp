@@ -302,6 +302,7 @@ Item {
         ListElement {
             severityKind: 0
             message: "Connected"
+            peers: []
             dismissing: false
         }
     }
@@ -1611,7 +1612,7 @@ void MediaOverlayTest::unavailableActionsStayClickableAndExplainWhy()
         QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier,
             button->mapToScene({button->width() / 2, button->height() / 2}).toPoint());
         QCOMPARE(toasts.count(), count + 1);
-        QCOMPARE(toasts.last().at(0).toString(), expected);
+        QCOMPARE(toasts.last().at(0).value<NotificationEntry>().message, expected);
         QCOMPARE(uploadCalls, 0);
         QVERIFY(!session.actionPending());
         QVERIFY(!host->remoteSceneLaunching());
@@ -1646,13 +1647,13 @@ void MediaOverlayTest::unavailableActionsStayClickableAndExplainWhy()
     QVERIFY(session.actionPending());
     QVERIFY(upload->isEnabled() && remote->isEnabled());
     session.triggerUploadAction();
-    QCOMPARE(toasts.last().at(0).toString(), "An action is already being processed. Please wait");
+    QCOMPARE(toasts.last().at(0).value<NotificationEntry>().message, "An action is already being processed. Please wait");
     session.toggleRemoteScene();
-    QCOMPARE(toasts.last().at(0).toString(), "An action is already being processed. Please wait");
+    QCOMPARE(toasts.last().at(0).value<NotificationEntry>().message, "An action is already being processed. Please wait");
     projectExists = false;
     QTRY_VERIFY(!session.actionPending());
     QCOMPARE(uploadCalls, 0);
-    QCOMPARE(toasts.last().at(0).toString(), "Create a project first");
+    QCOMPARE(toasts.last().at(0).value<NotificationEntry>().message, "Create a project first");
 }
 
 void MediaOverlayTest::uploadActionLocksBeforeDispatchAndRecovers()
@@ -2759,10 +2760,10 @@ Rectangle {
     }
     ListModel {
         id: toasts
-        ListElement { severityKind: 0; message: "Connected"; dismissing: false }
-        ListElement { severityKind: 1; message: "Connection lost"; dismissing: false }
-        ListElement { severityKind: 2; message: "Reconnecting"; dismissing: false }
-        ListElement { severityKind: 3; message: "Project loaded"; dismissing: false }
+        ListElement { severityKind: 0; message: "Connected"; peers: []; dismissing: false }
+        ListElement { severityKind: 1; message: "Connection lost"; peers: []; dismissing: false }
+        ListElement { severityKind: 2; message: "Reconnecting"; peers: []; dismissing: false }
+        ListElement { severityKind: 3; message: "Project loaded"; peers: []; dismissing: false }
     }
     QtObject {
         id: testController

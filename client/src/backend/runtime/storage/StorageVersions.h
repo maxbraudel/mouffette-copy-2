@@ -5,7 +5,7 @@
 namespace StorageVersions {
 inline constexpr int Settings = 1;
 inline constexpr int Projects = 8;
-inline constexpr int History = 1;
+inline constexpr int History = 2;
 inline constexpr int Identity = 1;
 inline constexpr int ReceivedMedia = 2;
 }

@@ -8,6 +8,9 @@
 #include "backend/security/DeviceIdentityStore.h"
 
 #include <QJsonDocument>
+#include <QBuffer>
+#include <QCryptographicHash>
+#include <QImage>
 #include <QPointer>
 #include <QFile>
 #include <QFileInfo>
@@ -507,7 +510,10 @@ void ConnectionManagerTest::signedHandshakeAndHeartbeat() {
         {"instanceOrdinal", QStringLiteral("3")}, {"instanceId", "instance-03"},
         {"endpointId", client.endpointId()}, {"installationId", "invalid"},
         {"runtimeId", "invalid"}, {"canAcceptSession", true},
-        {"status", "unknown"}, {"reason", "unknown"}, {"lastSeenAt", -1}
+        {"status", "unknown"}, {"reason", "unknown"}, {"lastSeenAt", -1},
+        {"username", 3}, {"username", QString(65, QLatin1Char('x'))},
+        {"username", QStringLiteral("bad\nname")}, {"profilePictureHash", false},
+        {"profilePictureHash", QStringLiteral("not-a-hash")}
     };
     for (const auto& corruption : corruptions) {
         QJsonObject invalidPresence = validPresence;
@@ -542,6 +548,92 @@ void ConnectionManagerTest::signedHandshakeAndHeartbeat() {
     QVERIFY(deliverPresence(retainedPeers, 2));
     QCOMPARE(lists.size(), 2);
     QCOMPARE(qvariant_cast<QList<ClientInfo>>(lists.last().first()).size(), 4097);
+
+    // Optional profile metadata is authoritative, including explicit clearing,
+    // while a missing offline profile remains distinct from an empty username.
+    QJsonObject profilePresence = validPresence;
+    profilePresence.insert("username", QStringLiteral("🎬").repeated(64));
+    profilePresence.insert("profilePictureHash", QString(64, QLatin1Char('a')));
+    QVERIFY(deliverPresence(QJsonArray{profilePresence}, 3));
+    QCOMPARE(lists.size(), 3);
+    QCOMPARE(qvariant_cast<QList<ClientInfo>>(lists.last().first()).first().username(),
+             QStringLiteral("🎬").repeated(64));
+    profilePresence.insert("username", QString());
+    profilePresence.insert("profilePictureHash", QString());
+    QVERIFY(deliverPresence(QJsonArray{profilePresence}, 4));
+    const ClientInfo clearedProfile = qvariant_cast<QList<ClientInfo>>(lists.last().first()).first();
+    QVERIFY(clearedProfile.hasProfileMetadata());
+    QCOMPARE(clearedProfile.getInstanceDisplayName(), QStringLiteral("Studio (3)"));
+
+    QImage picture(250, 250, QImage::Format_RGB32);
+    picture.fill(qRgb(50, 90, 150));
+    QByteArray jpeg;
+    QBuffer jpegBuffer(&jpeg);
+    QVERIFY(jpegBuffer.open(QIODevice::WriteOnly));
+    QVERIFY(picture.save(&jpegBuffer, "JPEG", 80));
+    const QString pictureHash = QString::fromLatin1(
+        QCryptographicHash::hash(jpeg, QCryptographicHash::Sha256).toHex());
+    const QString profileEndpoint = validPresence.value("endpointId").toString();
+    QSignalSpy pictures(&client, &WebSocketClient::profilePictureReceived);
+    QVERIFY(client.requestProfilePicture(profileEndpoint, QStringLiteral("bad-hash")).isEmpty());
+    const QString pictureRequest = client.requestProfilePicture(profileEndpoint, pictureHash);
+    QVERIFY(!pictureRequest.isEmpty());
+    QCOMPARE(client.requestProfilePicture(profileEndpoint, pictureHash), pictureRequest);
+    auto deliverPicture = [&](QJsonObject packet) {
+        packet.insert("type", "profile_picture_response");
+        packet.insert("protocolVersion", WebSocketClient::ProtocolVersion);
+        packet.insert("serverBootId", bootId);
+        packet.insert("messageId", QUuid::createUuid().toString(QUuid::WithoutBraces));
+        return QMetaObject::invokeMethod(&client, "onTextMessageReceived", Qt::DirectConnection,
+            Q_ARG(QString, QString::fromUtf8(QJsonDocument(packet).toJson(QJsonDocument::Compact))));
+    };
+    QJsonObject pictureResponse{{"requestId", pictureRequest}, {"endpointId", profileEndpoint},
+                               {"profilePictureHash", pictureHash},
+                               {"profilePictureJpeg", QString::fromLatin1(jpeg.toBase64())},
+                               {"connectionGeneration", static_cast<double>(client.connectionGeneration())}};
+    const QList<QPair<QString, QJsonValue>> uncorrelatedPictures{
+        {"requestId", QUuid::createUuid().toString(QUuid::WithoutBraces)},
+        {"endpointId", client.endpointId()}, {"profilePictureHash", QString(64, QLatin1Char('f'))},
+        {"connectionGeneration", static_cast<double>(client.connectionGeneration() + 1)}
+    };
+    for (const auto& corruption : uncorrelatedPictures) {
+        QJsonObject invalid = pictureResponse;
+        invalid.insert(corruption.first, corruption.second);
+        QVERIFY(deliverPicture(invalid));
+        QCOMPARE(pictures.size(), 0);
+    }
+    QVERIFY(deliverPicture(pictureResponse));
+    QCOMPARE(pictures.size(), 1);
+    QCOMPARE(pictures.last().at(3).toByteArray(), jpeg);
+    QVERIFY(deliverPicture(pictureResponse));
+    QCOMPARE(pictures.size(), 1); // Duplicate responses cannot apply twice.
+
+    for (const QString& encoded : {QString(), QStringLiteral("not-base64"),
+                                  QString::fromLatin1(jpeg.toBase64()) + QLatin1Char('\n')}) {
+        pictureResponse.insert("requestId", client.requestProfilePicture(profileEndpoint, pictureHash));
+        pictureResponse.insert("profilePictureJpeg", encoded);
+        const int before = pictures.size();
+        QVERIFY(deliverPicture(pictureResponse));
+        QCOMPARE(pictures.size(), before + 1);
+        QVERIFY(pictures.last().at(3).toByteArray().isEmpty());
+    }
+    // A valid hash alone cannot turn a PNG or wrong-sized JPEG into a profile.
+    for (const bool wrongDimensions : {false, true}) {
+        QByteArray invalidPicture;
+        QBuffer invalidBuffer(&invalidPicture);
+        QVERIFY(invalidBuffer.open(QIODevice::WriteOnly));
+        const QImage invalidImage = wrongDimensions ? picture.scaled(249, 250) : picture;
+        QVERIFY(invalidImage.save(&invalidBuffer, wrongDimensions ? "JPEG" : "PNG"));
+        const QString invalidHash = QString::fromLatin1(
+            QCryptographicHash::hash(invalidPicture, QCryptographicHash::Sha256).toHex());
+        pictureResponse.insert("requestId", client.requestProfilePicture(profileEndpoint, invalidHash));
+        pictureResponse.insert("profilePictureHash", invalidHash);
+        pictureResponse.insert("profilePictureJpeg", QString::fromLatin1(invalidPicture.toBase64()));
+        const int before = pictures.size();
+        QVERIFY(deliverPicture(pictureResponse));
+        QCOMPARE(pictures.size(), before + 1);
+        QVERIFY(pictures.last().at(3).toByteArray().isEmpty());
+    }
 
     // A delayed heartbeat is a queueing outlier, not evidence that the
     // previously established clock mapping became less precise. Scene launch

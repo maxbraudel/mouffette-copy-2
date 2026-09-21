@@ -74,9 +74,18 @@ void UploadEventHandler::uploadWorkspace(const QString& workspaceEndpointId, boo
     }
     uploadManager->setTargetClientId(targetClientId);
 
-    const QString clientLabel = session->lastClientInfo.getDisplayText().isEmpty()
-        ? targetClientId
-        : session->lastClientInfo.getDisplayText();
+    const NotificationPeer targetPeer{targetClientId,
+        session->lastClientInfo.getMachineName(),
+        qMax(1, session->lastClientInfo.instanceOrdinal()), QStringLiteral("To")};
+    const auto notifyTarget = [&targetPeer](const QString& message) {
+        if (auto* system = ToastNotificationSystem::instance()) {
+            NotificationRequest notification;
+            notification.category = QStringLiteral("Upload");
+            notification.message = message;
+            notification.peers = {targetPeer};
+            system->publishNotification(notification);
+        }
+    };
 
     const bool managerHasActive = uploadManager->hasActiveUpload() &&
         uploadManager->activeUploadTargetClientId() == targetClientId;
@@ -189,8 +198,7 @@ void UploadEventHandler::uploadWorkspace(const QString& workspaceEndpointId, boo
             knownRemoteFileIds.unite(currentFileIds);
             if (uploadManager->requestUnload(targetClientId,
                                              knownRemoteFileIds)) {
-                TOAST_INFO(QString("Removing remote media from %1…")
-                               .arg(clientLabel));
+                notifyTarget(QStringLiteral("Removing remote media…"));
             } else if (!uploadManager->isRemoving()) {
                 TOAST_ERROR("Remote media could not be unloaded safely",
                             AppConfig::instance().toastErrorDurationMs());
@@ -231,8 +239,7 @@ void UploadEventHandler::uploadWorkspace(const QString& workspaceEndpointId, boo
                 media->setUploadUploading(0);
             }
         }
-        TOAST_INFO(QString("Starting upload of %1 file(s) to %2...")
-                       .arg(files.size()).arg(clientLabel));
+        notifyTarget(QStringLiteral("Starting upload of %1 file(s)...").arg(files.size()));
     } else if (m_mainWindow->activeUploadWorkspaceEndpointId() == session->targetEndpointId) {
         m_mainWindow->setActiveUploadWorkspaceEndpointId(QString());
         uploadManager->setActiveWorkspaceEndpointId(QString());

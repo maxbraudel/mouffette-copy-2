@@ -19,7 +19,8 @@ public:
         MessageRole,
         TimestampTextRole,
         TimestampRole,
-        ReadRole
+        ReadRole,
+        PeersRole
     };
 
     explicit HistoryListModel(QObject* parent = nullptr);
@@ -45,7 +46,8 @@ public:
         ToastIdRole = Qt::UserRole + 1,
         SeverityKindRole,
         MessageRole,
-        DismissingRole
+        DismissingRole,
+        PeersRole
     };
 
     explicit ToastListModel(QObject* parent = nullptr);
@@ -60,10 +62,10 @@ private:
         QString message;
         int severityKind = 3;
         bool dismissing = false;
+        QList<NotificationPeer> peers;
     };
 
-    void appendToast(const QString& message, NotificationSeverity severity,
-                     int durationMs);
+    void appendToast(const NotificationEntry& entry, int durationMs);
     void beginDismissToast(const QString& id);
     void removeToast(const QString& id);
     static int severityKind(NotificationSeverity severity);

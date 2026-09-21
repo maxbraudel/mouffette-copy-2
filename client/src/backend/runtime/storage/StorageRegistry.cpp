@@ -3,6 +3,7 @@
 #include "StorageVersions.h"
 #include "migrations/settings/v0_to_v1.h"
 #include "migrations/projects/v6_to_v7.h"
+#include "migrations/history/v1_to_v2.h"
 #include "backend/domain/project/ProjectStore.h"
 #include "backend/notifications/HistoryStore.h"
 
@@ -110,7 +111,9 @@ QList<Component> components(const RuntimeProfileContext& context)
          [=] { return writeJson(root, history,
                     {{QStringLiteral("schemaVersion"), StorageVersions::History},
                      {QStringLiteral("entries"), QJsonArray{}},
-                     {QStringLiteral("terminalCorrelationIds"), QJsonArray{}}}); }, {}},
+                     {QStringLiteral("terminalCorrelationIds"), QJsonArray{}}}); },
+         {{1, 2, Transition::Kind::Migrate,
+           [=] { return Migrations::historyV1ToV2(root, history); }}}},
         {QStringLiteral("cache"), StorageVersions::ReceivedMedia,
          [=] { return readVersionedJson(root, cacheMetadata, StorageVersions::ReceivedMedia, 4096); },
          [=] {

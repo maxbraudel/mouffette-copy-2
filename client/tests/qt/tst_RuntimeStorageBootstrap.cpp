@@ -7,6 +7,7 @@
 #include "backend/security/DeviceIdentityStore.h"
 #include "backend/domain/project/ProjectStore.h"
 #include "backend/notifications/HistoryStore.h"
+#include "backend/notifications/NotificationCenter.h"
 
 #include <QDir>
 #include <QFile>
@@ -131,6 +132,7 @@ private slots:
     void projectTimelineResetPreservesOtherComponents();
     void unversionedSettingsMigration_data();
     void unversionedSettingsMigration();
+    void historyMigrationPreservesLegacyRecordsAndReplayState();
     void componentMismatch_data();
     void componentMismatch();
     void corruptComponents_data();
@@ -264,6 +266,61 @@ void RuntimeStorageBootstrapTest::unversionedSettingsMigration()
     for (auto it = before.cbegin(); it != before.cend(); ++it)
         if (it.key() != QLatin1String("settings")) QCOMPARE(after.value(it.key()), it.value());
     QCOMPARE(reportFor(bootstrap.run(), "settings").action, Action::Preserved);
+}
+
+void RuntimeStorageBootstrapTest::historyMigrationPreservesLegacyRecordsAndReplayState()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const auto context = temporaryContext(directory.path());
+    RuntimeStorageBootstrap bootstrap(context);
+    QVERIFY(bootstrap.run().succeeded());
+    QVERIFY(seedData());
+    const auto before = snapshots(context);
+    const QString path = componentPath(context, QStringLiteral("history"));
+    NotificationEntry legacy;
+    legacy.id = QStringLiteral("ce9bddf8-5f23-4ab6-af22-00ac67cc78e8");
+    legacy.timestampMs = 42;
+    legacy.message = QStringLiteral("Uploaded to old-hostname (2)");
+    legacy.read = true;
+    legacy.terminal = true;
+    legacy.correlationId = QStringLiteral("upload:legacy");
+    auto legacyJson = legacy.toJson();
+    legacyJson.remove(QStringLiteral("peers"));
+    const QJsonArray replayIds{QStringLiteral("upload:earlier"), legacy.correlationId};
+    QVERIFY(writeJson(context.rootPath, path,
+        {{QStringLiteral("schemaVersion"), 1},
+         {QStringLiteral("entries"), QJsonArray{legacyJson}},
+         {QStringLiteral("terminalCorrelationIds"), replayIds}}).succeeded());
+
+    const auto result = bootstrap.run();
+    QVERIFY2(result.succeeded(), qPrintable(result.cause));
+    QCOMPARE(reportFor(result, QStringLiteral("history")).action, Action::Migrated);
+    NotificationHistoryData restored;
+    HistoryStore history(path);
+    QVERIFY2(history.load(&restored), qPrintable(history.lastError()));
+    QCOMPARE(restored.entries.size(), 1);
+    const auto& entry = restored.entries.first();
+    QCOMPARE(entry.id, legacy.id);
+    QCOMPARE(entry.message, legacy.message);
+    QCOMPARE(entry.timestampMs, legacy.timestampMs);
+    QVERIFY(entry.read);
+    QVERIFY(entry.terminal);
+    QVERIFY(entry.peers.isEmpty());
+    QCOMPARE(restored.terminalCorrelationIds,
+             QStringList({QStringLiteral("upload:earlier"), legacy.correlationId}));
+    NotificationCenter notifications(&history);
+    NotificationRequest replay;
+    replay.message = QStringLiteral("Late replay");
+    replay.terminal = true;
+    replay.correlationId = legacy.correlationId;
+    QVERIFY(notifications.publish(replay).isEmpty());
+    const auto migrated = readBytes(path);
+    QCOMPARE(reportFor(bootstrap.run(), QStringLiteral("history")).action, Action::Preserved);
+    QCOMPARE(readBytes(path), migrated);
+    const auto after = snapshots(context);
+    for (auto it = before.cbegin(); it != before.cend(); ++it)
+        if (it.key() != QLatin1String("history")) QCOMPARE(after.value(it.key()), it.value());
 }
 
 void RuntimeStorageBootstrapTest::componentMismatch_data()

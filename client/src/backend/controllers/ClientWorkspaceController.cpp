@@ -85,6 +85,7 @@ ClientWorkspaceController::ClientWorkspace* ClientWorkspaceController::ensureWor
 
     workspace->canvas->setRemoteSceneTarget(
         workspace->targetEndpointId, workspace->lastClientInfo.getInstanceDisplayName());
+    workspace->canvas->updateRemoteSceneTargetFromClientList({workspace->lastClientInfo});
     if (workspace->lastClientInfo.isOnline()) {
         workspace->remoteContentClearedOnDisconnect = false;
     }
@@ -257,6 +258,7 @@ void ClientWorkspaceController::switchToWorkspace(const QString& targetEndpointI
 
     workspace->canvas->setRemoteSceneTarget(
         workspace->targetEndpointId, workspace->lastClientInfo.getInstanceDisplayName());
+    workspace->canvas->updateRemoteSceneTargetFromClientList({workspace->lastClientInfo});
     m_runtime->updateWorkspaceCapabilities(targetEndpointId);
     updateUploadButtonForWorkspace(workspace);
 }

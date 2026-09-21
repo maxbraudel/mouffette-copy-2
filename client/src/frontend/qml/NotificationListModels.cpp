@@ -32,6 +32,7 @@ QVariant HistoryListModel::data(const QModelIndex& index, int role) const
             .toString(QStringLiteral("dd/MM/yyyy HH:mm:ss"));
     case TimestampRole: return entry.timestampMs;
     case ReadRole: return entry.read;
+    case PeersRole: return notificationPeersToVariant(entry.peers);
     default: return {};
     }
 }
@@ -46,7 +47,8 @@ QHash<int, QByteArray> HistoryListModel::roleNames() const
         { MessageRole, QByteArrayLiteral("message") },
         { TimestampTextRole, QByteArrayLiteral("timestampText") },
         { TimestampRole, QByteArrayLiteral("timestamp") },
-        { ReadRole, QByteArrayLiteral("read") }
+        { ReadRole, QByteArrayLiteral("read") },
+        { PeersRole, QByteArrayLiteral("peers") }
     };
 }
 
@@ -104,6 +106,7 @@ QVariant ToastListModel::data(const QModelIndex& index, int role) const
     case SeverityKindRole: return toast.severityKind;
     case MessageRole: return toast.message;
     case DismissingRole: return toast.dismissing;
+    case PeersRole: return notificationPeersToVariant(toast.peers);
     default: return {};
     }
 }
@@ -114,7 +117,8 @@ QHash<int, QByteArray> ToastListModel::roleNames() const
         { ToastIdRole, QByteArrayLiteral("toastId") },
         { SeverityKindRole, QByteArrayLiteral("severityKind") },
         { MessageRole, QByteArrayLiteral("message") },
-        { DismissingRole, QByteArrayLiteral("dismissing") }
+        { DismissingRole, QByteArrayLiteral("dismissing") },
+        { PeersRole, QByteArrayLiteral("peers") }
     };
 }
 
@@ -129,11 +133,9 @@ void ToastListModel::setSource(NotificationCenter* source)
     }
 }
 
-void ToastListModel::appendToast(const QString& message,
-                                 NotificationSeverity severity,
-                                 int durationMs)
+void ToastListModel::appendToast(const NotificationEntry& entry, int durationMs)
 {
-    if (message.isEmpty()) return;
+    if (entry.message.isEmpty()) return;
     if (m_rows.size() >= 10) {
         beginRemoveRows(QModelIndex(), 0, 0);
         m_rows.removeFirst();
@@ -142,8 +144,9 @@ void ToastListModel::appendToast(const QString& message,
 
     Toast toast;
     toast.id = QUuid::createUuid().toString(QUuid::WithoutBraces);
-    toast.message = message;
-    toast.severityKind = severityKind(severity);
+    toast.message = entry.message;
+    toast.severityKind = severityKind(entry.severity);
+    toast.peers = entry.peers;
     const int row = m_rows.size();
     beginInsertRows(QModelIndex(), row, row);
     m_rows.append(toast);

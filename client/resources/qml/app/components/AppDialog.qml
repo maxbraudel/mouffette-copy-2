@@ -6,6 +6,8 @@ import Mouffette.App
 Dialog {
     id: dialog
 
+    property var controller: null
+    property var peers: []
     property string message: ""
     property string detail: ""
     property string acceptText: "OK"
@@ -30,6 +32,11 @@ Dialog {
     contentItem: ColumnLayout {
         spacing: 14
 
+        NotificationPeers {
+            Layout.fillWidth: true
+            controller: dialog.controller
+            peers: dialog.peers
+        }
         Text {
             Layout.fillWidth: true
             text: dialog.message

@@ -61,7 +61,10 @@ public:
     }
     
     // Client registration
-    void registerClient(const QString& machineName, const QString& platform, const QList<ScreenInfo>& screens, int volumePercent);
+    void registerClient(const QString& machineName, const QString& platform,
+                        const QList<ScreenInfo>& screens, int volumePercent,
+                        const QString& username = {}, const QByteArray& profilePictureJpeg = {});
+    QString requestProfilePicture(const QString& endpointId, const QString& profilePictureHash);
     void invalidateLocalDeviceSnapshot();
 
     // Protocol-v5 uploads. Authenticated socket identity supplies the peer;
@@ -233,6 +236,8 @@ signals:
                                     quint64 newGeneration);
     void clientListReceived(const QList<ClientInfo>& clients);
     void registrationConfirmed(const ClientInfo& clientInfo);
+    void profilePictureReceived(const QString& requestId, const QString& endpointId,
+                                const QString& profilePictureHash, const QByteArray& jpeg);
     void messageReceived(const QJsonObject& message);
 
     // Canonical protocol v5 upload envelope for both sender and target roles.

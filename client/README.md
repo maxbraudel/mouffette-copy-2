@@ -131,6 +131,11 @@ complete release contract and validation checklist.
 
 ## Features
 
+Clients can choose an optional username and profile picture in Settings.
+Pictures are centered, cropped and converted locally to a 250 × 250 JPEG.
+Only the owning client persists its profile; the server relays it in memory.
+See [client profiles](docs/client-profiles.md) for lifecycle and compatibility.
+
 - ✅ WebSocket connection to Mouffette server
 - ✅ Client registration with machine name and screen info
 - ✅ Real-time client discovery

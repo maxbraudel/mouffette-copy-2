@@ -49,6 +49,8 @@
 #include "frontend/rendering/remote/RemoteVideoFrameItem.h"
 #include "shared/rendering/MediaFrameSource.h"
 #include "frontend/qml/ClientWorkspaceViewModel.h"
+#include "frontend/qml/ClientListModel.h"
+#include "frontend/qml/SceneActivityListModel.h"
 #include "frontend/qml/MediaSettingsViewModel.h"
 #include "frontend/qml/WindowPresentation.h"
 #ifdef Q_OS_MACOS
@@ -175,11 +177,21 @@ private slots:
             "        property string settingsServerUrl: \"ws://127.0.0.1:3000\"\n"
             "        property bool settingsAutoUpload: true\n"
             "        property bool settingsAppAlwaysOnTop: true\n"
+            "        property string settingsUsername: \"Original name\"\n"
+            "        property string settingsHostname: \"Original hostname\"\n"
+            "        property string settingsProfilePictureSource: \"qrc:/icons/logo/mouffette-64.png\"\n"
+            "        property string settingsProfilePictureDraftSource: settingsProfilePictureSource\n"
             "        property bool ready: true\n"
             "        property bool clearingStorage: false\n"
             "        property int saveCalls: 0\n"
-            "        function saveSettings(url, upload, priority) {\n"
-            "            settingsAppAlwaysOnTop = priority; ++saveCalls; return \"\"\n"
+            "        function beginProfileEdit() { settingsProfilePictureDraftSource = settingsProfilePictureSource }\n"
+            "        function cancelProfileEdit() { settingsProfilePictureDraftSource = settingsProfilePictureSource }\n"
+            "        function removeProfilePicture() { settingsProfilePictureDraftSource = \"\" }\n"
+            "        function importProfilePicture(url) { settingsProfilePictureDraftSource = url.toString(); return \"\" }\n"
+            "        function saveSettings(url, upload, priority, username) {\n"
+            "            settingsAppAlwaysOnTop = priority; settingsUsername = username;\n"
+            "            settingsProfilePictureSource = settingsProfilePictureDraftSource;\n"
+            "            ++saveCalls; return \"\"\n"
             "        }\n"
             "    }\n"
             "    property SettingsDialog settingsDialog: SettingsDialog { controller: settingsController }\n"
@@ -191,7 +203,10 @@ private slots:
         QObject* controller = window->property("settingsController").value<QObject*>();
         QVERIFY(dialog && controller);
         QObject* checkbox = dialog->findChild<QObject*>(QStringLiteral("settingsAppAlwaysOnTop"));
-        QVERIFY(checkbox);
+        QObject* username = dialog->findChild<QObject*>(QStringLiteral("settingsUsername"));
+        QObject* preview = dialog->findChild<QObject*>(QStringLiteral("settingsProfilePicture"));
+        QObject* remove = dialog->findChild<QObject*>(QStringLiteral("settingsRemoveProfilePicture"));
+        QVERIFY(checkbox && username && preview && remove);
         const auto content = dialog->property("contentItem").value<QQuickItem*>();
         QObject* cancel = findQuickItemWithProperty(content, "text", QStringLiteral("Cancel"));
         QObject* save = findQuickItemWithProperty(content, "text", QStringLiteral("Save"));
@@ -199,23 +214,181 @@ private slots:
         QVERIFY(QMetaObject::invokeMethod(dialog, "open"));
         QTRY_VERIFY(dialog->property("opened").toBool());
         QVERIFY(checkbox->property("checked").toBool());
+        QCOMPARE(username->property("text").toString(), QStringLiteral("Original name"));
+        QCOMPARE(username->property("placeholderText").toString(), QStringLiteral("Original hostname"));
+        QCOMPARE(preview->property("source").toUrl(), QUrl(QStringLiteral("qrc:/icons/logo/mouffette-64.png")));
         checkbox->setProperty("checked", false);
+        username->setProperty("text", QStringLiteral("Discarded name"));
+        QVERIFY(QMetaObject::invokeMethod(remove, "clicked"));
+        QCOMPARE(preview->property("source").toUrl(), QUrl());
         QVERIFY(controller->property("settingsAppAlwaysOnTop").toBool());
+        QCOMPARE(controller->property("settingsUsername").toString(), QStringLiteral("Original name"));
+        QCOMPARE(controller->property("settingsProfilePictureSource").toString(), QStringLiteral("qrc:/icons/logo/mouffette-64.png"));
         QVERIFY(QMetaObject::invokeMethod(cancel, "clicked"));
         QTRY_VERIFY(!dialog->property("visible").toBool());
         QCOMPARE(controller->property("saveCalls").toInt(), 0);
         QVERIFY(QMetaObject::invokeMethod(dialog, "open"));
         QTRY_VERIFY(dialog->property("opened").toBool());
         QVERIFY(checkbox->property("checked").toBool());
+        QCOMPARE(username->property("text").toString(), QStringLiteral("Original name"));
+        QCOMPARE(preview->property("source").toUrl(), QUrl(QStringLiteral("qrc:/icons/logo/mouffette-64.png")));
         checkbox->setProperty("checked", false);
+        username->setProperty("text", QStringLiteral("Saved username"));
+        QVERIFY(QMetaObject::invokeMethod(remove, "clicked"));
         QVERIFY(QMetaObject::invokeMethod(save, "clicked"));
         QTRY_VERIFY(!dialog->property("visible").toBool());
         QVERIFY(!controller->property("settingsAppAlwaysOnTop").toBool());
+        QCOMPARE(controller->property("settingsUsername").toString(), QStringLiteral("Saved username"));
+        QVERIFY(controller->property("settingsProfilePictureSource").toString().isEmpty());
         QCOMPARE(controller->property("saveCalls").toInt(), 1);
         QVERIFY(QMetaObject::invokeMethod(dialog, "open"));
         QTRY_VERIFY(dialog->property("opened").toBool());
         QVERIFY(!checkbox->property("checked").toBool());
+        QCOMPARE(username->property("text").toString(), QStringLiteral("Saved username"));
+        QVERIFY(!remove->property("enabled").toBool());
+        auto* quickWindow = qobject_cast<QQuickWindow*>(window.data());
+        auto* saveItem = qobject_cast<QQuickItem*>(save);
+        QVERIFY(quickWindow && saveItem);
+        quickWindow->resize(480, 360);
+        QTRY_VERIFY(dialog->property("height").toReal() <= 320);
+        QTRY_VERIFY(saveItem->mapToScene(QPointF(saveItem->width(), saveItem->height())).y()
+                    <= quickWindow->height());
+        const QString artifacts = qEnvironmentVariable("MOUFFETTE_PROFILE_ARTIFACT_DIR");
+        if (!artifacts.isEmpty()) {
+            QVERIFY(QDir().mkpath(artifacts));
+            QSignalSpy frames(quickWindow, &QQuickWindow::frameSwapped);
+            quickWindow->update();
+            QTRY_VERIFY(!frames.isEmpty());
+            const QString scale = qEnvironmentVariable("QT_SCALE_FACTOR", QStringLiteral("1"));
+            QVERIFY(quickWindow->grabWindow().save(
+                QDir(artifacts).filePath(QStringLiteral("settings-narrow-scale-%1.png").arg(scale))));
+        }
         QVERIFY(QMetaObject::invokeMethod(cancel, "clicked"));
+    }
+
+    void clientIdentityUpdatesPropagateToLiveScenes()
+    {
+        ClientListModel clients;
+        SceneActivityModel activities;
+        activities.setLocalEndpointId(QStringLiteral("local"));
+        QVERIFY(activities.upsertLive(QStringLiteral("run"), QStringLiteral("session"),
+                                      QStringLiteral("local"), QStringLiteral("peer"), 1'000));
+        SceneActivityListModel scenes;
+        scenes.setClientsModel(&clients);
+        scenes.setSource(&activities);
+
+        ClientInfo peer(QStringLiteral("peer"), QStringLiteral("Studio"), QStringLiteral("macOS"));
+        peer.setInstanceOrdinal(2);
+        clients.setClients({peer});
+        QCOMPARE(clients.data(clients.index(0), ClientListModel::PrimaryTextRole).toString(),
+                 QStringLiteral("Studio (2)"));
+        QCOMPARE(scenes.data(scenes.index(0), SceneActivityListModel::PrimaryTextRole).toString(),
+                 QStringLiteral("Studio (2)"));
+        QCOMPARE(scenes.data(scenes.index(0), SceneActivityListModel::EndpointIdRole).toString(),
+                 QStringLiteral("peer"));
+        QCOMPARE(scenes.data(scenes.index(0), SceneActivityListModel::IdentityPrefixRole).toString(),
+                 QStringLiteral("Sent to"));
+
+        QSignalSpy changes(&scenes, &QAbstractItemModel::dataChanged);
+        peer.setUsername(QStringLiteral("Alice"));
+        clients.setClients({peer});
+        QVERIFY(!changes.isEmpty());
+        QCOMPARE(scenes.data(scenes.index(0), SceneActivityListModel::PrimaryTextRole).toString(),
+                 QStringLiteral("Alice (2)"));
+        QCOMPARE(scenes.data(scenes.index(0), SceneActivityListModel::PlatformRole).toString(),
+                 QStringLiteral("macOS"));
+
+        peer.setUsername(QString());
+        clients.setClients({peer});
+        QCOMPARE(scenes.data(scenes.index(0), SceneActivityListModel::PrimaryTextRole).toString(),
+                 QStringLiteral("Studio (2)"));
+        scenes.setClientsModel(nullptr);
+        QCOMPARE(scenes.data(scenes.index(0), SceneActivityListModel::PrimaryTextRole).toString(),
+                 QStringLiteral("Device peer"));
+    }
+
+    void notificationPeerPicturesResolveProfilesAndKeepCircularFallback()
+    {
+        registerCanvasQmlTypes();
+        QQmlEngine engine;
+        QQmlComponent component(&engine);
+        component.setData(
+            "import QtQuick\n"
+            "import QtQuick.Controls\n"
+            "import \"qrc:/qt/qml/Mouffette/App/resources/qml/app/components\"\n"
+            "ApplicationWindow {\n"
+            "    width: 360; height: 120; visible: true; color: \"#ff00ff\"\n"
+            "    property QtObject profileController: QtObject {\n"
+            "        property int profileRevision: 0\n"
+            "        property int requestCount: 0\n"
+            "        property string username: \"Alice\"\n"
+            "        property string picture: \"qrc:/icons/logo/mouffette-64.png\"\n"
+            "        signal profilesChanged()\n"
+            "        function profilePictureSource(endpoint) { return picture }\n"
+            "        function requestProfilePicture(endpoint) { ++requestCount }\n"
+            "        function clientDisplayName(endpoint, hostname, ordinal) {\n"
+            "            return (username || hostname) + \" (\" + ordinal + \")\"\n"
+            "        }\n"
+            "        function refresh() { ++profileRevision; profilesChanged() }\n"
+            "    }\n"
+            "    NotificationPeers {\n"
+            "        objectName: \"profilePeers\"\n"
+            "        x: 20; y: 20; width: 320\n"
+            "        controller: profileController\n"
+            "        peers: [{endpointId: \"peer\", machineName: \"Studio\", instanceOrdinal: 2, role: \"To\"}]\n"
+            "    }\n"
+            "}\n", QUrl());
+        QTRY_VERIFY(!component.isLoading());
+        QScopedPointer<QObject> root(component.create());
+        QVERIFY2(root, qPrintable(component.errorString()));
+        auto* window = qobject_cast<QQuickWindow*>(root.data());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        QObject* controller = root->property("profileController").value<QObject*>();
+        QVERIFY(controller);
+        QTRY_VERIFY(controller->property("requestCount").toInt() > 0);
+        QTRY_VERIFY(findQuickItemWithProperty(window->contentItem(), "text", QStringLiteral("Alice (2)")));
+        auto* picture = findQuickItemWithProperty(window->contentItem(), "objectName",
+                                                  QStringLiteral("profilePictureImage"));
+        auto* fallback = findQuickItemWithProperty(window->contentItem(), "objectName",
+                                                   QStringLiteral("profilePictureFallback"));
+        QVERIFY(picture && fallback);
+        QTRY_COMPARE(picture->property("status").toInt(), 1); // Image.Ready
+        QVERIFY(!fallback->isVisible());
+        controller->setProperty("username", QString());
+        controller->setProperty("picture", QString());
+        QVERIFY(QMetaObject::invokeMethod(controller, "refresh"));
+        QTRY_VERIFY(findQuickItemWithProperty(window->contentItem(), "text", QStringLiteral("Studio (2)")));
+        QTRY_VERIFY(fallback->isVisible());
+        QTRY_COMPARE(fallback->property("status").toInt(), 1);
+
+        QSignalSpy frames(window, &QQuickWindow::frameSwapped);
+        window->update();
+        QTRY_VERIFY(!frames.isEmpty());
+        const QImage frame = window->grabWindow();
+        QVERIFY(!frame.isNull());
+        QQuickItem* avatar = picture->parentItem()->parentItem();
+        const qreal scale = qreal(frame.width()) / window->width();
+        const auto pixel = [&](const QPointF& local) {
+            const QPointF scene = avatar->mapToScene(local);
+            return frame.pixelColor(qFloor(scene.x() * scale), qFloor(scene.y() * scale));
+        };
+        QCOMPARE(pixel({1, 1}), QColor(QStringLiteral("#ff00ff")));
+        QVERIFY(pixel({avatar->width() / 2, avatar->height() / 2}) != QColor(QStringLiteral("#ff00ff")));
+        const QString artifacts = qEnvironmentVariable("MOUFFETTE_PROFILE_ARTIFACT_DIR");
+        if (!artifacts.isEmpty()) {
+            QVERIFY(QDir().mkpath(artifacts));
+            QVERIFY(frame.save(QDir(artifacts).filePath(QStringLiteral("notification-peer-fallback.png"))));
+        }
+
+        avatar->setVisible(false);
+        QCoreApplication::processEvents();
+        const int previousRequests = controller->property("requestCount").toInt();
+        QVERIFY(QMetaObject::invokeMethod(controller, "refresh"));
+        QCoreApplication::processEvents();
+        QCOMPARE(controller->property("requestCount").toInt(), previousRequests);
+        avatar->setVisible(true);
+        QTRY_VERIFY(controller->property("requestCount").toInt() > previousRequests);
     }
 
     void remoteCursorUsesScreenIdentityAndExactPixels()
@@ -1704,7 +1877,7 @@ private slots:
             QCOMPARE(copy->timelineTrack().clip.sourceStartSlot.value(),15);
         }
         QCOMPARE(toasts.size(), 1);
-        QCOMPARE(toasts.last()[0].toString(), QStringLiteral("Media pasted."));
+        QCOMPARE(toasts.last()[0].value<NotificationEntry>().message, QStringLiteral("Media pasted."));
         QVERIFY(document.removeMedia(originalId));
         controller.pasteMedia();
         QCOMPARE(document.media().size(), 2);

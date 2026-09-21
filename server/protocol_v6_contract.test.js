@@ -179,7 +179,7 @@ for (const obsoleteVersion of [1, 7, 8, 10]) {
     assert.equal(list.clients.some(device => device.endpointId === 'B'), true);
     assert.equal(Object.hasOwn(list.clients.find(device => device.endpointId === 'B'), 'id'), false);
     assert.deepEqual(Object.keys(list.clients.find(device => device.endpointId === 'B')).sort(),
-        ['canAcceptSession', 'endpointId', 'installationId', 'instanceId', 'instanceOrdinal', 'lastSeenAt', 'machineName', 'platform', 'reason', 'runtimeId', 'status']);
+        ['canAcceptSession', 'endpointId', 'installationId', 'instanceId', 'instanceOrdinal', 'lastSeenAt', 'machineName', 'platform', 'profilePictureHash', 'reason', 'runtimeId', 'status', 'username']);
     assert.equal(list.clients.find(device => device.endpointId === 'B').status, 'Available');
     const forbiddenOutputFields = new Set([
         'clientId', 'persistentClientId', 'persistentId', 'deviceId', 'sessionId',

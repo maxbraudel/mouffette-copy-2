@@ -1,5 +1,6 @@
 #include <QtTest>
 #include <QJsonDocument>
+#include <QBuffer>
 #include <QImage>
 #include <QQuickWindow>
 #include <QApplication>
@@ -100,6 +101,7 @@ private slots:
     void reconnectsAutomaticallyAfterProlongedServerOutage();
     void concurrentProcessesShareInstallationAndKeepStableSlots();
     void retainedServerPresenceDoesNotKeepProjectlessRows();
+    void profilesPropagateWithoutChangingIdentity();
 private:
     void startRelay(quint16 port = 0);
     void configure(WebSocketClient& peer, const QString& name);
@@ -299,6 +301,151 @@ void RemoteSessionIntegrationTest::configure(WebSocketClient& peer, const QStrin
     });
 }
 
+void RemoteSessionIntegrationTest::profilesPropagateWithoutChangingIdentity()
+{
+    QTemporaryDir identities;
+    QVERIFY(identities.isValid());
+    WebSocketClient owner(identities.filePath("profile-owner"), false, nullptr, {}, 2);
+    WebSocketClient observer(identities.filePath("profile-observer"), false);
+    configure(observer, QStringLiteral("Observer hostname"));
+    const QString ownerEndpoint = owner.endpointId();
+    const QString ownerInstallation = owner.installationId();
+    const auto jpegForColor = [](QRgb color) {
+        QImage image(250, 250, QImage::Format_RGB32);
+        image.fill(color);
+        QByteArray bytes;
+        QBuffer buffer(&bytes);
+        buffer.open(QIODevice::WriteOnly);
+        image.save(&buffer, "JPEG", 90);
+        return bytes;
+    };
+    const auto hashOf = [](const QByteArray& bytes) {
+        return QString::fromLatin1(QCryptographicHash::hash(bytes, QCryptographicHash::Sha256).toHex());
+    };
+    const QByteArray red = jpegForColor(qRgb(210, 30, 50));
+    const QByteArray blue = jpegForColor(qRgb(30, 50, 210));
+    QVERIFY(!red.isEmpty() && !blue.isEmpty() && red != blue);
+    QString username = QStringLiteral("Équipe 🎬");
+    QByteArray picture = red;
+    const auto advertise = [&] {
+        owner.registerClient(QStringLiteral("Owner hostname"), QStringLiteral("integration-test"),
+                             {}, 50, username, picture);
+    };
+    connect(&owner, &WebSocketClient::connected, &owner, advertise);
+    connect(&owner, &WebSocketClient::localDeviceSnapshotRequested, &owner, advertise);
+    QList<ClientInfo> presence;
+    connect(&observer, &WebSocketClient::clientListReceived, &observer,
+            [&](const QList<ClientInfo>& clients) { presence = clients; });
+    const auto ownerPresence = [&] {
+        for (const ClientInfo& client : presence)
+            if (client.endpointId() == ownerEndpoint) return client;
+        return ClientInfo();
+    };
+    QSignalSpy pictures(&observer, &WebSocketClient::profilePictureReceived);
+    QSignalSpy lists(&observer, &WebSocketClient::clientListReceived);
+    QSignalSpy registrations(&observer, &WebSocketClient::registrationConfirmed);
+    QSignalSpy ownerRegistrations(&owner, &WebSocketClient::registrationConfirmed);
+    observer.connectToServer(m_url);
+    owner.connectToServer(m_url);
+    QTRY_VERIFY_WITH_TIMEOUT(!registrations.isEmpty() && !ownerRegistrations.isEmpty(), 4000);
+    QTRY_COMPARE_WITH_TIMEOUT(ownerPresence().username(), username, 4000);
+    QCOMPARE(ownerPresence().profilePictureHash(), hashOf(red));
+    QCOMPARE(ownerPresence().getInstanceDisplayName(), QStringLiteral("Équipe 🎬 (2)"));
+    QCOMPARE(ownerPresence().getMachineName(), QStringLiteral("Owner hostname"));
+    const auto acknowledged = qvariant_cast<ClientInfo>(ownerRegistrations.last().first());
+    QCOMPARE(acknowledged.username(), username);
+    QCOMPARE(acknowledged.profilePictureHash(), hashOf(red));
+    QVERIFY(owner.remoteSessionCoordinator()->all().isEmpty());
+    QVERIFY(observer.remoteSessionCoordinator()->all().isEmpty());
+
+    // Lose a real response at the socket boundary. The exact correlated
+    // request retries without requiring an open sharing session.
+    command({{"action", "dropFrame"}, {"endpoint", observer.endpointId()},
+             {"type", "profile_picture_response"}, {"count", 1}});
+    QString requestId = observer.requestProfilePicture(ownerEndpoint, hashOf(red));
+    QVERIFY(!requestId.isEmpty());
+    QCOMPARE(observer.requestProfilePicture(ownerEndpoint, hashOf(red)), requestId);
+    QTRY_COMPARE_WITH_TIMEOUT(pictures.count(), 1, 6000);
+    QCOMPARE(pictures.last().at(0).toString(), requestId);
+    QCOMPARE(pictures.last().at(1).toString(), ownerEndpoint);
+    QCOMPARE(pictures.last().at(2).toString(), hashOf(red));
+    QCOMPARE(pictures.last().at(3).toByteArray(), red);
+
+    username = QStringLiteral("New username");
+    picture = blue;
+    advertise();
+    QTRY_COMPARE_WITH_TIMEOUT(ownerPresence().profilePictureHash(), hashOf(blue), 4000);
+    QCOMPARE(ownerPresence().username(), username);
+    QCOMPARE(owner.endpointId(), ownerEndpoint);
+    QCOMPARE(owner.installationId(), ownerInstallation);
+    requestId = observer.requestProfilePicture(ownerEndpoint, hashOf(red));
+    QVERIFY(!requestId.isEmpty());
+    QTRY_COMPARE_WITH_TIMEOUT(pictures.count(), 2, 4000);
+    QCOMPARE(pictures.last().at(0).toString(), requestId);
+    QVERIFY(pictures.last().at(3).toByteArray().isEmpty());
+    requestId = observer.requestProfilePicture(ownerEndpoint, hashOf(blue));
+    QVERIFY(!requestId.isEmpty());
+    QTRY_COMPARE_WITH_TIMEOUT(pictures.count(), 3, 4000);
+    QCOMPARE(pictures.last().at(3).toByteArray(), blue);
+
+    username.clear();
+    advertise();
+    QTRY_VERIFY_WITH_TIMEOUT(ownerPresence().username().isEmpty(), 4000);
+    QCOMPARE(ownerPresence().getInstanceDisplayName(), QStringLiteral("Owner hostname (2)"));
+    QCOMPARE(ownerPresence().profilePictureHash(), hashOf(blue));
+    username = QStringLiteral("Name without picture");
+    picture.clear();
+    advertise();
+    QTRY_COMPARE_WITH_TIMEOUT(ownerPresence().username(), username, 4000);
+    QVERIFY(ownerPresence().profilePictureHash().isEmpty());
+    QVERIFY(ownerPresence().hasProfileMetadata());
+    username.clear();
+    advertise();
+    QTRY_VERIFY_WITH_TIMEOUT(ownerPresence().username().isEmpty(), 4000);
+    QVERIFY(ownerPresence().hasProfileMetadata());
+
+    username = QStringLiteral("Returns after reconnect");
+    picture = blue;
+    advertise();
+    QTRY_COMPARE_WITH_TIMEOUT(ownerPresence().username(), username, 4000);
+    owner.disconnect();
+    QTRY_VERIFY_WITH_TIMEOUT(!ownerPresence().isOnline(), 4000);
+    QCOMPARE(ownerPresence().endpointId(), ownerEndpoint);
+    QVERIFY(!ownerPresence().hasProfileMetadata());
+    QCOMPARE(ownerPresence().getInstanceDisplayName(), QStringLiteral("Owner hostname (2)"));
+    QVERIFY(!observer.requestProfilePicture(ownerEndpoint, hashOf(blue)).isEmpty());
+    QTRY_COMPARE_WITH_TIMEOUT(pictures.count(), 4, 4000);
+    QVERIFY(pictures.last().at(3).toByteArray().isEmpty());
+    owner.connectToServer(m_url);
+    QTRY_COMPARE_WITH_TIMEOUT(ownerPresence().username(), username, 4000);
+    QCOMPARE(ownerPresence().profilePictureHash(), hashOf(blue));
+    QCOMPARE(owner.endpointId(), ownerEndpoint);
+
+    // A restarted relay has no profiles to restore. Connecting only the
+    // observer first proves the owner must publish its locally held data again.
+    const QString previousBoot = observer.serverBootId();
+    const quint16 port = static_cast<quint16>(QUrl(m_url).port());
+    m_relay.kill();
+    QVERIFY(m_relay.waitForFinished(2000));
+    QTRY_VERIFY_WITH_TIMEOUT(!owner.isConnected() && !observer.isConnected(), 2000);
+    startRelay(port);
+    const int previousLists = lists.count();
+    observer.connectToServer(m_url);
+    QTRY_VERIFY_WITH_TIMEOUT(lists.count() > previousLists, 4000);
+    QVERIFY(observer.serverBootId() != previousBoot);
+    QVERIFY(ownerPresence().endpointId().isEmpty());
+    owner.connectToServer(m_url);
+    QTRY_COMPARE_WITH_TIMEOUT(ownerPresence().username(), username, 4000);
+    QCOMPARE(owner.endpointId(), ownerEndpoint);
+    QCOMPARE(owner.installationId(), ownerInstallation);
+    QCOMPARE(ownerPresence().profilePictureHash(), hashOf(blue));
+    QVERIFY(!observer.requestProfilePicture(ownerEndpoint, hashOf(blue)).isEmpty());
+    QTRY_COMPARE_WITH_TIMEOUT(pictures.count(), 5, 4000);
+    QCOMPARE(pictures.last().at(3).toByteArray(), blue);
+    owner.disconnect();
+    observer.disconnect();
+}
+
 void RemoteSessionIntegrationTest::pendingRequestsRecover_data()
 {
     QTest::addColumn<QString>("operation");
@@ -331,6 +478,7 @@ void RemoteSessionIntegrationTest::pendingRequestsRecover()
     configure(target, QStringLiteral("retry-target"));
     QSignalSpy states(&connection, &ConnectionManager::statusChanged);
     QSignalSpy opened(&owner, &WebSocketClient::remoteSessionOpened);
+    QSignalSpy resumed(&owner, &WebSocketClient::remoteSessionResumed);
     QSignalSpy closed(&owner, &WebSocketClient::remoteSessionClosed);
     QSignalSpy disabled(&owner, &WebSocketClient::endpointDisableAcknowledged);
     QSignalSpy targetRegistered(&target, &WebSocketClient::registrationConfirmed);
@@ -354,8 +502,16 @@ void RemoteSessionIntegrationTest::pendingRequestsRecover()
     if (operation == "open" || operation == "close") {
         QString request;
         QVERIFY(owner.openRemoteSession(target.endpointId(), &request));
-        QTRY_VERIFY_WITH_TIMEOUT(!opened.isEmpty(), 4000);
-        const QString id = opened.first().first().toJsonObject().value("remoteSessionId").toString();
+        // Heartbeat reconciliation can recover a lost OPEN response before
+        // its request retries; that legitimate path emits RESUMED instead.
+        QTRY_VERIFY_WITH_TIMEOUT(!opened.isEmpty() || !resumed.isEmpty(), 4000);
+        const auto& ready = opened.isEmpty() ? resumed : opened;
+        const QString id = ready.first().first().toJsonObject().value("remoteSessionId").toString();
+        QVERIFY(!id.isEmpty());
+        const auto binding = owner.remoteSessionCoordinator()->outgoingForPeer(target.endpointId());
+        QCOMPARE(binding.remoteSessionId, id);
+        QCOMPARE(binding.ownerEndpointId, owner.endpointId());
+        QCOMPARE(binding.targetEndpointId, target.endpointId());
         QTRY_VERIFY_WITH_TIMEOUT(owner.canIssueSessionCommands(id), 3000);
         if (operation == "close") {
             QVERIFY(owner.closeRemoteSession(id));

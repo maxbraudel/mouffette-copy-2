@@ -124,6 +124,9 @@ QtObject {
                     y: topBar.stacked ? (Theme.controlHeight + topBar.gap) * 2 : 0
                     width: topBar.stacked ? topBar.width : implicitWidth
                     primaryText: root.controller.remoteDisplayName
+                    profilePictureVisible: true
+                    profileController: root.controller
+                    profileEndpointId: root.controller.remoteEndpointId
                     statusText: root.controller.remoteStatusText
                     detailProvider: () => root.controller.remoteConnectionDetail()
                     statusKind: root.controller.remoteConnectionState
@@ -206,6 +209,8 @@ QtObject {
         MemoryUsagePopup { id: memoryPopup }
         AppDialog {
             id: confirmation
+            controller: root.controller
+            peers: root.controller.dialogPeers
             parent: Overlay.overlay
             anchors.centerIn: parent
             message: root.controller.dialogTitle

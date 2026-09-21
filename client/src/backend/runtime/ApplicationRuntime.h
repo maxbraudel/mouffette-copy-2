@@ -18,6 +18,7 @@
 #include "frontend/ui/notifications/ToastNotificationSystem.h"
 
 class ClientWorkspaceController;
+class ClientProfileCache;
 class ApplicationActivityMonitor;
 class ClientListBuilder;
 class ClientListEventHandler;
@@ -69,6 +70,7 @@ public:
     SceneActivityModel* getSceneActivityModel() const { return m_sceneActivityModel; }
     NotificationCenter* getNotificationCenter() const;
     SettingsManager* getSettingsManager() const { return m_settingsManager; }
+    ClientProfileCache* profileCache() const { return m_profileCache; }
     ICanvasHost* getActiveCanvas() const { return m_activeCanvas; }
     const ClientInfo& getSelectedClient() const { return m_selectedClient; }
     const ClientInfo& selectedClient() const { return m_selectedClient; }
@@ -306,6 +308,7 @@ private:
     WebSocketClient* m_webSocketClient = nullptr;
     ConnectionManager* m_connectionManager = nullptr;
     SettingsManager* m_settingsManager = nullptr;
+    ClientProfileCache* m_profileCache = nullptr;
     WebSocketMessageHandler* m_webSocketMessageHandler = nullptr;
     ScreenEventHandler* m_screenEventHandler = nullptr;
     UploadEventHandler* m_uploadEventHandler = nullptr;

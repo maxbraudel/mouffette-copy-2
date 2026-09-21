@@ -51,6 +51,9 @@ public:
     // Getters
     QString getId() const { return m_id; }
     QString getMachineName() const { return m_machineName; }
+    QString username() const { return m_username; }
+    QString profilePictureHash() const { return m_profilePictureHash; }
+    bool hasProfileMetadata() const { return m_hasProfileMetadata; }
     QString getPlatform() const { return m_platform; }
     QString getStatus() const { return m_status; }
     QList<ScreenInfo> getScreens() const { return m_screens; }
@@ -78,6 +81,12 @@ public:
     // Setters
     void setId(const QString& id) { m_id = id; }
     void setMachineName(const QString& name) { m_machineName = name; }
+    void setUsername(const QString& username) {
+        m_username = username.trimmed(); m_hasProfileMetadata = true;
+    }
+    void setProfilePictureHash(const QString& hash) {
+        m_profilePictureHash = hash; m_hasProfileMetadata = true;
+    }
     void setPlatform(const QString& platform) { m_platform = platform; }
     void setStatus(const QString& status) { m_status = status; }
     void setScreens(const QList<ScreenInfo>& screens) { m_screens = screens; }
@@ -110,6 +119,9 @@ public:
 private:
     QString m_id;
     QString m_machineName;
+    QString m_username;
+    QString m_profilePictureHash;
+    bool m_hasProfileMetadata = false;
     QString m_platform;
     QString m_status;
     QList<ScreenInfo> m_screens;

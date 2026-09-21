@@ -84,6 +84,10 @@ QJsonObject ClientInfo::toJson() const {
     obj["instanceOrdinal"] = m_instanceOrdinal;
     if (!m_runtimeId.isEmpty()) obj["runtimeId"] = m_runtimeId;
     obj["machineName"] = m_machineName;
+    if (m_hasProfileMetadata) {
+        obj["username"] = m_username;
+        obj["profilePictureHash"] = m_profilePictureHash;
+    }
     obj["platform"] = m_platform;
     obj["status"] = m_status;
     obj["canAcceptSession"] = canAcceptSession();
@@ -129,6 +133,9 @@ ClientInfo ClientInfo::fromJson(const QJsonObject& json) {
     client.m_runtimeId = json.value("runtimeId").toString();
     client.m_id = client.m_endpointId;
     client.m_machineName = json["machineName"].toString();
+    client.m_username = json.value("username").toString().trimmed();
+    client.m_profilePictureHash = json.value("profilePictureHash").toString();
+    client.m_hasProfileMetadata = json.contains("username") || json.contains("profilePictureHash");
     client.m_platform = json["platform"].toString();
     client.m_status = json.value("status").toString(QStringLiteral("Available"));
     if (client.m_status.compare(QStringLiteral("Reconnecting"), Qt::CaseInsensitive) == 0)
@@ -151,9 +158,9 @@ ClientInfo ClientInfo::fromJson(const QJsonObject& json) {
 }
 
 QString ClientInfo::getInstanceDisplayName() const {
-    const QString machineName = m_machineName.trimmed().isEmpty()
-        ? QStringLiteral("Unnamed client")
-        : m_machineName.trimmed();
+    const QString machineName = !m_username.isEmpty() ? m_username
+        : m_machineName.trimmed().isEmpty() ? QStringLiteral("Unnamed client")
+                                          : m_machineName.trimmed();
     return m_instanceOrdinal > 0
         ? QStringLiteral("%1 (%2)").arg(machineName).arg(m_instanceOrdinal)
         : machineName;

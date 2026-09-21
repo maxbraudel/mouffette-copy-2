@@ -15,6 +15,8 @@ private slots:
     void appendsInstanceNumberForEveryProfile();
     void preservesInstanceNumberWhenDisconnected();
     void unknownLegacyOrdinalDoesNotInventPrimary();
+    void usernameChangesPresentationWithoutChangingIdentity();
+    void distinguishesMissingProfileFromExplicitClearing();
 };
 
 void ClientInfoDisplayTest::normalizesEveryPublicAvailabilityBadge_data()
@@ -134,6 +136,45 @@ void ClientInfoDisplayTest::unknownLegacyOrdinalDoesNotInventPrimary()
     client.setInstanceOrdinal(0);
     QCOMPARE(client.getInstanceDisplayName(), QStringLiteral("Studio"));
     QCOMPARE(client.getIdentityDisplayText(), QStringLiteral("(linux) Studio"));
+}
+
+void ClientInfoDisplayTest::usernameChangesPresentationWithoutChangingIdentity()
+{
+    ClientInfo client(QStringLiteral("stable-endpoint"), QStringLiteral("Studio"), QStringLiteral("macOS"));
+    client.setInstanceOrdinal(2);
+    client.setUsername(QStringLiteral("  Zoé 🎬  "));
+    QCOMPARE(client.getInstanceDisplayName(), QStringLiteral("Zoé 🎬 (2)"));
+    QCOMPARE(client.getMachineName(), QStringLiteral("Studio"));
+    QCOMPARE(client.endpointId(), QStringLiteral("stable-endpoint"));
+    client.setOnline(false);
+    QCOMPARE(client.getInstanceDisplayName(), QStringLiteral("Zoé 🎬 (2)"));
+    client.setUsername(QString());
+    QCOMPARE(client.getInstanceDisplayName(), QStringLiteral("Studio (2)"));
+}
+
+void ClientInfoDisplayTest::distinguishesMissingProfileFromExplicitClearing()
+{
+    QJsonObject presence{{QStringLiteral("endpointId"), QStringLiteral("stable-endpoint")},
+                         {QStringLiteral("machineName"), QStringLiteral("Studio")},
+                         {QStringLiteral("instanceOrdinal"), 3}};
+    const ClientInfo legacy = ClientInfo::fromJson(presence);
+    QVERIFY(!legacy.hasProfileMetadata());
+    QVERIFY(!legacy.toJson().contains(QStringLiteral("username")));
+
+    presence.insert(QStringLiteral("username"), QStringLiteral("Zoé"));
+    presence.insert(QStringLiteral("profilePictureHash"), QString(64, QLatin1Char('a')));
+    const ClientInfo configured = ClientInfo::fromJson(presence);
+    QVERIFY(configured.hasProfileMetadata());
+    QCOMPARE(configured.getInstanceDisplayName(), QStringLiteral("Zoé (3)"));
+    QCOMPARE(ClientInfo::fromJson(configured.toJson()).profilePictureHash(), configured.profilePictureHash());
+
+    presence.insert(QStringLiteral("username"), QString());
+    presence.insert(QStringLiteral("profilePictureHash"), QString());
+    const ClientInfo cleared = ClientInfo::fromJson(presence);
+    QVERIFY(cleared.hasProfileMetadata());
+    QVERIFY(cleared.profilePictureHash().isEmpty());
+    QCOMPARE(cleared.getInstanceDisplayName(), QStringLiteral("Studio (3)"));
+    QVERIFY(cleared.toJson().contains(QStringLiteral("username")));
 }
 
 QTEST_APPLESS_MAIN(ClientInfoDisplayTest)

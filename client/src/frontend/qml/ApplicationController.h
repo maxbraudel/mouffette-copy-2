@@ -5,6 +5,8 @@
 #include <QObject>
 #include <QPointer>
 #include <QStringList>
+#include <QVariantList>
+#include <QUrl>
 #include <functional>
 #include <memory>
 
@@ -42,6 +44,9 @@ class ApplicationController final : public QObject
     Q_PROPERTY(QString localStatusText READ localStatusText NOTIFY presentationChanged)
     Q_PROPERTY(ConnectionState localConnectionState READ localConnectionState NOTIFY presentationChanged)
     Q_PROPERTY(QString remoteDisplayName READ remoteDisplayName NOTIFY presentationChanged)
+    Q_PROPERTY(QString remoteEndpointId READ remoteEndpointId NOTIFY presentationChanged)
+    Q_PROPERTY(QString remoteProfilePictureSource READ remoteProfilePictureSource NOTIFY profilesChanged)
+    Q_PROPERTY(int profileRevision READ profileRevision NOTIFY profilesChanged)
     Q_PROPERTY(QString remoteStatusText READ remoteStatusText NOTIFY presentationChanged)
     Q_PROPERTY(ConnectionState remoteConnectionState READ remoteConnectionState NOTIFY presentationChanged)
     Q_PROPERTY(QString remoteVolumeText READ remoteVolumeText NOTIFY presentationChanged)
@@ -53,10 +58,15 @@ class ApplicationController final : public QObject
     Q_PROPERTY(QString settingsServerUrl READ settingsServerUrl NOTIFY settingsChanged)
     Q_PROPERTY(bool settingsAutoUpload READ settingsAutoUpload NOTIFY settingsChanged)
     Q_PROPERTY(bool settingsAppAlwaysOnTop READ settingsAppAlwaysOnTop NOTIFY settingsChanged)
+    Q_PROPERTY(QString settingsUsername READ settingsUsername NOTIFY settingsChanged)
+    Q_PROPERTY(QString settingsHostname READ settingsHostname NOTIFY settingsChanged)
+    Q_PROPERTY(QString settingsProfilePictureSource READ settingsProfilePictureSource NOTIFY settingsChanged)
+    Q_PROPERTY(QString settingsProfilePictureDraftSource READ settingsProfilePictureDraftSource NOTIFY profileDraftChanged)
     Q_PROPERTY(bool clearingStorage READ clearingStorage NOTIFY clearingStorageChanged)
 
     Q_PROPERTY(QString dialogTitle READ dialogTitle NOTIFY dialogChanged)
     Q_PROPERTY(QString dialogMessage READ dialogMessage NOTIFY dialogChanged)
+    Q_PROPERTY(QVariantList dialogPeers READ dialogPeers NOTIFY dialogChanged)
     Q_PROPERTY(QString dialogAcceptText READ dialogAcceptText NOTIFY dialogChanged)
     Q_PROPERTY(QString dialogRejectText READ dialogRejectText NOTIFY dialogChanged)
     Q_PROPERTY(bool dialogDestructive READ dialogDestructive NOTIFY dialogChanged)
@@ -100,6 +110,12 @@ public:
     Q_INVOKABLE QString clientConnectionDetail(const QString& endpoint) const;
     ConnectionState localConnectionState() const;
     QString remoteDisplayName() const;
+    QString remoteEndpointId() const;
+    QString remoteProfilePictureSource() const;
+    int profileRevision() const { return m_profileRevision; }
+    Q_INVOKABLE QString profilePictureSource(const QString& endpointId) const;
+    Q_INVOKABLE void requestProfilePicture(const QString& endpointId);
+    Q_INVOKABLE QString clientDisplayName(const QString& endpointId, const QString& hostname, int ordinal) const;
     QString remoteStatusText() const;
     ConnectionState remoteConnectionState() const;
     QString remoteVolumeText() const;
@@ -111,10 +127,19 @@ public:
     QString settingsServerUrl() const;
     bool settingsAutoUpload() const;
     bool settingsAppAlwaysOnTop() const;
+    QString settingsUsername() const;
+    QString settingsHostname() const;
+    QString settingsProfilePictureSource() const;
+    QString settingsProfilePictureDraftSource() const;
+    Q_INVOKABLE void beginProfileEdit();
+    Q_INVOKABLE QString importProfilePicture(const QUrl& file);
+    Q_INVOKABLE void removeProfilePicture();
+    Q_INVOKABLE void cancelProfileEdit();
     bool clearingStorage() const { return m_clearingStorage; }
 
     QString dialogTitle() const { return m_dialogTitle; }
     QString dialogMessage() const { return m_dialogMessage; }
+    QVariantList dialogPeers() const { return m_dialogPeers; }
     QString dialogAcceptText() const { return m_dialogAcceptText; }
     QString dialogRejectText() const { return m_dialogRejectText; }
     bool dialogDestructive() const { return m_dialogDestructive; }
@@ -133,7 +158,8 @@ public:
     Q_INVOKABLE void requestClearHistory();
     Q_INVOKABLE void acceptDialog();
     Q_INVOKABLE void rejectDialog();
-    Q_INVOKABLE QString saveSettings(const QString& serverUrl, bool autoUpload, bool appAlwaysOnTop);
+    Q_INVOKABLE QString saveSettings(const QString& serverUrl, bool autoUpload, bool appAlwaysOnTop,
+                                    const QString& username = QString());
     Q_INVOKABLE void clearStorageAndClose();
     Q_INVOKABLE void hideWindow();
     Q_INVOKABLE void setWindowVisible(bool visible);
@@ -151,6 +177,8 @@ signals:
     void activeWorkspaceChanged();
     void presentationChanged();
     void settingsChanged();
+    void profilesChanged();
+    void profileDraftChanged();
     void clearingStorageChanged();
     void clearStorageOnExitRequested();
     void dialogChanged();
@@ -172,7 +200,7 @@ private:
     void showDialog(DialogKind kind, const QString& title,
                     const QString& message, const QString& acceptText,
                     const QString& rejectText, bool destructive,
-                    bool showReject);
+                    bool showReject, const QVariantList& peers = {});
     static ConnectionState connectionStateFromStatus(const QString& status);
 
     RuntimeProfileContext m_runtimeProfile;
@@ -195,6 +223,10 @@ private:
     DialogKind m_dialogKind = DialogKind::None;
     QString m_dialogTitle;
     QString m_dialogMessage;
+    QVariantList m_dialogPeers;
+    int m_profileRevision = 0;
+    bool m_profileEditing = false;
+    QByteArray m_draftProfilePicture;
     QString m_dialogAcceptText;
     QString m_dialogRejectText;
     bool m_dialogDestructive = false;
