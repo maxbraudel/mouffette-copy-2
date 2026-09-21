@@ -290,13 +290,11 @@ void ApplicationRuntime::refreshRemoteConnectionPresentation(bool propagateLoss)
         && !isUserDisconnected() && !isConnectionDraining()
         && !hasPendingOutgoingSessionClose(m_activeWorkspaceEndpointId)
         && !m_locallyTerminatingRemoteSessions.contains(binding.remoteSessionId);
-    // Connection loss only hides the value; the authenticated workspace keeps
-    // its last reading. Restore it on every readiness transition, even if the
-    // remote volume has not changed and therefore produces no new notification.
-    const ClientWorkspace* workspace = m_workspaceManager
-        ? m_workspaceManager->findWorkspace(m_activeWorkspaceEndpointId) : nullptr;
-    m_remoteVolumePercent = m_remoteClientConnected && workspace && activeProjectExists()
-        ? workspace->lastClientInfo.getVolumePercent() : -1;
+    // Volume is retained project data, just like screen topology. Losing
+    // command readiness must not erase the last authenticated reading.
+    const ProjectRecord* project = m_projectManager
+        ? m_projectManager->projectForTarget(m_activeWorkspaceEndpointId) : nullptr;
+    m_remoteVolumePercent = project ? project->savedVolumePercent : -1;
     const bool retainedRecovery = m_webSocketClient && !binding.remoteSessionId.isEmpty()
         && (binding.phase == QLatin1String("Active") || binding.phase == QLatin1String("Grace"))
         && m_webSocketClient->sessionRecoveryRemainingMs(binding.remoteSessionId) > 0;
@@ -1816,8 +1814,6 @@ void ApplicationRuntime::showScreenView(const ClientInfo& client) {
     m_preserveViewportOnReconnect = hasProject;
     updateClientNameDisplay(currentWorkspace->lastClientInfo);
     m_remoteClientConnected = active;
-    m_remoteVolumePercent = active && hasProject
-        ? currentWorkspace->lastClientInfo.getVolumePercent() : -1;
     refreshRemoteConnectionPresentation(false);
 
     m_navigationManager->showScreenView(currentWorkspace->lastClientInfo,
@@ -2188,7 +2184,6 @@ void ApplicationRuntime::ensureRemoteSessionForClient(const ClientInfo& client) 
         refreshProjectClientList();
         if (m_activeWorkspaceEndpointId == targetEndpointId) {
             m_remoteClientConnected = false;
-            m_remoteVolumePercent = -1;
             refreshRemoteConnectionPresentation(false);
             if (m_uploadManager) m_uploadManager->setTargetClientId(QString());
         }
@@ -2223,7 +2218,6 @@ void ApplicationRuntime::ensureRemoteSessionForClient(const ClientInfo& client) 
         if (m_activeWorkspaceEndpointId == targetEndpointId) {
             m_remoteClientConnected = locallyCommandReady;
             refreshRemoteConnectionPresentation(false);
-            if (!locallyCommandReady) m_remoteVolumePercent = -1;
             updateWorkspaceCapabilities(targetEndpointId);
         }
         m_remoteSessionOpenDesiredTargets.remove(targetEndpointId);
@@ -2404,7 +2398,6 @@ void ApplicationRuntime::handleRemoteSessionReady(const QJsonObject& envelope,
             refreshProjectClientList();
             if (m_activeWorkspaceEndpointId == peerEndpointId) {
                 m_remoteClientConnected = false;
-                m_remoteVolumePercent = -1;
                 refreshRemoteConnectionPresentation(false);
             }
         } else {
@@ -2568,8 +2561,6 @@ void ApplicationRuntime::handleRemoteSessionReady(const QJsonObject& envelope,
         // volume have all been installed; the initial page transition happened
         // earlier while the workspace intentionally had no canvas.
         m_selectedClient = session->lastClientInfo;
-        m_remoteVolumePercent = commandActive
-            ? session->lastClientInfo.getVolumePercent() : -1;
         m_remoteClientConnected = commandActive;
         refreshRemoteConnectionPresentation(false);
         updateWorkspaceCapabilities(peerEndpointId);
@@ -2632,11 +2623,10 @@ void ApplicationRuntime::handleRemoteSessionSnapshot(const QJsonObject& envelope
     if (workspace->canvas) workspace->canvas->setScreens(screens);
     if (m_activeWorkspaceEndpointId == targetEndpointId) {
         m_selectedClient = workspace->lastClientInfo;
-        // Compare the displayed value, not just the retained snapshot: an
-        // identical reading can arrive after recovery cleared the indicator.
-        const int visibleVolume = m_remoteClientConnected ? volumePercent : -1;
-        if (topologyChanged || m_remoteVolumePercent != visibleVolume) {
-            m_remoteVolumePercent = visibleVolume;
+        // An accepted snapshot updates retained presentation even while
+        // remote commands are unavailable. Only an explicit unknown clears it.
+        if (topologyChanged || m_remoteVolumePercent != volumePercent) {
+            m_remoteVolumePercent = volumePercent;
             emit presentationStateChanged();
         }
     }
@@ -2678,7 +2668,6 @@ void ApplicationRuntime::handleRemoteSessionLeaseState(const QJsonObject& envelo
         refreshProjectClientList();
         if (m_activeWorkspaceEndpointId == targetEndpointId) {
             m_remoteClientConnected = false;
-            m_remoteVolumePercent = -1;
             refreshRemoteConnectionPresentation(false);
         }
         return;
@@ -2711,7 +2700,6 @@ void ApplicationRuntime::handleRemoteSessionLeaseState(const QJsonObject& envelo
     if (m_activeWorkspaceEndpointId == targetEndpointId) {
         m_remoteClientConnected = commandReady;
         refreshRemoteConnectionPresentation(false);
-        if (!commandReady) m_remoteVolumePercent = -1;
     }
 }
 
@@ -3215,7 +3203,6 @@ void ApplicationRuntime::clearRemoteSessionRuntimeState(
 
     if (m_activeWorkspaceEndpointId == targetEndpointId) {
         m_remoteClientConnected = false;
-        m_remoteVolumePercent = -1;
         refreshRemoteConnectionPresentation(false);
     }
     // This final projection also updates the list when the Project already
@@ -3607,7 +3594,6 @@ void ApplicationRuntime::handleRemoteSessionError(const QJsonObject& envelope) {
         refreshProjectClientList();
         if (m_activeWorkspaceEndpointId == targetEndpointId) {
             refreshRemoteConnectionPresentation(false);
-            if (!activeProjectExists()) m_remoteVolumePercent = -1;
             if (m_activeCanvas) m_activeCanvas->setOverlayActionsEnabled(false);
 
             if (waitingForConvergence) {
@@ -4419,8 +4405,6 @@ void ApplicationRuntime::onClientListReceived(const QList<ClientInfo>& clients) 
     if (workspace) {
         m_selectedClient = workspace->lastClientInfo;
     }
-    m_remoteVolumePercent = active && workspace
-        ? workspace->lastClientInfo.getVolumePercent() : -1;
     refreshRemoteConnectionPresentation(false);
     updateWorkspaceCapabilities(targetEndpointId);
 }

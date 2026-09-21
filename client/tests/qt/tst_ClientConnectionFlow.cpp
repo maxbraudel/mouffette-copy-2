@@ -1126,8 +1126,29 @@ private slots:
         QVERIFY(runtime.displayClients().first().hasProject());
         QCOMPARE(runtime.displayClients().first().getVolumePercent(), 57);
         QCOMPARE(runtime.displayClients().first().username(), QStringLiteral("Retained offline"));
+
+        // A disconnected project must present its persisted reading even when
+        // there is no retained RemoteSession or current discovery snapshot.
+        QVERIFY(runtime.getProjectManager()->flush());
+        ProjectStore savedProjects;
+        QList<ProjectRecord> persisted;
+        QVERIFY(savedProjects.load(&persisted));
+        QCOMPARE(persisted.size(), 1);
+        QCOMPARE(persisted.first().savedVolumePercent, 57);
+        runtime.activateClient(first.endpointId());
+        QVERIFY(runtime.activeProjectExists());
+        QVERIFY(!runtime.isRemoteClientConnected());
+        QCOMPARE(runtime.remoteStatusText(), QStringLiteral("DISCONNECTED"));
+        QCOMPARE(runtime.remoteVolumePercent(), 57);
+        QCOMPARE(server.openCommands.size(), 0);
+        runtime.navigateToClients();
+        runtime.activateClient(first.endpointId());
+        QCOMPARE(runtime.remoteVolumePercent(), 57);
+
         QVERIFY(runtime.getProjectManager()->deleteProject(first.endpointId()));
         QVERIFY(runtime.displayClients().isEmpty()); // no new presence required
+        QCOMPARE(runtime.remoteVolumePercent(), -1);
+        QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
         runtime.handleApplicationAboutToQuit();
     }
 
@@ -3036,6 +3057,7 @@ private slots:
         QTest::newRow("active-lease-unchanged-volume") << false << 68;
         QTest::newRow("resume-unchanged-volume") << true << 68;
         QTest::newRow("resume-new-volume") << true << 73;
+        QTest::newRow("resume-zero-volume") << true << 0;
         QTest::newRow("resume-unavailable-volume") << true << -1;
     }
 
@@ -3095,6 +3117,11 @@ private slots:
         QVERIFY(runtime.isRemoteOverlayActionsEnabled());
         QCOMPARE(runtime.remoteStatusText(), QStringLiteral("CONNECTED"));
         QCOMPARE(runtime.remoteVolumePercent(), 68);
+        QList<int> volumesPresentedDuringOutage;
+        QObject volumeObserver;
+        const auto volumeObservation = connect(
+            &runtime, &ApplicationRuntime::presentationStateChanged, &volumeObserver,
+            [&] { volumesPresentedDuringOutage.append(runtime.remoteVolumePercent()); });
 
         // Keep the lease-bound session in memory while replacing the owner's
         // authenticated transport. Before RESUME is accepted, its old Active
@@ -3102,6 +3129,9 @@ private slots:
         server.connectionGeneration = 2;
         server.closePeer();
         QTRY_COMPARE_WITH_TIMEOUT(disconnectedSpy.count(), 1, 2'000);
+        // Losing transport disables commands, but it must keep the project's
+        // last authenticated reading visible throughout the outage.
+        QCOMPARE(runtime.remoteVolumePercent(), 68);
         QTRY_COMPARE_WITH_TIMEOUT(connectedSpy.count(), 2, 3'000);
         QTRY_COMPARE_WITH_TIMEOUT(server.resumeCommands.size(), 1, 1'000);
         QTRY_COMPARE_WITH_TIMEOUT(connections->state(), ConnectionManager::State::Connected, 1000);
@@ -3119,7 +3149,7 @@ private slots:
         QVERIFY(!runtime.isRemoteClientConnected());
         QVERIFY(!runtime.isRemoteOverlayActionsEnabled());
         QCOMPARE(runtime.remoteStatusText(), QStringLiteral("DEGRADED"));
-        QCOMPARE(runtime.remoteVolumePercent(), -1);
+        QCOMPARE(runtime.remoteVolumePercent(), 68);
         QCOMPARE(server.openCommands.size(), 1);
         QCOMPARE(runtime.getWorkspaceManager()->remoteSessionState(
                      targetEndpointId),
@@ -3143,8 +3173,16 @@ private slots:
         QVERIFY(!runtime.isRemoteClientConnected());
         QVERIFY(!runtime.isRemoteOverlayActionsEnabled());
         QCOMPARE(runtime.remoteStatusText(), QStringLiteral("DEGRADED"));
-        QCOMPARE(runtime.remoteVolumePercent(), -1);
+        QCOMPARE(runtime.remoteVolumePercent(), 68);
         QCOMPARE(server.openCommands.size(), 1);
+
+        // Every notification feeding QML must preserve the value, including
+        // intermediate status transitions rather than only the final state.
+        QVERIFY(!volumesPresentedDuringOutage.isEmpty());
+        for (const int displayedVolume : std::as_const(volumesPresentedDuringOutage)) {
+            QCOMPARE(displayedVolume, 68);
+        }
+        disconnect(volumeObservation);
 
         // A resumed session may carry a fresh snapshot, or just restore its
         // retained reading. Neither path needs another native volume change.
@@ -3189,7 +3227,7 @@ private slots:
         lease.insert(QStringLiteral("commandReady"), false);
         QVERIFY(server.send(lease));
         QTRY_VERIFY_WITH_TIMEOUT(!runtime.isRemoteClientConnected(), 1'000);
-        QCOMPARE(runtime.remoteVolumePercent(), -1);
+        QCOMPARE(runtime.remoteVolumePercent(), recoveredVolume);
         presentation.clear();
         lease.insert(QStringLiteral("degraded"), false);
         lease.insert(QStringLiteral("commandReady"), true);
@@ -5126,6 +5164,26 @@ private slots:
         QVERIFY(!presentationChanges.isEmpty());
         QCOMPARE(controller.activeWorkspace(), firstRaw);
         QVERIFY(firstRaw->hasScreens());
+
+        // The QML-facing label retains the same reading during degraded
+        // leases, just as the workspace retains its screen topology.
+        QJsonObject lease = openedEnvelope(firstSessionId, {}, firstScreen, 35);
+        lease.insert(QStringLiteral("type"), QStringLiteral("remote_session_lease_state"));
+        lease.remove(QStringLiteral("snapshot"));
+        lease.remove(QStringLiteral("snapshotSequence"));
+        lease.insert(QStringLiteral("degraded"), true);
+        lease.insert(QStringLiteral("commandReady"), false);
+        sendServerMessage(lease);
+        QTRY_COMPARE_WITH_TIMEOUT(controller.remoteStatusText(), QStringLiteral("DEGRADED"), 1'000);
+        QVERIFY(controller.remoteVolumeVisible());
+        QCOMPARE(controller.remoteVolumeText(), QStringLiteral("68%"));
+        QCOMPARE(controller.activeWorkspace(), firstRaw);
+        QVERIFY(firstRaw->hasScreens());
+        lease.insert(QStringLiteral("degraded"), false);
+        lease.insert(QStringLiteral("commandReady"), true);
+        sendServerMessage(lease);
+        QTRY_COMPARE_WITH_TIMEOUT(controller.remoteStatusText(), QStringLiteral("CONNECTED"), 1'000);
+        QCOMPARE(controller.remoteVolumeText(), QStringLiteral("68%"));
 
         controller.requestDeleteProject();
         QVERIFY(controller.dialogDestructive());
