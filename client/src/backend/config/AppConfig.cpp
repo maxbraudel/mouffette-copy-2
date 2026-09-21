@@ -26,7 +26,7 @@ struct SettingSpec {
     bool sensitive = false;
 };
 
-constexpr std::array<SettingSpec, 125> kSpecs{{
+constexpr std::array<SettingSpec, 130> kSpecs{{
     {Key::ServerUrl, "MOUFFETTE_SERVER_URL", "server-url", "serverUrl", "ws://localhost:8080", false},
     {Key::ProxyType, "MOUFFETTE_PROXY_TYPE", "proxy-type", nullptr, "system", false},
     {Key::ProxyHost, "MOUFFETTE_PROXY_HOST", "proxy-host", nullptr, "", false},
@@ -60,6 +60,11 @@ constexpr std::array<SettingSpec, 125> kSpecs{{
     {Key::ProjectDeadlinePollIntervalMs, "MOUFFETTE_PROJECT_DEADLINE_POLL_INTERVAL_MS", "project-deadline-poll-interval-ms", nullptr, "250", false},
     {Key::ScreenChangeDebounceMs, "MOUFFETTE_SCREEN_CHANGE_DEBOUNCE_MS", "screen-change-debounce-ms", nullptr, "150", false},
     {Key::ScreenAdaptiveEnabled, "MOUFFETTE_SCREEN_ADAPTIVE_ENABLED", "screen-adaptive-enabled", nullptr, "true", true},
+    {Key::ScreenLowEnabled, "MOUFFETTE_SCREEN_LOW_ENABLED", "screen-low-enabled", nullptr, "true", true},
+    {Key::ScreenLowMaxEdge, "MOUFFETTE_SCREEN_LOW_MAX_EDGE", "screen-low-max-edge", nullptr, "960", false},
+    {Key::ScreenLowMaxFps, "MOUFFETTE_SCREEN_LOW_MAX_FPS", "screen-low-max-fps", nullptr, "20", false},
+    {Key::ScreenLowMaxBitrateKbps, "MOUFFETTE_SCREEN_LOW_MAX_BITRATE_KBPS", "screen-low-max-bitrate-kbps", nullptr, "750", false},
+    {Key::ScreenLowMinTotalBitrateKbps, "MOUFFETTE_SCREEN_LOW_MIN_TOTAL_BITRATE_KBPS", "screen-low-min-total-bitrate-kbps", nullptr, "600", false},
     {Key::ScreenMaxEdge, "MOUFFETTE_SCREEN_MAX_EDGE", "screen-max-edge", nullptr, "3840", false},
     {Key::ScreenMaxFps, "MOUFFETTE_SCREEN_MAX_FPS", "screen-max-fps", nullptr, "30", false},
     {Key::ScreenIdleIntervalMs, "MOUFFETTE_SCREEN_IDLE_INTERVAL_MS", "screen-idle-interval-ms", nullptr, "1000", false},
@@ -466,6 +471,11 @@ void AppConfig::resetToCompiledDefaults() {
     m_projectDeadlinePollIntervalMs = 250;
     m_screenChangeDebounceMs = 150;
     m_screenAdaptiveEnabled = true;
+    m_screenLowEnabled = true;
+    m_screenLowMaxEdge = 960;
+    m_screenLowMaxFps = 20;
+    m_screenLowMaxBitrateKbps = 750;
+    m_screenLowMinTotalBitrateKbps = 600;
     m_screenMaxEdge = 3840;
     m_screenMaxFps = 30;
     m_screenIdleIntervalMs = 1000;
@@ -870,6 +880,10 @@ bool AppConfig::load(const LoadOptions& options, QString* errorMessage) {
                             &candidate.m_projectDeadlinePollIntervalMs)
         || !parseIntSetting(Key::ScreenChangeDebounceMs, 10, 5000,
                             &candidate.m_screenChangeDebounceMs)
+        || !parseIntSetting(Key::ScreenLowMaxEdge, 160, 1920, &candidate.m_screenLowMaxEdge)
+        || !parseIntSetting(Key::ScreenLowMaxFps, 1, 60, &candidate.m_screenLowMaxFps)
+        || !parseIntSetting(Key::ScreenLowMaxBitrateKbps, 32, 10000, &candidate.m_screenLowMaxBitrateKbps)
+        || !parseIntSetting(Key::ScreenLowMinTotalBitrateKbps, 64, 100000, &candidate.m_screenLowMinTotalBitrateKbps)
         || !parseIntSetting(Key::ScreenMaxEdge, 320, 3840, &candidate.m_screenMaxEdge)
         || !parseIntSetting(Key::ScreenMaxFps, 1, 60, &candidate.m_screenMaxFps)
         || !parseIntSetting(Key::ScreenIdleIntervalMs, 250, 4000, &candidate.m_screenIdleIntervalMs)
@@ -963,6 +977,9 @@ bool AppConfig::load(const LoadOptions& options, QString* errorMessage) {
                             &candidate.m_toastAnimationDurationMs)) {
         return false;
     }
+    if (candidate.m_screenLowMaxEdge % 2 != 0) {
+        return setError(errorMessage, QStringLiteral("MOUFFETTE_SCREEN_LOW_MAX_EDGE must be even"));
+    }
     if (candidate.m_screenMaxEdge % 2 != 0) {
         return setError(errorMessage, QStringLiteral("MOUFFETTE_SCREEN_MAX_EDGE must be even"));
     }
@@ -1007,7 +1024,8 @@ bool AppConfig::load(const LoadOptions& options, QString* errorMessage) {
     }
     candidate.m_uploadConcurrency = static_cast<int>(uploadConcurrency);
 
-    if (!parseBoolean(rawValues.at(Key::ScreenAdaptiveEnabled), keyName(Key::ScreenAdaptiveEnabled), candidate.m_screenAdaptiveEnabled, errorMessage)
+    if (!parseBoolean(rawValues.at(Key::ScreenLowEnabled), keyName(Key::ScreenLowEnabled), candidate.m_screenLowEnabled, errorMessage)
+        || !parseBoolean(rawValues.at(Key::ScreenAdaptiveEnabled), keyName(Key::ScreenAdaptiveEnabled), candidate.m_screenAdaptiveEnabled, errorMessage)
         || !parseBoolean(rawValues.at(Key::NetworkDiagnostics), keyName(Key::NetworkDiagnostics), candidate.m_networkDiagnostics, errorMessage)
         || !parseBoolean(rawValues.at(Key::NetworkDiagnosticsVerbose), keyName(Key::NetworkDiagnosticsVerbose), candidate.m_networkDiagnosticsVerbose, errorMessage)
         || !parseBoolean(rawValues.at(Key::AutoUploadImportedMedia),

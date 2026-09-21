@@ -51,6 +51,7 @@ struct ScreenStreamPacket {
     QSize size;
     qint64 timestampUs = 0;
     bool keyFrame = false;
+    QString layer = QStringLiteral("main");
 };
 Q_DECLARE_METATYPE(ScreenStreamPacket)
 

@@ -1578,6 +1578,7 @@ class MouffetteServer {
             case 'screen_share_consent':
             case 'screen_share_subscribe':
             case 'screen_share_status':
+            case 'screen_publication_status':
             case 'screen_share_keyframe':
                 this.screenShare.handleControl(clientId, message);
                 break;

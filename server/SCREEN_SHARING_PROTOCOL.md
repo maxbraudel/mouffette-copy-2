@@ -1,10 +1,12 @@
 # Live screen preview (protocol v12 extension)
 
-Video uses a third WebSocket, independent of control and media uploads. The
-server relays complete H.264 Annex-B access units without transcoding, base64,
-compression, or screen-content retention.
+Video uses WebSockets independent of control and media uploads. Shared
+publication v2, described below, separates publishing from viewing and retains
+only bounded, short-lived encoded IDRs. The legacy channel relays complete H.264
+Annex-B access units without retention. Neither mode transcodes, uses base64,
+or applies WebSocket compression. No server GPU is needed.
 
-## Authorization
+## Legacy authorization and delivery
 
 `request_screen_channel {requestId}` on authenticated control returns a random
 256-bit, single-use token valid for 15 seconds. Opening
@@ -153,3 +155,114 @@ The hard ACK timeout remains independent and discards an irrecoverable pipe.
 Tests cover two healthy 500 ms / sixteen-frame windows, 300 ms of additional
 queueing after a 40 ms baseline, and eight displays fairly sharing 1 Mbit/s
 under an intentionally restricted six-frame test window.
+
+## Shared publication v2
+
+An opt-in `request_screen_channel` adds `mediaVersion:2` and `role:"view"`
+or `role:"publish"`; tokens and ready messages repeat these capabilities.
+Tokens are single-use and bound to the exact control transport and role.
+Concurrent role requests do not invalidate one another. The two sockets have
+independent failure/replacement lifetimes: losing a viewing socket does not
+stop that endpoint publishing. Control loss revokes both. Setting
+`MOUFFETTE_SCREEN_SHARED_ENABLED=false` returns legacy capabilities, allowing a
+modern client to use its existing combined-channel fallback.
+
+For a v2 publisher, the server aggregates authorized session subscriptions into
+`screen_publication_request {publicationId,enabled,screens}`, where each screen
+contains `screenId,maximumEdge,layers:["main", "low"]` (low is optional).
+The UUID belongs to the source transport/consent/topology epoch, not one viewer.
+Joining, leaving, viewport changes and layer demand preserve it while a useful
+subscription remains. Last departure stops publication and deletes its cache.
+The default admission limit is ten distinct viewers per publisher. Server
+publication capacity is separately bounded.
+
+The source sends each requested encoded layer once, independent of viewer
+count. This implementation uses main plus an optional low encoding at the
+source; it does not manufacture lower-resolution pictures on the server.
+Main is always an authorized fallback for a requested physical screen.
+`screen_publication_status {publicationId,screenId,layer,reason}` accepts
+`starting`, `streaming`, `inactive`, `permission_denied`, or `capture_error`,
+and optional `bitrateBps` (0–400000000), `fps` (0–120). Positive hints describe
+the layer. Inactive/failed layers cannot publish until starting/streaming;
+starting is idempotent for an already usable layer. Failure is scoped to that
+screen/layer. If optional low is inactive and a viewer has a smaller hard decoder
+limit, main is capped to that limit; a viewer's weak bandwidth alone never
+lowers the shared main request.
+
+Ingress binary uses `MSV2`, uint16 big-endian JSON length, then one Annex-B
+access unit. Required header fields are
+`publicationId,screenId,layer,sequence,width,height,keyFrame,codec:"h264"`;
+`timestampUs,bitrateBps,fps` are optional. The payload limit remains 2 MiB,
+header 1024 bytes, even dimensions 2–3840, bitrate hints 1–400000000 and FPS
+1–120. Unknown fields and invalid roles are rejected. A declared IDR must
+contain SPS, PPS and IDR NAL units before it can enter the snapshot cache.
+This framing check does not decode or certify the bitstream's visual contents.
+
+`screen_publication_ack {publicationId,screenId,layer,sequence}` is sent on
+the publisher socket only after validating current publication authority. It
+acknowledges ingress consumption independently of all downstream ACKs. A
+late packet from a just-hidden lane may be acknowledged and discarded without
+restoring its demand. Old publication UUIDs, another publisher's UUID, obsolete
+transports and revoked consent release no source credit.
+
+Each viewer receives the existing session-bound `MSV1` envelope, with server
+delivery sequence numbers independent of source sequence/layer. Every delivery
+rechecks consent, current transports, generation, command-ready session and
+physical screen demand. Main/low switches require an IDR. A dependent frame
+also requires a contiguous source sequence for that viewer: a cached IDR does
+not permit skipping intervening source references merely because delivery
+sequence numbers are contiguous. Requests for source IDRs are coalesced and
+rate-limited per publication, not multiplied by viewer count.
+
+Viewer ACK/decode feedback controls only that consuming endpoint's target.
+Its shared bandwidth budget covers all of its visible screens and publishers;
+layer selection divides that budget between screens. A healthy viewer can
+retain main while another receives low or IDR-only snapshots. Viewer feedback
+is not forwarded into a v2 publisher's uplink controller. Reopening a disposable
+view socket preserves a conservatively capped learned target for the same
+authenticated control object, while discarding old receipt/RTT/socket state.
+Upload reservations reduce only the relevant viewer's download target.
+
+Snapshot storage is the latest complete encoded IDR per publication/screen/layer,
+bounded globally by packet bytes and age. There are no raw pixels, files, GOP
+queues, or per-viewer frame histories. Repeated ticks never send the identical
+cached source image as a new delivery; expired cache is discarded. A snapshot
+has at most one outstanding receipt per screen. A long snapshot reserves the
+endpoint window alone and incurs its entire serialization debt. Its receipt
+deadline includes a bounded serialization allowance, avoiding false timeouts
+on a useful slow delivery. An image that cannot fit the transfer/age bounds is
+skipped without taking fairness priority or repeatedly demanding an equally
+large IDR. Thus extremely low rates do not guarantee that every image is
+deliverable; they remain bounded and do not stall other eligible screens.
+
+These settings join the existing receipt/queue limits (`MOUFFETTE_SCREEN_`
+prefix on every key):
+
+| Suffix | Default | Purpose |
+| --- | ---: | --- |
+| `SHARED_ENABLED` | true | Opt-in shared publication negotiation/rollout |
+| `MAX_VIEWERS_PER_PUBLISHER` | 10 | Distinct subscribed viewers per source |
+| `MAX_PUBLICATIONS` | 256 | Active source publication admission cap |
+| `KEYFRAME_CACHE_MIB` | 16 | Global retained encoded IDR bytes |
+| `KEYFRAME_CACHE_TTL_MS` | 5000 | Maximum cache age |
+| `SERVER_EGRESS_BPS` | 100000000 | Aggregate paced video egress, shared with legacy |
+| `VIEWER_MIN_BPS` | 64000 | Adaptive receiver target floor |
+| `VIEWER_INITIAL_BPS` | 3000000 | Initial adaptive receiver target |
+| `VIEWER_MAX_BPS` | 20000000 | Adaptive receiver target ceiling |
+| `VIEWER_RECOVERY_MS` | 3000 | Healthy hold before gradual recovery |
+| `SNAPSHOT_INTERVAL_MS` | 1000 | Minimum interval between new snapshots |
+| `SNAPSHOT_MAX_TRANSFER_MS` | 4000 | Maximum estimated snapshot serialization |
+| `VIEWER_UPLOAD_PERCENT` | 40 | Video target percentage during incoming uploads |
+
+Targets are policy bounds, not Internet line-speed measurements or guaranteed
+throughput. Viewer minimum/initial/maximum must be ordered; snapshot interval
+and maximum transfer must be smaller than cache TTL. Long snapshot deadlines
+must remain consistent with the clients' stale/first-frame policy when changing
+defaults. Source and delivery shaping bound video; separate TCP sockets and a
+video cap alone do not provide strict cross-application file/control QoS.
+
+`screen_publications.test.js` covers ten-viewer fanout, single ingress ACKs,
+heterogeneous layer choices, legacy decoder caps, independent bidirectional
+roles, source-chain continuity on late join, long snapshot deadlines, snapshot
+fairness, learned-budget reconnects, authorization/epoch fences, cache budgets,
+global paced byte bounds and rollout fallback.

@@ -39,6 +39,19 @@ const DECLARATIONS = Object.freeze({
     MOUFFETTE_SCREEN_MAX_INFLIGHT_FRAMES: { type: 'int', default: 64, min: 1, max: 256 },
     MOUFFETTE_SCREEN_QUEUE_TARGET_MS: { type: 'int', default: 150, min: 25, max: 2000 },
     MOUFFETTE_SCREEN_KEYFRAME_REQUEST_INTERVAL_MS: { type: 'int', default: 1000, min: 250, max: 10000 },
+    MOUFFETTE_SCREEN_SHARED_ENABLED: { type: 'bool', default: true },
+    MOUFFETTE_SCREEN_MAX_VIEWERS_PER_PUBLISHER: { type: 'int', default: 10, min: 1, max: 64 },
+    MOUFFETTE_SCREEN_MAX_PUBLICATIONS: { type: 'int', default: 256, min: 1, max: 4096 },
+    MOUFFETTE_SCREEN_KEYFRAME_CACHE_MIB: { type: 'int', default: 16, min: 2, max: 256 },
+    MOUFFETTE_SCREEN_KEYFRAME_CACHE_TTL_MS: { type: 'int', default: 5000, min: 500, max: 15000 },
+    MOUFFETTE_SCREEN_SERVER_EGRESS_BPS: { type: 'int', default: 100000000, min: 64000, max: 10000000000 },
+    MOUFFETTE_SCREEN_VIEWER_MIN_BPS: { type: 'int', default: 64000, min: 16000, max: 100000000 },
+    MOUFFETTE_SCREEN_VIEWER_INITIAL_BPS: { type: 'int', default: 3000000, min: 16000, max: 100000000 },
+    MOUFFETTE_SCREEN_VIEWER_MAX_BPS: { type: 'int', default: 20000000, min: 16000, max: 100000000 },
+    MOUFFETTE_SCREEN_VIEWER_RECOVERY_MS: { type: 'int', default: 3000, min: 500, max: 30000 },
+    MOUFFETTE_SCREEN_SNAPSHOT_INTERVAL_MS: { type: 'int', default: 1000, min: 250, max: 10000 },
+    MOUFFETTE_SCREEN_SNAPSHOT_MAX_TRANSFER_MS: { type: 'int', default: 4000, min: 500, max: 10000 },
+    MOUFFETTE_SCREEN_VIEWER_UPLOAD_PERCENT: { type: 'int', default: 40, min: 10, max: 90 },
     MOUFFETTE_CURSOR_DEBUG: { type: 'bool', default: false },
 });
 
@@ -187,6 +200,16 @@ function loadServerConfig(options = {}) {
     if (values.MOUFFETTE_SCREEN_ACK_TIMEOUT_MS <= values.MOUFFETTE_SCREEN_QUEUE_TARGET_MS) {
         throw new Error('MOUFFETTE_SCREEN_ACK_TIMEOUT_MS must exceed MOUFFETTE_SCREEN_QUEUE_TARGET_MS');
     }
+    if (values.MOUFFETTE_SCREEN_VIEWER_MIN_BPS > values.MOUFFETTE_SCREEN_VIEWER_INITIAL_BPS
+        || values.MOUFFETTE_SCREEN_VIEWER_INITIAL_BPS > values.MOUFFETTE_SCREEN_VIEWER_MAX_BPS) {
+        throw new Error('MOUFFETTE_SCREEN_VIEWER_MIN_BPS <= MOUFFETTE_SCREEN_VIEWER_INITIAL_BPS <= MOUFFETTE_SCREEN_VIEWER_MAX_BPS is required');
+    }
+    if (values.MOUFFETTE_SCREEN_SNAPSHOT_INTERVAL_MS >= values.MOUFFETTE_SCREEN_KEYFRAME_CACHE_TTL_MS) {
+        throw new Error('MOUFFETTE_SCREEN_SNAPSHOT_INTERVAL_MS must be smaller than MOUFFETTE_SCREEN_KEYFRAME_CACHE_TTL_MS');
+    }
+    if (values.MOUFFETTE_SCREEN_SNAPSHOT_MAX_TRANSFER_MS >= values.MOUFFETTE_SCREEN_KEYFRAME_CACHE_TTL_MS) {
+        throw new Error('MOUFFETTE_SCREEN_SNAPSHOT_MAX_TRANSFER_MS must be smaller than MOUFFETTE_SCREEN_KEYFRAME_CACHE_TTL_MS');
+    }
 
     return Object.freeze({
         host: values.MOUFFETTE_SERVER_HOST,
@@ -225,6 +248,19 @@ function loadServerConfig(options = {}) {
         screenMaxInflightFrames: values.MOUFFETTE_SCREEN_MAX_INFLIGHT_FRAMES,
         screenQueueTargetMs: values.MOUFFETTE_SCREEN_QUEUE_TARGET_MS,
         screenKeyframeRequestIntervalMs: values.MOUFFETTE_SCREEN_KEYFRAME_REQUEST_INTERVAL_MS,
+        screenSharedEnabled: values.MOUFFETTE_SCREEN_SHARED_ENABLED,
+        screenMaxViewersPerPublisher: values.MOUFFETTE_SCREEN_MAX_VIEWERS_PER_PUBLISHER,
+        screenMaxPublications: values.MOUFFETTE_SCREEN_MAX_PUBLICATIONS,
+        screenKeyframeCacheMiB: values.MOUFFETTE_SCREEN_KEYFRAME_CACHE_MIB,
+        screenKeyframeCacheTtlMs: values.MOUFFETTE_SCREEN_KEYFRAME_CACHE_TTL_MS,
+        screenServerEgressBps: values.MOUFFETTE_SCREEN_SERVER_EGRESS_BPS,
+        screenViewerMinBps: values.MOUFFETTE_SCREEN_VIEWER_MIN_BPS,
+        screenViewerInitialBps: values.MOUFFETTE_SCREEN_VIEWER_INITIAL_BPS,
+        screenViewerMaxBps: values.MOUFFETTE_SCREEN_VIEWER_MAX_BPS,
+        screenViewerRecoveryMs: values.MOUFFETTE_SCREEN_VIEWER_RECOVERY_MS,
+        screenSnapshotIntervalMs: values.MOUFFETTE_SCREEN_SNAPSHOT_INTERVAL_MS,
+        screenSnapshotMaxTransferMs: values.MOUFFETTE_SCREEN_SNAPSHOT_MAX_TRANSFER_MS,
+        screenViewerUploadPercent: values.MOUFFETTE_SCREEN_VIEWER_UPLOAD_PERCENT,
         cursorDebug: values.MOUFFETTE_CURSOR_DEBUG,
         policyVersion: 5,
         values: Object.freeze(values),

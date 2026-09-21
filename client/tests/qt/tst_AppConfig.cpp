@@ -132,6 +132,11 @@ void AppConfigTest::screenPreviewDefaults() {
     AppConfig config;
     const auto verifyDefaults = [](const AppConfig& value) {
         QVERIFY(value.screenAdaptiveEnabled());
+        QCOMPARE(value.screenLowEnabled(), true);
+        QCOMPARE(value.screenLowMaxEdge(), 960);
+        QCOMPARE(value.screenLowMaxFps(), 20);
+        QCOMPARE(value.screenLowMaxBitrateKbps(), 750);
+        QCOMPARE(value.screenLowMinTotalBitrateKbps(), 600);
         QCOMPARE(value.screenMaxEdge(), 3840);
         QCOMPARE(value.screenMaxFps(), 30);
         QCOMPARE(value.screenIdleIntervalMs(), 1000);
@@ -166,6 +171,11 @@ void AppConfigTest::screenPreviewSourcesAndReload() {
     QTemporaryDir directory;
     QVERIFY(directory.isValid());
     const QString path = writeEnvFile(directory, "screen.env",
+        "MOUFFETTE_SCREEN_LOW_ENABLED=false\n"
+        "MOUFFETTE_SCREEN_LOW_MAX_EDGE=640\n"
+        "MOUFFETTE_SCREEN_LOW_MAX_FPS=12\n"
+        "MOUFFETTE_SCREEN_LOW_MAX_BITRATE_KBPS=400\n"
+        "MOUFFETTE_SCREEN_LOW_MIN_TOTAL_BITRATE_KBPS=800\n"
         "MOUFFETTE_SCREEN_ADAPTIVE_ENABLED=false\n"
         "MOUFFETTE_SCREEN_MAX_EDGE=2560\n"
         "MOUFFETTE_SCREEN_MAX_FPS=60\n"
@@ -195,6 +205,11 @@ void AppConfigTest::screenPreviewSourcesAndReload() {
     AppConfig config;
     QString error;
     QVERIFY2(config.load(options, &error), qPrintable(error));
+    QVERIFY(!config.screenLowEnabled());
+    QCOMPARE(config.screenLowMaxEdge(), 640);
+    QCOMPARE(config.screenLowMaxFps(), 12);
+    QCOMPARE(config.screenLowMaxBitrateKbps(), 400);
+    QCOMPARE(config.screenLowMinTotalBitrateKbps(), 800);
     QVERIFY(!config.screenAdaptiveEnabled());
     QCOMPARE(config.screenMaxEdge(), 2560);
     QCOMPARE(config.screenMaxFps(), 60);
@@ -221,14 +236,18 @@ void AppConfigTest::screenPreviewSourcesAndReload() {
     QCOMPARE(config.loadedEnvFilePath(), path);
     QCOMPARE(config.provenance(AppConfig::Key::ScreenMaxFps), "process:MOUFFETTE_ENV_FILE:" + path);
 
+    options.processEnvironment.insert("MOUFFETTE_SCREEN_LOW_MAX_FPS", "8");
     options.processEnvironment.insert("MOUFFETTE_SCREEN_MAX_FPS", "24");
     options.processEnvironment.insert("MOUFFETTE_SCREEN_ADAPTIVE_ENABLED", "true");
     QVERIFY2(config.load(options, &error), qPrintable(error));
+    QCOMPARE(config.screenLowMaxFps(), 8);
+    QCOMPARE(config.provenance(AppConfig::Key::ScreenLowMaxFps), QStringLiteral("process:MOUFFETTE_SCREEN_LOW_MAX_FPS"));
     QCOMPARE(config.screenMaxFps(), 24);
     QVERIFY(config.screenAdaptiveEnabled());
     QCOMPARE(config.provenance(AppConfig::Key::ScreenMaxFps), QStringLiteral("process:MOUFFETTE_SCREEN_MAX_FPS"));
-    options.arguments << "--screen-max-fps=15" << "--screen-adaptive-enabled=false";
+    options.arguments << "--screen-max-fps=15" << "--screen-adaptive-enabled=false" << "--screen-low-max-fps=6";
     QVERIFY2(config.load(options, &error), qPrintable(error));
+    QCOMPARE(config.screenLowMaxFps(), 6);
     QCOMPARE(config.screenMaxFps(), 15);
     QVERIFY(!config.screenAdaptiveEnabled());
     QCOMPARE(config.provenance(AppConfig::Key::ScreenMaxFps), QStringLiteral("cli:--screen-max-fps"));
@@ -242,6 +261,8 @@ void AppConfigTest::screenPreviewSourcesAndReload() {
     QCOMPARE(writeEnvFile(directory, "screen.env", "MOUFFETTE_SCREEN_MAX_FPS=10\n"), path);
     options = isolatedOptions(path);
     QVERIFY2(config.load(options, &error), qPrintable(error));
+    QCOMPARE(config.screenLowMaxFps(), 20);
+    QVERIFY(config.screenLowEnabled());
     QCOMPARE(config.screenMaxFps(), 10);
     QCOMPARE(config.screenMaxEdge(), 3840);
     QCOMPARE(config.screenMaxBitrateKbps(), 12000);
@@ -255,6 +276,10 @@ void AppConfigTest::screenPreviewSourcesAndReload() {
 
 void AppConfigTest::screenPreviewRejectsInvalidSettings() {
     const struct { const char* name; int minimum; int maximum; } limits[] = {
+        {"LOW_MAX_EDGE", 160, 1920},
+        {"LOW_MAX_FPS", 1, 60},
+        {"LOW_MAX_BITRATE_KBPS", 32, 10000},
+        {"LOW_MIN_TOTAL_BITRATE_KBPS", 64, 100000},
         {"MAX_EDGE", 320, 3840}, {"MAX_FPS", 1, 60}, {"IDLE_INTERVAL_MS", 250, 4000},
         {"MIN_BITRATE_KBPS", 32, 10000}, {"INITIAL_BITRATE_KBPS", 32, 100000},
         {"MAX_BITRATE_KBPS", 32, 100000}, {"UPLOAD_BITRATE_KBPS", 32, 100000},
@@ -286,6 +311,14 @@ void AppConfigTest::screenPreviewRejectsInvalidSettings() {
         }
         options.processEnvironment.remove(key);
     }
+    options.processEnvironment.insert("MOUFFETTE_SCREEN_LOW_ENABLED", "sometimes");
+    QVERIFY(!config.load(options, &error));
+    QVERIFY(error.contains("MOUFFETTE_SCREEN_LOW_ENABLED"));
+    options.processEnvironment.remove("MOUFFETTE_SCREEN_LOW_ENABLED");
+    options.processEnvironment.insert("MOUFFETTE_SCREEN_LOW_MAX_EDGE", "961");
+    QVERIFY(!config.load(options, &error));
+    QVERIFY(error.contains("MOUFFETTE_SCREEN_LOW_MAX_EDGE"));
+    options.processEnvironment.remove("MOUFFETTE_SCREEN_LOW_MAX_EDGE");
     options.processEnvironment.insert("MOUFFETTE_SCREEN_ADAPTIVE_ENABLED", "sometimes");
     QVERIFY(!config.load(options, &error));
     QVERIFY(error.contains("MOUFFETTE_SCREEN_ADAPTIVE_ENABLED"));

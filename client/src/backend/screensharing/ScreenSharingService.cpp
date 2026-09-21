@@ -1,6 +1,8 @@
 #include "ScreenSharingService.h"
 #include "ScreenCaptureSource.h"
 #include "ScreenAdaptiveController.h"
+#include "ScreenPublicationProfiles.h"
+#include "ScreenFrameAdmissionCeiling.h"
 #include "backend/config/AppConfig.h"
 #include "backend/network/NetworkDiagnostics.h"
 #include "ScreenStreamCodec.h"
@@ -26,6 +28,8 @@ QString issueText(const QString& reason)
     if (reason == QLatin1String("disabled") || reason == QLatin1String("consent_disabled")
         || reason == QLatin1String("not_allowed"))
         return QObject::tr("Screen sharing is disabled on the remote client.");
+    if (reason == QLatin1String("viewer_capacity") || reason == QLatin1String("capacity_limited"))
+        return QObject::tr("The screen sharing capacity limit has been reached. Try again after another viewer disconnects.");
     if (reason == QLatin1String("permission_denied"))
         return QObject::tr("Allow screen recording in the remote computer's system settings, then restart the sharing app. See its Settings for details.");
     if (reason == QLatin1String("unavailable") || reason == QLatin1String("capture_error")
@@ -60,25 +64,15 @@ int requestedEdge(const QJsonObject& grant, int screen) {
     }
     return 0;
 }
-ScreenStreamProfile streamProfile(int bitrate, int edge) {
+ScreenPublicationProfiles::Limits profileLimits() {
     const auto& c = AppConfig::instance();
-    ScreenStreamProfile profile;
-    profile.bitrateBps = std::max(32000, bitrate);
-    profile.maximumEdge = 320;
-    profile.framesPerSecond = 5;
-    struct Level { int bitrate; int edge; int fps; };
-    static const Level levels[] = {{220000,480,8}, {400000,640,12}, {700000,960,15},
-        {1100000,1280,24}, {2200000,1920,30}, {4500000,2560,30},
-        {8000000,3840,30}, {16000000,3840,60}};
-    for (const auto& level : levels) if (bitrate >= level.bitrate) {
-        profile.maximumEdge = level.edge; profile.framesPerSecond = level.fps;
-    }
-    profile.maximumEdge = std::min({profile.maximumEdge, edge, c.screenMaxEdge()});
-    profile.framesPerSecond = std::min(profile.framesPerSecond, c.screenMaxFps());
-    profile.idleIntervalMs = c.screenIdleIntervalMs();
-    profile.keyFrameIntervalMs = c.screenKeyframeIntervalMs();
-    profile.softwarePreset = c.screenSoftwarePreset();
-    return profile.normalized();
+    return {c.screenMaxEdge(), c.screenMaxFps(), c.screenIdleIntervalMs(),
+        c.screenKeyframeIntervalMs(), c.screenSoftwarePreset(), c.screenLowEnabled(),
+        c.screenLowMaxEdge(), c.screenLowMaxFps(), c.screenLowMaxBitrateKbps() * 1000,
+        c.screenLowMinTotalBitrateKbps() * 1000};
+}
+ScreenStreamProfile streamProfile(int bitrate, int edge) {
+    return ScreenPublicationProfiles::profile(bitrate, edge, profileLimits());
 }
 }
 
@@ -112,12 +106,16 @@ struct ScreenSharingService::Private {
     QHash<int, QSet<QString>> reportedScreenIssues;
     QHash<QString, QJsonObject> grants;
     QHash<QString, QHash<int, quint64>> sequences;
+    QJsonObject publication;
+    QHash<int, QHash<QString, quint64>> publicationSequences;
     struct Capture {
         ScreenCaptureSource* source = nullptr;
         QPointer<QScreen> screen;
         QRect geometry;
         ScreenStreamProfile profile;
-        int slowEncodes = 0;
+        QHash<QString, ScreenStreamProfile> layerProfiles;
+        QHash<QString, ScreenFrameAdmissionCeiling> admissionCeilings;
+        bool lowSuppressed = false;
         int encodingFailures = 0;
         int recoveryMaximumEdge = ScreenStreamEncoder::MaximumDecodeEdge;
         int recoveryBitrateBps = 100000000;
@@ -153,6 +151,31 @@ struct ScreenSharingService::Private {
             && binding.phase == QLatin1String("Active")
             && network->canIssueSessionCommands(session)
             && (incoming ? binding.targetEndpointId : binding.ownerEndpointId) == network->endpointId();
+    }
+    bool shared() const { return network->sharedScreenPublicationSupported(); }
+    bool publicationReady() const {
+        if (!enabled || suspended || !network->isConnected()
+            || !network->isScreenPublicationChannelConnected()
+            || !publication.value("enabled").toBool()
+            || publication.value("publicationId").toString().isEmpty()) return false;
+        // The relay owns the aggregate grant. Retain a local session-lease
+        // guard too, without coupling it to any single viewer's session.
+        for (const auto& binding : network->remoteSessionCoordinator()->all())
+            if (ready(binding.remoteSessionId, true)) return true;
+        return false;
+    }
+    bool lowRequested(int screen) const {
+        for (const auto& entry : publication.value("screens").toArray()) {
+            const auto item = entry.toObject();
+            if (item.value("screenId").toInt(-1) == screen)
+                return item.value("layers").toArray().contains(QStringLiteral("low"));
+        }
+        return false;
+    }
+    void clearPublication() {
+        publication = {};
+        publicationSequences.clear();
+        stopCaptures();
     }
     void setStatus(const QString& value) {
         if (status == value) return;
@@ -236,11 +259,14 @@ struct ScreenSharingService::Private {
         network->setScreenVideoBudget(currentBudget);
         if (!force && now - lastProfileUpdate < 1000) return;
         lastProfileUpdate = now;
-        QHash<int, int> edges, copies;
+        QHash<int, int> edges;
         qint64 weight = 0;
         for (auto it = captures.cbegin(); it != captures.cend(); ++it) {
             int edge = 0, count = 0, receiverCap = 3840;
-            for (auto grant = grants.cbegin(); grant != grants.cend(); ++grant) {
+            if (shared()) {
+                edge = requestedEdge(publication, it.key());
+                count = 1;
+            } else for (auto grant = grants.cbegin(); grant != grants.cend(); ++grant) {
                 if (!ready(grant.key(), true)) continue;
                 const int requested = requestedEdge(*grant, it.key());
                 if (requested > 0) {
@@ -249,22 +275,44 @@ struct ScreenSharingService::Private {
                 }
             }
             edge = std::min(edge, receiverCap);
-            edges.insert(it.key(), edge); copies.insert(it.key(), count);
+            edges.insert(it.key(), edge);
             weight += qint64(std::max(160, edge)) * std::max(1, count);
         }
         for (auto it = captures.begin(); it != captures.end(); ++it) {
             const int share = int(qint64(currentBudget) * std::max(160, edges.value(it.key()))
                 / std::max<qint64>(1, weight));
-            auto profile = streamProfile(share, std::max(160, edges.value(it.key())));
-            // Keep an encoder failure's local ceiling for this capture's
-            // lifetime. Healthy network feedback must not repeatedly restore
-            // a hardware profile that has already failed.
-            profile.maximumEdge = std::min(profile.maximumEdge, it->recoveryMaximumEdge);
-            profile.bitrateBps = std::min(profile.bitrateBps, it->recoveryBitrateBps);
-            profile.framesPerSecond = std::min(profile.framesPerSecond, it->recoveryMaximumFps);
-            if (it->profile != profile || force) {
-                it->profile = profile;
-                it->source->setProfile(profile);
+            const int edge = std::max(160, edges.value(it.key()));
+            QHash<QString, ScreenStreamProfile> profiles = shared()
+                ? ScreenPublicationProfiles::select(share, edge, lowRequested(it.key()),
+                    it->lowSuppressed, it->layerProfiles.contains(QStringLiteral("low")), profileLimits())
+                : QHash<QString, ScreenStreamProfile>{{QStringLiteral("main"), streamProfile(share, edge)}};
+            // Network recovery cannot restore an encoder profile which failed
+            // during this capture's lifetime. Apply its ceilings to both layers.
+            for (auto layer = profiles.begin(); layer != profiles.end(); ++layer) {
+                auto& profile = layer.value();
+                profile = it->admissionCeilings[layer.key()].apply(profile, now);
+                profile.maximumEdge = std::min(profile.maximumEdge, it->recoveryMaximumEdge);
+                profile.bitrateBps = std::min(profile.bitrateBps, it->recoveryBitrateBps);
+                profile.framesPerSecond = std::min(profile.framesPerSecond, it->recoveryMaximumFps);
+            }
+            if (profiles.contains(QStringLiteral("low"))) {
+                const auto main = profiles.value(QStringLiteral("main"));
+                const auto low = profiles.value(QStringLiteral("low"));
+                if (main.maximumEdge <= low.maximumEdge && main.framesPerSecond <= low.framesPerSecond)
+                    profiles.remove(QStringLiteral("low"));
+            }
+            if (it->layerProfiles != profiles || force) {
+                it->layerProfiles = profiles;
+                it->profile = profiles.value(QStringLiteral("main"));
+                it->source->setProfiles(profiles);
+                if (shared()) {
+                    const auto id = publication.value("publicationId").toString();
+                    for (auto layer = profiles.cbegin(); layer != profiles.cend(); ++layer)
+                        network->sendScreenPublicationStatus(id, it.key(), layer.key(), QStringLiteral("starting"),
+                            layer->bitrateBps, layer->framesPerSecond);
+                    if (lowRequested(it.key()) && !profiles.contains(QStringLiteral("low")))
+                        network->sendScreenPublicationStatus(id, it.key(), QStringLiteral("low"), QStringLiteral("inactive"));
+                }
             }
         }
         updateBackpressure();
@@ -273,7 +321,8 @@ struct ScreenSharingService::Private {
             NetworkDiagnostics::record(QStringLiteral("screen_quality"), {
                 {QStringLiteral("budgetBps"), currentBudget},
                 {QStringLiteral("screens"), captures.size()},
-                {QStringLiteral("viewers"), grants.size()}});
+                {QStringLiteral("sharedPublication"), shared()},
+                {QStringLiteral("legacyViewers"), grants.size()}});
         }
     }
     void decodeNext(int screen, const std::shared_ptr<Decode>& state) {
@@ -361,8 +410,25 @@ struct ScreenSharingService::Private {
         decodeNext(screen, state);
     }
     void publish(int screen, const ScreenStreamPacket& packet) {
-        if (!enabled || suspended || !channelReady || !captures.contains(screen)
+        if (!enabled || suspended || !captures.contains(screen)
             || monitor->screenCaptureTopology().isEmpty()) return;
+        if (shared()) {
+            if (!publicationReady() || requestedEdge(publication, screen) == 0
+                || !captures.value(screen).layerProfiles.contains(packet.layer)) return;
+            const auto profile = captures.value(screen).layerProfiles.value(packet.layer);
+            const QJsonObject header{{"publicationId", publication.value("publicationId")},
+                {"screenId", screen}, {"layer", packet.layer},
+                {"sequence", double(++publicationSequences[screen][packet.layer])},
+                {"width", packet.size.width()}, {"height", packet.size.height()},
+                {"keyFrame", packet.keyFrame}, {"codec", QStringLiteral("h264")},
+                {"timestampUs", double(packet.timestampUs)},
+                {"bitrateBps", profile.bitrateBps}, {"fps", profile.framesPerSecond}};
+            if (!network->sendScreenPublicationFrame(header, packet.annexB))
+                captures.value(screen).source->requestKeyFrame(packet.layer);
+            updateBackpressure();
+            return;
+        }
+        if (!channelReady) return;
         bool dropped = false;
         for (auto it = grants.cbegin(); it != grants.cend(); ++it) {
             if (!ready(it.key(), true) || requestedEdge(*it, screen) == 0) continue;
@@ -391,7 +457,7 @@ struct ScreenSharingService::Private {
         }
         bool hasReadyGrant = false;
         for (auto it = grants.cbegin(); it != grants.cend(); ++it) hasReadyGrant |= ready(it.key(), true);
-        if (!hasReadyGrant || !channelReady) {
+        if (shared() ? !publicationReady() : (!hasReadyGrant || !channelReady)) {
             stopCaptures();
             if (!enabled) setStatus(QObject::tr("Screen sharing is disabled."));
             else if (failedScreens.isEmpty()) setStatus(QObject::tr("Ready to share when a client connects."));
@@ -399,6 +465,7 @@ struct ScreenSharingService::Private {
         }
         const auto topology = monitor->screenCaptureTopology();
         const auto demanded = [this](int screen) {
+            if (shared()) return publicationReady() && requestedEdge(publication, screen) > 0;
             for (auto it = grants.cbegin(); it != grants.cend(); ++it)
                 if (ready(it.key(), true) && requestedEdge(*it, screen) > 0) return true;
             return false;
@@ -417,21 +484,58 @@ struct ScreenSharingService::Private {
             auto* source = new ScreenCaptureSource(q);
             captures.insert(i, {source, topology[i].screen, topology[i].advertisedGeometry});
             QObject::connect(source, &ScreenCaptureSource::packetReady, q,
-                             [this, i](const ScreenStreamPacket& packet) { publish(i, packet); });
+                             [this, i, source](const ScreenStreamPacket& packet) {
+                if (captures.value(i).source == source) publish(i, packet);
+            });
             QObject::connect(source, &ScreenCaptureSource::encodingMeasured, q,
-                             [this, i](int elapsedMs) {
+                             [this, i, source, average = 0.0, samples = 0,
+                              warmSince = qint64(-1), overloadedSince = qint64(-1),
+                              lastSampleAt = qint64(-1), cooldownUntil = qint64(0),
+                              observedProfile = ScreenStreamProfile{}, observedLayers = 0](int elapsedMs) mutable {
                 auto it = captures.find(i);
-                if (it == captures.end()) return;
-                const int limit = std::max(50, 2000 / it->profile.framesPerSecond);
-                it->slowEncodes = elapsedMs > limit ? it->slowEncodes + 1 : 0;
-                if (it->slowEncodes >= 3) {
-                    adaptation.penalize(clock.elapsed());
-                    it->slowEncodes = 0;
+                if (it == captures.end() || it->source != source) return;
+                const qint64 now = clock.elapsed();
+                const double periodMs = 1000.0 / it->profile.framesPerSecond;
+                const int layers = it->layerProfiles.size();
+                if (observedProfile != it->profile || observedLayers != layers
+                    || lastSampleAt < 0 || now - lastSampleAt > std::max(2000.0, periodMs * 10.0)) {
+                    observedProfile = it->profile;
+                    observedLayers = layers;
+                    average = 0.0;
+                    samples = 0;
+                    warmSince = now;
+                    overloadedSince = -1;
                 }
+                lastSampleAt = now;
+                // Main and low share this worker. Their aggregate conversion
+                // time must fit main's frame period, with 20% scheduling slack.
+                // Clip single spikes, warm up after profile changes, and demand
+                // sustained overload: one startup/periodic IDR is not CPU load.
+                const double ratio = std::clamp(elapsedMs / periodMs, 0.0, 4.0);
+                average = samples == 0 ? std::min(1.0, ratio) : average * .8 + ratio * .2;
+                samples = std::min(samples + 1, 1000);
+                if (samples < 6 || now - warmSince < 750 || now < cooldownUntil) return;
+                if (average <= 1.2) { overloadedSince = -1; return; }
+                if (overloadedSince < 0) overloadedSince = now;
+                if (now - overloadedSince < 1000) return;
+                overloadedSince = -1;
+                cooldownUntil = now + 2000;
+                if (shared() && it->layerProfiles.contains(QStringLiteral("low"))) {
+                    it->lowSuppressed = true;
+                    updateProfiles(true);
+                } else adaptation.penalize(now);
+            });
+            QObject::connect(source, &ScreenCaptureSource::layerEncodingFailed, q,
+                             [this, i, source](const QString& layer, const QString&) {
+                auto it = captures.find(i);
+                if (it == captures.end() || it->source != source || layer != QLatin1String("low")) return;
+                it->lowSuppressed = true;
+                updateProfiles(true);
             });
             QObject::connect(source, &ScreenCaptureSource::errorOccurred, q,
                              [this, i, source](ScreenCaptureError code, const QString& error) {
                 auto capture = captures.find(i);
+                if (capture == captures.end() || capture->source != source) return;
                 if (code == ScreenCaptureError::EncodingFailed && capture != captures.end()
                     && ++capture->encodingFailures <= 3 && capture->profile.maximumEdge > 160) {
                     adaptation.penalize(clock.elapsed());
@@ -443,11 +547,13 @@ struct ScreenSharingService::Private {
                     capture->recoveryBitrateBps = profile.bitrateBps;
                     capture->recoveryMaximumFps = profile.framesPerSecond;
                     capture->profile = profile;
-                    source->setProfile(profile);
+                    capture->lowSuppressed = true;
+                    updateProfiles(true);
                     source->setBackpressured(!network->screenSendWindowOpen());
                     source->start(capture->screen);
                     return;
                 }
+                const auto failedLayers = capture->layerProfiles.keys();
                 failedScreens.insert(i);
                 source->stop();
                 captures.remove(i);
@@ -456,8 +562,10 @@ struct ScreenSharingService::Private {
                 const QString reason = code == ScreenCaptureError::PermissionDenied
                     ? QStringLiteral("permission_denied") : QStringLiteral("capture_error");
                 qWarning().noquote() << "[ScreenSharing] Screen" << i << reason << error;
+                if (shared()) for (const auto& layer : failedLayers)
+                    network->sendScreenPublicationStatus(publication.value("publicationId").toString(), i, layer, reason);
                 for (auto it = grants.cbegin(); it != grants.cend(); ++it)
-                    if (requestedEdge(*it, i) > 0)
+                    if (!shared() && requestedEdge(*it, i) > 0)
                         network->sendScreenShareStatus(it.key(), quint64(it->value("generation").toDouble()),
                                                       reason, i);
             });
@@ -483,6 +591,20 @@ ScreenSharingService::ScreenSharingService(WebSocketClient* network, SystemMonit
     connect(network, &WebSocketClient::screenSourceFeedback, this, [this](int rtt, bool congested) {
         d->adaptation.observe(QStringLiteral("source"), rtt, congested, false, d->clock.elapsed());
     });
+    connect(network, &WebSocketClient::screenFrameAdmissionLimited, this,
+            [this](const QJsonObject& metadata, qint64 bytes, qint64 maximumBytes) {
+        const int screen = metadata.value("screenId").toInt(-1);
+        auto capture = d->captures.find(screen);
+        if (capture == d->captures.end()) return;
+        const auto layer = d->shared() ? metadata.value("layer").toString() : QStringLiteral("main");
+        if (!capture->layerProfiles.contains(layer)) return;
+        if (d->shared() && metadata.value("publicationId") != d->publication.value("publicationId")) return;
+        auto profile = capture->layerProfiles.value(layer);
+        profile.maximumEdge = std::min(profile.maximumEdge,
+            std::max(metadata.value("width").toInt(), metadata.value("height").toInt()));
+        if (capture->admissionCeilings[layer].limit(profile, bytes, maximumBytes, d->clock.elapsed()))
+            d->updateProfiles(true);
+    });
     connect(network, &WebSocketClient::heartbeatSampleReceived, this,
             [this](quint64, qint64 rtt, qint64, qint64) {
         d->adaptation.observe(QStringLiteral("control"), int(std::min<qint64>(60000, rtt)),
@@ -490,6 +612,7 @@ ScreenSharingService::ScreenSharingService(WebSocketClient* network, SystemMonit
     });
     connect(network, &WebSocketClient::screenSendWindowChanged, this, [this] { d->updateBackpressure(); });
     connect(network, &WebSocketClient::screenShareFeedbackReceived, this, [this](const QJsonObject& feedback) {
+        if (d->shared()) return; // Each downstream receiver is paced by the relay.
         const QString id = feedback.value("remoteSessionId").toString();
         if (d->grants.value(id).value("streamId") != feedback.value("streamId")) return;
         const QString leg = feedback.value("streamId").toString() + QLatin1Char(':')
@@ -500,7 +623,7 @@ ScreenSharingService::ScreenSharingService(WebSocketClient* network, SystemMonit
     });
     connect(network, &WebSocketClient::screenChannelReady, this, [this] {
         d->channelReady = true;
-        d->failedScreens.clear();
+        if (!d->shared()) d->failedScreens.clear();
         // WebSocketClient replays subscriptions before this signal. A prior
         // channel loss has already invalidated subscribedGeneration; do not
         // overwrite an authoritative disabled response during initial connect.
@@ -511,14 +634,44 @@ ScreenSharingService::ScreenSharingService(WebSocketClient* network, SystemMonit
         if (!d->viewedEndpoint.isEmpty() && d->ready(binding.remoteSessionId, false))
             d->reportIssue(QStringLiteral("channel_unavailable"));
         d->channelReady = false;
-        d->adaptation.transportReset(d->clock.elapsed());
-        d->grants.clear();
-        d->sequences.clear();
-        d->stopCaptures();
+        if (!d->shared()) {
+            d->adaptation.transportReset(d->clock.elapsed());
+            d->grants.clear();
+            d->sequences.clear();
+            d->stopCaptures();
+        }
         d->clearReceived();
         d->subscribedGeneration = 0;
     });
+    connect(network, &WebSocketClient::screenPublicationChannelReady, this, [this] {
+        d->failedScreens.clear();
+        refresh();
+    });
+    connect(network, &WebSocketClient::screenPublicationChannelUnavailable, this, [this] {
+        d->clearPublication();
+        d->adaptation.transportReset(d->clock.elapsed());
+    });
+    connect(network, &WebSocketClient::screenPublicationRequested, this, [this](const QJsonObject& request) {
+        if (!d->shared()) return;
+        const bool changed = d->publication.value("publicationId") != request.value("publicationId");
+        if (changed || !request.value("enabled").toBool()) {
+            d->clearPublication();
+            d->failedScreens.clear();
+        }
+        if (request.value("enabled").toBool() && d->enabled && !d->suspended) d->publication = request;
+        d->refreshCaptures();
+        // Existing encoders absorb changing viewport/layer demand on the
+        // regular profile tick; continuous zoom must not reopen them per event.
+        // Newly demanded monitors were started immediately by refreshCaptures.
+        d->updateProfiles();
+    });
+    connect(network, &WebSocketClient::screenPublicationKeyFrameRequested, this, [this](const QJsonObject& request) {
+        if (!d->publicationReady() || request.value("publicationId") != d->publication.value("publicationId")) return;
+        const int screen = request.value("screenId").toInt(-1);
+        if (d->captures.contains(screen)) d->captures.value(screen).source->requestKeyFrame(request.value("layer").toString());
+    });
     connect(network, &WebSocketClient::screenShareRequestReceived, this, [this](const QJsonObject& request) {
+        if (d->shared()) return;
         const QString id = request.value("remoteSessionId").toString();
         if (request.value("enabled").toBool() && d->enabled && d->ready(id, true)) {
             const auto previous = d->grants.value(id);
@@ -592,7 +745,8 @@ ScreenSharingService::ScreenSharingService(WebSocketClient* network, SystemMonit
     connect(network->remoteSessionCoordinator(), &RemoteSessionCoordinator::sessionRemoved,
             this, &ScreenSharingService::refresh);
     connect(monitor, &SystemMonitor::screenTopologyInvalidated, this, [this] {
-        d->stopCaptures();
+        if (d->shared()) d->clearPublication();
+        else d->stopCaptures();
         d->failedScreens.clear();
     });
     connect(monitor, &SystemMonitor::screenConfigurationChanged, this, &ScreenSharingService::refresh);
@@ -611,6 +765,7 @@ void ScreenSharingService::setSharingEnabled(bool enabled)
     const bool changed = d->enabled != enabled;
     d->enabled = enabled;
     if (changed) d->failedScreens.clear();
+    if (!enabled) d->clearPublication();
     d->network->setScreenSharingEnabled(enabled && !d->suspended);
     refresh();
 }
@@ -662,6 +817,7 @@ void ScreenSharingService::setSuspended(bool suspended)
 {
     if (d->suspended == suspended) return;
     d->suspended = suspended;
+    if (suspended) d->clearPublication();
     d->network->setScreenSharingEnabled(d->enabled && !suspended);
     refresh();
 }

@@ -1207,6 +1207,25 @@ void UploadRemovalSecurityTest::receiverReportsDecodeFailureSeparatelyFromUpload
         {"size", static_cast<double>(bytes.size())}, {"sha256", digest},
         {"data", QString::fromLatin1(bytes.toBase64())},
     });
+    // A real sender sends completion only after the receiver's durable ACK.
+    // Chunk admission queues the writer; its fsync/checkpoint is asynchronous.
+    const auto chunkIsDurable = [&] {
+        for (const auto& reply : replies) {
+            const auto message = reply.at(0).toJsonObject();
+            if (message.value("type") != QLatin1String("upload_progress")
+                || message.value("uploadId") != uploadId
+                || message.value("remoteSessionId") != remoteSessionId
+                || message.value("generation").toInt() != 1
+                || message.value("durableBytes").toDouble() != double(bytes.size())) continue;
+            for (const auto& value : message.value("assets").toArray()) {
+                const auto asset = value.toObject();
+                if (asset.value("assetId") == assetId && asset.value("sha256") == digest
+                    && asset.value("offset").toDouble() == double(bytes.size())) return true;
+            }
+        }
+        return false;
+    };
+    QTRY_VERIFY_WITH_TIMEOUT(chunkIsDurable(), 5000);
     deliverIncoming(uploads, QJsonObject{
         {"type", "upload_complete"}, {"protocolVersion", 12},
         {"connectionGeneration", 7}, {"generation", 1},

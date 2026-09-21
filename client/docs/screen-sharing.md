@@ -92,20 +92,32 @@ panning does not crop pixels or change screen coordinates. An empty demand
 means no monitor is visible. A host without a known viewport uses the legacy
 subscription behavior until it can report its demand.
 
-Multiple viewers reuse one capture and encoder per monitor. Each session still
-requires its own uploaded packet copy, which counts against the publisher's
-aggregate video budget. There is no simulcast or independent quality level per
-viewer: a slow viewer can reduce the shared profile. A static desktop supplies
-a freshness sample at the configured idle interval (1 second by default);
-received images expire after the stale timeout.
+With negotiated media v2, multiple viewers reuse one capture per monitor and
+at most two source encoders. Each layer is uploaded **once**, independently of
+the number of viewers. The relay forwards compressed H.264 without decoding,
+scaling or transcoding. It selects main video, low video or recent independent
+IDRs separately for each viewer; one slow viewer no longer controls the source's
+upload budget. The default admission limit is ten viewers per publisher.
+
+The optional low layer is requested only when bandwidth, viewport or decoder
+capabilities justify it. It defaults to a maximum edge of 960 pixels, 20 FPS and
+750 kbit/s; these are ceilings, not a fixed output rate. It receives at most a
+quarter of its monitor's budget and is suppressed on a weak uplink, redundant
+profiles or sustained encoder overload. Only one useful layer remains in those
+cases. Source quality and actual cadence still adapt to upload conditions and
+CPU capacity. A static desktop supplies a freshness sample at the configured
+idle interval (1 second by default); received images expire after the stale
+timeout. Legacy servers retain the original per-viewer-copy mode.
 
 ## Capture and video path
 
 - macOS uses ScreenCaptureKit with native display IDs and SDR NV12. Capture
-  dimensions and requested FPS change with the active encoding profile, up to
+  dimensions and requested FPS follow the largest active encoding profile, up to
   the configured 3,840-pixel edge and 30 FPS defaults. Cursor and audio are not
   captured. An IOSurface-backed CVPixelBuffer reaches VideoToolbox without a
-  CPU pixel copy when its dimensions match the encoder. Native reconfiguration
+  CPU pixel copy when its dimensions match the encoder. A smaller low layer
+  uses software scaling of the same native surface; no second desktop capture
+  is created. Native reconfiguration
   is coalesced and stale surfaces are rejected. The native queue has three
   surfaces.
 - Windows uses Qt's FFmpeg-backed QScreenCapture and DXGI Desktop Duplication.
@@ -132,7 +144,8 @@ received images expire after the stale timeout.
 - Decoding uses two workers, at most three waiting packets and 4 MiB per screen,
   plus a configurable queue-age limit (200 ms by default). Gaps, stale queued
   work and overload abandon dependent P frames and request an IDR. Stopped
-  streams discard in-flight results. Slow decoding is reported to the source.
+  streams discard in-flight results. Slow decoding is reported to the relay;
+  in legacy mode it is forwarded to the source.
   Decode errors and stale frames clear and recover the affected screen without
   clearing other screens. A screen explicitly reported as capture-failed rejects
   delayed video packets until a matching `starting`/`streaming` state or a new
@@ -145,13 +158,16 @@ received images expire after the stale timeout.
 
 The initial aggregate video target is **1.2 Mbit/s**, with a default floor of
 128 kbit/s and ceiling of **12 Mbit/s**. These cover all captured screens and
-all viewer copies from this client; they are not separate allowances per screen.
-When a local upload or a reported remote upload needs capacity, preview is capped
+both layers together; viewer count does not multiply this source budget in v2.
+The server separately budgets its aggregate outgoing traffic and each viewer's
+incoming preview, shared across subscribed screens. When a local upload needs
+capacity (or a reported remote upload in legacy mode), source preview is capped
 at **1 Mbit/s** by default. Network headers and TCP retransmissions are additional
 traffic, so these values are not exact wire-rate guarantees.
 
-Source receipts, downstream relay feedback, decoder feedback and control RTT
-feed the policy. Each measured path has its own minimum RTT baseline: a healthy
+Source receipts and control RTT feed the source policy; downstream delivery and
+decoder feedback feed the relay's independent viewer policy. In legacy mode those
+viewer reports also affect the source. Each measured path has its own minimum RTT baseline: a healthy
 long-RTT link is not itself congestion. Growing delay, dropped work, blocked
 transport or sustained encoder overload can lower the target. With adaptation
 on, a congestion step multiplies it by 0.65, at most once per feedback interval
@@ -161,8 +177,9 @@ is active. Reconnecting clears old measurements and returns conservatively.
 These are application heuristics over TCP, not libwebrtc's congestion controller
 or a measurement of the subscription's advertised Internet speed.
 
-The policy divides this budget between demanded screens, accounts for viewer
-copies, and updates encoding profiles at most once per second. The current
+The policy divides this budget between demanded screens and their layers,
+accounts for viewer copies only in legacy mode, and updates encoding profiles
+at most once per second. The current
 compiled quality ladder is:
 
 | Per-screen encoding share | Maximum edge | Moving-content FPS target |
@@ -177,8 +194,10 @@ compiled quality ladder is:
 | From 8 Mbit/s | 3840 | 30 |
 | From 16 Mbit/s | 3840 | 60 |
 
-Viewport demand, native size, receiver capabilities and configured FPS/edge
-limits can lower these values. With the default 12 Mbit/s total ceiling and
+Viewport demand, native size and configured FPS/edge limits can lower these
+values. A receiver's hard decoder cap is served by low where available; if low
+is unavailable, main is capped to remain decodable for all subscribed viewers.
+This capability constraint is separate from downstream congestion. With the default 12 Mbit/s total ceiling and
 30 FPS cap, 60 FPS is not selected. Raising the ceiling and FPS cap only permits
 it where the path, display demand and hardware support it. A 4K display is no
 longer always forced to 1080p; equally, a 1 Gbit/s link does not justify sending
@@ -198,16 +217,22 @@ queues and viewport selection. Session recovery deadlines remain server authorit
 
 The implemented transport is **adaptive WebSocket video**, using `wss://` when
 the server URL selects TLS. It has a separate socket from commands and files.
-The control connection issues a single-use token valid for 15 seconds, bound to
-its authenticated identity. TLS protects each client/server leg; the trusted
+In v2 there are separate authenticated video sockets for publishing and viewing,
+so a client can do both without cross-blocking their receipts. The control
+connection issues single-use tokens valid for 15 seconds, bound to its identity,
+connection generation and media role. TLS protects each client/server leg; the trusted
 relay can access compressed video. There is no end-to-end encryption, UDP,
 WebRTC, TURN, automatic transport selection or ordinary HTTPS polling in this
 implementation.
 
-Each binary message contains `MSV1`, a big-endian 16-bit JSON header length,
-a header of at most 1,024 bytes and one H.264 Annex B access unit of at most
-2 MiB. The header binds `remoteSessionId`, `generation`, server-issued `streamId`,
-`screenId`, `sequence`, `width`, `height`, `keyFrame` and `codec`. No base64 image,
+Source publications use `MSV2`, a big-endian 16-bit JSON header length, a header
+of at most 1,024 bytes and one H.264 Annex B access unit of at most 2 MiB.
+Metadata binds the publication epoch, monitor, layer and source sequence. The
+relay sends `MSV1` to viewers, using their own authenticated `remoteSessionId`,
+`generation`, server-issued `streamId` and monotonically increasing delivery
+sequence. The receiver therefore remains compatible with independent layer
+switches. It resets the decoder only on a self-contained IDR containing SPS/PPS.
+Legacy publication also retains `MSV1`. No base64 image,
 temporary video file or per-frame control message is involved. Feedback and
 viewport capabilities are negotiated; older receivers retain a conservative
 1,920-pixel limit rather than receiving unsupported 4K packets.
@@ -215,18 +240,25 @@ viewport capabilities are negotiated; older receivers retain a conservative
 The relay validates publisher role, current connections, session lease, opt-in,
 monitor inventory, viewport demand and stream generation. Revocation, channel
 replacement and monitor topology changes issue new stream identities, preventing
-old TCP or decoder work from reappearing after teardown. Both video legs use
-exact stream/screen/sequence receipts; an ACK confirms transport consumption,
-not necessarily a displayed frame. Decode feedback is a separate signal.
+old TCP or decoder work from reappearing after teardown. Source receipts bind publication/screen/layer/sequence; viewer receipts bind
+stream/screen/sequence. The source receipt acknowledges relay ingress without
+waiting for any viewer. An ACK confirms transport consumption, not necessarily
+a displayed frame. Decode feedback is a separate signal.
 
 The sender spaces encoded packet admission against the aggregate budget, counting
-every copied payload. Its ordinary byte window uses current bitrate multiplied
+each uploaded layer once in v2 and every copied payload in legacy mode. Its ordinary byte window uses current bitrate multiplied
 by baseline receipt RTT plus the configured **150 ms** target margin, with a
 32 KiB minimum. Hard caps default to **2,048 KiB and 64 unacknowledged frames**;
 they accommodate data already in transit and are not a desired backlog. A
 standalone packet may exceed the ordinary byte window only within the packet
-and serialization-time guards. The source rejects excessive bursts rather than
-putting them behind a long TCP queue. Relay byte/frame limits are independently
+and serialization-time guards. One recovery IDR may use a larger bounded allowance only when source byte
+credit, socket backlog and pacing debt are all empty. It repays its entire cost;
+an ACK does not erase pacing debt. If a frame still exceeds its admission bound,
+a separate per-layer ceiling lowers edge (down to 160 pixels), bitrate (down to
+32 kbit/s) and FPS (down to one). These bounds recover progressively after five
+seconds without a size rejection. Repeated rejections at the floor do not keep
+reopening the encoder. The source rejects excessive bursts rather than putting
+them behind a long TCP queue. Relay byte/frame limits are independently
 configured in `server/.env`, with downstream RTT and queue-age guards.
 
 After the configured receipt timeout (3 seconds by default), the disposable
@@ -242,7 +274,7 @@ TCP reliability still causes head-of-line delays under packet loss, and an
 unrelated application can saturate the shared network.
 
 The client supports system proxy policy, explicit HTTP CONNECT or SOCKS5, and
-direct mode, consistently across all three sockets. Explicit credentials are
+direct mode, consistently across control, upload and both media sockets. Explicit credentials are
 supplied only for the configured proxy host/port; TLS certificate verification
 remains enabled. See the [proxy settings](../src/backend/config/README.md#network-proxies).
 System discovery and enterprise authentication depend on Qt and the OS and must
@@ -254,12 +286,37 @@ usable because it does not require WebRTC. If the network blocks WSS or access
 to the service, this implementation cannot establish a session via ordinary
 HTTPS instead. A port-443 address alone is not a universal connectivity promise.
 The [adaptability plan](screen-stream-adaptability-plan.md) documents the remaining
-native WebRTC/SFU/TURN, HTTPS session fallback and independent-viewer layers;
-those components are not delivered by these settings.
+native WebRTC/TURN and HTTPS session fallback. Independent-viewer layers and
+latest-IDR delivery are implemented on the existing reliable transport.
 
 Both relay and desktop clients should be upgraded together. The extension uses
 the existing v12 authenticated session envelope without reviving retired
 messages; legacy targets without consent do not publish.
+
+## Relay resource limits and slow viewers
+
+The relay caches only the newest self-contained IDR for each active layer,
+with a global default cap of 16 MiB and a 5-second TTL. It does not retain a GOP
+history or raw pixels. Snapshot delivery waits for the previous receipt and
+sends a newer cached image, never repeats an old frame as a fresh update. A
+larger snapshot can occupy the empty receiver window alone, with its complete
+pacing cost and a receipt deadline accounting for serialization. The configured
+transfer estimate defaults to at most four seconds, within cache freshness;
+a frame too large for this bound cannot monopolize other monitors' turns.
+Dropping a dependent H.264 frame fences that viewer's chain until another IDR;
+recovery requests are coalesced across viewers of the same publication.
+Quality recovery requires stable feedback rather than immediate oscillation.
+Replacing the viewer socket retains a conservative estimate for that
+control connection while discarding old RTT samples and byte debt.
+
+A Linux Docker server needs no GPU or FFmpeg for this path. Its remaining costs
+are networking, TLS where terminated locally, packet validation/copying and
+bounded per-session metadata. Outgoing bandwidth still grows with viewer count:
+ten viewers at 2 Mbit/s need roughly 20 Mbit/s of server egress plus overhead.
+Defaults cap total preview egress at 100 Mbit/s and active publications at 256;
+these are resource guards, not a capacity benchmark for a small server. Configure
+these values for the actual host and measure alongside file transfers. See
+[server protocol and configuration](../../server/SCREEN_SHARING_PROTOCOL.md).
 
 ## Validation
 

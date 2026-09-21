@@ -2,9 +2,23 @@
 
 Node.js WebSocket coordinator for Mouffette protocol v12.
 
-Live screen sharing uses a separate authenticated H.264 video channel, with
-explicit target consent, session-bound stream identities and bounded receipt
-windows. See [the screen sharing protocol](SCREEN_SHARING_PROTOCOL.md).
+Live screen sharing negotiates separate authenticated publication and viewing
+WebSockets. A source sends one shared H.264 `MSV2` publication (main and optional
+low layer); the server forwards `MSV1` deliveries to at most ten viewers per
+publisher by default. Each viewer adapts independently, down to bounded fresh
+IDR snapshots. The server performs no transcoding and requires no GPU. Legacy
+peers retain the combined screen channel. Consent, session authority, receipt
+windows and keyframe-cache lifetime remain bounded. See
+[the screen sharing protocol](SCREEN_SHARING_PROTOCOL.md).
+
+The default 100 Mbps server cap applies to aggregate video egress, including
+legacy delivery; it is not a link-speed measurement or a bandwidth guarantee
+for file transfers. Adjust it to the server's actual available capacity. Control
+and uploads use independent sockets; incoming uploads reduce that viewer's
+video target. For public deployment, the TLS front end must preserve WebSocket
+Upgrade and the authenticated `?channel=screen&token=…` query for both media
+roles. The same WSS route works without WebRTC/UDP. No Docker GPU or media
+transcoding service is needed for this implementation.
 
 ## Run and test
 

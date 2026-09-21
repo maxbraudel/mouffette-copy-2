@@ -88,7 +88,7 @@ application start without rebuilding. These settings are not watched live.
 Invalid settings reject the complete reload, retaining the last valid config.
 
 Bitrate settings describe the **aggregate publisher video budget**, including all
-screens and all subscriber copies. They use decimal kilobits per second
+screens and each active publication layer once in v2 (all subscriber copies with a legacy server). They use decimal kilobits per second
 (1 kbps = 1000 bits/s), not a per-screen allowance. The upload budget limits the
 preview while file transfers need capacity. Budgets are targets for compressed
 video admission; they are not guarantees of available bandwidth or wire traffic,
@@ -98,6 +98,11 @@ recovery deadlines remain server authority.
 | Environment variable | Default | Allowed range |
 | --- | ---: | --- |
 | `MOUFFETTE_SCREEN_ADAPTIVE_ENABLED` | true | boolean |
+| `MOUFFETTE_SCREEN_LOW_ENABLED` | true | boolean |
+| `MOUFFETTE_SCREEN_LOW_MAX_EDGE` | 960 | integer 160–1920 (even) |
+| `MOUFFETTE_SCREEN_LOW_MAX_FPS` | 20 | integer 1–60 |
+| `MOUFFETTE_SCREEN_LOW_MAX_BITRATE_KBPS` | 750 | integer 32–10000 |
+| `MOUFFETTE_SCREEN_LOW_MIN_TOTAL_BITRATE_KBPS` | 600 | integer 64–100000 |
 | `MOUFFETTE_SCREEN_MAX_EDGE` | 3840 | integer 320–3840 (even) |
 | `MOUFFETTE_SCREEN_MAX_FPS` | 30 | integer 1–60 |
 | `MOUFFETTE_SCREEN_IDLE_INTERVAL_MS` | 1000 | integer 250–4000 |
@@ -173,3 +178,5 @@ SOCKS5 credentials are bounded to 255 UTF-8 bytes each.
 References: [Qt proxy factory](https://doc.qt.io/qt-6/qnetworkproxyfactory.html),
 [Qt proxy types](https://doc.qt.io/qt-6/qnetworkproxy.html),
 [Qt WebSocket authentication](https://doc.qt.io/qt-6/qwebsocket.html#proxyAuthenticationRequired).
+
+The optional low publication layer has its own size, FPS and bitrate caps, but remains part of the existing aggregate source video budget. `MOUFFETTE_SCREEN_LOW_MIN_TOTAL_BITRATE_KBPS` is an activation threshold, not a reserved bitrate. The runtime bounds low quality to the current main profile and suppresses redundant or locally expensive encoding. These settings do not create server-side transcoding.

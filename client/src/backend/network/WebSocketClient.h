@@ -64,6 +64,11 @@ public:
     bool ensureScreenChannel();
     void closeScreenChannel();
     bool isScreenChannelConnected() const;
+    bool sharedScreenPublicationSupported() const;
+    bool isScreenPublicationChannelConnected() const;
+    bool sendScreenPublicationFrame(const QJsonObject& metadata, const QByteArray& annexB);
+    bool sendScreenPublicationStatus(const QString& publicationId, int screenId, const QString& layer,
+                                     const QString& reason, int bitrateBps = 0, int fps = 0);
     void setScreenSharingEnabled(bool enabled);
     bool setScreenShareSubscription(const QString& remoteSessionId, quint64 generation, bool enabled);
     bool setScreenShareSubscription(const QString& remoteSessionId, quint64 generation,
@@ -234,10 +239,15 @@ public:
 signals:
     void screenChannelReady();
     void screenChannelUnavailable();
+    void screenPublicationChannelReady();
+    void screenPublicationChannelUnavailable();
+    void screenPublicationRequested(const QJsonObject& message);
+    void screenPublicationKeyFrameRequested(const QJsonObject& message);
     void screenShareRequestReceived(const QJsonObject& message);
     void screenShareStateReceived(const QJsonObject& message);
     void screenShareKeyFrameRequested(const QJsonObject& message);
     void screenSourceFeedback(int roundTripMs, bool congested);
+    void screenFrameAdmissionLimited(const QJsonObject& metadata, qint64 bytes, qint64 maximumBytes);
     void screenSendWindowChanged();
     void screenShareFeedbackReceived(const QJsonObject& message);
     void screenFrameReceived(const QJsonObject& metadata, const QByteArray& annexB);
@@ -320,6 +330,16 @@ private:
                                 bool enabled, const QJsonArray* screens);
     qint64 screenQueueLimit() const;
     bool screenTransportWindowOpen() const;
+    QWebSocket* screenOutgoingSocket() const;
+    bool ensureScreenPublicationChannel();
+    void closeScreenPublicationChannel();
+    void failScreenPublicationChannel();
+    void closeScreenViewChannel();
+    void clearScreenSourceWindow();
+    void onScreenPublicationTextMessageReceived(const QString& message);
+    bool sendScreenWireFrame(const QJsonObject& metadata, const QByteArray& annexB, bool publication);
+    bool screenPublicationAllows(int screenId, const QString& layer) const;
+    void acceptScreenReceipt(const QString& key);
     void armScreenPacer();
     void onScreenTextMessageReceived(const QString& message);
     void onScreenBinaryMessageReceived(const QByteArray& message);
@@ -327,6 +347,16 @@ private:
     void clearScreenReceiptEpoch(const QString& streamId);
     bool handleScreenControlMessage(const QJsonObject& message);
     QWebSocket* m_screenSocket = nullptr;
+    QWebSocket* m_screenPublicationSocket = nullptr;
+    bool m_sharedScreenPublicationSupported = false;
+    bool m_screenPublicationAuthenticated = false;
+    bool m_screenPublicationTokenRequested = false;
+    QString m_screenPublicationTokenRequestId;
+    QString m_screenPublicationToken;
+    QTimer m_screenPublicationTimer;
+    int m_screenPublicationRetryAttempt = 0;
+    QJsonObject m_screenPublicationGrant;
+    QHash<QString, quint64> m_screenPublicationSequences;
     bool m_screenChannelAuthenticated = false;
     bool m_screenFeedbackSupported = false;
     bool m_screenChannelWanted = false;

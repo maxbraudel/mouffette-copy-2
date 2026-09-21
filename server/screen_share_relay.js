@@ -2,6 +2,7 @@
 
 const crypto = require('node:crypto');
 const WebSocket = require('ws');
+const { ScreenPublications, parsePublicationFrame } = require('./screen_publications');
 
 const MAX_FRAME_BYTES = 2 * 1024 * 1024;
 const MAX_HEADER_BYTES = 1024;
@@ -51,14 +52,18 @@ class ScreenShareRelay {
         this.server = server;
         this.tokens = new Map();
         this.sockets = new Map(); // authenticated control object -> video socket
+        this.publishSockets = new Map(); // v2 ingress; independent of viewing
         this.inflight = new Map(); // video socket -> bounded receipt window
         this.subscriptions = new Map(); // RemoteSession -> ephemeral stream grant
+        this.subscriptionsByTarget = new Map();
         this.maxBufferedBytes = (server.config?.screenMaxBufferedKiB ?? MAX_BUFFERED_BYTES / 1024) * 1024;
         this.maxInflightFrames = server.config?.screenMaxInflightFrames ?? MAX_INFLIGHT_FRAMES;
         this.ackTimeoutMs = server.config?.screenAckTimeoutMs ?? ACK_TIMEOUT_MS;
         this.feedbackIntervalMs = server.config?.screenFeedbackIntervalMs ?? 500;
         this.keyframeRequestIntervalMs = server.config?.screenKeyframeRequestIntervalMs ?? 1000;
         this.queueTargetMs = server.config?.screenQueueTargetMs ?? 150;
+        this.sharedEnabled = server.config?.screenSharedEnabled ?? true;
+        this.shared = new ScreenPublications(this);
     }
 
     current(client) {
@@ -72,19 +77,24 @@ class ScreenShareRelay {
     issueToken(clientId, requestId, capabilities = {}) {
         const client = this.server.clients.get(clientId);
         if (!this.current(client) || !opaque(requestId)) return false;
+        if ((capabilities.mediaVersion !== undefined || capabilities.role !== undefined)
+            && (capabilities.mediaVersion !== 2 || !['view', 'publish'].includes(capabilities.role))) return false;
         if ((capabilities.feedbackVersion !== undefined && capabilities.feedbackVersion !== 1)
             || (capabilities.maximumEdge !== undefined
                 && (!integer(capabilities.maximumEdge, 2, MAXIMUM_EDGE) || capabilities.maximumEdge % 2))) return false;
         const now = this.server.monotonicNow();
+        const role = this.sharedEnabled && capabilities.mediaVersion === 2 ? capabilities.role : undefined;
         for (const [token, binding] of this.tokens) {
-            if (binding.client === client || binding.expiresAt <= now) this.tokens.delete(token);
+            if ((binding.client === client && binding.role === role) || binding.expiresAt <= now) this.tokens.delete(token);
         }
         const token = crypto.randomBytes(32).toString('base64url');
         this.tokens.set(token, { client, expiresAt: now + 15_000,
+            role, mediaVersion: role ? 2 : 1,
             feedbackVersion: capabilities.feedbackVersion === 1 ? 1 : 0,
             maximumEdge: capabilities.maximumEdge ?? 1920 });
         return this.server.sendToEndpoint(client.endpointId, {
             type: 'screen_channel_token', requestId, token,
+            ...(role ? { role, mediaVersion: 2 } : {}),
         });
     }
 
@@ -96,6 +106,8 @@ class ScreenShareRelay {
         if (ws) {
             ws.screenFeedbackVersion = binding.feedbackVersion;
             ws.screenMaximumEdge = binding.maximumEdge;
+            ws.screenRole = binding.role;
+            ws.screenMediaVersion = binding.mediaVersion;
         }
         return binding.client;
     }
@@ -103,20 +115,34 @@ class ScreenShareRelay {
     acceptSocket(ws, token) {
         const client = this.consumeToken(token, ws);
         if (!client) { ws.close(1008, 'Screen channel authentication failed'); return; }
-        const previous = this.sockets.get(client);
+        const sockets = ws.screenRole === 'publish' ? this.publishSockets : this.sockets;
+        const previous = sockets.get(client);
         if (previous) {
-            this.sockets.delete(client);
+            sockets.delete(client);
             this.refreshForClient(client);
             previous.close(1008, 'Screen channel replaced');
         }
         ws.mouffetteClient = client;
-        this.sockets.set(client, ws);
+        sockets.set(client, ws);
         ws.on('message', (data, isBinary) => {
-            if (!this.current(client) || this.sockets.get(client) !== ws) {
+            if (!this.current(client) || sockets.get(client) !== ws) {
                 ws.close(1008, 'Stale screen channel'); return;
             }
             if (!isBinary) {
+                if (ws.screenRole === 'publish') { ws.close(1008, 'Unexpected publisher message'); return; }
                 if (!this.handleAcknowledgement(client, ws, data)) ws.close(1008, 'Invalid screen acknowledgement');
+                return;
+            }
+            if (ws.screenRole === 'view') { ws.close(1008, 'Viewer cannot publish'); return; }
+            if (ws.screenRole === 'publish') {
+                const parsed = parsePublicationFrame(data);
+                if (!parsed) { ws.close(1008, 'Invalid publication frame'); return; }
+                if ((Number(ws.bufferedAmount) || 0) > this.maxBufferedBytes) {
+                    if (typeof ws.terminate === 'function') ws.terminate();
+                    else ws.close(1008, 'Publication receipt congestion');
+                    return;
+                }
+                this.shared.handleFrame(client, ws, parsed);
                 return;
             }
             const frame = parseScreenFrame(data);
@@ -137,8 +163,9 @@ class ScreenShareRelay {
         });
         const lost = () => {
             this.inflight.delete(ws);
-            if (this.sockets.get(client) !== ws) return;
-            this.sockets.delete(client);
+            this.shared.receivers.delete(ws);
+            if (sockets.get(client) !== ws) return;
+            sockets.delete(client);
             this.refreshForClient(client);
         };
         ws.on('close', lost);
@@ -146,7 +173,8 @@ class ScreenShareRelay {
         ws.send(JSON.stringify({ type: 'screen_channel_ready', endpointId: client.endpointId,
             protocolVersion: this.server.protocolVersion, serverBootId: this.server.serverBootId,
             messageId: crypto.randomUUID(), connectionGeneration: client.connectionGeneration,
-            feedbackVersion: 1, maximumEdge: MAXIMUM_EDGE }));
+            feedbackVersion: 1, maximumEdge: MAXIMUM_EDGE,
+            ...(ws.screenRole ? { role: ws.screenRole, mediaVersion: 2 } : {}) }));
         this.refreshForClient(client);
     }
 
@@ -175,14 +203,16 @@ class ScreenShareRelay {
             window.frames.delete(key);
             const now = this.server.monotonicNow();
             const rtt = Math.min(60000, Math.max(0, Math.round(now - pending.sentAt)));
-            if (window.baselineRttMs === null || now - window.baselineAt >= 30000 || rtt <= window.baselineRttMs) {
-                window.baselineRttMs = rtt;
+            const baselineSample = Math.max(0, rtt - (pending.serializationMs || 0));
+            if (window.baselineRttMs === null || now - window.baselineAt >= 30000 || baselineSample <= window.baselineRttMs) {
+                window.baselineRttMs = baselineSample;
                 window.baselineAt = now;
             }
             const entry = this.subscriptions.get(pending.remoteSessionId);
             if (entry?.streamId === ack.streamId && this.feedbackReady(entry)) {
                 this.recordFeedback(entry, ack.screenId, {
                     deliveryRttMs: rtt,
+                    ...(pending.serializationMs ? { serializationMs: pending.serializationMs } : {}),
                     bufferedBytes: Math.max(window.bytes, Number(ws.bufferedAmount) || 0),
                 });
             }
@@ -196,7 +226,7 @@ class ScreenShareRelay {
         const limit = window.baselineRttMs === null
             ? Math.min(1000, this.ackTimeoutMs / 2)
             : window.baselineRttMs + this.queueTargetMs;
-        return [...window.frames.values()].some(frame => now - frame.sentAt > limit);
+        return [...window.frames.values()].some(frame => now - frame.sentAt > limit + (frame.serializationMs || 0));
     }
 
     requested(entry, screenId) {
@@ -205,7 +235,7 @@ class ScreenShareRelay {
 
     effectiveSelection(entry) {
         const owner = this.socket(this.endpointClient(entry.session.ownerEndpointId));
-        const target = this.socket(this.endpointClient(entry.session.targetEndpointId));
+        const target = this.publisherSocket(this.endpointClient(entry.session.targetEndpointId));
         const maximum = Math.min(owner?.screenMaximumEdge ?? 1920, target?.screenMaximumEdge ?? 1920);
         return this.topology(entry.session).filter(screen => this.requested(entry, screen.id)).map(screen => ({
             screenId: screen.id,
@@ -225,7 +255,7 @@ class ScreenShareRelay {
         if (!entry.enabled || !session || session !== entry.session
             || session.generation !== entry.generation || !this.server.remoteSessions.commandReady(session)) return false;
         const owner = this.endpointClient(session.ownerEndpointId), target = this.endpointClient(session.targetEndpointId);
-        return !!this.socket(owner) && !!this.socket(target)
+        return !!this.socket(owner) && !!this.publisherSocket(target)
             && this.server.validateSessionMessage(target.id, {
                 remoteSessionId: session.remoteSessionId, generation: entry.generation,
                 connectionGeneration: target.connectionGeneration,
@@ -278,6 +308,10 @@ class ScreenShareRelay {
 
     recordFeedback(entry, screenId, sample) {
         if (!this.requested(entry, screenId)) return;
+        if (this.shared.source(this.endpointClient(entry.session.targetEndpointId))) {
+            this.shared.recordFeedback(entry, screenId, sample);
+            return;
+        }
         const feedback = this.feedbackLane(entry, screenId);
         if (sample.deliveryRttMs !== undefined) feedback.deliveryRttMs = sample.deliveryRttMs;
         if (sample.bufferedBytes !== undefined) feedback.bufferedBytes = Math.min(16 * 1024 * 1024, sample.bufferedBytes);
@@ -291,8 +325,9 @@ class ScreenShareRelay {
         if (!feedback.pending || now - feedback.lastSentAt < this.feedbackIntervalMs
             || !this.feedbackReady(entry) || !this.requested(entry, screenId)) return;
         const publisher = this.endpointClient(entry.session.targetEndpointId);
-        const ws = this.socket(publisher);
-        if (ws.screenFeedbackVersion !== 1 || (Number(ws.bufferedAmount) || 0) > this.maxBufferedBytes) return;
+        const ws = this.publisherSocket(publisher);
+        if (!ws || ws.screenMediaVersion === 2 || ws.screenFeedbackVersion !== 1
+            || (Number(ws.bufferedAmount) || 0) > this.maxBufferedBytes) return;
         // Uploads are removed from the live map when terminal. Paused/queued
         // transfers retain their reservation so video does not impede recovery.
         const uploadActive = [...(this.server.uploads?.values() || [])].some(upload =>
@@ -313,7 +348,7 @@ class ScreenShareRelay {
     sweep() {
         const now = this.server.monotonicNow();
         for (const [ws, window] of this.inflight) {
-            if ([...window.frames.values()].some(frame => now - frame.sentAt >= this.ackTimeoutMs)) {
+            if ([...window.frames.values()].some(frame => now >= (frame.deadlineAt ?? frame.sentAt + this.ackTimeoutMs))) {
                 this.inflight.delete(ws);
                 // close() would put a close frame behind the stale TCP queue.
                 // Terminate the disposable pipe immediately to shed that queue.
@@ -334,6 +369,7 @@ class ScreenShareRelay {
         }
         for (const entry of this.subscriptions.values())
             for (const [screenId, feedback] of entry.feedback) this.flushFeedback(entry, screenId, feedback);
+        this.shared.sweep();
     }
 
     endpointClient(endpointId) {
@@ -345,6 +381,13 @@ class ScreenShareRelay {
         return this.current(client) && ws?.readyState === WebSocket.OPEN ? ws : null;
     }
 
+    publisherSocket(client) {
+        const ws = this.publishSockets.get(client);
+        if (this.current(client) && ws?.readyState === WebSocket.OPEN) return ws;
+        const legacy = this.socket(client);
+        return legacy?.screenMediaVersion === 2 ? null : legacy;
+    }
+
     envelope(entry, type, extra = {}) {
         return { type, remoteSessionId: entry.session.remoteSessionId,
             generation: entry.generation, streamId: entry.streamId || '',
@@ -353,6 +396,7 @@ class ScreenShareRelay {
     }
 
     publish(entry, enabled, reason) {
+        this.shared.admissionCounts = null;
         const changed = entry.enabled !== enabled;
         if (changed) {
             const previousStreamId = entry.streamId;
@@ -383,8 +427,11 @@ class ScreenShareRelay {
                 this.server.sendToEndpoint(entry.session.ownerEndpointId,
                     this.envelope(entry, 'screen_share_state', { enabled: true, screenId, reason: status }));
         }
-        this.server.sendToEndpoint(entry.session.targetEndpointId,
-            this.envelope(entry, 'screen_share_request', { ...selection, enabled, reason }));
+        const target = this.endpointClient(entry.session.targetEndpointId);
+        if (this.shared.source(target) || this.shared.byClient.has(target)) this.shared.refresh(target);
+        else if (this.socket(target)?.screenMediaVersion !== 2)
+            this.server.sendToEndpoint(entry.session.targetEndpointId,
+                this.envelope(entry, 'screen_share_request', { ...selection, enabled, reason }));
     }
 
     refresh(entry) {
@@ -405,7 +452,7 @@ class ScreenShareRelay {
         else if (entry.waitingForTopology
             || (session.latestTargetSnapshot?.generation === session.generation
                 && JSON.stringify(session.latestTargetSnapshot.snapshot.screens) !== JSON.stringify(target.screens))) reason = 'topology_pending';
-        else if (!this.socket(owner) || !this.socket(target)) reason = 'channel_unavailable';
+        else if (!this.socket(owner) || !this.publisherSocket(target)) reason = 'channel_unavailable';
         if (entry.enabled && entry.topology !== signature) this.publish(entry, false, 'topology_changed');
         entry.topology = signature;
         this.publish(entry, reason === 'ready', reason);
@@ -416,6 +463,7 @@ class ScreenShareRelay {
             if (entry.session.ownerEndpointId === client.endpointId
                 || entry.session.targetEndpointId === client.endpointId) this.refresh(entry);
         }
+        this.shared.refresh(client);
     }
 
     refreshSession(session) {
@@ -427,6 +475,7 @@ class ScreenShareRelay {
         const client = this.server.clients.get(clientId);
         if (!this.current(client)) return false;
         if (message.type === 'request_screen_channel') return this.issueToken(clientId, message.requestId, message);
+        if (message.type === 'screen_publication_status') return this.shared.status(client, message);
         if (message.type === 'screen_share_consent') {
             if (typeof message.enabled !== 'boolean') return false;
             client.screenSharingEnabled = message.enabled;
@@ -453,6 +502,20 @@ class ScreenShareRelay {
                 requestedScreens = message.screens.map(({ screenId, maximumEdge }) => ({ screenId, maximumEdge }));
             }
             let entry = this.subscriptions.get(session.remoteSessionId);
+            if (requestedScreens === null || requestedScreens.length) {
+                const viewers = new Set([...this.subscriptions.values()]
+                    .filter(other => other.session.targetEndpointId === session.targetEndpointId
+                        && other.session.ownerEndpointId !== session.ownerEndpointId
+                        && (other.requestedScreens === null || other.requestedScreens.length))
+                    .map(other => other.session.ownerEndpointId));
+                if (viewers.size >= this.shared.maxViewers) {
+                    this.server.sendToEndpoint(session.ownerEndpointId, {
+                        type: 'screen_share_state', remoteSessionId: session.remoteSessionId, generation: session.generation,
+                        streamId: '', enabled: false, reason: 'viewer_capacity',
+                    });
+                    return false;
+                }
+            }
             if (entry && entry.generation !== session.generation) {
                 this.removeSession(session, 'session_changed'); entry = null;
             }
@@ -461,6 +524,11 @@ class ScreenShareRelay {
                     streamId: '', screens: new Map(), screenStatuses: new Map(), feedback: new Map(), requestedScreens: null,
                     lastKeyframeRequest: -Infinity };
                 this.subscriptions.set(session.remoteSessionId, entry);
+                let targetEntries = this.subscriptionsByTarget.get(session.targetEndpointId);
+                if (!targetEntries) {
+                    targetEntries = new Set(); this.subscriptionsByTarget.set(session.targetEndpointId, targetEntries);
+                }
+                targetEntries.add(entry);
             }
             entry.requestedScreens = requestedScreens;
             for (const screenId of entry.screens.keys()) {
@@ -511,6 +579,15 @@ class ScreenShareRelay {
     }
 
     requestKeyframe(entry, screenId) {
+        const publication = this.shared.byClient.get(this.endpointClient(entry.session.targetEndpointId));
+        if (publication) {
+            if (screenId === -1) {
+                for (const id of publication.screens.keys())
+                    if (this.requested(entry, id)) this.shared.requestKeyframe(publication, id, entry.screens.get(id)?.layer || 'main');
+                return true;
+            }
+            return this.shared.requestKeyframe(publication, screenId, entry.screens.get(screenId)?.layer || 'main');
+        }
         const now = this.server.monotonicNow();
         if (now - entry.lastKeyframeRequest < this.keyframeRequestIntervalMs) return false;
         entry.lastKeyframeRequest = now;
@@ -552,14 +629,14 @@ class ScreenShareRelay {
         const now = this.server.monotonicNow();
         const lane = `${frame.streamId}:${frame.screenId}`;
         const delayed = this.deliveryWindowDelayed(window, now);
-        for (const [waiting, seen] of window.waiting)
-            if (now - seen >= this.ackTimeoutMs) window.waiting.delete(waiting);
+        for (const [waiting, deadline] of window.waiting)
+            if (now >= deadline) window.waiting.delete(waiting);
         const turn = window.waiting.keys().next().value;
         if (delayed || (turn !== undefined && turn !== lane) || window.frames.size >= this.maxInflightFrames
             || (window.frames.size > 0 && window.bytes + data.length > this.maxBufferedBytes)
             || buffered > this.maxBufferedBytes || (buffered > 0 && buffered + data.length > this.maxBufferedBytes)
             || (data.length > this.maxBufferedBytes && !frame.keyFrame)) {
-            if (window.waiting.has(lane) || window.waiting.size < 256) window.waiting.set(lane, now);
+            if (window.waiting.has(lane) || window.waiting.size < 256) window.waiting.set(lane, now + this.ackTimeoutMs);
             stream.needsKeyframe = true;
             if (delayed || buffered > this.maxBufferedBytes)
                 this.recordFeedback(entry, frame.screenId,
@@ -569,6 +646,13 @@ class ScreenShareRelay {
         }
         window.waiting.delete(lane);
         if (stream.needsKeyframe && !frame.keyFrame) {
+            this.requestKeyframe(entry, frame.screenId);
+            return false;
+        }
+        if (!this.shared.reserveLegacyEgress(destination, data.length)) {
+            stream.needsKeyframe = true;
+            if (window.waiting.has(lane) || window.waiting.size < 256) window.waiting.set(lane, now + this.ackTimeoutMs);
+            this.recordFeedback(entry, frame.screenId, { congested: true, bufferedBytes: window.bytes });
             this.requestKeyframe(entry, frame.screenId);
             return false;
         }
@@ -596,17 +680,24 @@ class ScreenShareRelay {
         if (!entry) return;
         this.publish(entry, false, reason);
         this.subscriptions.delete(session.remoteSessionId);
+        const targetEntries = this.subscriptionsByTarget.get(entry.session.targetEndpointId);
+        targetEntries?.delete(entry);
+        if (targetEntries?.size === 0) this.subscriptionsByTarget.delete(entry.session.targetEndpointId);
     }
 
     revokeClient(client) {
         for (const [token, binding] of this.tokens) if (binding.client === client) this.tokens.delete(token);
         const ws = this.sockets.get(client);
+        const publisher = this.publishSockets.get(client);
         this.sockets.delete(client);
+        this.publishSockets.delete(client);
+        this.shared.retire(client);
         for (const entry of [...this.subscriptions.values()]) {
             if (entry.session.ownerEndpointId === client.endpointId
                 || entry.session.targetEndpointId === client.endpointId) this.removeSession(entry.session, 'channel_unavailable');
         }
         if (ws) { this.inflight.delete(ws); ws.close(1008, 'Control channel disconnected'); }
+        if (publisher) publisher.close(1008, 'Control channel disconnected');
     }
 }
 

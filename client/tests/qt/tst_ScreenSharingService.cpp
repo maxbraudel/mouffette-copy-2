@@ -104,6 +104,10 @@ private slots:
         const QString node = QStandardPaths::findExecutable(QStringLiteral("node"));
         QVERIFY2(!node.isEmpty(), "Node.js is required for screen sharing integration tests");
         m_output.clear();
+        auto environment = QProcessEnvironment::systemEnvironment();
+        environment.insert(QStringLiteral("MOUFFETTE_SCREEN_SHARED_ENABLED"),
+            QByteArray(QTest::currentTestFunction()).startsWith("shared") ? QStringLiteral("true") : QStringLiteral("false"));
+        m_relay.setProcessEnvironment(environment);
         m_relay.setProcessChannelMode(QProcess::MergedChannels);
         connect(&m_relay, &QProcess::readyReadStandardOutput, this, [this] {
             m_output += m_relay.readAllStandardOutput();
@@ -126,6 +130,202 @@ private slots:
             }
         }
         disconnect(&m_relay, nullptr, this, nullptr);
+    }
+
+    void sharedPublicationFansOutOneUploadAndRetainsOtherViewer() {
+        QTemporaryDir identities;
+        WebSocketClient first(identities.filePath("first"), false);
+        WebSocketClient second(identities.filePath("second"), false);
+        WebSocketClient source(identities.filePath("source"), false);
+        SystemMonitor monitor(nullptr, emptyDesktop());
+        ScreenSharingService firstView(&first, &monitor), secondView(&second, &monitor);
+        QSignalSpy firstFrames(&firstView, &ScreenSharingService::frameReady);
+        QSignalSpy secondFrames(&secondView, &ScreenSharingService::frameReady);
+        QSignalSpy publication(&source, &WebSocketClient::screenPublicationRequested);
+        QSignalSpy sourceReceipts(&source, &WebSocketClient::screenSourceFeedback);
+        QSignalSpy forwardedViewerFeedback(&source, &WebSocketClient::screenShareFeedbackReceived);
+        QString firstSession;
+        connectPeers(first, source, &firstSession);
+        configure(second, "second-viewer");
+        QSignalSpy secondOpened(&second, &WebSocketClient::remoteSessionOpened);
+        second.connectToServer(m_url);
+        QTRY_VERIFY_WITH_TIMEOUT(second.isConnected(), 4000);
+        QVERIFY(second.openRemoteSession(source.endpointId()));
+        QTRY_VERIFY_WITH_TIMEOUT(!secondOpened.isEmpty(), 4000);
+        const auto secondSession = secondOpened.last().first().toJsonObject().value("remoteSessionId").toString();
+        QTRY_VERIFY_WITH_TIMEOUT(second.canIssueSessionCommands(secondSession)
+            && source.canIssueSessionCommands(secondSession), 4000);
+        source.setScreenSharingEnabled(true);
+        QTRY_VERIFY_WITH_TIMEOUT(source.isScreenPublicationChannelConnected(), 4000);
+        QVERIFY(source.sharedScreenPublicationSupported());
+        firstView.setViewedEndpoint(source.endpointId());
+        secondView.setViewedEndpoint(source.endpointId());
+        QTRY_VERIFY_WITH_TIMEOUT(!publication.isEmpty()
+            && publication.last().first().toJsonObject().value("enabled").toBool(), 4000);
+        QTRY_VERIFY_WITH_TIMEOUT(first.isScreenChannelConnected() && second.isScreenChannelConnected(), 4000);
+        // Wait for both subscriptions' control states before the one upstream
+        // packet. This avoids depending on cross-socket handshake ordering.
+        QTest::qWait(150);
+        const auto grant = publication.last().first().toJsonObject();
+        const auto id = grant.value("publicationId").toString();
+        QVERIFY(!id.isEmpty());
+        QImage image(640, 360, QImage::Format_RGBA8888);
+        image.fill(Qt::green);
+        ScreenStreamEncoder encoder(false);
+        QString error;
+        const auto packets = encoder.encode(QVideoFrame(image), true, error);
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QCOMPARE(packets.size(), 1);
+        const auto packet = packets.first();
+        auto metadata = QJsonObject{{"publicationId", id}, {"screenId", 0}, {"layer", "main"},
+            {"sequence", 1}, {"width", 640}, {"height", 360}, {"keyFrame", true},
+            {"codec", "h264"}, {"bitrateBps", 200000}, {"fps", 5}};
+        QVERIFY(source.sendScreenPublicationFrame(metadata, packet.annexB));
+        QTRY_COMPARE_WITH_TIMEOUT(firstFrames.count(), 1, 4000);
+        QTRY_COMPARE_WITH_TIMEOUT(secondFrames.count(), 1, 4000);
+        QTRY_COMPARE_WITH_TIMEOUT(sourceReceipts.count(), 1, 4000);
+        bool feedbackSent = false;
+        QTRY_VERIFY_WITH_TIMEOUT(feedbackSent || (feedbackSent = first.sendScreenViewFeedback(firstSession,
+            first.remoteSessionCoordinator()->byId(firstSession).generation, 0, 600, 10)), 2000);
+        QTest::qWait(100);
+        QCOMPARE(sourceReceipts.count(), 1);
+        QVERIFY(forwardedViewerFeedback.isEmpty());
+        firstView.setViewedEndpoint({});
+        QTest::qWait(150);
+        QCOMPARE(publication.last().first().toJsonObject().value("publicationId").toString(), id);
+        QVERIFY(publication.last().first().toJsonObject().value("enabled").toBool());
+        metadata.insert("sequence", 2);
+        QTRY_VERIFY_WITH_TIMEOUT(source.screenSendWindowOpen(), 4000);
+        QVERIFY(source.sendScreenPublicationFrame(metadata, packet.annexB));
+        QTRY_COMPARE_WITH_TIMEOUT(secondFrames.count(), 2, 4000);
+        QCOMPARE(firstFrames.count(), 1);
+        QVERIFY(secondView.isRemoteScreenAvailable(source.endpointId()));
+        QVERIFY(first.canIssueSessionCommands(firstSession));
+        QVERIFY(second.canIssueSessionCommands(secondSession));
+        secondView.setViewedEndpoint({});
+        QTRY_VERIFY_WITH_TIMEOUT(!publication.last().first().toJsonObject().value("enabled").toBool(), 4000);
+        metadata.insert("sequence", 3);
+        QVERIFY(!source.sendScreenPublicationFrame(metadata, packet.annexB));
+        first.disconnect(); second.disconnect(); source.disconnect();
+    }
+
+    void sharedPublicationSelectsIndependentDecodableLayers() {
+        QTemporaryDir identities;
+        WebSocketClient first(identities.filePath("first"), false), second(identities.filePath("second"), false),
+            source(identities.filePath("source"), false);
+        SystemMonitor monitor(nullptr, emptyDesktop());
+        ScreenSharingService firstView(&first, &monitor), secondView(&second, &monitor);
+        QSignalSpy firstFrames(&firstView, &ScreenSharingService::frameReady);
+        QSignalSpy secondFrames(&secondView, &ScreenSharingService::frameReady);
+        QSignalSpy publications(&source, &WebSocketClient::screenPublicationRequested);
+        QString firstSession;
+        connectPeers(first, source, &firstSession, {ScreenInfo(0, 1920, 1080, 0, 0, true)});
+        configure(second, "small-viewer");
+        QSignalSpy opened(&second, &WebSocketClient::remoteSessionOpened);
+        second.connectToServer(m_url);
+        QTRY_VERIFY_WITH_TIMEOUT(second.isConnected(), 4000);
+        QVERIFY(second.openRemoteSession(source.endpointId()));
+        QTRY_VERIFY_WITH_TIMEOUT(!opened.isEmpty(), 4000);
+        const auto secondSession = opened.last().first().toJsonObject().value("remoteSessionId").toString();
+        QTRY_VERIFY_WITH_TIMEOUT(second.canIssueSessionCommands(secondSession)
+            && source.canIssueSessionCommands(secondSession), 4000);
+        source.setScreenSharingEnabled(true);
+        QTRY_VERIFY_WITH_TIMEOUT(source.isScreenPublicationChannelConnected(), 4000);
+        firstView.setViewedEndpoint(source.endpointId());
+        firstView.setViewedScreens({QJsonObject{{"screenId", 0}, {"maximumEdge", 1920}}});
+        secondView.setViewedEndpoint(source.endpointId());
+        secondView.setViewedScreens({QJsonObject{{"screenId", 0}, {"maximumEdge", 320}}});
+        const auto lowRequested = [&] {
+            if (publications.isEmpty()) return false;
+            const auto screens = publications.last().first().toJsonObject().value("screens").toArray();
+            return !screens.isEmpty() && screens.first().toObject().value("layers").toArray().contains("low");
+        };
+        QTRY_VERIFY_WITH_TIMEOUT(lowRequested(), 4000);
+        const auto id = publications.last().first().toJsonObject().value("publicationId");
+        source.setScreenVideoBudget(2000000);
+        ScreenStreamEncoder mainEncoder(false), lowEncoder(false);
+        ScreenStreamProfile mainProfile; mainProfile.maximumEdge = 1280; mainProfile.bitrateBps = 800000;
+        ScreenStreamProfile lowProfile; lowProfile.maximumEdge = 320; lowProfile.bitrateBps = 100000;
+        mainEncoder.setProfile(mainProfile); lowEncoder.setProfile(lowProfile);
+        QImage big(1280, 720, QImage::Format_RGBA8888), small(320, 180, QImage::Format_RGBA8888);
+        big.fill(Qt::blue); small.fill(Qt::green);
+        QString error;
+        const auto mainPackets = mainEncoder.encode(QVideoFrame(big), true, error);
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        const auto lowPackets = lowEncoder.encode(QVideoFrame(small), true, error);
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QCOMPARE(mainPackets.size(), 1); QCOMPARE(lowPackets.size(), 1);
+        const auto publish = [&](const QString& layer, const ScreenStreamPacket& packet, int sequence, int bitrate) {
+            return source.sendScreenPublicationFrame({{"publicationId", id}, {"screenId", 0}, {"layer", layer},
+                {"sequence", sequence}, {"width", packet.size.width()}, {"height", packet.size.height()},
+                {"keyFrame", packet.keyFrame}, {"codec", "h264"}, {"bitrateBps", bitrate}, {"fps", 10}}, packet.annexB);
+        };
+        QVERIFY(publish("low", lowPackets.first(), 1, 100000));
+        QTRY_COMPARE_WITH_TIMEOUT(firstFrames.count(), 1, 4000);
+        QTRY_COMPARE_WITH_TIMEOUT(secondFrames.count(), 1, 4000);
+        QTRY_VERIFY_WITH_TIMEOUT(source.screenSendWindowOpen(), 4000);
+        QVERIFY(publish("main", mainPackets.first(), 1, 800000));
+        QTRY_COMPARE_WITH_TIMEOUT(firstFrames.count(), 2, 4000);
+        QCOMPARE(qvariant_cast<QVideoFrame>(firstFrames.last().at(2)).size(), big.size());
+        QCOMPARE(qvariant_cast<QVideoFrame>(secondFrames.last().at(2)).size(), small.size());
+        QCOMPARE(secondFrames.count(), 1);
+        const auto nextMain = mainEncoder.encode(QVideoFrame(big), false, error);
+        const auto nextLow = lowEncoder.encode(QVideoFrame(small), false, error);
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QCOMPARE(nextMain.size(), 1); QCOMPARE(nextLow.size(), 1);
+        QTRY_VERIFY_WITH_TIMEOUT(source.screenSendWindowOpen(), 4000);
+        QVERIFY(publish("low", nextLow.first(), 2, 100000));
+        QTRY_COMPARE_WITH_TIMEOUT(secondFrames.count(), 2, 4000);
+        QTRY_VERIFY_WITH_TIMEOUT(source.screenSendWindowOpen(), 4000);
+        QVERIFY(publish("main", nextMain.first(), 2, 800000));
+        QTRY_COMPARE_WITH_TIMEOUT(firstFrames.count(), 3, 4000);
+        QCOMPARE(qvariant_cast<QVideoFrame>(firstFrames.last().at(2)).size(), big.size());
+        QCOMPARE(qvariant_cast<QVideoFrame>(secondFrames.last().at(2)).size(), small.size());
+        firstView.stop(); secondView.stop();
+        first.disconnect(); second.disconnect(); source.disconnect();
+    }
+
+    void sharedPublicationKeepsPublishingAcrossOwnViewerSocketFailure() {
+        QTemporaryDir identities;
+        WebSocketClient viewer(identities.filePath("viewer"), false);
+        WebSocketClient source(identities.filePath("source"), false);
+        SystemMonitor monitor(nullptr, emptyDesktop());
+        ScreenSharingService display(&viewer, &monitor);
+        QSignalSpy frames(&display, &ScreenSharingService::frameReady);
+        QSignalSpy publications(&source, &WebSocketClient::screenPublicationRequested);
+        QSignalSpy publishLost(&source, &WebSocketClient::screenPublicationChannelUnavailable);
+        QString session;
+        connectPeers(viewer, source, &session);
+        source.setScreenSharingEnabled(true);
+        QTRY_VERIFY_WITH_TIMEOUT(source.isScreenPublicationChannelConnected(), 4000);
+        display.setViewedEndpoint(source.endpointId());
+        QTRY_VERIFY_WITH_TIMEOUT(!publications.isEmpty()
+            && publications.last().first().toJsonObject().value("enabled").toBool(), 4000);
+        const auto grant = publications.last().first().toJsonObject();
+        QImage image(640, 360, QImage::Format_RGBA8888); image.fill(Qt::blue);
+        ScreenStreamEncoder encoder(false); QString error;
+        const auto packets = encoder.encode(QVideoFrame(image), true, error);
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QCOMPARE(packets.size(), 1);
+        const auto metadata = QJsonObject{{"publicationId", grant.value("publicationId")},
+            {"screenId", 0}, {"layer", "main"}, {"sequence", 1}, {"width", 640}, {"height", 360},
+            {"keyFrame", true}, {"codec", "h264"}, {"bitrateBps", 200000}, {"fps", 5}};
+        auto* ownViewSocket = videoSocket(source);
+        QVERIFY(ownViewSocket);
+        // The first-created media socket is the role=view connection. Losing
+        // it must not retire the independent role=publish token/publication.
+        ownViewSocket->abort();
+        QVERIFY(source.isScreenPublicationChannelConnected());
+        QVERIFY(source.sendScreenPublicationFrame(metadata, packets.first().annexB));
+        QTRY_COMPARE_WITH_TIMEOUT(frames.count(), 1, 4000);
+        QVERIFY(publishLost.isEmpty());
+        QCOMPARE(publications.last().first().toJsonObject().value("publicationId"), grant.value("publicationId"));
+        QVERIFY(source.canIssueSessionCommands(session));
+        source.setScreenSharingEnabled(false);
+        QTRY_VERIFY_WITH_TIMEOUT(!display.isRemoteScreenAvailable(source.endpointId()), 4000);
+        auto stale = metadata; stale.insert("sequence", 2);
+        QVERIFY(!source.sendScreenPublicationFrame(stale, packets.first().annexB));
+        display.stop(); viewer.disconnect(); source.disconnect();
     }
 
     void consentDecodeDetachAndRevocation() {

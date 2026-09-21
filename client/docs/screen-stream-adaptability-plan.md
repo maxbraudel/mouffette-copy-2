@@ -13,8 +13,8 @@ QScreenCapture on Windows, encodes H.264 and renders decoded YUV through Qt Quic
 The Node relay authenticates separate control, upload and video WebSockets.
 Uploads use durable acknowledgements and shared recipient windows. Video has
 bounded receipts on both legs, but initially had fixed encoding parameters and
-no downstream congestion feedback. One captured/encoded screen is shared by
-viewers, but its encoded packets are uploaded once per session.
+no downstream congestion feedback. Negotiated media v2 now uploads each source layer once per monitor and forwards
+it independently to viewers. Legacy peers retain per-session upload copies.
 
 ## Delivery sequence
 
@@ -30,17 +30,64 @@ viewers, but its encoded packets are uploaded once per session.
 3. Subscribe to the visible monitor set and request a useful resolution for the
    actual viewport and device pixel ratio. Quantize/debounce changes, fence
    stopped streams and keep project serialization independent of preview state.
-4. Integrate a version-pinned native WebRTC media stack and a deployable SFU/TURN
-   service. Keep the reliable transport as a permanent supported fallback.
-5. Add a last-resort ordinary HTTPS session transport and low-rate independent
-   preview images, with the same authorization, ordering and revocation rules.
+4. **Implemented shared publication:** authenticate separate publish/view paths;
+   capture once per monitor; encode main plus at most one useful low layer at
+   source; upload each layer once; forward main/low or recent self-contained IDRs
+   per viewer without server decoding/transcoding. Fence epochs on revocation,
+   publisher replacement and topology changes. Bound cache, receiver windows,
+   aggregate server egress and admission (ten viewers per source by default).
+5. **Future transport work:** integrate a version-pinned native WebRTC stack and
+   deployed TURN where measurements justify it; retain the working WSS path.
+   Add ordinary HTTPS session/preview transport for networks blocking WSS.
 6. Validate the complete chain against shaped networks, blocked transports,
    enterprise proxies, native hardware and concurrent file/scene operations.
 
-Steps 4 and 5 require actual implementations and deployment verification; they
-must never be represented by no-op `.env` flags. This document distinguishes the
+Step 5 requires actual implementations and deployment verification; it must
+never be represented by no-op `.env` flags. This document distinguishes the
 implemented reliable path from those deployment-dependent parts in its final
 validation record.
+
+## Shared publication design decision
+
+For the current requirement (up to ten viewers per source, Linux/Docker server
+with no GPU), server transcoding is deliberately absent. Its per-source decoder
+and multiple encoders would move a substantial CPU burden onto the constrained
+host. Sending independent full-resolution JPEG/WebP images at a fixed 30 FPS
+would discard inter-frame compression and cannot guarantee freshness on a weak
+upload. A single predictive H.264 stream also cannot be arbitrarily frame-skipped:
+P frames require their predecessors. The implemented compromise uses standard
+H.264 access units and bounded source-side simulcast.
+
+1. The source receives an aggregate publication grant independent of a viewer's
+   session. It allocates the upload budget across screens, then main/optional
+   low. The low layer is demand-driven, defaults to at most 960 pixels/20 FPS/
+   750 kbit/s, and gets at most a quarter of a monitor's budget. Activation needs
+   600 kbit/s total by default, with a 20% hold band. Redundant profiles collapse.
+2. Source RTT growth, control RTT, uploads and encoding time govern the source;
+   downstream feedback governs only that viewer at the relay. CPU guard uses a
+   smoothed encode-time/frame-period ratio, warm-up and sustained overload;
+   optional low is abandoned before reducing the remaining useful stream.
+   Actual oversized frames additionally teach independent spatial/bitrate/FPS
+   ceilings, with a bounded IDR exception, reduction as far as 160 pixels/1 FPS/
+   32 kbit/s and slow recovery instead of endless rejection at the ordinary
+   quality ladder's floor.
+3. Publication and viewing use separately authenticated disposable sockets.
+   Receiving congestion cannot close an otherwise healthy publisher. Old
+   servers negotiate legacy behavior; the server rollout flag can also disable
+   v2 without changing the control protocol version.
+4. The relay assigns delivery sequences per viewer and changes layers only on
+   complete IDRs with SPS/PPS. Below available video rates it sends independent
+   recent IDRs. No P-frame history is retained; a skipped dependency requires
+   recovery. Viewer budgets and server egress are aggregate, not per-screen
+   allowances. Cache TTL, global bytes, pending receipts and viewers are bounded.
+5. Consent, active command-ready session, requested monitor and transport epoch
+   remain authority. Last-viewer departure stops publication and purges pixels;
+   departure of one among several viewers preserves the shared source.
+
+This follows the selective-forwarding principle (no media transcoding), while
+remaining a custom WS/WSS relay, not a deployed WebRTC SFU. Primary references:
+[mediasoup architecture](https://mediasoup.org/documentation/overview/) and
+[H.264 decoder refresh procedure](https://www.rfc-editor.org/rfc/rfc6184.html#section-8.5.1).
 
 ## Transport strategy and prerequisites
 
@@ -138,9 +185,9 @@ clear of another healthy monitor. Record first-frame time, video age, control RT
 file throughput, memory and CPU across the network matrix. Compare those metrics
 to the same workload over the current WSS path. Ship WebRTC only after the
 chosen dependency artifacts and deployed relay paths pass this gate.
-Independent viewer quality is a subsequent bounded-simulcast task: measure
-extra encoding/upload cost and prove that a slow consumer does not lower another
-consumer's selected layer within the source's aggregate budget.
+Independent viewer quality is implemented on WSS with two demand-driven source
+layers and an IDR-only mode. A future WebRTC path must preserve this source
+budget, consent/session authorization and independent downstream selection.
 
 ## Next implementation: ordinary HTTPS fallback
 
@@ -232,7 +279,7 @@ Primary references:
 | Proxy policy | Implemented: system/direct/HTTP CONNECT/SOCKS5, explicit authentication fencing and unchanged TLS validation |
 | Native WebRTC, SFU and TURN deployment | Not implemented; requires the native/toolchain and deployment work above |
 | Ordinary HTTPS preview and session fallback | Not implemented; WSS-blocked networks remain unsupported |
-| Independent per-viewer quality/simulcast | Not implemented; viewers currently share an encoding profile |
+| Independent per-viewer quality | Implemented on WS/WSS: one shared publication, up to two source encoders per monitor, per-viewer selection and latest-IDR mode without server transcoding |
 | AV1 and content-aware text/motion classification | Not implemented |
 | Full shaped-network/hardware/enterprise qualification | Still required; automated synthetic and local integration results are not equivalent to this deployment matrix |
 
@@ -248,7 +295,7 @@ warnings are scoped to the affected monitor. Metadata-only fairness turns stay
 valid through outstanding pacing debt plus the receipt margin, without keeping
 obsolete frames. The regression record below includes these corrections.
 
-## Current validation record
+## Previous adaptive-v1 validation record
 
 The final rebuilt macOS/Qt 6.11.2 binary passed the four targeted
 `CanvasSelectionBackend` cases below with `QT_QPA_PLATFORM=offscreen`:
@@ -269,7 +316,7 @@ frame timeout, an 8,000 ms stale timeout, a 2,048 KiB maximum buffered allowance
 and 64 pending receipts by default. These limits remain configurable and subject
 to the documented cross-field validation.
 
-Final local validation on 2026-09-21:
+Local validation of the previous adaptive-v1 implementation on 2026-09-21:
 
 - The macOS application and all affected regression executables built
   successfully using `client/out/build/macos-debug`.
@@ -302,3 +349,54 @@ Windows builds/drivers, real capture, end-to-end shaped bandwidth/loss,
 4K throughput and enterprise proxy traversal have not been qualified by these
 local automated runs. The network matrix and remaining transport stages above
 remain release work; this record does not declare them complete.
+
+
+## Shared-v2 validation record
+
+The shared-publication implementation builds with Qt 6.11.2 on macOS. Its
+synthetic capture tests exercise two independently decodable encoders, separate
+cadence/idle periods, adding/removing low without breaking main, pending callback
+fences, isolated low failure, invalidation after failure and bounded work while
+the GUI is blocked. Profile tests check the aggregate layer allocation, demand
+and CPU gates, activation hysteresis, configuration extremes and oversized-frame
+ceilings/recovery. Network tests cover publication ACK tuples, consent, role
+separation, old epochs, bounded recovery IDRs and debt surviving receipt.
+
+The Qt/Node integration adds a single-upload/two-viewer decoded fanout,
+independent main/low decoding with delivery sequence translation, one viewer
+leaving while another continues, consent revocation and publisher survival
+across its own viewing-socket failure. Existing v1 cases run with the server's
+real rollout flag disabled to retain old-server compatibility coverage.
+
+Relay regressions include ten viewers per source, heterogeneous feedback,
+late-join/source-sequence continuity, snapshot-to-video recovery, bounded IDR
+cache/TTL, consent/topology/authentication fences, long snapshot receipt timing,
+two-monitor fairness under a 64 kbit/s budget, intrinsically oversized images,
+conservative bandwidth across reconnects, aggregate egress and concurrent upload
+budget reductions. These are deterministic tests, not a throughput benchmark
+of a production Linux/Docker host. No server GPU or transcoder is introduced.
+
+Final local outcomes on 2026-09-21:
+
+- The macOS application and all affected test targets rebuilt successfully.
+- All 15 selected client suites are validated: the 13 suites in the previous
+  selection plus `ScreenCaptureLayers` and `ScreenPublicationProfiles`. The
+  initial run passed 13 and exposed two test-fixture ordering issues. The new
+  screen test now avoids evaluating a rate-limited send twice inside a QTRY
+  assertion; the existing upload test waits for its exact durable chunk ACK
+  before completion, matching the real protocol. After those fixture fixes,
+  full `ScreenSharingService` passed in 61.71 seconds and full
+  `UploadRemovalSecurity` passed in 13.56 seconds. Upload production code was
+  unchanged. The other 13 suites passed in the initial run.
+- The final `npm test` passed all 20 server scripts after the late-join,
+  snapshot fairness, reconnect estimate and cache-allocation fixes.
+- `git diff --check` passed. No live desktop permission was requested; the
+  optional real-capture codec smoke remains excluded.
+
+Reproduce the shared-v2 client selection by adding
+`ScreenCaptureLayers|ScreenPublicationProfiles` to the CTest expression above.
+The server command is `npm test` from `server`.
+
+Windows native capture/encoders, Linux container sizing and the real shaped-link
+matrix remain platform/deployment qualification. WSS-blocked networks still
+require the future HTTPS session transport described above.

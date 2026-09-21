@@ -19,19 +19,81 @@
 #include <algorithm>
 
 namespace {
+struct LayerRequest {
+    ScreenStreamProfile profile;
+    quint64 epoch = 0;
+    bool forceKeyFrame = true;
+    bool failed = false;
+};
 struct CaptureMailbox {
     QMutex mutex;
     QWaitCondition changed;
     QVideoFrame latest;
     QSize expectedNativeSize;
     quint64 revision = 0;
-    quint64 contentEpoch = 0;
-    ScreenStreamProfile profile;
-    bool forceKeyFrame = true;
+    quint64 nextLayerEpoch = 0;
+    QHash<QString, LayerRequest> layers;
     bool deliveryPending = false;
     bool backpressured = false;
     bool closed = false;
 };
+
+QHash<QString, ScreenStreamProfile> normalizedProfiles(const QHash<QString, ScreenStreamProfile>& profiles) {
+    QHash<QString, ScreenStreamProfile> result;
+    for (const auto& name : {QStringLiteral("main"), QStringLiteral("low")}) {
+        const auto it = profiles.constFind(name);
+        if (it != profiles.cend()) result.insert(name, it->normalized());
+    }
+    return result;
+}
+
+ScreenStreamProfile nativeProfile(const QHash<QString, ScreenStreamProfile>& profiles) {
+    ScreenStreamProfile result;
+    result.maximumEdge = 160;
+    result.framesPerSecond = 1;
+    for (const auto& profile : profiles) {
+        result.maximumEdge = std::max(result.maximumEdge, profile.maximumEdge);
+        result.framesPerSecond = std::max(result.framesPerSecond, profile.framesPerSecond);
+    }
+    return result;
+}
+
+// Caller holds the mailbox mutex. Epochs never repeat after removing and adding
+// a layer, so an already queued callback cannot revive an obsolete encoder.
+void updateLayerProfiles(CaptureMailbox& state, const QHash<QString, ScreenStreamProfile>& profiles) {
+    for (const auto& name : state.layers.keys())
+        if (!profiles.contains(name)) state.layers.remove(name);
+    for (auto it = profiles.cbegin(); it != profiles.cend(); ++it) {
+        auto existing = state.layers.find(it.key());
+        const auto& value = it.value();
+        const bool reopen = existing == state.layers.end() || existing->failed
+            || existing->profile.maximumEdge != value.maximumEdge
+            || existing->profile.framesPerSecond != value.framesPerSecond
+            || existing->profile.bitrateBps != value.bitrateBps
+            || existing->profile.keyFrameIntervalMs != value.keyFrameIntervalMs
+            || existing->profile.softwarePreset != value.softwarePreset;
+        if (reopen) state.layers.insert(it.key(), {value, ++state.nextLayerEpoch, true, false});
+        else existing->profile = value;
+    }
+    state.changed.wakeOne();
+}
+
+void submitCaptureFrame(CaptureMailbox& state, const QVideoFrame& frame) {
+    if (state.closed) return;
+    if (frame.isValid() && state.expectedNativeSize.isValid() && frame.size() != state.expectedNativeSize) return;
+    state.latest = frame;
+    if (!frame.isValid()) {
+        for (auto& layer : state.layers) {
+            layer.epoch = ++state.nextLayerEpoch;
+            layer.forceKeyFrame = true;
+            // A discontinuity also fences any pending error callback. Its
+            // replacement encoder must not inherit an unreported failure.
+            layer.failed = false;
+        }
+    }
+    ++state.revision;
+    state.changed.wakeOne();
+}
 
 #ifdef Q_OS_MACOS
 QSize captureSize(QScreen* screen, int maximumEdge) {
@@ -48,105 +110,159 @@ QSize captureSize(QScreen* screen, int maximumEdge) {
 // admitted only after the previous packet has been delivered to the service.
 class CaptureWorker final : public QThread {
 public:
-    CaptureWorker(ScreenCaptureSource* owner, std::shared_ptr<CaptureMailbox> mailbox)
-        : m_owner(owner), m_mailbox(std::move(mailbox)) { setObjectName(QStringLiteral("Screen H264 encoder")); }
+    CaptureWorker(ScreenCaptureSource* owner, std::shared_ptr<CaptureMailbox> mailbox, bool preferHardware = true)
+        : m_owner(owner), m_mailbox(std::move(mailbox)), m_preferHardware(preferHardware) {
+        setObjectName(QStringLiteral("Screen H264 encoder"));
+    }
     void run() override {
-        ScreenStreamEncoder encoder;
-        QString reportedBackend;
+        struct EncoderLayer {
+            explicit EncoderLayer(bool hardware, quint64 generation) : encoder(hardware), epoch(generation) {}
+            ScreenStreamEncoder encoder;
+            QString reportedBackend;
+            quint64 epoch;
+            quint64 encodedRevision = 0;
+            qint64 lastEncodeUs = -1000000;
+            qint64 lastKeyFrameUs = -30000000;
+        };
+        struct Work {
+            QString name;
+            ScreenStreamProfile profile;
+            std::shared_ptr<EncoderLayer> layer;
+            bool forceKeyFrame;
+        };
+        struct Delivery {
+            QString name;
+            quint64 epoch;
+            QList<ScreenStreamPacket> packets;
+            QString error;
+            QString backend;
+            bool backendChanged = false;
+        };
+        QHash<QString, std::shared_ptr<EncoderLayer>> encoders;
         QElapsedTimer clock;
         clock.start();
-        quint64 encodedRevision = 0;
-        quint64 encodedEpoch = 0;
-        qint64 lastEncodeUs = -1000000;
-        qint64 lastKeyFrameUs = -30000000;
         const auto state = m_mailbox;
         while (true) {
             QVideoFrame frame;
-            bool forceKeyFrame;
-            qint64 timestamp;
-            quint64 contentEpoch;
-            ScreenStreamProfile profile;
+            QList<Work> work;
+            QList<std::shared_ptr<EncoderLayer>> retired;
+            qint64 timestamp = 0;
             {
                 QMutexLocker lock(&state->mutex);
                 while (true) {
                     if (state->closed) return;
+                    for (const auto& name : encoders.keys())
+                        if (!state->layers.contains(name)) retired.append(encoders.take(name));
                     timestamp = clock.nsecsElapsed() / 1000;
-                    const qint64 elapsed = timestamp - lastEncodeUs;
-                    const bool changed = state->revision != encodedRevision || state->forceKeyFrame || encoder.hasDelayedKeyFrame();
-                    const qint64 interval = changed ? 1000000 / state->profile.framesPerSecond
-                                                   : qint64(state->profile.idleIntervalMs) * 1000;
-                    if (state->latest.isValid() && !state->deliveryPending && !state->backpressured && elapsed >= interval) break;
-                    const auto waitMs = !state->latest.isValid() || state->deliveryPending || state->backpressured
-                        ? 1000ul : static_cast<unsigned long>(std::max<qint64>(1, (interval - elapsed + 999) / 1000));
-                    state->changed.wait(&state->mutex, waitMs);
+                    qint64 waitUs = 1000000;
+                    if (state->latest.isValid() && !state->deliveryPending && !state->backpressured) {
+                        // Stable order gives main the earliest conversion slot;
+                        // each layer still owns its independent pacing and GOP.
+                        for (const auto& name : {QStringLiteral("main"), QStringLiteral("low")}) {
+                            auto request = state->layers.find(name);
+                            if (request == state->layers.end() || request->failed) continue;
+                            auto& layer = encoders[name];
+                            if (!layer || layer->epoch != request->epoch) {
+                                if (layer) retired.append(std::move(layer));
+                                layer = std::make_shared<EncoderLayer>(m_preferHardware, request->epoch);
+                            }
+                            const bool changed = state->revision != layer->encodedRevision
+                                || request->forceKeyFrame || layer->encoder.hasDelayedKeyFrame();
+                            const qint64 interval = changed ? 1000000 / request->profile.framesPerSecond
+                                : qint64(request->profile.idleIntervalMs) * 1000;
+                            const qint64 remaining = interval - (timestamp - layer->lastEncodeUs);
+                            if (remaining > 0) { waitUs = std::min(waitUs, remaining); continue; }
+                            const bool forceKeyFrame = request->forceKeyFrame
+                                && timestamp - layer->lastKeyFrameUs
+                                    >= qint64(request->profile.minimumKeyFrameIntervalMs) * 1000;
+                            if (forceKeyFrame) request->forceKeyFrame = false;
+                            layer->encodedRevision = state->revision;
+                            layer->lastEncodeUs = timestamp;
+                            work.append({name, request->profile, layer, forceKeyFrame});
+                        }
+                    }
+                    if (!work.isEmpty()) {
+                        frame = state->latest;
+                        state->deliveryPending = true;
+                        break;
+                    }
+                    if (!retired.isEmpty()) {
+                        // Closing a hardware encoder can wait for its driver.
+                        // Never hold up native capture or the GUI mailbox lock.
+                        lock.unlock();
+                        retired.clear();
+                        lock.relock();
+                        continue;
+                    }
+                    state->changed.wait(&state->mutex,
+                        static_cast<unsigned long>(std::max<qint64>(1, (waitUs + 999) / 1000)));
                 }
-                frame = state->latest;
-                contentEpoch = state->contentEpoch;
-                profile = state->profile;
-                encodedRevision = state->revision;
-                forceKeyFrame = state->forceKeyFrame
-                    && (contentEpoch != encodedEpoch
-                        || timestamp - lastKeyFrameUs >= qint64(profile.minimumKeyFrameIntervalMs) * 1000);
-                if (forceKeyFrame) state->forceKeyFrame = false;
             }
+            retired.clear();
             QElapsedTimer encodingClock;
             encodingClock.start();
-            if (encodedEpoch != contentEpoch) {
-                encoder.reset(); forceKeyFrame = true; encodedEpoch = contentEpoch;
+            QList<Delivery> deliveries;
+            for (const auto& item : work) {
+                {
+                    QMutexLocker lock(&state->mutex);
+                    if (state->closed) return;
+                    const auto request = state->layers.constFind(item.name);
+                    if (request == state->layers.cend() || request->epoch != item.layer->epoch) continue;
+                }
+                auto& layer = *item.layer;
+                layer.encoder.setProfile(item.profile);
+                // Wrappers share one immutable raw surface and have their own
+                // timing metadata; low conversion never mutates main's input.
+                QString error;
+                auto packets = layer.encoder.encode(presentationFrame(frame, timestamp), item.forceKeyFrame, error);
+                for (auto& packet : packets) {
+                    packet.layer = item.name;
+                    if (packet.keyFrame) layer.lastKeyFrameUs = std::max(layer.lastKeyFrameUs, packet.timestampUs);
+                }
+                const auto backend = layer.encoder.backendName();
+                const bool backendChanged = backend != layer.reportedBackend;
+                if (backendChanged) layer.reportedBackend = backend;
+                if (!error.isEmpty()) {
+                    QMutexLocker lock(&state->mutex);
+                    auto request = state->layers.find(item.name);
+                    if (request != state->layers.end() && request->epoch == layer.epoch) request->failed = true;
+                }
+                if (!packets.isEmpty() || !error.isEmpty() || backendChanged)
+                    deliveries.append({item.name, layer.epoch, std::move(packets), error, backend, backendChanged});
             }
-            encoder.setProfile(profile);
-            // QVideoFrame is explicitly shared. Do not mutate the native sink's
-            // timestamps: a separate presentation wrapper owns this metadata.
-            frame = presentationFrame(std::move(frame), timestamp);
-            lastEncodeUs = timestamp;
-            QString error;
-            auto packets = encoder.encode(std::move(frame), forceKeyFrame, error);
             const int encodingMs = int(std::min<qint64>(60000, encodingClock.elapsed()));
-            for (const auto& packet : packets)
-                if (packet.keyFrame) lastKeyFrameUs = std::max(lastKeyFrameUs, packet.timestampUs);
-            const auto backend = encoder.backendName();
-            const bool backendChanged = backend != reportedBackend;
-            if (backendChanged) reportedBackend = backend;
-            if (packets.isEmpty() && error.isEmpty() && !backendChanged) continue;
             {
                 QMutexLocker lock(&state->mutex);
                 if (state->closed) return;
-                if (state->contentEpoch != contentEpoch) continue;
-                state->deliveryPending = true;
+                if (deliveries.isEmpty()) {
+                    state->deliveryPending = false;
+                    state->changed.wakeOne();
+                    continue;
+                }
             }
-            QMetaObject::invokeMethod(m_owner, [owner = m_owner, state, packets = std::move(packets), error,
-                                               backend, backendChanged, contentEpoch, encodingMs]() {
-                {
+            QMetaObject::invokeMethod(m_owner, [owner = m_owner, state, deliveries = std::move(deliveries), encodingMs]() {
+                const auto current = [&state](const Delivery& delivery) {
                     QMutexLocker lock(&state->mutex);
-                    if (state->closed) return;
-                    if (state->contentEpoch != contentEpoch) {
-                        state->deliveryPending = false; state->changed.wakeOne(); return;
+                    const auto request = state->layers.constFind(delivery.name);
+                    return !state->closed && request != state->layers.cend() && request->epoch == delivery.epoch;
+                };
+                bool measured = false;
+                for (const auto& delivery : deliveries) {
+                    if (!current(delivery)) continue;
+                    if (!measured) { emit owner->encodingMeasured(encodingMs); measured = true; }
+                    if (!current(delivery)) continue;
+                    if (delivery.backendChanged) emit owner->backendChanged(delivery.backend);
+                    for (const auto& packet : delivery.packets) {
+                        // A signal handler can remove a layer or stop capture
+                        // synchronously. Recheck the exact layer epoch each time.
+                        if (!current(delivery)) break;
+                        emit owner->packetReady(packet);
                     }
-                }
-                emit owner->encodingMeasured(encodingMs);
-                if (backendChanged) emit owner->backendChanged(backend);
-                for (const auto& packet : packets) {
-                    // A signal handler can disable sharing synchronously.
-                    {
-                        QMutexLocker lock(&state->mutex);
-                        if (state->closed) return;
-                        if (state->contentEpoch != contentEpoch) {
-                            state->deliveryPending = false; state->changed.wakeOne(); return;
-                        }
+                    if (current(delivery) && !delivery.error.isEmpty()) {
+                        emit owner->layerEncodingFailed(delivery.name, delivery.error);
+                        if (delivery.name == QLatin1String("main") && current(delivery))
+                            emit owner->errorOccurred(ScreenCaptureError::EncodingFailed, delivery.error);
                     }
-                    emit owner->packetReady(packet);
-                }
-                {
-                    QMutexLocker lock(&state->mutex);
-                    if (state->closed) return;
-                    if (state->contentEpoch != contentEpoch) {
-                        state->deliveryPending = false; state->changed.wakeOne(); return;
-                    }
-                }
-                if (!error.isEmpty()) {
-                    owner->stop();
-                    emit owner->errorOccurred(ScreenCaptureError::EncodingFailed, error);
-                    return;
                 }
                 QMutexLocker lock(&state->mutex);
                 state->deliveryPending = false;
@@ -154,6 +270,7 @@ public:
             }, Qt::QueuedConnection);
         }
     }
+
 private:
     // The capture buffer is shared without copying its pixels. Qt 6.8+'s public
     // buffer API gives this worker separate timing metadata and maps natively.
@@ -191,6 +308,7 @@ private:
     }
     ScreenCaptureSource* const m_owner;
     std::shared_ptr<CaptureMailbox> m_mailbox;
+    const bool m_preferHardware;
 };
 }
 
@@ -207,7 +325,7 @@ struct ScreenCaptureSource::Private {
     std::unique_ptr<CaptureWorker> worker;
     QMetaObject::Connection frameConnection;
     QMetaObject::Connection screenConnection;
-    ScreenStreamProfile profile;
+    QHash<QString, ScreenStreamProfile> profiles{{QStringLiteral("main"), ScreenStreamProfile{}}};
     bool backpressured = false;
 };
 
@@ -247,21 +365,15 @@ bool ScreenCaptureSource::start(QScreen* screen) {
     if (!screen) { emit errorOccurred(ScreenCaptureError::CaptureFailed, QStringLiteral("No screen was selected for sharing")); return false; }
     d->screen = screen;
     d->mailbox = std::make_shared<CaptureMailbox>();
-    d->mailbox->profile = d->profile;
+    updateLayerProfiles(*d->mailbox, d->profiles);
     d->mailbox->backpressured = d->backpressured;
 #ifdef Q_OS_MACOS
-    d->mailbox->expectedNativeSize = captureSize(screen, d->profile.maximumEdge);
+    d->mailbox->expectedNativeSize = captureSize(screen, nativeProfile(d->profiles).maximumEdge);
 #endif
     d->worker = std::make_unique<CaptureWorker>(this, d->mailbox);
     const auto submit = [mailbox = d->mailbox](const QVideoFrame& frame) {
             QMutexLocker lock(&mailbox->mutex);
-            if (mailbox->closed) return;
-            if (frame.isValid() && mailbox->expectedNativeSize.isValid()
-                && frame.size() != mailbox->expectedNativeSize) return;
-            mailbox->latest = frame;
-            if (!frame.isValid()) { ++mailbox->contentEpoch; mailbox->forceKeyFrame = true; }
-            ++mailbox->revision;
-            mailbox->changed.wakeOne();
+            submitCaptureFrame(*mailbox, frame);
         };
 #ifndef Q_OS_MACOS
     d->frameConnection = connect(&d->sink, &QVideoSink::videoFrameChanged, this, submit, Qt::DirectConnection);
@@ -272,7 +384,7 @@ bool ScreenCaptureSource::start(QScreen* screen) {
     });
     d->worker->start();
 #ifdef Q_OS_MACOS
-    d->capture.setProfile(d->profile);
+    d->capture.setProfile(nativeProfile(d->profiles));
     d->capture.start(screen, submit, [this, mailbox = d->mailbox](ScreenCaptureError code, const QString& message) {
         // The mutex fences invoking a GUI callback against destruction. Pixels
         // use the independent mailbox and never require the facade to be alive.
@@ -294,33 +406,31 @@ bool ScreenCaptureSource::start(QScreen* screen) {
 bool ScreenCaptureSource::isActive() const { return d->mailbox && d->capture.isActive(); }
 
 void ScreenCaptureSource::setProfile(const ScreenStreamProfile& profile) {
+    setProfiles({{QStringLiteral("main"), profile}});
+}
+
+void ScreenCaptureSource::setProfiles(const QHash<QString, ScreenStreamProfile>& profiles) {
     Q_ASSERT(QThread::currentThread() == thread());
-    const auto value = profile.normalized();
-    if (d->profile == value) return;
-    const bool resized = d->profile.maximumEdge != value.maximumEdge;
-    const bool reconfigured = resized || d->profile.framesPerSecond != value.framesPerSecond
-        || d->profile.bitrateBps != value.bitrateBps || d->profile.keyFrameIntervalMs != value.keyFrameIntervalMs
-        || d->profile.softwarePreset != value.softwarePreset;
-    d->profile = value;
+    const auto values = normalizedProfiles(profiles);
+#ifdef Q_OS_MACOS
+    const auto previousNative = nativeProfile(d->profiles);
+    const auto nextNative = nativeProfile(values);
+#endif
+    d->profiles = values;
     if (d->mailbox) {
         QMutexLocker lock(&d->mailbox->mutex);
-        d->mailbox->profile = value;
-        if (reconfigured) {
-            ++d->mailbox->contentEpoch;
-            d->mailbox->forceKeyFrame = true;
-        }
+        updateLayerProfiles(*d->mailbox, values);
 #ifdef Q_OS_MACOS
-        // Wait for the surface at the new native size rather than scaling the
-        // previous IOSurface on the CPU during asynchronous reconfiguration.
-        if (resized && d->screen) {
-            d->mailbox->expectedNativeSize = captureSize(d->screen, value.maximumEdge);
+        // A native resize need not restart unchanged lower encoders. Only
+        // discard a raw surface whose dimensions no longer match capture.
+        if (previousNative.maximumEdge != nextNative.maximumEdge && d->screen) {
+            d->mailbox->expectedNativeSize = captureSize(d->screen, nextNative.maximumEdge);
             if (d->mailbox->latest.size() != d->mailbox->expectedNativeSize) d->mailbox->latest = {};
         }
 #endif
-        d->mailbox->changed.wakeOne();
     }
 #ifdef Q_OS_MACOS
-    d->capture.setProfile(value);
+    d->capture.setProfile(nextNative);
 #endif
 }
 
@@ -334,10 +444,11 @@ void ScreenCaptureSource::setBackpressured(bool backpressured) {
     d->mailbox->changed.wakeOne();
 }
 
-void ScreenCaptureSource::requestKeyFrame() {
+void ScreenCaptureSource::requestKeyFrame(const QString& layer) {
     if (!d->mailbox) return;
     QMutexLocker lock(&d->mailbox->mutex);
-    d->mailbox->forceKeyFrame = true;
+    for (auto it = d->mailbox->layers.begin(); it != d->mailbox->layers.end(); ++it)
+        if (layer.isEmpty() || it.key() == layer) it->forceKeyFrame = true;
     d->mailbox->changed.wakeOne();
 }
 

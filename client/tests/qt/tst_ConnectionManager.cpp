@@ -22,6 +22,7 @@
 #include <QUuid>
 #include <QWebSocket>
 #include <QWebSocketServer>
+#include <QUrlQuery>
 
 #include <openssl/evp.h>
 #include <openssl/x509.h>
@@ -88,6 +89,7 @@ private slots:
     void uploadChannelReadyRequiresExactEnvelope();
     void screenChannelReadyRequiresExactEnvelope_data();
     void screenChannelReadyRequiresExactEnvelope();
+    void sharedScreenPublicationUsesIndependentSocketsAndExactReceipts();
     void protocolUploadWireSchemaAndActiveGate();
     void suspendInclusiveTransportBoundaryRejectsLateContact_data();
     void suspendInclusiveTransportBoundaryRejectsLateContact();
@@ -1424,6 +1426,225 @@ void ConnectionManagerTest::screenChannelReadyRequiresExactEnvelope() {
     QTRY_VERIFY_WITH_TIMEOUT(uploadPeerSeen, 2000);
     QTest::qWait(100);
     QVERIFY(!client.isScreenChannelConnected());
+    client.disconnect();
+}
+
+void ConnectionManagerTest::sharedScreenPublicationUsesIndependentSocketsAndExactReceipts() {
+    QTemporaryDir identityDirectory;
+    QVERIFY(identityDirectory.isValid());
+    QWebSocketServer server(QStringLiteral("screen-v2-test"), QWebSocketServer::NonSecureMode);
+    QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+    const auto uuid = [] { return QUuid::createUuid().toString(QUuid::WithoutBraces); };
+    const QString bootId = uuid();
+    QPointer<QWebSocket> control, view, publisher;
+    QHash<QString, QString> tokenRoles;
+    QVector<QJsonObject> requests;
+    QVector<QByteArray> publications, unexpectedViewPublications;
+    WebSocketClient client(identityDirectory.path(), false);
+    const auto send = [&](QWebSocket* peer, QJsonObject message) {
+        QVERIFY(peer);
+        message.insert("protocolVersion", 12);
+        message.insert("serverBootId", bootId);
+        message.insert("messageId", uuid());
+        message.insert("connectionGeneration", 1);
+        completeV7TestEnvelope(message);
+        peer->sendTextMessage(QString::fromUtf8(QJsonDocument(message).toJson(QJsonDocument::Compact)));
+    };
+    connect(&server, &QWebSocketServer::newConnection, this, [&] {
+        auto* peer = server.nextPendingConnection();
+        QVERIFY(peer);
+        const QUrlQuery query(peer->requestUrl());
+        if (query.queryItemValue("channel") == QLatin1String("screen")) {
+            const QString role = tokenRoles.take(query.queryItemValue("token"));
+            QVERIFY(role == QLatin1String("view") || role == QLatin1String("publish"));
+            if (role == QLatin1String("view")) {
+                view = peer;
+                connect(peer, &QWebSocket::binaryMessageReceived, this, [&](const QByteArray& packet) {
+                    unexpectedViewPublications.append(packet);
+                });
+            } else {
+                publisher = peer;
+                connect(peer, &QWebSocket::binaryMessageReceived, this, [&](const QByteArray& packet) {
+                    publications.append(packet);
+                });
+            }
+            send(peer, {{"type", "screen_channel_ready"}, {"endpointId", client.endpointId()},
+                        {"mediaVersion", 2}, {"role", role}, {"feedbackVersion", 1}});
+            return;
+        }
+        control = peer;
+        send(peer, {{"type", "auth_challenge"}, {"nonce", QString::fromLatin1(QByteArray(32, 'v').toBase64(
+            QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals))}, {"issuedAt", 1}});
+        connect(peer, &QWebSocket::textMessageReceived, this, [&, peer](const QString& encoded) {
+            const auto message = QJsonDocument::fromJson(encoded.toUtf8()).object();
+            const auto type = message.value("type").toString();
+            if (type == QLatin1String("auth_response")) {
+                const QJsonObject policy{{"policyVersion", 5}, {"transportTimeoutMs", 5000},
+                    {"heartbeatIntervalMs", 750}, {"transportSuspectAfterMs", 1500},
+                    {"sessionRecoveryTimeoutMs", 15000}, {"leaseTimeoutMs", 1500},
+                    {"scenePrepareTimeoutMs", 15000}, {"sceneActivationLeadMs", 4000},
+                    {"sceneMaxClockSkewMs", 50}, {"sceneStartedAckTimeoutMs", 5000},
+                    {"sceneMaxStartSkewMs", 750}, {"sceneStopTimeoutMs", 5000},
+                    {"uploadIdleTimeoutMs", 45000}, {"uploadTargetAckTimeoutMs", 30000}, {"removalAckTimeoutMs", 30000}};
+                send(peer, {{"type", "welcome"}, {"connectionId", uuid()},
+                    {"installationId", message.value("installationId")},
+                    {"endpointId", DeviceIdentityStore::endpointIdForInstallation(
+                        message.value("installationId").toString(), message.value("instanceId").toString())},
+                    {"instanceId", message.value("instanceId")}, {"instanceOrdinal", message.value("instanceOrdinal")},
+                    {"runtimeId", message.value("runtimeId")}, {"policy", policy}, {"serverMonotonicMs", 1}});
+            } else if (type == QLatin1String("heartbeat")) {
+                send(peer, {{"type", "heartbeat_ack"}, {"sequence", message.value("sequence")},
+                    {"clientMonotonicMs", message.value("clientMonotonicMs")},
+                    {"serverMonotonicMs", message.value("clientMonotonicMs")}, {"serverEpochMs", 1}});
+            } else if (type == QLatin1String("request_screen_channel")) {
+                QCOMPARE(message.value("mediaVersion").toInt(), 2);
+                const QString role = message.value("role").toString();
+                QVERIFY(role == QLatin1String("view") || role == QLatin1String("publish"));
+                requests.append(message);
+                const QString token = QString::fromLatin1(QCryptographicHash::hash(
+                    uuid().toUtf8(), QCryptographicHash::Sha256).toBase64(
+                        QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals));
+                tokenRoles.insert(token, role);
+                send(peer, {{"type", "screen_channel_token"}, {"requestId", message.value("requestId")},
+                    {"mediaVersion", 2}, {"role", role}, {"token", token}});
+            }
+        });
+    });
+    QSignalSpy connected(&client, &WebSocketClient::connected);
+    QSignalSpy grants(&client, &WebSocketClient::screenPublicationRequested);
+    QSignalSpy sourceSamples(&client, &WebSocketClient::screenSourceFeedback);
+    QSignalSpy lostView(&client, &WebSocketClient::screenChannelUnavailable);
+    QSignalSpy lostPublication(&client, &WebSocketClient::screenPublicationChannelUnavailable);
+    QSignalSpy keyframes(&client, &WebSocketClient::screenPublicationKeyFrameRequested);
+    client.connectToServer(QStringLiteral("ws://127.0.0.1:%1").arg(server.serverPort()));
+    QTRY_COMPARE_WITH_TIMEOUT(connected.count(), 1, 2000);
+    QVERIFY(client.ensureScreenChannel());
+    QTRY_VERIFY_WITH_TIMEOUT(client.isScreenChannelConnected(), 2000);
+    QVERIFY(client.sharedScreenPublicationSupported());
+    QVERIFY(!client.isScreenPublicationChannelConnected());
+    QCOMPARE(requests.size(), 1);
+    client.setScreenSharingEnabled(true);
+    QTRY_VERIFY_WITH_TIMEOUT(client.isScreenPublicationChannelConnected(), 2000);
+    QCOMPARE(requests.size(), 2);
+    QVERIFY(view && publisher && view != publisher);
+    QString epoch = uuid();
+    const auto grant = [&] {
+        send(control, {{"type", "screen_publication_request"}, {"publicationId", epoch}, {"enabled", true},
+            {"screens", QJsonArray{QJsonObject{{"screenId", 0}, {"maximumEdge", 1920},
+                {"layers", QJsonArray{QStringLiteral("main"), QStringLiteral("low")}}}}}});
+    };
+    grant();
+    QTRY_COMPARE_WITH_TIMEOUT(grants.count(), 1, 1000);
+    const auto frame = [&](int sequence, const QString& layer = QStringLiteral("main")) {
+        return QJsonObject{{"publicationId", epoch}, {"screenId", 0}, {"layer", layer},
+            {"sequence", sequence}, {"width", 640}, {"height", 360}, {"keyFrame", true},
+            {"codec", "h264"}, {"bitrateBps", 500000}, {"fps", 15}};
+    };
+    const QByteArray accessUnit = QByteArray::fromHex("000000016588");
+    const int receiptLimit = AppConfig::instance().screenMaxInflightFrames();
+    for (int sequence = 1; sequence <= receiptLimit; ++sequence)
+        QVERIFY(client.sendScreenPublicationFrame(frame(sequence), accessUnit));
+    QTRY_COMPARE_WITH_TIMEOUT(publications.size(), receiptLimit, 1000);
+    QVERIFY(unexpectedViewPublications.isEmpty());
+    QVERIFY(publications.first().startsWith("MSV2"));
+    QVERIFY(!client.sendScreenPublicationFrame(frame(receiptLimit + 1), accessUnit));
+    const auto ack = [&](QWebSocket* peer, const QString& id, const QString& layer, int sequence) {
+        send(peer, {{"type", "screen_publication_ack"}, {"publicationId", id},
+                    {"screenId", 0}, {"layer", layer}, {"sequence", sequence}});
+    };
+    ack(publisher, uuid(), QStringLiteral("main"), 1);
+    ack(publisher, epoch, QStringLiteral("low"), 1); // Same sequence, different encoder.
+    send(view, {{"type", "screen_frame_ack"}, {"streamId", epoch}, {"screenId", 0}, {"sequence", 1}});
+    QTest::qWait(30);
+    QCOMPARE(sourceSamples.count(), 0);
+    QVERIFY(!client.sendScreenPublicationFrame(frame(receiptLimit + 1), accessUnit));
+    ack(publisher, epoch, QStringLiteral("main"), 1);
+    QTRY_COMPARE_WITH_TIMEOUT(sourceSamples.count(), 1, 1000);
+    QVERIFY(client.sendScreenPublicationFrame(frame(receiptLimit + 1), accessUnit));
+    QVERIFY(!client.sendScreenPublicationFrame(frame(receiptLimit + 1), accessUnit));
+    QVERIFY(client.sendScreenPublicationStatus(epoch, 0, QStringLiteral("low"), QStringLiteral("inactive")));
+    QVERIFY(!client.sendScreenPublicationStatus(uuid(), 0, QStringLiteral("main"), QStringLiteral("streaming")));
+    send(control, {{"type", "screen_publication_keyframe"}, {"publicationId", epoch}, {"screenId", 0}, {"layer", "low"}});
+    QTRY_COMPARE_WITH_TIMEOUT(keyframes.count(), 1, 1000);
+    send(control, {{"type", "screen_publication_keyframe"}, {"publicationId", epoch}, {"screenId", 1}, {"layer", "low"}});
+    QTest::qWait(10);
+    QCOMPARE(keyframes.count(), 1);
+
+    // A receiving socket replacement does not revoke the publication or its pending ACKs.
+    auto* const firstPublisher = publisher.data();
+    view->abort();
+    QTRY_COMPARE_WITH_TIMEOUT(lostView.count(), 1, 1000);
+    QVERIFY(client.isScreenPublicationChannelConnected());
+    QCOMPARE(lostPublication.count(), 0);
+    ack(publisher, epoch, QStringLiteral("main"), 2);
+    QTRY_COMPARE_WITH_TIMEOUT(sourceSamples.count(), 2, 1000);
+    QTRY_VERIFY_WITH_TIMEOUT(client.isScreenChannelConnected(), 2000);
+    QCOMPARE(publisher.data(), firstPublisher);
+
+    // Replacing only the publishing socket fences the previous publication epoch.
+    auto* const survivingView = view.data();
+    const QString oldEpoch = epoch;
+    publisher->abort();
+    QTRY_COMPARE_WITH_TIMEOUT(lostPublication.count(), 1, 1000);
+    QVERIFY(client.isScreenChannelConnected());
+    QCOMPARE(lostView.count(), 1);
+    QTRY_VERIFY_WITH_TIMEOUT(client.isScreenPublicationChannelConnected(), 2000);
+    QCOMPARE(view.data(), survivingView);
+    QVERIFY(!client.sendScreenPublicationFrame(frame(receiptLimit + 2), accessUnit));
+    epoch = uuid();
+    grant();
+    QTRY_COMPARE_WITH_TIMEOUT(grants.count(), 2, 1000);
+    QVERIFY(client.sendScreenPublicationFrame(frame(1), accessUnit));
+    ack(publisher, oldEpoch, QStringLiteral("main"), 1);
+    QTest::qWait(20);
+    QCOMPARE(sourceSamples.count(), 2);
+    ack(publisher, epoch, QStringLiteral("main"), 1);
+    QTRY_COMPARE_WITH_TIMEOUT(sourceSamples.count(), 3, 1000);
+
+    // A 12 KiB recovery IDR exceeds the normal 600 ms burst at 128 kbit/s,
+    // but must not be rejected forever when it is the only queued packet.
+    client.setScreenVideoBudget(128000);
+    QTRY_VERIFY_WITH_TIMEOUT(client.screenSendWindowOpen(), 1000);
+    QSignalSpy admissionLimits(&client, &WebSocketClient::screenFrameAdmissionLimited);
+    QByteArray recoveryIdr(12 * 1024, char(0x88));
+    recoveryIdr.replace(0, accessUnit.size(), accessUnit);
+    const int beforeRecoverySamples = sourceSamples.count();
+    QElapsedTimer recoveryClock;
+    recoveryClock.start();
+    QVERIFY(client.sendScreenPublicationFrame(frame(2), recoveryIdr));
+    QVERIFY(!client.sendScreenPublicationFrame(frame(3), recoveryIdr));
+    QCOMPARE(admissionLimits.count(), 0); // Waiting for credit is not an intrinsic size error.
+    ack(publisher, epoch, QStringLiteral("main"), 2);
+    QTRY_COMPARE_WITH_TIMEOUT(sourceSamples.count(), beforeRecoverySamples + 1, 1000);
+    QVERIFY(!client.screenSendWindowOpen()); // ACK releases credit, not pacing debt.
+    QVERIFY(!client.sendScreenPublicationFrame(frame(3), recoveryIdr));
+    QCOMPARE(admissionLimits.count(), 0);
+
+    auto dependent = frame(3);
+    dependent.insert("keyFrame", false);
+    QByteArray dependentPayload = recoveryIdr;
+    dependentPayload[4] = char(0x41);
+    QVERIFY(!client.sendScreenPublicationFrame(dependent, dependentPayload));
+    QCOMPARE(admissionLimits.count(), 1);
+    QCOMPARE(admissionLimits.at(0).at(0).toJsonObject(), dependent);
+    QCOMPARE(admissionLimits.at(0).at(1).toLongLong(), qint64(dependentPayload.size()
+        + QJsonDocument(dependent).toJson(QJsonDocument::Compact).size() + 6));
+    QCOMPARE(admissionLimits.at(0).at(2).toLongLong(), qint64(9600));
+    QByteArray oversizedIdr(30 * 1024, char(0x88));
+    oversizedIdr.replace(0, accessUnit.size(), accessUnit);
+    QVERIFY(!client.sendScreenPublicationFrame(frame(3), oversizedIdr));
+    QCOMPARE(admissionLimits.count(), 2);
+    QCOMPARE(admissionLimits.at(1).at(2).toLongLong(), qint64(24000));
+    QCOMPARE(sourceSamples.count(), beforeRecoverySamples + 1); // No fabricated congestion sample.
+    QTRY_VERIFY_WITH_TIMEOUT(client.screenSendWindowOpen(), 1500);
+    QVERIFY(recoveryClock.elapsed() >= 700); // Full ~780 ms wire debt survives the early ACK.
+    QVERIFY(client.sendScreenPublicationFrame(frame(3), recoveryIdr));
+    ack(publisher, epoch, QStringLiteral("main"), 3);
+    QTRY_COMPARE_WITH_TIMEOUT(sourceSamples.count(), beforeRecoverySamples + 2, 1000);
+    client.setScreenSharingEnabled(false);
+    QVERIFY(client.isScreenChannelConnected());
+    QVERIFY(!client.isScreenPublicationChannelConnected());
+    QVERIFY(!client.sendScreenPublicationFrame(frame(2), accessUnit));
     client.disconnect();
 }
 

@@ -128,5 +128,39 @@ fs.writeFileSync(envFile, 'MOUFFETTE_SCREEN_FEEDBACK_INTERVAL_MS=1000\nMOUFFETTE
 assert.throws(() => loadServerConfig({ envFile }), /must exceed MOUFFETTE_SCREEN_FEEDBACK_INTERVAL_MS/);
 fs.writeFileSync(envFile, 'MOUFFETTE_SCREEN_QUEUE_TARGET_MS=1000\nMOUFFETTE_SCREEN_ACK_TIMEOUT_MS=1000\n');
 assert.throws(() => loadServerConfig({ envFile }), /must exceed MOUFFETTE_SCREEN_QUEUE_TARGET_MS/);
+fs.writeFileSync(envFile, '');
+assert.equal(loadServerConfig({ envFile }).screenSharedEnabled, true);
+for (const [key, property, value, tooLarge] of [
+    ['MAX_VIEWERS_PER_PUBLISHER', 'screenMaxViewersPerPublisher', 4, 65],
+    ['MAX_PUBLICATIONS', 'screenMaxPublications', 32, 4097],
+    ['KEYFRAME_CACHE_MIB', 'screenKeyframeCacheMiB', 8, 257],
+    ['KEYFRAME_CACHE_TTL_MS', 'screenKeyframeCacheTtlMs', 6000, 15001],
+    ['SERVER_EGRESS_BPS', 'screenServerEgressBps', 5000000, 10000000001],
+    ['VIEWER_MIN_BPS', 'screenViewerMinBps', 128000, 100000001],
+    ['VIEWER_INITIAL_BPS', 'screenViewerInitialBps', 4000000, 100000001],
+    ['VIEWER_MAX_BPS', 'screenViewerMaxBps', 10000000, 100000001],
+    ['VIEWER_RECOVERY_MS', 'screenViewerRecoveryMs', 4000, 30001],
+    ['SNAPSHOT_INTERVAL_MS', 'screenSnapshotIntervalMs', 2000, 10001],
+    ['SNAPSHOT_MAX_TRANSFER_MS', 'screenSnapshotMaxTransferMs', 3000, 10001],
+    ['VIEWER_UPLOAD_PERCENT', 'screenViewerUploadPercent', 50, 91],
+]) {
+    const envKey = `MOUFFETTE_SCREEN_${key}`;
+    fs.writeFileSync(envFile, `${envKey}=${value}\n`);
+    assert.equal(loadServerConfig({ envFile })[property], value);
+    for (const invalid of [0, -1, tooLarge, '1.5', 'no']) {
+        fs.writeFileSync(envFile, `${envKey}=${invalid}\n`);
+        assert.throws(() => loadServerConfig({ envFile }), new RegExp(envKey));
+    }
+}
+fs.writeFileSync(envFile, 'MOUFFETTE_SCREEN_SHARED_ENABLED=false\n');
+assert.equal(loadServerConfig({ envFile }).screenSharedEnabled, false);
+fs.writeFileSync(envFile, 'MOUFFETTE_SCREEN_SHARED_ENABLED=yes\n');
+assert.throws(() => loadServerConfig({ envFile }), /true or false/);
+fs.writeFileSync(envFile, 'MOUFFETTE_SCREEN_VIEWER_MIN_BPS=4000000\n');
+assert.throws(() => loadServerConfig({ envFile }), /MIN_BPS <=/);
+fs.writeFileSync(envFile, 'MOUFFETTE_SCREEN_VIEWER_MAX_BPS=1000000\n');
+assert.throws(() => loadServerConfig({ envFile }), /INITIAL_BPS <=/);
+fs.writeFileSync(envFile, 'MOUFFETTE_SCREEN_SNAPSHOT_INTERVAL_MS=5000\n');
+assert.throws(() => loadServerConfig({ envFile }), /must be smaller/);
 fs.rmSync(temporary, { recursive: true, force: true });
 console.log('server config tests passed');

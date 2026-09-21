@@ -56,6 +56,11 @@ public:
         ProjectDeadlinePollIntervalMs,
         ScreenChangeDebounceMs,
         ScreenAdaptiveEnabled,
+        ScreenLowEnabled,
+        ScreenLowMaxEdge,
+        ScreenLowMaxFps,
+        ScreenLowMaxBitrateKbps,
+        ScreenLowMinTotalBitrateKbps,
         ScreenMaxEdge,
         ScreenMaxFps,
         ScreenIdleIntervalMs,
@@ -232,6 +237,11 @@ public:
     int projectDeadlinePollIntervalMs() const { return m_projectDeadlinePollIntervalMs; }
     int screenChangeDebounceMs() const { return m_screenChangeDebounceMs; }
     bool screenAdaptiveEnabled() const { return m_screenAdaptiveEnabled; }
+    bool screenLowEnabled() const { return m_screenLowEnabled; }
+    int screenLowMaxEdge() const { return m_screenLowMaxEdge; }
+    int screenLowMaxFps() const { return m_screenLowMaxFps; }
+    int screenLowMaxBitrateKbps() const { return m_screenLowMaxBitrateKbps; }
+    int screenLowMinTotalBitrateKbps() const { return m_screenLowMinTotalBitrateKbps; }
     int screenMaxEdge() const { return m_screenMaxEdge; }
     int screenMaxFps() const { return m_screenMaxFps; }
     int screenIdleIntervalMs() const { return m_screenIdleIntervalMs; }
@@ -368,6 +378,11 @@ private:
     int m_projectDeadlinePollIntervalMs = 250;
     int m_screenChangeDebounceMs = 150;
     bool m_screenAdaptiveEnabled = true;
+    bool m_screenLowEnabled = true;
+    int m_screenLowMaxEdge = 960;
+    int m_screenLowMaxFps = 20;
+    int m_screenLowMaxBitrateKbps = 750;
+    int m_screenLowMinTotalBitrateKbps = 600;
     int m_screenMaxEdge = 3840;
     int m_screenMaxFps = 30;
     int m_screenIdleIntervalMs = 1000;

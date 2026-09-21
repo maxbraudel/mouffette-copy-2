@@ -713,6 +713,26 @@ if(BUILD_TESTING)
     target_link_libraries(tst_ScreenAdaptiveController PRIVATE Qt6::Core Qt6::Test)
     add_test(NAME ScreenAdaptiveController COMMAND tst_ScreenAdaptiveController)
 
+    add_executable(tst_ScreenPublicationProfiles tests/qt/tst_ScreenPublicationProfiles.cpp)
+    target_include_directories(tst_ScreenPublicationProfiles PRIVATE src)
+    target_link_libraries(tst_ScreenPublicationProfiles PRIVATE Qt6::Core Qt6::Gui Qt6::Multimedia Qt6::Test)
+    add_test(NAME ScreenPublicationProfiles COMMAND tst_ScreenPublicationProfiles)
+
+    add_executable(tst_ScreenCaptureLayers
+        tests/qt/tst_ScreenCaptureLayers.cpp
+        src/backend/screensharing/ScreenCaptureSource.h
+        src/backend/screensharing/ScreenStreamCodec.cpp)
+    target_include_directories(tst_ScreenCaptureLayers PRIVATE src)
+    target_link_libraries(tst_ScreenCaptureLayers PRIVATE
+        Qt6::Core Qt6::Gui Qt6::Multimedia Qt6::Test PkgConfig::FFMPEG)
+    if(APPLE)
+        target_sources(tst_ScreenCaptureLayers PRIVATE src/backend/screensharing/MacScreenCapture.mm)
+        target_link_libraries(tst_ScreenCaptureLayers PRIVATE "-framework ScreenCaptureKit"
+            "-framework CoreVideo" "-framework CoreMedia" "-framework CoreGraphics" "-framework AppKit")
+    endif()
+    add_test(NAME ScreenCaptureLayers COMMAND tst_ScreenCaptureLayers)
+    set_tests_properties(ScreenCaptureLayers PROPERTIES TIMEOUT 30 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
     add_executable(tst_ScreenStreamCodec
         tests/qt/tst_ScreenStreamCodec.cpp
         src/backend/screensharing/ScreenStreamCodec.cpp)
