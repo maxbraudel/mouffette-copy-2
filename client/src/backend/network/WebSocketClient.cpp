@@ -390,6 +390,10 @@ WebSocketClient::WebSocketClient(const QString& identityFallbackDirectory,
     m_deviceSnapshotRetryTimer.setInterval(100);
     connect(&m_deviceSnapshotRetryTimer, &QTimer::timeout,
             this, &WebSocketClient::publishDeviceSnapshots);
+    m_volumeDiscoveryTimer.setSingleShot(true);
+    m_volumeDiscoveryTimer.setInterval(100);
+    connect(&m_volumeDiscoveryTimer, &QTimer::timeout,
+            this, &WebSocketClient::publishDeviceSnapshots);
     m_heartbeatTimer->setSingleShot(false);
     connect(m_heartbeatTimer, &QTimer::timeout, this, &WebSocketClient::sendHeartbeat);
     m_clockSyncBurstTimer->setInterval(kClockSyncBurstIntervalMs);
@@ -560,6 +564,7 @@ void WebSocketClient::connectToServer(const QString& serverUrl) {
     closeScreenChannel();
     m_authenticated = false;
     m_endpointDraining = false;
+    m_volumeDiscoveryTimer.stop();
     m_heartbeatTimer->stop();
     m_clockSyncBurstTimer->stop();
     m_clockSyncBurstRemaining = 0;
@@ -614,6 +619,7 @@ void WebSocketClient::connectToServer(const QString& serverUrl) {
 void WebSocketClient::disconnect() {
     clearControlRequests();
     m_endpointDraining = true;
+    m_volumeDiscoveryTimer.stop();
     m_pendingServerBootId.clear();
     m_pendingUploadResponses.clear();
     m_endpointDisableRequestId.clear();
@@ -1254,6 +1260,30 @@ void WebSocketClient::registerClient(const QString& machineName, const QString& 
     publishDeviceSnapshots();
 }
 
+void WebSocketClient::updateSystemVolume(int volumePercent)
+{
+    // Native volume notifications already carry the new reading. Reuse the
+    // last complete inventory instead of capturing screen topology on every
+    // volume-key repeat. An invalidated inventory must await full registration.
+    if (!isConnected() || m_endpointDraining
+        || m_registeredEndpointSnapshot.isEmpty()
+        || m_registeredTargetSnapshot.isEmpty()) return;
+    const QJsonValue volume = volumePercent >= 0 && volumePercent <= 100
+        ? QJsonValue(volumePercent) : QJsonValue(QJsonValue::Null);
+    if (m_registeredDeviceContent.value(QStringLiteral("volumePercent")) == volume) return;
+    m_registeredEndpointSnapshot.insert(QStringLiteral("volumePercent"), volume);
+    m_registeredDeviceContent.insert(QStringLiteral("volumePercent"), volume);
+    m_registeredTargetSnapshot.insert(QStringLiteral("volumePercent"), volume);
+    m_registeredTargetSnapshot.insert(QStringLiteral("revision"),
+                                     static_cast<double>(++m_targetSnapshotRevision));
+    m_registeredTargetSnapshot.insert(QStringLiteral("capturedAtEpochMs"),
+                                     static_cast<double>(QDateTime::currentMSecsSinceEpoch()));
+    // Session updates are small and latency-sensitive. Discovery also carries
+    // the profile JPEG, so coalesce volume-key repeats before advertising it.
+    publishRemoteSessionSnapshots();
+    m_volumeDiscoveryTimer.start();
+}
+
 QString WebSocketClient::requestProfilePicture(const QString& endpointId, const QString& profilePictureHash)
 {
     if (!isConnected() || m_endpointDraining || !isUploadSha256(profilePictureHash)
@@ -1288,6 +1318,7 @@ void WebSocketClient::invalidateLocalDeviceSnapshot()
     completeControlRequest(m_registrationRequestId);
     m_registrationRequestId.clear();
     m_deviceSnapshotRetryTimer.stop();
+    m_volumeDiscoveryTimer.stop();
     m_registeredTargetSnapshot = {};
     m_registeredDeviceContent = {};
     m_registeredEndpointSnapshot = {};
@@ -1391,6 +1422,7 @@ void WebSocketClient::completeSessionRequests(const QString& sessionId, bool ter
 void WebSocketClient::publishDeviceSnapshots()
 {
     m_deviceSnapshotRetryTimer.stop();
+    m_volumeDiscoveryTimer.stop();
     if (!isConnected() || m_endpointDraining || m_registeredEndpointSnapshot.isEmpty()) return;
     // Retain just the latest capture. No historical snapshots are queued when
     // transport backpressure is present; the next retry sends current state.
@@ -1408,6 +1440,12 @@ void WebSocketClient::publishDeviceSnapshots()
         m_publishedEndpointGeneration = m_connectionGeneration;
         m_publishedEndpointSnapshot = m_registeredEndpointSnapshot;
     }
+    publishRemoteSessionSnapshots();
+}
+
+void WebSocketClient::publishRemoteSessionSnapshots()
+{
+    if (!isConnected() || m_endpointDraining || m_registeredTargetSnapshot.isEmpty()) return;
     const QJsonObject& content = m_registeredDeviceContent;
     const qint64 now = m_processClock.elapsed();
     for (const auto& binding : remoteSessionCoordinator()->all()) {
@@ -1797,9 +1835,14 @@ bool WebSocketClient::sendRemoteCursor(const QString& remoteSessionId,
     {
         const QJsonObject& content = m_registeredDeviceContent;
         const auto last = m_publishedDeviceSnapshots.value(remoteSessionId);
+        // The session must have current state and discovery must have current
+        // topology. Deferred discovery-only volume changes cannot block mice.
         if (last.generation != generation || last.content != content
             || m_publishedEndpointGeneration != m_connectionGeneration
-            || m_publishedEndpointSnapshot != m_registeredEndpointSnapshot) return false;
+            || m_publishedEndpointSnapshot.value(QStringLiteral("screens"))
+                != m_registeredEndpointSnapshot.value(QStringLiteral("screens"))
+            || m_publishedEndpointSnapshot.value(QStringLiteral("systemUI"))
+                != m_registeredEndpointSnapshot.value(QStringLiteral("systemUI"))) return false;
     }
     if (visible && (screenId < 0 || screenId > 1000000
         || !std::isfinite(screenPosition.x()) || !std::isfinite(screenPosition.y())
@@ -2095,6 +2138,7 @@ bool WebSocketClient::beginEndpointDisable(const QString& requestId)
     closeUploadChannel();
     closeScreenChannel();
     m_endpointDraining = true;
+    m_volumeDiscoveryTimer.stop();
     m_endpointDisableRequestId = correlation;
     return true;
 }
@@ -2425,6 +2469,7 @@ void WebSocketClient::onDisconnected() {
     }
     clearControlRequests();
     m_deviceSnapshotRetryTimer.stop();
+    m_volumeDiscoveryTimer.stop();
     qDebug() << "Control transport disconnected";
     closeUploadChannel();
     closeScreenChannel();
@@ -2754,6 +2799,7 @@ bool WebSocketClient::handleWelcome(const QJsonObject& message) {
     m_publishedEndpointGeneration = 0;
     m_publishedDeviceSnapshots.clear();
     m_deviceSnapshotRetryTimer.stop();
+    m_volumeDiscoveryTimer.stop();
     m_serverBootId = newBootId;
     m_pendingServerBootId.clear();
     m_connectionGeneration = newGeneration;

@@ -359,6 +359,16 @@ elseif(NOT APPLE)
     list(APPEND SOURCES src/backend/managers/system/SystemLifecycleMonitorStub.cpp)
 endif()
 
+# Native system volume monitoring is shared by the application and isolated tests.
+if(APPLE)
+    set(MOUFFETTE_VOLUME_BACKEND src/backend/managers/system/SystemVolumeMonitor_mac.mm)
+elseif(WIN32)
+    set(MOUFFETTE_VOLUME_BACKEND src/backend/managers/system/SystemVolumeMonitor_windows.cpp)
+else()
+    set(MOUFFETTE_VOLUME_BACKEND src/backend/managers/system/SystemVolumeMonitor_stub.cpp)
+endif()
+list(APPEND SOURCES ${MOUFFETTE_VOLUME_BACKEND})
+
 # Header files - Frontend/Backend Architecture
 set(HEADERS
     # ═══════════════════════════════════════════════════════
@@ -657,7 +667,7 @@ if(APPLE)
         MACOSX_BUNDLE_GUI_IDENTIFIER "${MOUFFETTE_BUNDLE_IDENTIFIER}"
     )
     # Link with macOS frameworks used by native integrations
-    target_link_libraries(MouffetteClient PRIVATE "-framework AppKit" "-framework AVFoundation" "-framework CoreMedia" "-framework CoreGraphics" "-framework Security")
+    target_link_libraries(MouffetteClient PRIVATE "-framework CoreAudio" "-framework AppKit" "-framework AVFoundation" "-framework CoreMedia" "-framework CoreGraphics" "-framework Security")
     target_link_libraries(MouffetteClient PRIVATE "-framework ScreenCaptureKit" "-framework CoreVideo")
     set_source_files_properties(src/backend/screensharing/MacScreenCapture.mm
         PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
@@ -752,6 +762,7 @@ if(BUILD_TESTING)
     add_executable(tst_SystemMonitor
         tests/qt/tst_SystemMonitor.cpp
         src/backend/managers/system/SystemMonitor.cpp
+        ${MOUFFETTE_VOLUME_BACKEND}
         src/backend/platform/LocalScreenTopology.cpp
         src/backend/domain/models/ClientInfo.cpp
         src/backend/config/AppConfig.cpp
@@ -760,9 +771,9 @@ if(BUILD_TESTING)
     target_link_libraries(tst_SystemMonitor PRIVATE Qt6::GuiPrivate Qt6::Network Qt6::Test)
     if(APPLE)
         target_sources(tst_SystemMonitor PRIVATE src/backend/platform/macos/MacWindowManager.mm)
-        target_link_libraries(tst_SystemMonitor PRIVATE "-framework AppKit" "-framework CoreGraphics")
+        target_link_libraries(tst_SystemMonitor PRIVATE "-framework CoreAudio" "-framework AppKit" "-framework CoreGraphics")
     elseif(WIN32)
-        target_link_libraries(tst_SystemMonitor PRIVATE ole32)
+        target_link_libraries(tst_SystemMonitor PRIVATE ole32 uuid)
     endif()
     add_test(NAME SystemMonitor COMMAND tst_SystemMonitor)
     set_tests_properties(SystemMonitor PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")

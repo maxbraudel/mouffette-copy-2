@@ -6,11 +6,11 @@
 #include <QPointF>
 #include <QString>
 #include <functional>
+#include "backend/managers/system/SystemVolumeMonitorBackend.h"
 #include "backend/platform/LocalScreenTopology.h"
 #include "backend/domain/models/ClientInfo.h"
 
 class QTimer;
-class QProcess;
 class QScreen;
 class ScreenInfo;
 
@@ -18,36 +18,37 @@ class ScreenInfo;
  * @brief SystemMonitor - Monitors system information (volume, screens, platform)
  * 
  * This class encapsulates platform-specific system monitoring logic including:
- * - Volume monitoring (macOS async polling, Windows Core Audio)
+ * - Native volume notifications (macOS and Windows Core Audio)
  * - Screen configuration detection
  * - Platform and machine name detection
  * 
- * Volume monitoring uses asynchronous polling on macOS to avoid UI blocking.
- * On Windows, it queries the system on-demand using Core Audio APIs.
+ * Native callbacks update a cached value on the owning Qt thread.
+ * A recovery timer handles unavailable or replaced output devices.
  */
 class SystemMonitor : public QObject {
     Q_OBJECT
     
 public:
     using ScreenProvider = std::function<QList<LocalScreenTopology::Screen>(bool*)>;
-    explicit SystemMonitor(QObject* parent = nullptr, ScreenProvider screenProvider = {});
+    using VolumeBackendFactory = std::function<std::unique_ptr<SystemVolumeMonitorBackend>(
+        SystemVolumeMonitorBackend::Publish)>;
+    explicit SystemMonitor(QObject* parent = nullptr, ScreenProvider screenProvider = {},
+                           VolumeBackendFactory volumeBackendFactory = {});
     ~SystemMonitor() override;
     
     /**
      * @brief Get the current system volume percentage
      * @return Volume level 0-100, or -1 if unknown
      * 
-     * On macOS: Returns cached value updated asynchronously
-     * On Windows: Queries system directly (fast operation)
+     * Returns the cached native value without re-querying the audio device.
      */
     int getSystemVolumePercent();
     
     /**
      * @brief Start volume monitoring
      * 
-     * Begins periodic volume polling:
-     * - macOS: Starts async osascript polling (~1.2s interval)
-     * - Windows: Starts polling timer (~1.2s interval)
+     * Reads the initial value and subscribes to native change notifications.
+     * Calling start again after stop restarts monitoring.
      */
     void startVolumeMonitoring();
     
@@ -91,7 +92,7 @@ signals:
     void screenTopologyInvalidated();
     /**
      * @brief Emitted when system volume changes
-     * @param volumePercent New volume level (0-100)
+     * @param volumePercent New volume level (0-100), or -1 when unavailable
      */
     void volumeChanged(int volumePercent);
     
@@ -113,12 +114,9 @@ private:
     int m_cachedSystemVolume = -1;  // Last known value (0-100), -1 = unknown
     QTimer* m_screenChangeTimer = nullptr;
     
-#ifdef Q_OS_MACOS
-    QProcess* m_volProc = nullptr;  // For async osascript calls
-    QTimer* m_volTimer = nullptr;   // Background polling timer
-#else
-    QTimer* m_volTimer = nullptr;   // Polling timer for non-macOS
-#endif
+    VolumeBackendFactory m_volumeBackendFactory;
+    std::unique_ptr<SystemVolumeMonitorBackend> m_volumeBackend;
+    bool m_volumeMonitoring = false;
 };
 
 #endif // SYSTEMMONITOR_H

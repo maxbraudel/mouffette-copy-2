@@ -37,6 +37,7 @@
 #include "backend/domain/project/ProjectManager.h"
 #include "backend/managers/network/ConnectionManager.h"
 #include "backend/managers/network/ClientListBuilder.h"
+#include "backend/managers/system/SystemMonitor.h"
 #include "backend/network/RemoteSessionCoordinator.h"
 #include "backend/network/WebSocketClient.h"
 #include "backend/network/UploadManager.h"
@@ -332,6 +333,9 @@ public:
     QList<QJsonObject> resumeCommands;
     QList<QJsonObject> teardownAcknowledgements;
     QList<QJsonObject> cursorSamples;
+    QList<QJsonObject> endpointSnapshots;
+    QList<QJsonObject> sessionSnapshots;
+    QStringList snapshotPublicationOrder;
     QList<QJsonObject> disableCommands;
     QList<QJsonObject> uploadStarts;
     QList<QJsonObject> uploadAborts;
@@ -388,6 +392,8 @@ private:
                      static_cast<double>(QDateTime::currentMSecsSinceEpoch())}
                 });
             } else if (type == QLatin1String("endpoint_snapshot")) {
+                endpointSnapshots.append(message);
+                snapshotPublicationOrder.append(type);
                 QJsonObject snapshot = message;
                 snapshot.insert(QStringLiteral("installationId"), authentication.value("installationId"));
                 snapshot.insert(QStringLiteral("instanceId"), authentication.value("instanceId"));
@@ -425,6 +431,9 @@ private:
                 disableCommands.append(message);
             } else if (type == QLatin1String("remote_session_cursor")) {
                 cursorSamples.append(message);
+            } else if (type == QLatin1String("remote_session_snapshot")) {
+                sessionSnapshots.append(message);
+                snapshotPublicationOrder.append(type);
             }
         });
 
@@ -486,6 +495,93 @@ class ClientConnectionFlowTest final : public QObject
     Q_OBJECT
 
 private slots:
+    void nativeVolumeChangesPublishImmediatelyWithoutRecapturingTopology()
+    {
+        QTemporaryDir root;
+        QVERIFY(root.isValid());
+        RuntimeProfileContext context;
+        context.ordinal = 2;
+        context.instanceId = QStringLiteral("native-volume-publication");
+        context.profileId = context.instanceId;
+        context.rootPath = root.path();
+        context.persistent = false;
+        RuntimeProfile::configure(context);
+        ApplicationRuntime runtime(context);
+        runtime.getWorkspaceManager()->stopAutomaticTimersForTesting();
+        runtime.getProjectManager()->stopAutomaticTimersForTesting();
+        auto* monitor = runtime.findChild<SystemMonitor*>();
+        QVERIFY(monitor);
+        monitor->stopVolumeMonitoring();
+        auto* websocket = runtime.getWebSocketClient();
+        RemoteSessionTestServer server(websocket->endpointId());
+        QVERIFY(server.listen());
+        auto* connections = runtime.findChild<ConnectionManager*>();
+        QVERIFY(connections);
+        connections->connectToServer(server.url());
+        QTRY_VERIFY_WITH_TIMEOUT(!server.endpointSnapshots.isEmpty(), 2'000);
+
+        const QString sessionId = QStringLiteral("volume-incoming");
+        QVERIFY(server.sendIncomingOpened(sessionId, QStringLiteral("volume-offer"),
+                                          fixtureEndpoint(QLatin1Char('V'))));
+        QTRY_VERIFY_WITH_TIMEOUT(!server.sessionSnapshots.isEmpty(), 1'000);
+        // A recognizable cached topology proves that volume callbacks do not
+        // query native screens again before they reach the wire.
+        const ScreenInfo screen(999, 1600, 900, -1600, 0, true);
+        websocket->registerClient(QStringLiteral("Volume target"), QStringLiteral("test"),
+                                  {screen}, -1);
+        QTRY_COMPARE_WITH_TIMEOUT(server.sessionSnapshots.last().value("snapshot").toObject()
+                                     .value("screens").toArray(), QJsonArray{screen.toJson()}, 500);
+        const auto previousRevision = server.sessionSnapshots.last().value("snapshot").toObject()
+                                          .value("revision").toInteger();
+        const auto previousSequence = server.sessionSnapshots.last().value("snapshotSequence").toInteger();
+        server.endpointSnapshots.clear();
+        server.sessionSnapshots.clear();
+        server.snapshotPublicationOrder.clear();
+
+        monitor->volumeChanged(67);
+        monitor->volumeChanged(68);
+        monitor->volumeChanged(69);
+        monitor->volumeChanged(70);
+        // Cursor publication must not wait for the deferred discovery update.
+        QVERIFY(websocket->sendRemoteCursor(sessionId, 1, 100, true, 999, {10, 10}));
+        QTRY_COMPARE_WITH_TIMEOUT(server.sessionSnapshots.size(), 4, 500);
+        QTRY_COMPARE_WITH_TIMEOUT(server.endpointSnapshots.size(), 1, 500);
+        QCOMPARE(server.snapshotPublicationOrder,
+                 QStringList({"remote_session_snapshot", "remote_session_snapshot",
+                              "remote_session_snapshot", "remote_session_snapshot", "endpoint_snapshot"}));
+        const auto published = server.sessionSnapshots.first();
+        const auto snapshot = published.value("snapshot").toObject();
+        QCOMPARE(published.value("remoteSessionId").toString(), sessionId);
+        QCOMPARE(snapshot.value("volumePercent").toInt(), 67);
+        QCOMPARE(snapshot.value("screens").toArray(), QJsonArray{screen.toJson()});
+        QVERIFY(snapshot.value("revision").toInteger() > previousRevision);
+        QVERIFY(published.value("snapshotSequence").toInteger() > previousSequence);
+        QCOMPARE(server.sessionSnapshots.last().value("snapshot").toObject()
+                     .value("volumePercent").toInt(), 70);
+        QCOMPARE(server.endpointSnapshots.last().value("volumePercent").toInt(), 70);
+
+        // Repeated native callbacks do not duplicate state; a missing device
+        // is transmitted explicitly so the receiver cannot retain old volume.
+        monitor->volumeChanged(70);
+        monitor->volumeChanged(-1);
+        QTRY_COMPARE_WITH_TIMEOUT(server.sessionSnapshots.size(), 5, 500);
+        QTRY_COMPARE_WITH_TIMEOUT(server.endpointSnapshots.size(), 2, 500);
+        QVERIFY(server.sessionSnapshots.last().value("snapshot").toObject()
+                    .value("volumePercent").isNull());
+
+        // Cleanup invalidation is a publication fence until a new complete
+        // registration is allowed; audio callbacks must not bypass it.
+        monitor->volumeChanged(71);
+        websocket->invalidateLocalDeviceSnapshot();
+        monitor->volumeChanged(42);
+        QTRY_COMPARE_WITH_TIMEOUT(server.sessionSnapshots.size(), 6, 500);
+        QTest::qWait(150);
+        QCOMPARE(server.sessionSnapshots.size(), 6);
+        QCOMPARE(server.endpointSnapshots.size(), 2);
+        connections->disconnect();
+        runtime.handleApplicationAboutToQuit();
+    }
+
     void serverRecoveryBadgeSurvivesRetriesAndExpires_data()
     {
         QTest::addColumn<bool>("abortSocket");
@@ -3272,6 +3368,7 @@ private slots:
                              &WebSocketClient::remoteSessionClosed);
         connections->connectToServer(server.url());
         QTRY_COMPARE_WITH_TIMEOUT(connectedSpy.count(), 1, 2'000);
+        QTRY_VERIFY_WITH_TIMEOUT(connections->isReady(), 2'000);
 
         const QString targetEndpointId = fixtureEndpoint(QLatin1Char('R'));
         const QString firstSessionId = QStringLiteral("recovered-peer-session-1");
@@ -3627,6 +3724,7 @@ private slots:
                             &WebSocketClient::remoteSessionError);
         connections->connectToServer(server.url());
         QTRY_COMPARE_WITH_TIMEOUT(connectedSpy.count(), 1, 2'000);
+        QTRY_VERIFY_WITH_TIMEOUT(connections->isReady(), 2'000);
 
         const QString targetEndpointId = fixtureEndpoint(QLatin1Char('U'));
         const QString firstSessionId = QStringLiteral("automatic-convergence-session-1");
@@ -3733,6 +3831,7 @@ private slots:
                              &WebSocketClient::remoteSessionClosed);
         connections->connectToServer(server.url());
         QTRY_COMPARE_WITH_TIMEOUT(connectedSpy.count(), 1, 2'000);
+        QTRY_VERIFY_WITH_TIMEOUT(connections->isReady(), 2'000);
 
         const QString targetEndpointId = fixtureEndpoint(QLatin1Char('V'));
         const QString firstSessionId = QStringLiteral("invalid-auto-session-1");
@@ -3867,6 +3966,7 @@ private slots:
                                 &WebSocketClient::connected);
         connections->connectToServer(server.url());
         QTRY_COMPARE_WITH_TIMEOUT(connectedSpy.count(), 1, 2'000);
+        QTRY_VERIFY_WITH_TIMEOUT(connections->isReady(), 2'000);
 
         const QString targetEndpointId = fixtureEndpoint(QLatin1Char('F'));
         ClientInfo client = onlineClient(
@@ -3972,6 +4072,7 @@ private slots:
                                   &WebSocketClient::remoteSessionRecoveryExpired);
         connections->connectToServer(server.url());
         QTRY_COMPARE_WITH_TIMEOUT(connectedSpy.count(), 1, 2'000);
+        QTRY_VERIFY_WITH_TIMEOUT(connections->isReady(), 2'000);
         disconnectedSpy.clear();
 
         const QString targetEndpointId = fixtureEndpoint(QLatin1Char('G'));
@@ -4917,6 +5018,21 @@ private slots:
         QVERIFY(controller.remoteVolumeVisible());
         QCOMPARE(controller.remoteVolumeText(), QStringLiteral("35%"));
         controller.setScreenContentVisible(true);
+
+        // A volume-only authenticated snapshot refreshes the visible label
+        // while keeping the existing workspace and screen presentation.
+        QJsonObject changedVolume = openedEnvelope(firstSessionId, {}, firstScreen, 68);
+        changedVolume.insert(QStringLiteral("type"), QStringLiteral("remote_session_snapshot"));
+        changedVolume.insert(QStringLiteral("snapshotSequence"), 2);
+        auto changedSnapshot = changedVolume.value(QStringLiteral("snapshot")).toObject();
+        changedSnapshot.insert(QStringLiteral("revision"), 2);
+        changedVolume.insert(QStringLiteral("snapshot"), changedSnapshot);
+        QSignalSpy presentationChanges(&controller, &ApplicationController::presentationChanged);
+        sendServerMessage(changedVolume);
+        QTRY_COMPARE_WITH_TIMEOUT(controller.remoteVolumeText(), QStringLiteral("68%"), 500);
+        QVERIFY(!presentationChanges.isEmpty());
+        QCOMPARE(controller.activeWorkspace(), firstRaw);
+        QVERIFY(firstRaw->hasScreens());
 
         controller.requestDeleteProject();
         QVERIFY(controller.dialogDestructive());

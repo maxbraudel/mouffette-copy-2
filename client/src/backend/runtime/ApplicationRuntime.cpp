@@ -543,14 +543,15 @@ ApplicationRuntime::ApplicationRuntime(const RuntimeProfileContext& runtimeProfi
     }
     
     if (m_systemMonitor) {
-        m_systemMonitor->startVolumeMonitoring();
-        // Volume is part of every protocol v4 device snapshot; it is not tied
-        // to any remote controller's Project or session.
-        connect(m_systemMonitor, &SystemMonitor::volumeChanged, this, [this](int) {
-            if (m_webSocketClient && m_webSocketClient->isConnected()) {
-                syncRegistration();
+        // Publish native notifications immediately on the same control socket
+        // as the remote cursor, without waiting for the inventory refresh.
+        connect(m_systemMonitor, &SystemMonitor::volumeChanged, this, [this](int volume) {
+            if (m_webSocketClient && m_webSocketClient->isConnected()
+                && (!m_uploadManager || m_uploadManager->receiverReadyForAdvertisement())) {
+                m_webSocketClient->updateSystemVolume(volume);
             }
         });
+        m_systemMonitor->startVolumeMonitoring();
         connect(m_systemMonitor, &SystemMonitor::screenConfigurationChanged,
                 this, [this](const QList<ScreenInfo>&) {
             if (m_webSocketClient && m_webSocketClient->isConnected()) {

@@ -75,6 +75,7 @@ public:
     void registerClient(const QString& machineName, const QString& platform,
                         const QList<ScreenInfo>& screens, int volumePercent,
                         const QString& username = {}, const QByteArray& profilePictureJpeg = {});
+    void updateSystemVolume(int volumePercent);
     QString requestProfilePicture(const QString& endpointId, const QString& profilePictureHash);
     void invalidateLocalDeviceSnapshot();
 
@@ -340,6 +341,7 @@ private:
     QJsonObject addProtocolEnvelope(const QJsonObject& message) const;
     bool sendRawControlMessage(const QJsonObject& message);
     void publishDeviceSnapshots();
+    void publishRemoteSessionSnapshots();
     bool sendTrackedControl(const QJsonObject& message);
     void scheduleControlRetry(const QString& requestId);
     void completeControlRequest(const QString& requestId);
@@ -425,6 +427,7 @@ private:
     };
     QHash<QString, PublishedDeviceSnapshot> m_publishedDeviceSnapshots;
     QTimer m_deviceSnapshotRetryTimer;
+    QTimer m_volumeDiscoveryTimer;
     quint64 m_targetSnapshotRevision = 0;
     QHash<QString, quint64> m_targetSnapshotSequenceBySession;
     struct CursorSequence {
