@@ -4891,6 +4891,8 @@ private slots:
 
         controller.openClient(targetEndpointId);
         QTRY_COMPARE_WITH_TIMEOUT(openCommands.size(), 1, 1'000);
+        QVERIFY(controller.remoteVolumeVisible());
+        QCOMPARE(controller.remoteVolumeText(), QStringLiteral("—"));
         const ScreenInfo firstScreen(21, 1920, 1080, 0, 0, true);
         sendServerMessage(openedEnvelope(
             firstSessionId,
@@ -4909,6 +4911,12 @@ private slots:
         QVERIFY(firstRaw->hasScreens());
         QVERIFY(firstRaw->canvasNavigation());
         QVERIFY(firstCanvasController);
+        QVERIFY(controller.remoteVolumeVisible());
+        QCOMPARE(controller.remoteVolumeText(), QStringLiteral("35%"));
+        controller.setScreenContentVisible(false);
+        QVERIFY(controller.remoteVolumeVisible());
+        QCOMPARE(controller.remoteVolumeText(), QStringLiteral("35%"));
+        controller.setScreenContentVisible(true);
 
         controller.requestDeleteProject();
         QVERIFY(controller.dialogDestructive());
@@ -4937,6 +4945,8 @@ private slots:
                  ApplicationController::ApplicationPage::Canvas);
         QCOMPARE(controller.activeWorkspace(), nullptr);
         QCOMPARE(openCommands.size(), 1);
+        QVERIFY(controller.remoteVolumeVisible());
+        QCOMPARE(controller.remoteVolumeText(), QStringLiteral("—"));
 
         sendServerMessage(QJsonObject{
             {QStringLiteral("type"), QStringLiteral("remote_session_closed")},

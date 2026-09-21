@@ -744,6 +744,14 @@ void MediaOverlayTest::screenAvailabilitySharesStatusCardWithVolume()
             ? QStringLiteral("screen.svg") : QStringLiteral("screen-off.svg"));
         QTRY_COMPARE(icon->property("status").toInt(), 1); // Image.Ready.
         QCOMPARE(card->implicitWidth(), stableWidth);
+        QVERIFY(screen->isVisible());
+        QVERIFY(volume->isVisible());
+        for (const auto* volumeText : {"—", "0%", "75%", "100%"}) {
+            card->setProperty("auxiliaryText", QString::fromUtf8(volumeText));
+            QVERIFY(volume->isVisible());
+            QCOMPARE(card->implicitWidth(), stableWidth);
+        }
+        card->setProperty("auxiliaryText", QStringLiteral("75%"));
         QTRY_VERIFY(screen->x() + screen->width() <= volume->x());
         QVERIFY(icon->x() + icon->width() <= label->x());
         QVERIFY(label->property("implicitWidth").toReal() <= label->width());

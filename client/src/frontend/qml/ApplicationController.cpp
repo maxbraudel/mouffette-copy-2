@@ -207,14 +207,16 @@ ApplicationController::ConnectionState ApplicationController::remoteConnectionSt
 QString ApplicationController::remoteVolumeText() const
 {
     if (!m_runtime || m_runtime->remoteVolumePercent() < 0) {
-        return {};
+        return QStringLiteral("—");
     }
     return QStringLiteral("%1%").arg(m_runtime->remoteVolumePercent());
 }
 
 bool ApplicationController::remoteVolumeVisible() const
 {
-    return m_runtime && m_runtime->remoteVolumePercent() >= 0;
+    // Keep the volume beside the screen status while its value is pending or
+    // unavailable. A missing reading must not remove the indicator.
+    return !remoteEndpointId().isEmpty();
 }
 
 bool ApplicationController::remoteScreenAvailable() const
