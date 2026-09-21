@@ -222,7 +222,11 @@ void PlaybackAudio::refill() {
         if (!voice->playing.load() && !d->seeking) d->timer.stop();
         return;
     }
-    if (voice->playing.load()) d->nextUs = std::max(d->nextUs, nowUs() + voice->clockOffsetUs.load());
+    // prepare() runs before play() installs the new clock offset. A seek must
+    // start at its requested position, even when the previous transport is
+    // still playing; catching up to that old clock would skip a backward seek.
+    if (voice->playing.load() && !d->seeking)
+        d->nextUs = std::max(d->nextUs, nowUs() + voice->clockOffsetUs.load());
     qint64 start = d->nextUs;
     d->nextUs += qint64(empty.size()) * 50000;
     if (start >= 0 && start + qint64(empty.size()) * 50000 <= 200000

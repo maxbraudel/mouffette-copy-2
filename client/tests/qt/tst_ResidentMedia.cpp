@@ -1332,6 +1332,43 @@ private slots:
         }
     }
 
+    void playingAudioSeekPreservesRequestedTarget_data() {
+        QTest::addColumn<qint64>("targetUs");
+        QTest::newRow("backward") << qint64(300000);
+        QTest::newRow("forward") << qint64(1800000);
+    }
+
+    void playingAudioSeekPreservesRequestedTarget() {
+        QFETCH(qint64, targetUs);
+        QTemporaryDir directory;
+        const QString path = directory.filePath("playing-audio-seek.mp4");
+        QVERIFY(writeVideo(path, false, false, 0, 120, 0, 64));
+        auto asset = MediaDecoder::decode(path);
+        QVERIFY(asset);
+        QAudioOutput output;
+        output.setMuted(true);
+        PlaybackAudio audio;
+        audio.setOutput(&output);
+        audio.setAsset(asset);
+        if (!PlaybackAudio::deviceCount()) QSKIP("No audio callback device is available");
+        QSignalSpy failures(&audio, &PlaybackAudio::failed);
+        audio.prepare(1000000);
+        QTRY_VERIFY_WITH_TIMEOUT(audio.preparedAt(1000000), 3000);
+        audio.play(1000000);
+        // Suspend GUI refills while the independent callback drains the PCM.
+        // Empty slots make the next play() prepare immediately, before its new
+        // clock offset is installed; this reproduced lost backward seeks.
+        QTest::qSleep(350);
+        QVERIFY(audio.presentedSincePlay());
+        QVERIFY(!audio.preparedAt(1150000));
+        audio.play(targetUs);
+        audio.pause(); // Keep the newly prepared target available for inspection.
+        QTRY_VERIFY_WITH_TIMEOUT(audio.preparedAt(targetUs), 1000);
+        audio.play(targetUs);
+        QTRY_VERIFY_WITH_TIMEOUT(audio.presentedSincePlay(), 1000);
+        QVERIFY(failures.isEmpty());
+    }
+
     void audioSeekAndClearReleaseTheResidentAsset() {
         QTemporaryDir directory;
         const QString path = directory.filePath("audio-seek.mp4");

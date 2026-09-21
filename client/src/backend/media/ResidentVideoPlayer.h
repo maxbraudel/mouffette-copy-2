@@ -108,6 +108,8 @@ private:
         SharedMediaFramePtr frame;
         QHash<int, SharedMediaFramePtr> lookahead;
         bool pending = false;
+        int pendingIndex = -1;
+        quint64 pendingDirectionEpoch = 0;
         bool starting = false;
     } m_cursor;
     std::shared_ptr<const ResidentMediaAsset> m_asset;

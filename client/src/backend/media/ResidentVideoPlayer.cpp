@@ -78,6 +78,7 @@ void ResidentVideoPlayer::releasePlayer() {
     DecodeScheduler::instance().cancel(&m_entryOwner, m_entryGeneration++);
     m_entryFrame.reset(); m_entryPositionMs = -1;
     m_cursor.pending = m_cursor.starting = false;
+    m_cursor.pendingIndex = -1;
     m_cursor.frame.reset(); m_cursor.lookahead.clear();
     m_positionTimer.stop(); m_scrubTimer.stop(); m_preparationTimer.stop(); m_audio.setAsset({});
     if (m_videoSink) m_videoSink->setVideoFrame({});
@@ -208,11 +209,14 @@ void ResidentVideoPlayer::requestFrame() {
     const quint64 directionEpoch = m_scrubDirectionEpoch;
     if (m_scrubbing) m_lastScrubDispatchMs = requestedAt;
     m_cursor.pending = true;
+    m_cursor.pendingIndex = requestedIndex;
+    m_cursor.pendingDirectionEpoch = directionEpoch;
     DecodeScheduler::instance().request(this, generation, m_asset, m_positionMs * 1000,
         m_scrubbing ? DecodeScheduler::Scrub : isPlaying() || m_cursor.starting ? DecodeScheduler::Playback : DecodeScheduler::Prepare, 0,
         [this, generation, requestedIndex, requestedPosition, requestedAt, directionEpoch](SharedMediaFramePtr frame, const QString& error) {
             if (generation != m_cursor.generation || !m_asset) return;
             m_cursor.pending = false;
+            m_cursor.pendingIndex = -1;
             // Usually only the newest target is presented. A cold long-GOP
             // decode may complete behind a moving pointer: allow bounded,
             // directionally useful progress instead of freezing until release.
@@ -231,6 +235,13 @@ void ResidentVideoPlayer::requestFrame() {
             QPointer<ResidentVideoPlayer> self(this);
             presentPoster();
             if (!self) return;
+            // A matching scrub request can outlive pointer release. A native
+            // result is already exact; a proxy must first request that exact
+            // frame, before lookahead starts another decode of the same GOP.
+            if (!m_scrubbing && m_cursor.frame->editingPreview) {
+                requestFrame();
+                return;
+            }
             if (!m_scrubbing) prefetch();
             if (!self) return;
             if (preparedAt(m_positionMs)) m_preparationTimer.stop();
@@ -358,7 +369,7 @@ void ResidentVideoPlayer::setPosition(qint64 value) {
     if (changed) {
         if (!m_scrubbing) {
             DecodeScheduler::instance().cancel(this, m_cursor.generation++);
-            m_cursor.pending = false; m_cursor.lookahead.clear();
+            m_cursor.pending = false; m_cursor.pendingIndex = -1; m_cursor.lookahead.clear();
         }
         if (m_asset && ensurePlayer()) {
             if (m_scrubbing) {
@@ -396,20 +407,30 @@ void ResidentVideoPlayer::setScrubbing(bool enabled) {
         // scheduled; completed frames remain valid in the shared cache.
         DecodeScheduler::instance().cancel(this, m_cursor.generation++);
         m_cursor.pending = false;
+        m_cursor.pendingIndex = -1;
         for (auto it = m_cursor.lookahead.begin(); it != m_cursor.lookahead.end();) {
             if (!it.value()) it = m_cursor.lookahead.erase(it); else ++it;
         }
     }
     if (!enabled) {
         m_scrubTimer.stop();
-        DecodeScheduler::instance().cancel(this, m_cursor.generation++);
+        // Do not throw away a decode that is already producing the release
+        // frame. Long-GOP native requests otherwise start from their keyframe
+        // again. Results from another target or drag direction remain obsolete.
+        const bool keepPending = m_cursor.pending && m_asset
+            && m_cursor.pendingIndex == IndexedMediaDecoder::frameAt(*m_asset, m_positionMs * 1000)
+            && m_cursor.pendingDirectionEpoch == m_scrubDirectionEpoch;
+        if (!keepPending) {
+            DecodeScheduler::instance().cancel(this, m_cursor.generation++);
+            m_cursor.pending = false;
+            m_cursor.pendingIndex = -1;
+        }
         // Empty entries represent in-flight requests from the old generation.
         // Cancellation removes their callbacks: retaining them would prevent
         // prefetch() from ever requesting those required frames again.
         for (auto it = m_cursor.lookahead.begin(); it != m_cursor.lookahead.end();) {
             if (!it.value()) it = m_cursor.lookahead.erase(it); else ++it;
         }
-        m_cursor.pending = false;
         QPointer<ResidentVideoPlayer> self(this);
         m_audio.prepare(m_positionMs * 1000);
         if (self) requestFrame();
