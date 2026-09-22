@@ -1276,7 +1276,7 @@ bool QuickCanvasHost::remoteFeedbackAudioSuppressed() const
 
 void QuickCanvasHost::refreshRemoteFeedback()
 {
-    m_controller->setRemoteScreenOverlayActive(
+    m_controller->setRemoteFeedbackMediaHidden(
         m_sceneContext && m_timelineRemote && m_timelinePlaying && m_remoteScreenFeedbackEnabled);
     // Re-evaluate only the output gain, without seeking or restarting playback.
     for (auto* media : m_document->media()) {

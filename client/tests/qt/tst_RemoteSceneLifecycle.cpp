@@ -68,16 +68,16 @@ private slots:
         media->setVolume(0.4);
         const auto saved = host->serializeProjectState();
         host->setRemoteFeedbackEnabled(screen, audio);
-        QVERIFY(!host->controller()->remoteScreenOverlayActive());
+        QVERIFY(!host->controller()->remoteFeedbackMediaHidden());
         QVERIFY(!host->remoteFeedbackAudioSuppressed());
         // No received frame, audio stream or network connection is required:
         // the buttons alone determine suppression during the presentation.
         host->beginScenePresentation(true);
-        QCOMPARE(host->controller()->remoteScreenOverlayActive(), screen);
+        QCOMPARE(host->controller()->remoteFeedbackMediaHidden(), screen);
         QCOMPARE(media->player()->audioOutput()->isMuted(), audio);
         QCOMPARE(media->player()->audioOutput()->volume(), 0.4f);
         host->setRemoteFeedbackEnabled(!screen, !audio);
-        QCOMPARE(host->controller()->remoteScreenOverlayActive(), !screen);
+        QCOMPARE(host->controller()->remoteFeedbackMediaHidden(), !screen);
         QCOMPARE(media->player()->audioOutput()->isMuted(), !audio);
         host->applyTimeline(100, true);
         QCOMPARE(media->player()->audioOutput()->isMuted(), !audio);
@@ -87,12 +87,12 @@ private slots:
         QVERIFY(media->player()->audioOutput()->isMuted());
         media->setMuted(false);
         host->stopScenePresentation();
-        QVERIFY(!host->controller()->remoteScreenOverlayActive());
+        QVERIFY(!host->controller()->remoteFeedbackMediaHidden());
         QVERIFY(!host->remoteFeedbackAudioSuppressed());
         QCOMPARE(host->serializeProjectState(), saved);
         host->setRemoteFeedbackEnabled(true, true);
         host->beginScenePresentation(false);
-        QVERIFY(!host->controller()->remoteScreenOverlayActive());
+        QVERIFY(!host->controller()->remoteFeedbackMediaHidden());
         QVERIFY(!media->player()->audioOutput()->isMuted());
         host->stopScenePresentation();
     }
@@ -112,7 +112,7 @@ private slots:
         host->document()->addText({}, "Remote");
         host->setRemoteFeedbackEnabled(true, true);
         host->beginScenePresentation(true);
-        QVERIFY(host->controller()->remoteScreenOverlayActive());
+        QVERIFY(host->controller()->remoteFeedbackMediaHidden());
         QVERIFY(host->remoteFeedbackAudioSuppressed());
         if (reason == "failure") host->failScene("test", false);
         else if (reason == "disconnect") host->handleRemoteConnectionLost();
@@ -120,12 +120,12 @@ private slots:
             host->m_timelineAnchorPositionMs = host->timelineStopMs();
             host->advanceTimeline();
         } else host->stopScenePresentation();
-        QVERIFY(!host->controller()->remoteScreenOverlayActive());
+        QVERIFY(!host->controller()->remoteFeedbackMediaHidden());
         QVERIFY(!host->remoteFeedbackAudioSuppressed());
         // Cleanup is idempotent; the preferences remain for the next run.
         host->stopScenePresentation();
         host->beginScenePresentation(true);
-        QVERIFY(host->controller()->remoteScreenOverlayActive());
+        QVERIFY(host->controller()->remoteFeedbackMediaHidden());
         host->stopScenePresentation();
     }
 
