@@ -27,7 +27,12 @@ void SettingsManager::loadSettings() {
     m_screenSharingEnabled = settings->value(QStringLiteral("screenSharingEnabled"), false)
                                  .toString() == QLatin1String("true");
     m_screenContentVisible = settings->value(QStringLiteral("screenContentVisible"), true).toBool();
-    m_remoteAudioMuted = settings->value(QStringLiteral("remoteAudioMuted"), false).toBool();
+    // The former consent checkbox explicitly covered both screen and audio.
+    // Preserve that choice only when this profile predates separate consent.
+    m_audioSharingEnabled = settings->value(QStringLiteral("audioSharingEnabled"), m_screenSharingEnabled)
+                                .toString() == QLatin1String("true");
+    m_systemAudioEnabled = settings->value(QStringLiteral("systemAudioEnabled"),
+        !settings->value(QStringLiteral("remoteAudioMuted"), false).toBool()).toBool();
     if (!ProfileImage::normalizeUsername(settings->value(QStringLiteral("username")).toString(), &m_username))
         m_username.clear();
     const QByteArray encoded = settings->value(QStringLiteral("profilePictureJpeg")).toByteArray();
@@ -49,12 +54,20 @@ bool SettingsManager::commitSettings(const QString& serverUrl, bool autoUpload, 
                                      const QString& username, const QByteArray& jpeg, QString* error)
 {
     return commitSettings(serverUrl, autoUpload, alwaysOnTop, username, jpeg,
-                          m_screenSharingEnabled, error);
+                          m_screenSharingEnabled, m_audioSharingEnabled, error);
 }
 
 bool SettingsManager::commitSettings(const QString& serverUrl, bool autoUpload, bool alwaysOnTop,
                                      const QString& username, const QByteArray& jpeg,
                                      bool screenSharingEnabled, QString* error)
+{
+    return commitSettings(serverUrl, autoUpload, alwaysOnTop, username, jpeg,
+                          screenSharingEnabled, m_audioSharingEnabled, error);
+}
+
+bool SettingsManager::commitSettings(const QString& serverUrl, bool autoUpload, bool alwaysOnTop,
+                                     const QString& username, const QByteArray& jpeg,
+                                     bool screenSharingEnabled, bool audioSharingEnabled, QString* error)
 {
     QUrl normalizedUrl;
     QString normalizedUsername;
@@ -76,6 +89,9 @@ bool SettingsManager::commitSettings(const QString& serverUrl, bool autoUpload, 
     values.insert(QStringLiteral("autoUploadImportedMedia"), autoUpload);
     values.insert(QStringLiteral("appAlwaysOnTop"), alwaysOnTop);
     values.insert(QStringLiteral("screenSharingEnabled"), screenSharingEnabled);
+    values.insert(QStringLiteral("audioSharingEnabled"), audioSharingEnabled);
+    values.insert(QStringLiteral("systemAudioEnabled"), m_systemAudioEnabled);
+    values.remove(QStringLiteral("remoteAudioMuted"));
     values.insert(QStringLiteral("username"), normalizedUsername);
     values.insert(QStringLiteral("profilePictureJpeg"), QString::fromLatin1(jpeg.toBase64()));
     const auto committed = RuntimeStorage::writeSettings(RuntimeProfile::profileRoot(),
@@ -86,14 +102,17 @@ bool SettingsManager::commitSettings(const QString& serverUrl, bool autoUpload, 
     }
     const bool urlChanged = canonical != m_serverUrlConfig;
     const bool sharingChanged = screenSharingEnabled != m_screenSharingEnabled;
+    const bool audioChanged = audioSharingEnabled != m_audioSharingEnabled;
     m_serverUrlConfig = canonical;
     m_autoUploadImportedMedia = autoUpload;
     m_appAlwaysOnTop = alwaysOnTop;
     m_screenSharingEnabled = screenSharingEnabled;
+    m_audioSharingEnabled = audioSharingEnabled;
     m_username = normalizedUsername;
     m_profilePictureJpeg = jpeg;
     if (urlChanged) emit serverUrlChanged(canonical);
     if (sharingChanged) emit screenSharingEnabledChanged(screenSharingEnabled);
+    if (audioChanged) emit audioSharingEnabledChanged(audioSharingEnabled);
     emit settingsChanged();
     return true;
 }
@@ -146,6 +165,8 @@ bool SettingsManager::setScreenContentVisible(bool visible, QString* error)
         values.insert(QStringLiteral("autoUploadImportedMedia"), m_autoUploadImportedMedia);
         values.insert(QStringLiteral("appAlwaysOnTop"), m_appAlwaysOnTop);
         values.insert(QStringLiteral("screenSharingEnabled"), m_screenSharingEnabled);
+        values.insert(QStringLiteral("audioSharingEnabled"), m_audioSharingEnabled);
+        values.insert(QStringLiteral("systemAudioEnabled"), m_systemAudioEnabled);
         values.insert(QStringLiteral("username"), m_username);
         values.insert(QStringLiteral("profilePictureJpeg"), QString::fromLatin1(m_profilePictureJpeg.toBase64()));
     }
@@ -162,9 +183,9 @@ bool SettingsManager::setScreenContentVisible(bool visible, QString* error)
     return true;
 }
 
-bool SettingsManager::setRemoteAudioMuted(bool muted, QString* error)
+bool SettingsManager::setSystemAudioEnabled(bool enabled, QString* error)
 {
-    if (m_remoteAudioMuted == muted) return true;
+    if (m_systemAudioEnabled == enabled) return true;
     const auto previous = RuntimeStorage::readSettings(RuntimeProfile::profileRoot(),
                                                        RuntimeProfile::settingsFilePath());
     if (previous.inspection.state != RuntimeStorage::State::Current
@@ -178,19 +199,22 @@ bool SettingsManager::setRemoteAudioMuted(bool muted, QString* error)
         values.insert(QStringLiteral("autoUploadImportedMedia"), m_autoUploadImportedMedia);
         values.insert(QStringLiteral("appAlwaysOnTop"), m_appAlwaysOnTop);
         values.insert(QStringLiteral("screenSharingEnabled"), m_screenSharingEnabled);
+        values.insert(QStringLiteral("audioSharingEnabled"), m_audioSharingEnabled);
+        values.insert(QStringLiteral("systemAudioEnabled"), m_systemAudioEnabled);
         values.insert(QStringLiteral("screenContentVisible"), m_screenContentVisible);
         values.insert(QStringLiteral("username"), m_username);
         values.insert(QStringLiteral("profilePictureJpeg"), QString::fromLatin1(m_profilePictureJpeg.toBase64()));
     }
-    values.insert(QStringLiteral("remoteAudioMuted"), muted);
+    values.insert(QStringLiteral("systemAudioEnabled"), enabled);
+    values.remove(QStringLiteral("remoteAudioMuted"));
     const auto committed = RuntimeStorage::writeSettings(RuntimeProfile::profileRoot(),
         RuntimeProfile::settingsFilePath(), values, StorageVersions::Settings);
     if (!committed.succeeded()) {
         if (error) *error = committed.reason;
         return false;
     }
-    m_remoteAudioMuted = muted;
-    emit remoteAudioMutedChanged(muted);
+    m_systemAudioEnabled = enabled;
+    emit systemAudioEnabledChanged(enabled);
     emit settingsChanged();
     return true;
 }

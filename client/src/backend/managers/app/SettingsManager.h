@@ -23,7 +23,8 @@ public:
     bool getAppAlwaysOnTop() const { return m_appAlwaysOnTop; }
     bool getScreenSharingEnabled() const { return m_screenSharingEnabled; }
     bool getScreenContentVisible() const { return m_screenContentVisible; }
-    bool getRemoteAudioMuted() const { return m_remoteAudioMuted; }
+    bool getAudioSharingEnabled() const { return m_audioSharingEnabled; }
+    bool getSystemAudioEnabled() const { return m_systemAudioEnabled; }
     QString username() const { return m_username; }
     QByteArray profilePictureJpeg() const { return m_profilePictureJpeg; }
     bool commitSettings(const QString& serverUrl, bool autoUpload, bool alwaysOnTop,
@@ -32,20 +33,24 @@ public:
     bool commitSettings(const QString& serverUrl, bool autoUpload, bool alwaysOnTop,
                         const QString& username, const QByteArray& profilePictureJpeg,
                         bool screenSharingEnabled, QString* error = nullptr);
+    bool commitSettings(const QString& serverUrl, bool autoUpload, bool alwaysOnTop,
+                        const QString& username, const QByteArray& profilePictureJpeg,
+                        bool screenSharingEnabled, bool audioSharingEnabled, QString* error = nullptr);
     
     // Setters
     void setServerUrl(const QString& url);
     void setAutoUploadImportedMedia(bool enabled);
     void setAppAlwaysOnTop(bool enabled);
     bool setScreenContentVisible(bool visible, QString* error = nullptr);
-    bool setRemoteAudioMuted(bool muted, QString* error = nullptr);
+    bool setSystemAudioEnabled(bool enabled, QString* error = nullptr);
 
 signals:
     void settingsChanged();
     void serverUrlChanged(const QString& newUrl);
     void screenSharingEnabledChanged(bool enabled);
     void screenContentVisibleChanged(bool visible);
-    void remoteAudioMutedChanged(bool muted);
+    void audioSharingEnabledChanged(bool enabled);
+    void systemAudioEnabledChanged(bool enabled);
 
 private:
     // Settings values
@@ -56,7 +61,8 @@ private:
     bool m_screenSharingEnabled = false;
     // Viewer preference shared by all projects in this client profile.
     bool m_screenContentVisible = true;
-    bool m_remoteAudioMuted = false;
+    bool m_audioSharingEnabled = false;
+    bool m_systemAudioEnabled = true;
     QString m_username;
     QByteArray m_profilePictureJpeg;
 };

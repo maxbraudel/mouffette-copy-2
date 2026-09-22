@@ -73,7 +73,11 @@ public:
     NotificationCenter* getNotificationCenter() const;
     SettingsManager* getSettingsManager() const { return m_settingsManager; }
     QString screenSharingStatus() const;
+    QString audioSharingStatus() const;
     QString remoteAudioState() const;
+    QString remoteAudioStatus() const;
+    QString remoteScreenState() const;
+    QString remoteScreenStatus() const;
     ClientProfileCache* profileCache() const { return m_profileCache; }
     ICanvasHost* getActiveCanvas() const { return m_activeCanvas; }
     const ClientInfo& getSelectedClient() const { return m_selectedClient; }
@@ -184,6 +188,7 @@ public slots:
 
 signals:
     void screenSharingStatusChanged();
+    void audioSharingStatusChanged();
     void displayClientsChanged(const QList<ClientInfo>& clients);
     void presentationStateChanged();
     void applicationPageChanged(int page);
@@ -210,7 +215,7 @@ private slots:
     void onTrayIconActivated(int reason);
 
 private:
-    void refreshScreenSharing();
+    void refreshMediaSharing();
     void refreshRemoteCursorStreaming();
     void publishLocalCursor();
     void expireStaleRemoteCursors();

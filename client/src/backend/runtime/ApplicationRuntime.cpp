@@ -425,13 +425,15 @@ ApplicationRuntime::ApplicationRuntime(const RuntimeProfileContext& runtimeProfi
     m_screenSharing = new ScreenSharingService(m_webSocketClient, m_systemMonitor, this);
     m_audioSharing = new AudioSharingService(m_webSocketClient, this);
     connect(m_audioSharing, &AudioSharingService::statusChanged,
-            this, &ApplicationRuntime::screenSharingStatusChanged);
+            this, &ApplicationRuntime::audioSharingStatusChanged);
     connect(m_audioSharing, &AudioSharingService::stateChanged,
             this, &ApplicationRuntime::presentationStateChanged);
-    connect(m_settingsManager, &SettingsManager::screenSharingEnabledChanged,
+    connect(m_audioSharing, &AudioSharingService::remoteStatusChanged,
+            this, &ApplicationRuntime::presentationStateChanged);
+    connect(m_settingsManager, &SettingsManager::audioSharingEnabledChanged,
             m_audioSharing, &AudioSharingService::setSharingEnabled);
-    connect(m_settingsManager, &SettingsManager::remoteAudioMutedChanged,
-            m_audioSharing, &AudioSharingService::setMuted);
+    connect(m_settingsManager, &SettingsManager::systemAudioEnabledChanged,
+            m_audioSharing, &AudioSharingService::setListeningEnabled);
     connect(m_screenSharing, &ScreenSharingService::sourceBudgetChanged,
             m_audioSharing, &AudioSharingService::setSourceBudget);
     connect(m_audioSharing, &AudioSharingService::sourceReservationChanged,
@@ -447,7 +449,7 @@ ApplicationRuntime::ApplicationRuntime(const RuntimeProfileContext& runtimeProfi
         if (!m_toastSystem || m_cleanShutdownPrepared || isUserDisconnected()
             || !m_qmlWindowVisible || m_applicationPage != 1
             || endpoint != m_activeWorkspaceEndpointId
-            || m_settingsManager->getRemoteAudioMuted()) return;
+            || !m_settingsManager->getSystemAudioEnabled()) return;
         NotificationRequest notification;
         notification.severity = NotificationSeverity::Warning;
         notification.category = QStringLiteral("Audio sharing");
@@ -463,7 +465,7 @@ ApplicationRuntime::ApplicationRuntime(const RuntimeProfileContext& runtimeProfi
     connect(m_settingsManager, &SettingsManager::screenSharingEnabledChanged,
             m_screenSharing, &ScreenSharingService::setSharingEnabled);
     connect(m_settingsManager, &SettingsManager::screenContentVisibleChanged,
-            this, &ApplicationRuntime::refreshScreenSharing);
+            this, &ApplicationRuntime::refreshMediaSharing);
     connect(m_screenSharing, &ScreenSharingService::frameReady, this,
             [this](const QString& endpoint, int screenId, const QVideoFrame& frame) {
         if (auto* canvas = canvasForEndpointId(endpoint)) canvas->setRemoteScreenFrame(screenId, frame);
@@ -494,11 +496,11 @@ ApplicationRuntime::ApplicationRuntime(const RuntimeProfileContext& runtimeProfi
                                m_selectedClient.instanceOrdinal(), QStringLiteral("From")}};
         m_toastSystem->publishNotification(notification);
     });
-    connect(this, &ApplicationRuntime::activeWorkspaceChanged, this, &ApplicationRuntime::refreshScreenSharing);
-    connect(this, &ApplicationRuntime::applicationPageChanged, this, &ApplicationRuntime::refreshScreenSharing);
+    connect(this, &ApplicationRuntime::activeWorkspaceChanged, this, &ApplicationRuntime::refreshMediaSharing);
+    connect(this, &ApplicationRuntime::applicationPageChanged, this, &ApplicationRuntime::refreshMediaSharing);
     m_screenSharing->setSharingEnabled(m_settingsManager->getScreenSharingEnabled());
-    m_audioSharing->setMuted(m_settingsManager->getRemoteAudioMuted());
-    m_audioSharing->setSharingEnabled(m_settingsManager->getScreenSharingEnabled());
+    m_audioSharing->setListeningEnabled(m_settingsManager->getSystemAudioEnabled());
+    m_audioSharing->setSharingEnabled(m_settingsManager->getAudioSharingEnabled());
     m_profileCache->setPictureRequester([this](const QString& endpoint, const QString& hash) {
         return m_webSocketClient->requestProfilePicture(endpoint, hash);
     });
@@ -1702,7 +1704,7 @@ void ApplicationRuntime::handleApplicationStateChanged(Qt::ApplicationState stat
     setApplicationSuspended(state == Qt::ApplicationHidden
                             || state == Qt::ApplicationSuspended
                             || m_nativeSystemSuspended);
-    refreshScreenSharing();
+    refreshMediaSharing();
 }
 
 void ApplicationRuntime::handleNativeSystemSuspendedChanged(bool suspended) {
@@ -1711,7 +1713,7 @@ void ApplicationRuntime::handleNativeSystemSuspendedChanged(bool suspended) {
     setApplicationSuspended(suspended
                             || QGuiApplication::applicationState() == Qt::ApplicationHidden
                             || QGuiApplication::applicationState() == Qt::ApplicationSuspended);
-    refreshScreenSharing();
+    refreshMediaSharing();
 }
 
 void ApplicationRuntime::showScreenView(const ClientInfo& client) {
@@ -3837,7 +3839,7 @@ void ApplicationRuntime::setApplicationSuspended(bool suspended) {
         return;
     }
     m_applicationSuspended = suspended;
-    refreshScreenSharing();
+    refreshMediaSharing();
     if (m_activityMonitor) m_activityMonitor->setSystemSuspended(suspended);
     updateHistoryVisibilityState();
 }
@@ -3965,7 +3967,7 @@ void ApplicationRuntime::setQmlWindowVisible(bool visible)
 {
     if (m_qmlWindowVisible == visible) return;
     m_qmlWindowVisible = visible;
-    refreshScreenSharing();
+    refreshMediaSharing();
     if (m_activityMonitor) m_activityMonitor->setControlWindowVisible(visible);
     updateHistoryVisibilityState();
 }
@@ -4250,14 +4252,33 @@ void ApplicationRuntime::onDisconnected() {
 
 QString ApplicationRuntime::screenSharingStatus() const
 {
-    const auto screen = m_screenSharing ? m_screenSharing->status() : QString();
-    const auto audio = m_audioSharing ? m_audioSharing->status() : QString();
-    return audio.isEmpty() ? screen : screen + QLatin1Char('\n') + audio;
+    return m_screenSharing ? m_screenSharing->status() : QString();
+}
+
+QString ApplicationRuntime::audioSharingStatus() const
+{
+    return m_audioSharing ? m_audioSharing->status() : QString();
 }
 
 QString ApplicationRuntime::remoteAudioState() const
 {
     return m_audioSharing ? m_audioSharing->state() : QStringLiteral("unavailable");
+}
+
+QString ApplicationRuntime::remoteAudioStatus() const
+{
+    return m_audioSharing ? m_audioSharing->remoteStatus() : QString();
+}
+
+QString ApplicationRuntime::remoteScreenState() const
+{
+    return m_screenSharing ? m_screenSharing->remoteState(m_activeWorkspaceEndpointId)
+                           : QStringLiteral("unavailable");
+}
+
+QString ApplicationRuntime::remoteScreenStatus() const
+{
+    return m_screenSharing ? m_screenSharing->remoteStatus(m_activeWorkspaceEndpointId) : QString();
 }
 
 bool ApplicationRuntime::remoteScreenAvailable() const
@@ -4270,7 +4291,7 @@ bool ApplicationRuntime::remoteScreenLoading() const
     return m_screenSharing && m_screenSharing->isRemoteScreenLoading(m_activeWorkspaceEndpointId);
 }
 
-void ApplicationRuntime::refreshScreenSharing()
+void ApplicationRuntime::refreshMediaSharing()
 {
     if (!m_screenSharing || m_cleanShutdownPrepared) return;
     // Hiding the control application must not stop an authorized publisher.
@@ -4288,7 +4309,7 @@ void ApplicationRuntime::refreshScreenSharing()
             ? m_activeWorkspaceEndpointId : QString());
     if (auto* canvas = getActiveCanvas()) {
         connect(canvas, &ICanvasHost::screenPreviewDemandChanged,
-                this, &ApplicationRuntime::refreshScreenSharing, Qt::UniqueConnection);
+                this, &ApplicationRuntime::refreshMediaSharing, Qt::UniqueConnection);
         const auto demand = canvas->screenPreviewDemand();
         if (demand.isArray()) m_screenSharing->setViewedScreens(demand.toArray());
     }

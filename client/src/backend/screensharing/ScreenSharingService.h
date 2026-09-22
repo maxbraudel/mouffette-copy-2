@@ -26,6 +26,8 @@ public:
     void refresh();
     void stop();
     QString status() const;
+    QString remoteState(const QString& endpoint) const;
+    QString remoteStatus(const QString& endpoint) const;
     bool isRemoteScreenAvailable(const QString& endpoint) const;
     bool isRemoteScreenLoading(const QString& endpoint) const;
 

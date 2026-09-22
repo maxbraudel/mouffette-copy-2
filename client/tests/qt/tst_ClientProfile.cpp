@@ -383,7 +383,7 @@ private slots:
         QCOMPARE(reloaded.profilePictureJpeg(), jpeg);
     }
 
-    void remoteAudioMuteIsAtomicAndIndependentOfScreenVisibility()
+    void systemAudioListeningIsAtomicAndIndependentOfScreenVisibility()
     {
         const auto previous = RuntimeProfile::context();
         const auto restore = qScopeGuard([&] { RuntimeProfile::configure(previous); });
@@ -397,32 +397,146 @@ private slots:
         RuntimeProfile::configure(context);
         SettingsManager settings;
         settings.loadSettings();
-        QVERIFY(!settings.getRemoteAudioMuted());
-        QSignalSpy changes(&settings, &SettingsManager::remoteAudioMutedChanged);
+        QVERIFY(settings.getSystemAudioEnabled());
+        QSignalSpy changes(&settings, &SettingsManager::systemAudioEnabledChanged);
         QString error;
-        QVERIFY2(settings.setRemoteAudioMuted(true, &error), qPrintable(error));
+        QVERIFY2(settings.setSystemAudioEnabled(false, &error), qPrintable(error));
         QVERIFY(settings.setScreenContentVisible(false, &error));
         QVERIFY(settings.commitSettings(QStringLiteral("ws://localhost:8080"), true, false,
             QStringLiteral("Audio"), {}, true, &error));
         SettingsManager reloaded;
         reloaded.loadSettings();
-        QVERIFY(reloaded.getRemoteAudioMuted());
+        QVERIFY(!reloaded.getSystemAudioEnabled());
         QVERIFY(!reloaded.getScreenContentVisible());
         QVERIFY(reloaded.getScreenSharingEnabled());
-        QVERIFY(settings.setRemoteAudioMuted(true, &error));
+        QVERIFY(settings.setSystemAudioEnabled(false, &error));
         QCOMPARE(changes.count(), 1);
         QFile blocker(directory.filePath(QStringLiteral("blocked")));
         QVERIFY(blocker.open(QIODevice::WriteOnly));
         blocker.close();
         context.rootPath = blocker.fileName();
         RuntimeProfile::configure(context);
-        QVERIFY(!settings.setRemoteAudioMuted(false, &error));
-        QVERIFY(settings.getRemoteAudioMuted());
+        QVERIFY(!settings.setSystemAudioEnabled(true, &error));
+        QVERIFY(!settings.getSystemAudioEnabled());
         QCOMPARE(changes.count(), 1);
         context.rootPath = directory.filePath(QStringLiteral("other-profile"));
         RuntimeProfile::configure(context);
         reloaded.loadSettings();
-        QVERIFY(!reloaded.getRemoteAudioMuted());
+        QVERIFY(reloaded.getSystemAudioEnabled());
+    }
+
+    void sharingPermissionsAreIndependentAndAtomic()
+    {
+        const auto previous = RuntimeProfile::context();
+        const auto restore = qScopeGuard([&] { RuntimeProfile::configure(previous); });
+        QTemporaryDir directory;
+        RuntimeProfileContext context;
+        context.rootPath = directory.filePath(QStringLiteral("separate-sharing"));
+        QVERIFY(QDir().mkpath(context.rootPath));
+        QVERIFY(QFile::setPermissions(context.rootPath,
+            QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+        RuntimeProfile::configure(context);
+        SettingsManager settings;
+        settings.loadSettings();
+        QVERIFY(!settings.getScreenSharingEnabled());
+        QVERIFY(!settings.getAudioSharingEnabled());
+        QSignalSpy screenChanges(&settings, &SettingsManager::screenSharingEnabledChanged);
+        QSignalSpy audioChanges(&settings, &SettingsManager::audioSharingEnabledChanged);
+        QString error;
+        const QString url = QStringLiteral("ws://localhost:8080");
+        // Audio-only consent survives a restart and does not grant screen access.
+        QVERIFY2(settings.commitSettings(url, true, false, {}, {}, false, true, &error), qPrintable(error));
+        SettingsManager reloaded;
+        reloaded.loadSettings();
+        QVERIFY(!reloaded.getScreenSharingEnabled());
+        QVERIFY(reloaded.getAudioSharingEnabled());
+        QCOMPARE(screenChanges.count(), 0);
+        QCOMPARE(audioChanges.count(), 1);
+        // Changing another field through an older caller retains both choices.
+        QVERIFY(settings.commitSettings(url, false, false, {}, {}, &error));
+        reloaded.loadSettings();
+        QVERIFY(!reloaded.getScreenSharingEnabled());
+        QVERIFY(reloaded.getAudioSharingEnabled());
+        const auto persisted = RuntimeProfile::readSettings();
+        QVERIFY(!settings.commitSettings(QStringLiteral("invalid"), true, true,
+                                         {}, {}, true, false, &error));
+        QCOMPARE(RuntimeProfile::readSettings(), persisted);
+        QVERIFY(!settings.getScreenSharingEnabled());
+        QVERIFY(settings.getAudioSharingEnabled());
+        QCOMPARE(screenChanges.count(), 0);
+        QCOMPARE(audioChanges.count(), 1);
+        // A failed disk commit cannot apply half of a consent change.
+        const QString root = context.rootPath;
+        QFile blocker(directory.filePath(QStringLiteral("blocked")));
+        QVERIFY(blocker.open(QIODevice::WriteOnly));
+        blocker.close();
+        context.rootPath = blocker.fileName();
+        RuntimeProfile::configure(context);
+        QVERIFY(!settings.commitSettings(url, true, true, {}, {}, true, false, &error));
+        QVERIFY(!settings.getScreenSharingEnabled());
+        QVERIFY(settings.getAudioSharingEnabled());
+        QCOMPARE(screenChanges.count(), 0);
+        QCOMPARE(audioChanges.count(), 1);
+        context.rootPath = root;
+        RuntimeProfile::configure(context);
+        // Screen-only consent likewise survives a restart.
+        QVERIFY(settings.commitSettings(url, true, true, {}, {}, true, false, &error));
+        reloaded.loadSettings();
+        QVERIFY(reloaded.getScreenSharingEnabled());
+        QVERIFY(!reloaded.getAudioSharingEnabled());
+        QCOMPARE(screenChanges.count(), 1);
+        QCOMPARE(audioChanges.count(), 2);
+    }
+
+    void migratesCombinedSharingAndListeningPreferences()
+    {
+        const auto previous = RuntimeProfile::context();
+        const auto restore = qScopeGuard([&] { RuntimeProfile::configure(previous); });
+        QTemporaryDir directory;
+        RuntimeProfileContext context;
+        context.rootPath = directory.filePath(QStringLiteral("legacy-sharing"));
+        QVERIFY(QDir().mkpath(context.rootPath));
+        QVERIFY(QFile::setPermissions(context.rootPath,
+            QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+        RuntimeProfile::configure(context);
+        SettingsManager settings;
+        QString error;
+        QVERIFY(settings.commitSettings(QStringLiteral("ws://localhost:8080"), true, true,
+                                         {}, {}, &error));
+        auto legacy = RuntimeProfile::readSettings();
+        legacy.remove(QStringLiteral("audioSharingEnabled"));
+        legacy.remove(QStringLiteral("systemAudioEnabled"));
+        legacy.insert(QStringLiteral("screenSharingEnabled"), true);
+        legacy.insert(QStringLiteral("remoteAudioMuted"), true);
+        QVERIFY(RuntimeStorage::writeSettings(RuntimeProfile::profileRoot(),
+            RuntimeProfile::settingsFilePath(), legacy, StorageVersions::Settings).succeeded());
+        settings.loadSettings();
+        QVERIFY(settings.getScreenSharingEnabled());
+        QVERIFY(settings.getAudioSharingEnabled());
+        QVERIFY(!settings.getSystemAudioEnabled());
+        // Revoking screen access after migration preserves the previous audio opt-in.
+        QVERIFY(settings.commitSettings(QStringLiteral("ws://localhost:8080"), true, true,
+                                         {}, {}, false, &error));
+        SettingsManager reloaded;
+        reloaded.loadSettings();
+        QVERIFY(!reloaded.getScreenSharingEnabled());
+        QVERIFY(reloaded.getAudioSharingEnabled());
+        QVERIFY(!reloaded.getSystemAudioEnabled());
+        QVERIFY(!RuntimeProfile::readSettings().contains(QStringLiteral("remoteAudioMuted")));
+        // An explicit new setting wins, and malformed consent never authorizes audio.
+        auto malformed = RuntimeProfile::readSettings();
+        malformed.insert(QStringLiteral("screenSharingEnabled"), true);
+        malformed.insert(QStringLiteral("audioSharingEnabled"), QStringLiteral("unexpected"));
+        QVERIFY(RuntimeStorage::writeSettings(RuntimeProfile::profileRoot(),
+            RuntimeProfile::settingsFilePath(), malformed, StorageVersions::Settings).succeeded());
+        reloaded.loadSettings();
+        QVERIFY(reloaded.getScreenSharingEnabled());
+        QVERIFY(!reloaded.getAudioSharingEnabled());
+        context.rootPath = directory.filePath(QStringLiteral("fresh-profile"));
+        RuntimeProfile::configure(context);
+        reloaded.loadSettings();
+        QVERIFY(!reloaded.getScreenSharingEnabled());
+        QVERIFY(!reloaded.getAudioSharingEnabled());
     }
 
     void peerCacheIsTransientAndIgnoresStalePictures()

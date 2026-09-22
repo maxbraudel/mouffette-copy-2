@@ -123,9 +123,11 @@ struct AudioTransport::Private {
             }
             state(timingFailure ? QStringLiteral("timing_unavailable") : QStringLiteral("channel_unavailable"));
         }
-        if(wasReady) emit q->issue(timingFailure
+        if(&pipe==&view) emit q->issue(timingFailure
             ? AudioTransport::tr("Remote audio exceeded the synchronization delay limit. Reconnecting…")
-            : AudioTransport::tr("The remote audio connection was interrupted. Reconnecting…"));
+            : AudioTransport::tr("The remote system audio connection is unavailable. Reconnecting…"));
+        else if(wasReady) emit q->publicationIssue(
+            AudioTransport::tr("The system audio sharing connection was interrupted. Reconnecting…"));
     }
     bool authenticatedMessage(const QJsonObject& message) const {
         return connected() && message.value("protocolVersion").toInt(-1)==WebSocketClient::ProtocolVersion

@@ -7,11 +7,12 @@ they are never saved in a project, recorded, or written to the media cache.
 
 ## Consent and lifecycle
 
-In **Settings**, enable **Share my screens and system audio** and save.
+In **Settings**, enable **Share my screen** and save.
 The setting is off by default and belongs to the local runtime profile. Cancel
 does not change it. It authorizes all screens for owners of an authenticated
-active remote session. It also authorizes one independent system audio stream,
-but never microphone capture or remote input. Existing saved consent is retained.
+active remote session. **Share my system audio** separately authorizes the audio
+stream; neither option permits microphone capture or remote input. Existing
+combined consent initializes both permissions, which are then saved independently.
 The control interface, its dialogs and local preview audio are excluded; received
 scene windows and their sound remain shared. See [system audio sharing](system-audio-sharing.md).
 
@@ -22,18 +23,24 @@ primary instance remembers it across restarts; temporary instances keep it for
 their session. Hiding immediately clears the screen frames and unsubscribes from the
 stream; showing subscribes again to the visible canvas. Monitor outlines, scene
 media and the remote cursor remain available. This preference does not change
-either client's permission to share its own screens.
+either client's permission to share its own screens. The adjacent **Play system
+audio / Stop system audio** button controls a separate listening subscription;
+showing or hiding screen content does not change it. The former canvas mute button
+has been removed, and its saved choice migrates to the new listening preference.
 
 The remote connection card shows **Screen disabled** when the viewer turns off
 screen content locally. With viewing enabled, it shows **Screen loading** while
 connecting and waiting for the first frame, then **Screen available** once frames
-arrive. Disabled remote sharing or a failure leaving no healthy displayed
-monitor shows **Screen not available**. A capture, decode or stale-frame failure
+arrive. Disabled remote sharing shows **Screen not shared**; a capture, decode or
+transport failure leaving no healthy displayed monitor shows **Screen error**.
+Other unavailable states show **Screen not available**. A capture, decode or stale-frame failure
 on one monitor clears only that monitor; another healthy monitor keeps the
-connection card **Screen available**. A monitor icon sits immediately to the left of the volume. These
+connection card **Screen available**. A separate **Audio disabled / loading /
+available / not shared / error / not available** indicator reports audio's own
+state, and hovering either indicator exposes its detail. These
 indicators share the connection statuses' font, foreground and background colors:
 amber while loading, green when available, red when unavailable or locally disabled.
-Availability follows decoded frames for the currently viewed client, not just
+Screen availability follows decoded frames for the currently viewed client, not just
 publishing consent. There is no permanent status message inside the canvas screens.
 
 Screen-sharing problems use warning toasts and notification history: remote
@@ -44,6 +51,10 @@ Normal handshakes and successful recovery are silent. Monitor-specific warnings
 identify the affected screen and suppress duplicate reasons until that screen
 recovers or the viewing attempt changes. Other healthy screens keep their
 images and availability. Intentional hiding and suspension do not create warnings.
+Audio warnings and notifications are separate. Revoking or failing screen capture
+leaves authorized audio running; audio denial, codec failure or playback failure
+leaves healthy screen previews running. Shared timing observations still synchronize
+both streams when available.
 
 macOS also requires the operating system's Screen Recording permission for the
 application. The checkbox only authorizes sharing within Mouffette; it does not
@@ -434,8 +445,12 @@ displays, scaling/rotation, exclusion, reconnect and lock/unlock.
    combinations, maps to its canvas rectangle.
 3. Move windows and play a video; verify canvas pan/zoom and editing remain
    responsive. Test while simultaneously uploading a large file.
-4. Disable sharing during motion: the viewer must clear immediately. Re-enable,
-   disconnect/reconnect, hide/reopen the viewer, and lock/unlock the target.
+4. Disable screen sharing during motion: the viewer must clear immediately while
+   authorized audio continues. Disable audio sharing with screen sharing enabled:
+   healthy screens must remain visible. Repeat using the two viewer controls and
+   independently denied/failed captures; verify each status and warning identifies
+   only the affected medium. Re-enable, disconnect/reconnect, hide/reopen the viewer,
+   and lock/unlock the target.
 5. Unplug/reorder/rotate a monitor during streaming and verify no old monitor
    image is retained under a reassigned ID.
 6. Constrain uplink and downlink independently, add latency/loss, then restore

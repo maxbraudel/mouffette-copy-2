@@ -58,6 +58,7 @@ private slots:
     void segmentedStatusKeepsSingleTopBorder();
     void stateLabelsReserveWidthBeforeTransitions();
     void screenAvailabilitySharesStatusCardWithVolume();
+    void audioAndScreenStatusesRemainIndependent();
     void mediaPanelWidthSurvivesActionAndUploadTransitions();
     void emptyScreenHintStaysBehindMediaAndCenteredInViewport();
     void mediaPanelVisibilityAnchorInteractionAndScroll();
@@ -68,7 +69,7 @@ private slots:
     void mainWindowPointerActivity_data();
     void mainWindowPointerActivity();
     void screenContentButtonTogglesAndPersists();
-    void remoteAudioButtonPersistsAcrossWorkspacesAndPlayback();
+    void systemAudioButtonPersistsIndependentlyOfScreen();
     void mediaActionPalette_data();
     void mediaActionPalette();
     void mediaRowsAndProgress();
@@ -770,6 +771,99 @@ void MediaOverlayTest::screenAvailabilitySharesStatusCardWithVolume()
             QVERIFY(window.grabWindow().save(QDir(artifactDir).filePath(state.artifact)));
         }
     }
+}
+
+void MediaOverlayTest::audioAndScreenStatusesRemainIndependent()
+{
+    QQmlEngine engine;
+    QQuickWindow window;
+    window.resize(900, 110);
+    std::unique_ptr<QQuickItem> card(createStatusCard(engine, window, true));
+    QVERIFY(card);
+    card->setProperty("primaryText", QStringLiteral("Remote client"));
+    card->setProperty("screenStatusVisible", true);
+    card->setProperty("audioStatusVisible", true);
+    card->setProperty("screenState", QStringLiteral("available"));
+    card->setWidth(860);
+    auto* screen = card->findChild<QQuickItem*>(QStringLiteral("screenAvailabilitySegment"));
+    auto* screenLabel = card->findChild<QQuickItem*>(QStringLiteral("screenAvailabilityLabel"));
+    auto* audio = card->findChild<QQuickItem*>(QStringLiteral("audioAvailabilitySegment"));
+    auto* audioLabel = card->findChild<QQuickItem*>(QStringLiteral("audioAvailabilityLabel"));
+    auto* audioIcon = card->findChild<QQuickItem*>(QStringLiteral("audioAvailabilityIcon"));
+    auto* volume = card->findChild<QQuickItem*>(QStringLiteral("volumeSegment"));
+    QVERIFY(screen && screenLabel && audio && audioLabel && audioIcon && volume);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    // Cocoa may fit first exposure to the screen at a high scale factor.
+    window.resize(900, 110);
+    const qreal stableWidth = card->implicitWidth();
+    const QList<QPair<QString, QString>> states{
+        {QStringLiteral("loading"), QStringLiteral("Audio loading")},
+        {QStringLiteral("available"), QStringLiteral("Audio available")},
+        {QStringLiteral("sharing_disabled"), QStringLiteral("Audio not shared")},
+        {QStringLiteral("unavailable"), QStringLiteral("Audio not available")},
+        {QStringLiteral("error"), QStringLiteral("Audio error")}
+    };
+    for (const auto& [state, label] : states) {
+        card->setProperty("audioState", state);
+        QCOMPARE(audioLabel->property("text").toString(), label);
+        QCOMPARE(screenLabel->property("text").toString(), QStringLiteral("Screen available"));
+        QCOMPARE(audioIcon->property("source").toUrl().fileName(),
+            state == QLatin1String("loading") || state == QLatin1String("available")
+                ? QStringLiteral("volume-on.svg") : QStringLiteral("volume-off.svg"));
+        QCOMPARE(card->implicitWidth(), stableWidth);
+        QTRY_VERIFY(screen->x() + screen->width() <= audio->x());
+        QTRY_VERIFY(audio->x() + audio->width() <= volume->x());
+        QVERIFY(audioLabel->isVisible());
+        QVERIFY(audioLabel->implicitWidth() <= audioLabel->width());
+        QVERIFY(volume->x() + volume->width() <= card->width());
+        const QString artifactDir = qEnvironmentVariable("MOUFFETTE_OVERLAY_ARTIFACT_DIR");
+        if (!artifactDir.isEmpty()) {
+            QVERIFY(QDir().mkpath(artifactDir));
+            QSignalSpy frames(&window, &QQuickWindow::frameSwapped);
+            window.update();
+            QTRY_VERIFY(!frames.isEmpty());
+            QVERIFY(window.grabWindow().save(QDir(artifactDir).filePath(
+                QStringLiteral("audio-status-%1.png").arg(state))));
+        }
+    }
+    card->setProperty("audioState", QStringLiteral("available"));
+    card->setProperty("screenState", QStringLiteral("error"));
+    QCOMPARE(screenLabel->property("text").toString(), QStringLiteral("Screen error"));
+    QCOMPARE(audioLabel->property("text").toString(), QStringLiteral("Audio available"));
+    card->setProperty("screenState", QStringLiteral("sharing_disabled"));
+    QCOMPARE(screenLabel->property("text").toString(), QStringLiteral("Screen not shared"));
+    QCOMPARE(audioLabel->property("text").toString(), QStringLiteral("Audio available"));
+    card->setProperty("screenContentEnabled", false);
+    QCOMPARE(screenLabel->property("text").toString(), QStringLiteral("Screen disabled"));
+    QCOMPARE(audioLabel->property("text").toString(), QStringLiteral("Audio available"));
+    card->setProperty("systemAudioEnabled", false);
+    QCOMPARE(audioLabel->property("text").toString(), QStringLiteral("Audio disabled"));
+    card->setProperty("audioState", QStringLiteral("error"));
+    QCOMPARE(audioLabel->property("text").toString(), QStringLiteral("Audio disabled"));
+
+    // A long endpoint name should elide before either status loses its label.
+    card->setProperty("primaryText", QString(200, QLatin1Char('W')));
+    QVERIFY(card->implicitWidth() > card->width());
+    QVERIFY(!card->property("compactMediaStatus").toBool());
+    QVERIFY(screenLabel->isVisible() && audioLabel->isVisible());
+    card->setProperty("primaryText", QStringLiteral("Remote client"));
+    card->setWidth(440);
+    QTRY_VERIFY(card->property("compactMediaStatus").toBool());
+    QVERIFY(screen->isVisible() && audio->isVisible() && volume->isVisible());
+    QVERIFY(!screenLabel->isVisible() && !audioLabel->isVisible());
+    QTRY_VERIFY(screen->x() >= 0);
+    QTRY_VERIFY(volume->x() + volume->width() <= card->width());
+    const QString artifactDir = qEnvironmentVariable("MOUFFETTE_OVERLAY_ARTIFACT_DIR");
+    if (!artifactDir.isEmpty()) {
+        QSignalSpy frames(&window, &QQuickWindow::frameSwapped);
+        window.update();
+        QTRY_VERIFY(!frames.isEmpty());
+        QVERIFY(window.grabWindow().save(QDir(artifactDir).filePath(QStringLiteral("audio-screen-status-narrow.png"))));
+    }
+    card->setWidth(860);
+    QTRY_VERIFY(screenLabel->isVisible() && audioLabel->isVisible());
+    QCOMPARE(card->implicitWidth(), stableWidth);
 }
 
 void MediaOverlayTest::stateLabelsReserveWidthBeforeTransitions()
@@ -1974,7 +2068,7 @@ void MediaOverlayTest::screenContentButtonTogglesAndPersists()
     }
 }
 
-void MediaOverlayTest::remoteAudioButtonPersistsAcrossWorkspacesAndPlayback()
+void MediaOverlayTest::systemAudioButtonPersistsIndependentlyOfScreen()
 {
     QTemporaryDir directory;
     QVERIFY(directory.isValid());
@@ -2001,82 +2095,120 @@ void MediaOverlayTest::remoteAudioButtonPersistsAcrossWorkspacesAndPlayback()
             });
         controller.start();
         QTRY_VERIFY_WITH_TIMEOUT(controller.ready(), 8000);
-        QCOMPARE(controller.remoteAudioMuted(), launch == 1);
+        QCOMPARE(controller.systemAudioEnabled(), launch == 0);
+        QVERIFY(controller.screenContentVisible());
+        QVERIFY(!controller.settingsScreenSharingEnabled());
+        QCOMPARE(controller.settingsAudioSharingEnabled(), launch == 1);
+        QQmlComponent component(&engine, QUrl(QStringLiteral(
+            "qrc:/qt/qml/Mouffette/App/resources/qml/app/Main.qml")));
+        std::unique_ptr<QObject> root(component.createWithInitialProperties({
+            {QStringLiteral("controller"), QVariant::fromValue(&controller)}
+        }));
+        QVERIFY2(root, qPrintable(component.errorString()));
+        auto* bootstrap = qobject_cast<QWindow*>(root->property("bootstrap").value<QObject*>());
+        QVERIFY(bootstrap);
+        bootstrap->hide();
+        auto* window = qobject_cast<QQuickWindow*>(root->property("window").value<QObject*>());
+        QVERIFY(window);
+        window->showNormal();
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        window->resize(1400, 650);
+        auto* audio = findVisualItem(window->contentItem(), QStringLiteral("systemAudioButton"));
+        auto* screen = findVisualItem(window->contentItem(), QStringLiteral("screenContentButton"));
+        QVERIFY(audio && screen);
+        QVERIFY(audio->isVisible() && audio->isEnabled());
+        QCOMPARE(audio->parentItem(), screen->parentItem());
+        QTRY_COMPARE(audio->x(), screen->x() + screen->width()
+            + audio->parentItem()->property("spacing").toReal());
+        QCOMPARE(audio->property("checked").toBool(), launch == 0);
+        QCOMPARE(audio->property("text").toString(), launch == 0
+            ? QStringLiteral("Stop system audio") : QStringLiteral("Play system audio"));
+        QCOMPARE(audio->property("iconSource").toUrl().fileName(), launch == 0
+            ? QStringLiteral("volume-off.svg") : QStringLiteral("volume-on.svg"));
 
+        // Listening is an application action; no mute control remains in the canvas.
+        QQuickWindow toolbarWindow;
         QString error;
-        std::unique_ptr<QuickCanvasHost> host(QuickCanvasHost::create(&error));
-        QVERIFY2(host, qPrintable(error));
-        host->setProjectEditingEnabled(true);
-        QVERIFY(host->document()->addText({100, 100}, QStringLiteral("Audio controls")));
-        ClientWorkspaceViewModel first(QStringLiteral("audio-first-client"), host.get(), [] {}, nullptr,
-            [] { return false; }, [] { return false; }, [] { return true; });
-        ClientWorkspaceViewModel second(QStringLiteral("audio-second-client"), host.get(), [] {}, nullptr,
-            [] { return false; }, [] { return false; }, [] { return true; });
-        first.setLoading(false);
-        second.setLoading(false);
-        QQuickWindow window;
-        window.resize(420, 100);
-        std::unique_ptr<QQuickItem> harness(createCanvasToolbarHarness(engine, window, &error, &controller));
-        QVERIFY2(harness, qPrintable(error));
-        auto* toolbar = findVisualItem(harness.get(), QStringLiteral("canvasToolbar"));
-        QVERIFY(toolbar);
-        toolbar->setProperty("session", QVariant::fromValue<QObject*>(&first));
-        QPointer<QQuickItem> audioButton = findVisualItem(harness.get(), QStringLiteral("canvasRemoteAudioButton"));
-        QVERIFY(audioButton);
-        QCOMPARE(audioButton->width(), 36.0);
-        QCOMPARE(audioButton->height(), 36.0);
-        QVERIFY(audioButton->isEnabled());
-        QCOMPARE(audioButton->property("toggled").toBool(), launch == 0);
-        QCOMPARE(audioButton->property("iconSource").toUrl().fileName(), launch == 0
-            ? QStringLiteral("volume-on.svg") : QStringLiteral("volume-off.svg"));
-        QCOMPARE(audioButton->property("accessibleName").toString(), launch == 0
-            ? QStringLiteral("Mute remote audio") : QStringLiteral("Unmute remote audio"));
-        window.show();
-        QVERIFY(QTest::qWaitForWindowExposed(&window));
-        QTRY_VERIFY(audioButton->isVisible());
-        auto* text = findVisualItem(harness.get(), QStringLiteral("canvasTextToolButton"));
-        QVERIFY(text);
-        QTRY_VERIFY(audioButton->mapToScene({0, 0}).x()
-            >= text->mapToScene({text->width(), 0}).x() + 8.0);
+        std::unique_ptr<QQuickItem> toolbar(createCanvasToolbarHarness(engine, toolbarWindow, &error, &controller));
+        QVERIFY2(toolbar, qPrintable(error));
+        QVERIFY(!findVisualItem(toolbar.get(), QStringLiteral("canvasRemoteAudioButton")));
         if (launch == 1) continue;
 
-        QSignalSpy muteChanges(&controller, &ApplicationController::remoteAudioMutedChanged);
-        const auto clickAudio = [&] {
-            QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier,
-                audioButton->mapToScene({audioButton->width() / 2, audioButton->height() / 2}).toPoint());
+        // The settings dialog commits the two source permissions separately.
+        auto* settingsButton = findVisualItem(window->contentItem(), QStringLiteral("settingsButton"));
+        auto* settingsDialog = root->findChild<QObject*>(QStringLiteral("settingsDialog"));
+        QVERIFY(settingsButton && settingsDialog);
+        for (bool shareScreen : {true, false}) {
+            QVERIFY(QMetaObject::invokeMethod(settingsButton, "clicked"));
+            QTRY_VERIFY(settingsDialog->property("opened").toBool());
+            QTRY_VERIFY(findVisualItem(window->contentItem(), QStringLiteral("settingsAudioSharingEnabled")));
+            auto* screenSharing = findVisualItem(window->contentItem(), QStringLiteral("settingsScreenSharingEnabled"));
+            auto* audioSharing = findVisualItem(window->contentItem(), QStringLiteral("settingsAudioSharingEnabled"));
+            auto* save = findVisualItem(window->contentItem(), QStringLiteral("settingsSave"));
+            QVERIFY(screenSharing && audioSharing && save);
+            QCOMPARE(screenSharing->property("text").toString(), QStringLiteral("Share my screen"));
+            QCOMPARE(audioSharing->property("text").toString(), QStringLiteral("Share my system audio"));
+            QCOMPARE(screenSharing->property("checked").toBool(), controller.settingsScreenSharingEnabled());
+            QCOMPARE(audioSharing->property("checked").toBool(), controller.settingsAudioSharingEnabled());
+            screenSharing->setProperty("checked", shareScreen);
+            audioSharing->setProperty("checked", !shareScreen);
+            QVERIFY(QMetaObject::invokeMethod(save, "clicked"));
+            QTRY_COMPARE(controller.settingsScreenSharingEnabled(), shareScreen);
+            QTRY_COMPARE(controller.settingsAudioSharingEnabled(), !shareScreen);
+            QTRY_VERIFY(!settingsDialog->property("opened").toBool());
+            QTRY_VERIFY(!save->isVisible());
+        }
+
+        const auto click = [&](QQuickItem* button) {
+            // Native first exposure can resize the window at high DPI. Wait
+            // for Row's polish before measuring the button's click position.
+            QSignalSpy frames(window, &QQuickWindow::frameSwapped);
+            window->update();
+            QTRY_VERIFY(!frames.isEmpty());
+            QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+                button->mapToScene({button->width() / 2, button->height() / 2}).toPoint());
         };
-        clickAudio();
-        QTRY_VERIFY(controller.remoteAudioMuted());
-        QCOMPARE(muteChanges.size(), 1);
-        QTRY_COMPARE(audioButton->property("iconSource").toUrl().fileName(), QStringLiteral("volume-off.svg"));
-        QVERIFY(!audioButton->property("toggled").toBool());
-        QCOMPARE(RuntimeProfile::readSettings().value(QStringLiteral("remoteAudioMuted")).toString(),
-            QStringLiteral("true"));
+        const qreal stableWidth = audio->property("textWidth").toReal();
+        QSignalSpy audioChanges(&controller, &ApplicationController::systemAudioEnabledChanged);
+        QSignalSpy screenChanges(&controller, &ApplicationController::screenContentVisibleChanged);
+        click(audio);
+        QTRY_VERIFY(!controller.systemAudioEnabled());
+        QVERIFY(controller.screenContentVisible());
+        QCOMPARE(audioChanges.size(), 1);
+        QCOMPARE(screenChanges.size(), 0);
+        QCOMPARE(audio->property("text").toString(), QStringLiteral("Play system audio"));
+        QCOMPARE(audio->property("textWidth").toReal(), stableWidth);
+        QCOMPARE(RuntimeProfile::readSettings().value(QStringLiteral("systemAudioEnabled")).toString(),
+            QStringLiteral("false"));
 
-        // Changing the canvas endpoint reuses the application's one mute
-        // preference. It does not create a separate button/session mute value.
-        toolbar->setProperty("session", QVariant::fromValue<QObject*>(&second));
-        QTRY_COMPARE(toolbar->property("session").value<QObject*>(), &second);
-        QCOMPARE(findVisualItem(harness.get(), QStringLiteral("canvasRemoteAudioButton")), audioButton.data());
-        QVERIFY(controller.remoteAudioMuted());
-        QVERIFY(!audioButton->property("toggled").toBool());
+        click(screen);
+        QTRY_VERIFY(!controller.screenContentVisible());
+        QVERIFY(!controller.systemAudioEnabled());
+        QCOMPARE(audioChanges.size(), 1);
+        click(audio);
+        QTRY_VERIFY(controller.systemAudioEnabled());
+        QVERIFY(!controller.screenContentVisible());
+        QCOMPARE(screenChanges.size(), 1);
+        click(screen);
+        QTRY_VERIFY(controller.screenContentVisible());
+        QVERIFY(controller.systemAudioEnabled());
 
-        // The same document lock is held while a remote scene runs. Editing
-        // controls disappear, while listening remains independently usable.
-        host->document()->setEditsLocked(true);
-        QTRY_VERIFY(!second.mediaEditingEnabled());
-        QTRY_VERIFY(!findVisualItem(harness.get(), QStringLiteral("canvasTextToolButton")));
-        QVERIFY(audioButton && audioButton->isVisible() && audioButton->isEnabled());
-        clickAudio();
-        QTRY_VERIFY(!controller.remoteAudioMuted());
-        QCOMPARE(muteChanges.size(), 2);
-        QVERIFY(audioButton->property("toggled").toBool());
-        clickAudio();
-        QTRY_VERIFY(controller.remoteAudioMuted());
-        QCOMPARE(muteChanges.size(), 3);
-        QCOMPARE(RuntimeProfile::readSettings().value(QStringLiteral("remoteAudioMuted")).toString(),
-            QStringLiteral("true"));
-        host->document()->setEditsLocked(false);
+        controller.showHistory();
+        QTRY_COMPARE(controller.applicationPage(), ApplicationController::ApplicationPage::History);
+        QVERIFY(audio->isVisible() && audio->isEnabled());
+        window->resize(480, 650);
+        QTRY_VERIFY(audio->property("iconOnly").toBool());
+        QTRY_VERIFY(audio->mapToScene({0, 0}).x() >= 0);
+        QTRY_VERIFY(audio->mapToScene({audio->width(), 0}).x() <= window->width());
+        click(audio);
+        QTRY_VERIFY(!controller.systemAudioEnabled());
+        QVERIFY(controller.screenContentVisible());
+        QCOMPARE(audioChanges.size(), 3);
+        controller.goBack();
+        QTRY_COMPARE(controller.applicationPage(), ApplicationController::ApplicationPage::Clients);
+        QVERIFY(!controller.systemAudioEnabled());
+        QCOMPARE(RuntimeProfile::readSettings().value(QStringLiteral("systemAudioEnabled")).toString(),
+            QStringLiteral("false"));
     }
 }
 
@@ -2308,7 +2440,7 @@ void MediaOverlayTest::toolbarToolsAndGlobalMemoryUsage()
     QTRY_COMPARE(memory->mapToScene({0, 0}).y(), toolbarY);
     QTRY_VERIFY(memory->mapToScene({memory->width(), 0}).x() <= appWindow->width());
     QVERIFY(memory->isVisible() && memory->width() >= memory->implicitWidth());
-    for (const auto* name : {"connectionButton", "screenContentButton", "historyButton", "settingsButton"}) {
+    for (const auto* name : {"connectionButton", "screenContentButton", "systemAudioButton", "historyButton", "settingsButton"}) {
         auto* button = findVisualItem(topBar, QString::fromLatin1(name));
         QVERIFY(button && button->isVisible());
         QCOMPARE(button->mapToScene({0, 0}).y(), toolbarY);

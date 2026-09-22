@@ -7,6 +7,7 @@ import "../components"
 
 Dialog {
     id: dialog
+    objectName: "settingsDialog"
 
     required property var controller
     property string validationError: ""
@@ -30,6 +31,7 @@ Dialog {
         autoUpload.checked = controller.settingsAutoUpload
         appAlwaysOnTop.checked = controller.settingsAppAlwaysOnTop
         screenSharing.checked = controller.settingsScreenSharingEnabled
+        audioSharing.checked = controller.settingsAudioSharingEnabled
         validationError = ""
     }
     onClosed: controller.cancelProfileEdit()
@@ -155,20 +157,11 @@ Dialog {
                 AppCheckBox {
                     id: screenSharing
                     objectName: "settingsScreenSharingEnabled"
-                    text: "Share my screens and system audio"
+                    text: "Share my screen"
                 }
                 Text {
                     Layout.fillWidth: true
-                    text: "Connected clients can see your screens and hear system audio, including received scenes. Mouffette controls and local previews are excluded. Changes apply when you save."
-                    color: Theme.mutedText
-                    font.pixelSize: 12
-                    wrapMode: Text.Wrap
-                }
-                Text {
-                    objectName: "settingsScreenRecordingHelp"
-                    Layout.fillWidth: true
-                    visible: Qt.platform.os === "osx"
-                    text: "This checkbox does not grant macOS Screen Recording permission. Open System Settings → Privacy & Security → Screen & System Audio Recording and allow the app named in the permission request. For development launches, this may be Terminal or Visual Studio Code. Then quit and reopen all Mouffette instances."
+                    text: "Connected clients can see your screens, including received scenes. Mouffette controls and local previews are excluded. Changes apply when you save."
                     color: Theme.mutedText
                     font.pixelSize: 12
                     wrapMode: Text.Wrap
@@ -179,6 +172,37 @@ Dialog {
                     visible: text.length > 0
                     text: dialog.controller.settingsScreenSharingStatus || ""
                     textFormat: Text.PlainText
+                    color: Theme.mutedText
+                    font.pixelSize: 12
+                    wrapMode: Text.Wrap
+                }
+                AppCheckBox {
+                    id: audioSharing
+                    objectName: "settingsAudioSharingEnabled"
+                    text: "Share my system audio"
+                }
+                Text {
+                    Layout.fillWidth: true
+                    text: "Connected clients can hear your system audio, including received scenes. Mouffette local previews are excluded. Changes apply when you save."
+                    color: Theme.mutedText
+                    font.pixelSize: 12
+                    wrapMode: Text.Wrap
+                }
+                Text {
+                    objectName: "settingsAudioSharingStatus"
+                    Layout.fillWidth: true
+                    visible: text.length > 0
+                    text: dialog.controller.settingsAudioSharingStatus || ""
+                    textFormat: Text.PlainText
+                    color: Theme.mutedText
+                    font.pixelSize: 12
+                    wrapMode: Text.Wrap
+                }
+                Text {
+                    objectName: "settingsScreenRecordingHelp"
+                    Layout.fillWidth: true
+                    visible: Qt.platform.os === "osx"
+                    text: "These sharing preferences do not grant macOS recording permission. Open System Settings → Privacy & Security → Screen & System Audio Recording and allow the app named in the permission request. For development launches, this may be Terminal or Visual Studio Code. Then quit and reopen all Mouffette instances."
                     color: Theme.mutedText
                     font.pixelSize: 12
                     wrapMode: Text.Wrap
@@ -217,7 +241,7 @@ Dialog {
                 onClicked: {
                     var error = dialog.controller.saveSettings(serverUrl.text.trim(), autoUpload.checked,
                                                                appAlwaysOnTop.checked, username.text,
-                                                               screenSharing.checked)
+                                                               screenSharing.checked, audioSharing.checked)
                     if (error && error.length > 0) {
                         dialog.validationError = error
                         return

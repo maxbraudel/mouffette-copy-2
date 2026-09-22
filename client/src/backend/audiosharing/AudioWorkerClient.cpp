@@ -118,9 +118,9 @@ AudioWorkerClient::AudioWorkerClient(QObject* parent) : QObject(parent), d(std::
             qWarning().noquote() << "[AudioWorker]" << failure;
             emit captureStateChanged(false, failure);
             // Never leak excluded preview audio into the main process as a fallback.
+            emit failed(QStringLiteral("The audio worker stopped; audio is unavailable"));
             if (++d->restarts <= 3 && (d->capture || !d->previews.isEmpty()))
                 QTimer::singleShot(250 * d->restarts, this, [this] { ensureWorker(); });
-            else emit failed(QStringLiteral("The audio worker stopped; audio is unavailable"));
         });
 }
 AudioWorkerClient::~AudioWorkerClient() { shutdown(); }
@@ -130,9 +130,10 @@ void AudioWorkerClient::ensureWorker() {
     // Test binaries do not implement --audio-worker. They can supply an actual
     // worker executable explicitly, and otherwise keep preparation headless.
     if (executable.isEmpty()) {
+        if (d->capture) emit captureStateChanged(false, QStringLiteral("Audio worker executable is unavailable"));
         if (!d->unavailableReported) {
             d->unavailableReported = true;
-            emit captureStateChanged(false, QStringLiteral("Audio worker executable is unavailable"));
+            emit failed(QStringLiteral("Audio worker executable is unavailable"));
         }
         return;
     }
@@ -216,7 +217,10 @@ void AudioWorkerClient::readMessages() {
             emit playbackFeedback(message.value(QStringLiteral("source")).toString(),
                 message.value(QStringLiteral("epoch")).toString(), int(message.value(QStringLiteral("dropped")).toInteger()),
                 int(message.value(QStringLiteral("buffered")).toInteger()));
-        } else if (type == QLatin1String("error")) emit playbackFailed(message.value(QStringLiteral("error")).toString());
+        } else if (type == QLatin1String("error")) {
+            emit playbackFailed(message.value(QStringLiteral("source")).toString(),
+                message.value(QStringLiteral("epoch")).toString(), message.value(QStringLiteral("error")).toString());
+        }
     }
     if (malformed && d->socket) d->socket->abort();
 }

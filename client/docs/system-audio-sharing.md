@@ -1,17 +1,55 @@
 # System audio sharing
 
-The existing **Share my screens and system audio** setting authorizes screen
-and system audio publication; it remains off by default and retains saved consent.
-No microphone is opened. One capture and one Opus encode serve all monitors and
-viewers of an endpoint. The relay forwards compressed sound without transcoding
-or recording it. Neither PCM nor received packets enter project/media storage.
+In **Settings**, **Share my system audio** authorizes system audio publication
+independently of **Share my screen**. Both permissions are off by default, belong
+to the local runtime profile and apply only after a successful Save. Cancel
+discards pending changes. No microphone is opened. One capture and one Opus encode
+serve all listeners of an endpoint, including when no screen is shared or visible.
+The relay forwards compressed sound without transcoding or recording it. Neither
+PCM nor received packets enter project/media storage.
 
-The canvas toolbar's speaker button controls only remote listening. Listening
-starts enabled and its mute preference is stored in the viewer's runtime profile,
-independently of project, peer and screen visibility. Hiding monitor pixels or
-panning all monitors outside the viewport leaves sound playing. Leaving the
-canvas, hiding the viewer window, sleep/lock or losing its active session stops
-listening and clears old playback. Publishing can continue with its window hidden.
+The top-bar **Play system audio / Stop system audio** button, next to **Show screen
+content / Hide screen content**, controls remote listening. There is no separate
+mute button inside the canvas. Stop unsubscribes and clears playback; Play requests
+the remote audio stream again. Listening starts enabled and its preference is
+stored in the viewer's runtime profile, independently of project, peer, screen
+visibility and publishing consent. Hiding monitor pixels or panning all monitors
+outside the viewport leaves sound playing. Leaving the canvas, hiding the viewer
+window, sleep/lock or losing its active session stops listening and clears old
+playback. Publishing can continue with its window hidden.
+
+Existing profiles retain both previous choices. When the new audio consent key is
+absent, the former combined **Share my screens and system audio** consent supplies
+the initial audio permission. Subsequent saves persist screen and audio permissions
+separately. The old remote mute preference supplies the inverse initial listening
+choice, so a muted profile stays stopped. Saving settings or changing listening
+persists the new listening key and removes the old mute key. Explicit saved audio
+permissions and listening choices take precedence over these migration defaults.
+
+## Independent availability and errors
+
+The remote connection card shows a separate audio indicator alongside the screen
+indicator. **Audio disabled** means listening was stopped locally. **Audio loading**
+covers startup, and **Audio available** means remote capture is active, including
+when the remote system is silent. Playback failures override that status, and
+only actual playback progress supplies the audio/video synchronization clock.
+**Audio not shared** means the remote user disabled system audio sharing.
+**Audio error** covers capture, codec, playback and transport failures;
+**Audio not available** covers unsupported or otherwise unavailable service.
+Hovering the indicator exposes its detail. A silent system mix can still be
+available; the status does not require audible content.
+
+Audio errors and remote consent denial produce warning toasts and notification
+history independently of screen warnings. Duplicate warnings are suppressed until
+recovery or a new listening attempt. Intentional Stop and suspension are silent.
+A missing audio channel times out instead of remaining loading indefinitely.
+The publishing client's audio status in Settings carries local capture diagnostics.
+Capture failure retains its error during retry backoff before rotating the audio
+epoch and retrying.
+
+Audio consent, subscription, transport and capture failures do not revoke screen
+sharing, and screen failures do not revoke audio. The paths retain their shared
+bandwidth accounting and bounded A/V timing observations when both are active.
 
 ## Control interface and received scenes
 
@@ -68,8 +106,9 @@ MMDevice module remains loaded while late callbacks can still run.
 Publisher logs now include `[AudioSharing] System audio capture failed:` with
 the failing WASAPI stage, HRESULT, Windows version and native error text. A
 worker exit also reports its exit code and whether QProcess observed a crash.
-The viewer toast alone cannot distinguish an unsupported process-loopback API,
-format rejection, permission failure or worker termination. Runtime activation
+The viewer reports the audio failure separately from screen availability; the
+publisher's diagnostics distinguish the failing process-loopback API, format,
+permission or worker stage. Runtime activation
 is authoritative for Windows 10 installations; the generic OS-version advice
 is not substituted for the actual error.
 
@@ -129,14 +168,17 @@ coverage and remaining transport/device limits.
 
 The capture backend forwards the system mix at its native level. It does not
 read or reapply the sharing computer's speaker volume or mute. The viewer's
-own speaker/device volume and the canvas mute button control listening. This
+own speaker/device volume and the top-bar listening button control listening. This
 does not normalize media or undo individual applications' own mix levels.
 
 ## Validation
 
 Automated checks cover codec/framing, timing bounds, shared PCM generations,
-native-window policy/lifecycle, relay authorization and congestion, toolbar
-preferences, and existing media/scene/video behavior. Tests use synthetic audio
+native-window policy/lifecycle, relay authorization and congestion, independent
+sharing/listening preferences and their migration, and existing media/scene/video
+behavior. Relay regressions cover audio without screen consent or displays,
+independent consent revocation, capture-error isolation and recovery, and listener
+capacity status. Tests use synthetic audio
 and do not implicitly request screen-recording permission.
 
 `AudioWorker` exercises exact and padded allocations through the real helper on
@@ -144,7 +186,7 @@ every OS, without skipping registration checks on headless CI. It also rejects
 truncated, missing and incompatible segments, verifies keyed client error
 propagation, and checks local PCM consumption during remote playback and mute
 when an output device is available. Windows release checks must include a local
-canvas video while listening to a remote client, then mute/unmute remote audio:
+canvas video while listening to a remote client, then Stop/Play system audio:
 the local video must remain audible in both states.
 
 `WindowsAudioActivation` exercises late completion after cancellation, agile
@@ -157,8 +199,11 @@ an animated desktop behind control windows, received scenes, three monitors,
 mutual listening without echo, system volume/mute and balance, device hotplug,
 permission denial, sleep/reconnect, concurrent upload and weak-link recovery.
 Changing the publisher's output-device volume or mute must not change the shared
-mix; changing an application's own level still does. The viewer's canvas mute
-must stop only remote monitoring.
+mix; changing an application's own level still does. The viewer's **Stop system
+audio** button must stop only remote monitoring. Exercise all four combinations
+of publishing consent and all four combinations of viewing/listening choices.
+Deny or fail each capture independently and verify that the other medium keeps
+working, with its own availability indicator and warning history.
 Use a flash/bip source and measure A/V offset over a long session; target less than
 100 ms on a stable link. Qualify macOS, Windows 10 22H2 and Windows 11 separately.
 Platform behavior and acoustic synchronization cannot be certified by synthetic

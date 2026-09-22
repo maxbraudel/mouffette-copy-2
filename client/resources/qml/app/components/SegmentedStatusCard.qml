@@ -18,7 +18,8 @@ Item {
         id: detailHover
         onHoveredChanged: if (hovered && root.detailProvider) root.currentDetail = root.detailProvider()
     }
-    ToolTip.visible: detailHover.hovered && currentDetail.length > 0
+    ToolTip.visible: detailHover.hovered && !screenStatusHover.hovered && !audioStatusHover.hovered
+        && currentDetail.length > 0
     ToolTip.text: currentDetail
     ToolTip.delay: 400
     Timer {
@@ -37,13 +38,32 @@ Item {
     property bool screenContentEnabled: true
     property bool screenAvailable: false
     property bool screenLoading: false
+    property string screenState: screenLoading ? "loading" : screenAvailable ? "available" : "unavailable"
+    property string screenStatusDetail: ""
     readonly property string screenStatusText: !screenContentEnabled ? "Screen disabled"
-        : screenLoading ? "Screen loading" : screenAvailable ? "Screen available" : "Screen not available"
+        : screenState === "loading" ? "Screen loading"
+        : screenState === "available" ? "Screen available"
+        : screenState === "sharing_disabled" ? "Screen not shared"
+        : screenState === "error" ? "Screen error" : "Screen not available"
     readonly property int screenStatusKind: !screenContentEnabled ? SegmentedStatusCard.Error
-        : screenLoading ? SegmentedStatusCard.Warning
-        : screenAvailable ? SegmentedStatusCard.Connected : SegmentedStatusCard.Error
+        : screenState === "loading" ? SegmentedStatusCard.Warning
+        : screenState === "available" ? SegmentedStatusCard.Connected : SegmentedStatusCard.Error
     readonly property color screenStatusColor: foregroundForStatus(screenStatusKind)
     readonly property color screenStatusBackground: backgroundForStatus(screenStatusKind)
+    property bool audioStatusVisible: false
+    property bool systemAudioEnabled: true
+    property string audioState: "unavailable"
+    property string audioStatusDetail: ""
+    readonly property string audioStatusText: !systemAudioEnabled || audioState === "disabled" ? "Audio disabled"
+        : audioState === "loading" ? "Audio loading"
+        : audioState === "available" ? "Audio available"
+        : audioState === "sharing_disabled" ? "Audio not shared"
+        : audioState === "error" ? "Audio error" : "Audio not available"
+    readonly property int audioStatusKind: !systemAudioEnabled ? SegmentedStatusCard.Error
+        : audioState === "loading" ? SegmentedStatusCard.Warning
+        : audioState === "available" ? SegmentedStatusCard.Connected : SegmentedStatusCard.Error
+    readonly property color audioStatusColor: foregroundForStatus(audioStatusKind)
+    readonly property color audioStatusBackground: backgroundForStatus(audioStatusKind)
     property bool profilePictureVisible: false
     property url profilePictureSource: ""
     property var profileController: null
@@ -56,8 +76,22 @@ Item {
     readonly property real statusWidth: statusMetrics.maximumWidth + Theme.segmentPadding * 2
     readonly property real auxiliaryWidth: auxiliaryVisible
         ? Math.max(40, auxiliaryMetrics.maximumWidth + Theme.segmentPadding * 2 + 16 + 4) : 0
-    readonly property real screenStatusWidth: screenStatusVisible
+    readonly property real preferredScreenStatusWidth: screenStatusVisible
         ? screenStatusMetrics.maximumWidth + Theme.segmentPadding * 2 + 16 + 4 : 0
+    readonly property real preferredAudioStatusWidth: audioStatusVisible
+        ? audioStatusMetrics.maximumWidth + Theme.segmentPadding * 2 + 16 + 4 : 0
+    // At narrow sizes, retain both indicators and the remote client's name.
+    // Each indicator exposes its full status and error detail on hover.
+    readonly property real minimumPrimaryWidth: Math.min(primaryWidth, 80 + profilePictureWidth)
+    readonly property real minimumMediaLabelsWidth: minimumPrimaryWidth + 1 + statusWidth
+        + (auxiliaryVisible ? 1 + auxiliaryWidth : 0)
+        + (screenStatusVisible ? 1 + preferredScreenStatusWidth : 0)
+        + (audioStatusVisible ? 1 + preferredAudioStatusWidth : 0)
+    readonly property bool compactMediaStatus: audioStatusVisible && width < minimumMediaLabelsWidth
+    readonly property real screenStatusWidth: screenStatusVisible
+        ? compactMediaStatus ? Theme.segmentPadding * 2 + 16 : preferredScreenStatusWidth : 0
+    readonly property real audioStatusWidth: audioStatusVisible
+        ? compactMediaStatus ? Theme.segmentPadding * 2 + 16 : preferredAudioStatusWidth : 0
     readonly property bool availableStatus: statusText.trim().toUpperCase() === "AVAILABLE"
 
     function foregroundForStatus(kind) {
@@ -88,13 +122,23 @@ Item {
     StateTextMetrics {
         id: screenStatusMetrics
         text: root.screenStatusText
-        textVariants: ["Screen available", "Screen not available", "Screen disabled", "Screen loading"]
+        textVariants: ["Screen available", "Screen not available", "Screen disabled", "Screen loading",
+                       "Screen not shared", "Screen error"]
         font: screenStatusLabel.font
+    }
+
+    StateTextMetrics {
+        id: audioStatusMetrics
+        text: root.audioStatusText
+        textVariants: ["Audio available", "Audio not available", "Audio disabled", "Audio loading",
+                       "Audio not shared", "Audio error"]
+        font: audioStatusLabel.font
     }
 
     implicitWidth: primaryWidth + 1 + statusWidth
                    + (auxiliaryVisible ? 1 + auxiliaryWidth : 0)
-                   + (screenStatusVisible ? 1 + screenStatusWidth : 0)
+                   + (screenStatusVisible ? 1 + preferredScreenStatusWidth : 0)
+                   + (audioStatusVisible ? 1 + preferredAudioStatusWidth : 0)
     implicitHeight: Theme.controlHeight
     height: Theme.controlHeight
 
@@ -140,7 +184,8 @@ Item {
             height: root.height
             width: Math.max(0, root.width - 1 - root.statusWidth
                            - (root.auxiliaryVisible ? 1 + root.auxiliaryWidth : 0)
-                           - (root.screenStatusVisible ? 1 + root.screenStatusWidth : 0))
+                           - (root.screenStatusVisible ? 1 + root.screenStatusWidth : 0)
+                           - (root.audioStatusVisible ? 1 + root.audioStatusWidth : 0))
             color: "transparent"
 
             ProfilePicture {
@@ -187,10 +232,16 @@ Item {
             height: root.height
             width: root.screenStatusWidth
             color: root.screenStatusBackground
-            topRightRadius: root.auxiliaryVisible ? 0 : Theme.controlRadius
+            topRightRadius: root.auxiliaryVisible || root.audioStatusVisible ? 0 : Theme.controlRadius
             bottomRightRadius: topRightRadius
             Accessible.role: Accessible.StaticText
             Accessible.name: root.screenStatusText
+            Accessible.description: root.screenStatusDetail
+            HoverHandler { id: screenStatusHover }
+            ToolTip.visible: screenStatusHover.hovered
+            ToolTip.text: !root.screenContentEnabled ? "Screen content is hidden on this device."
+                : root.screenStatusDetail || root.screenStatusText
+            ToolTip.delay: 400
 
             Image {
                 id: screenStatusIcon
@@ -200,7 +251,7 @@ Item {
                 anchors.verticalCenter: parent.verticalCenter
                 width: 16
                 height: 16
-                source: root.screenContentEnabled && (root.screenAvailable || root.screenLoading)
+                source: root.screenContentEnabled && (root.screenState === "available" || root.screenState === "loading")
                     ? "qrc:/icons/icons/screen.svg" : "qrc:/icons/icons/screen-off.svg"
                 sourceSize: Qt.size(width * 4, height * 4)
                 fillMode: Image.PreserveAspectFit
@@ -216,6 +267,7 @@ Item {
             Text {
                 id: screenStatusLabel
                 objectName: "screenAvailabilityLabel"
+                visible: !root.compactMediaStatus
                 anchors.left: screenStatusIcon.right
                 anchors.leftMargin: 4
                 anchors.right: parent.right
@@ -223,6 +275,69 @@ Item {
                 height: parent.height
                 text: root.screenStatusText
                 color: root.screenStatusColor
+                font: statusLabel.font
+                verticalAlignment: Text.AlignVCenter
+                horizontalAlignment: Text.AlignHCenter
+            }
+        }
+
+        Rectangle {
+            visible: root.audioStatusVisible
+            width: visible ? 1 : 0
+            height: root.height
+            color: Theme.border
+        }
+
+        Rectangle {
+            id: audioStatusSegment
+            objectName: "audioAvailabilitySegment"
+            visible: root.audioStatusVisible
+            height: root.height
+            width: root.audioStatusWidth
+            color: root.audioStatusBackground
+            topRightRadius: root.auxiliaryVisible ? 0 : Theme.controlRadius
+            bottomRightRadius: topRightRadius
+            Accessible.role: Accessible.StaticText
+            Accessible.name: root.audioStatusText
+            Accessible.description: root.audioStatusDetail
+            HoverHandler { id: audioStatusHover }
+            ToolTip.visible: audioStatusHover.hovered
+            ToolTip.text: !root.systemAudioEnabled ? "System audio is stopped on this device."
+                : root.audioStatusDetail || root.audioStatusText
+            ToolTip.delay: 400
+
+            Image {
+                id: audioStatusIcon
+                objectName: "audioAvailabilityIcon"
+                anchors.left: parent.left
+                anchors.leftMargin: Theme.segmentPadding
+                anchors.verticalCenter: parent.verticalCenter
+                width: 16
+                height: 16
+                source: root.systemAudioEnabled && (root.audioState === "available" || root.audioState === "loading")
+                    ? "qrc:/icons/icons/volume-on.svg" : "qrc:/icons/icons/volume-off.svg"
+                sourceSize: Qt.size(width * 4, height * 4)
+                fillMode: Image.PreserveAspectFit
+                layer.enabled: true
+                layer.effect: MultiEffect {
+                    contrast: -1
+                    brightness: 0.5
+                    colorization: 1
+                    colorizationColor: root.audioStatusColor
+                }
+            }
+
+            Text {
+                id: audioStatusLabel
+                objectName: "audioAvailabilityLabel"
+                visible: !root.compactMediaStatus
+                anchors.left: audioStatusIcon.right
+                anchors.leftMargin: 4
+                anchors.right: parent.right
+                anchors.rightMargin: Theme.segmentPadding
+                height: parent.height
+                text: root.audioStatusText
+                color: root.audioStatusColor
                 font: statusLabel.font
                 verticalAlignment: Text.AlignVCenter
                 horizontalAlignment: Text.AlignHCenter

@@ -138,15 +138,21 @@ QtObject {
                     screenContentEnabled: root.controller.screenContentVisible
                     screenAvailable: root.controller.remoteScreenAvailable
                     screenLoading: root.controller.remoteScreenLoading
+                    screenState: root.controller.remoteScreenState
+                    screenStatusDetail: root.controller.remoteScreenStatus
+                    audioStatusVisible: true
+                    systemAudioEnabled: root.controller.systemAudioEnabled
+                    audioState: root.controller.remoteAudioState
+                    audioStatusDetail: root.controller.remoteAudioStatus
                 }
                 Row {
                     id: actions
                     x: topBar.width - width
                     spacing: topBar.gap
                     readonly property real textWidth: connectionButton.textWidth
-                        + screenContentButton.textWidth + historyButton.textWidth
+                        + screenContentButton.textWidth + systemAudioButton.textWidth + historyButton.textWidth
                         + settingsButton.textWidth + memoryButton.textWidth
-                        + spacing * 4 + (deleteButton.visible ? deleteButton.textWidth + spacing : 0)
+                        + spacing * 5 + (deleteButton.visible ? deleteButton.textWidth + spacing : 0)
 
                     AppButton {
                         id: connectionButton
@@ -168,6 +174,18 @@ QtObject {
                         checked: root.controller.screenContentVisible
                         enabled: root.controller.ready && !root.controller.clearingStorage
                         onClicked: root.controller.setScreenContentVisible(!root.controller.screenContentVisible)
+                    }
+                    AppButton {
+                        id: systemAudioButton
+                        objectName: "systemAudioButton"
+                        text: root.controller.systemAudioEnabled ? "Stop system audio" : "Play system audio"
+                        textVariants: ["Stop system audio", "Play system audio"]
+                        iconSource: root.controller.systemAudioEnabled
+                            ? "qrc:/icons/icons/volume-off.svg" : "qrc:/icons/icons/volume-on.svg"
+                        iconOnly: topBar.compactButtons
+                        checked: root.controller.systemAudioEnabled
+                        enabled: root.controller.ready && !root.controller.clearingStorage
+                        onClicked: root.controller.setSystemAudioEnabled(!root.controller.systemAudioEnabled)
                     }
                     AppButton {
                         id: historyButton

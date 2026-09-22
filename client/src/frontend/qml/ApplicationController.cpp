@@ -77,15 +77,20 @@ bool ApplicationController::screenContentVisible() const
     return !settings || settings->getScreenContentVisible();
 }
 
-bool ApplicationController::remoteAudioMuted() const
+bool ApplicationController::systemAudioEnabled() const
 {
     const auto* settings = m_runtime ? m_runtime->getSettingsManager() : nullptr;
-    return settings && settings->getRemoteAudioMuted();
+    return !settings || settings->getSystemAudioEnabled();
 }
 
 QString ApplicationController::remoteAudioState() const
 {
     return m_runtime ? m_runtime->remoteAudioState() : QStringLiteral("unavailable");
+}
+
+QString ApplicationController::remoteAudioStatus() const
+{
+    return m_runtime ? m_runtime->remoteAudioStatus() : QString();
 }
 
 QString ApplicationController::localConnectionDetail() const { return m_runtime ? m_runtime->localConnectionDetail() : QString(); }
@@ -240,6 +245,16 @@ bool ApplicationController::remoteScreenLoading() const
     return m_runtime && m_runtime->remoteScreenLoading();
 }
 
+QString ApplicationController::remoteScreenState() const
+{
+    return m_runtime ? m_runtime->remoteScreenState() : QStringLiteral("unavailable");
+}
+
+QString ApplicationController::remoteScreenStatus() const
+{
+    return m_runtime ? m_runtime->remoteScreenStatus() : QString();
+}
+
 bool ApplicationController::canDeleteProject() const
 {
     return m_runtime && m_runtime->canDeleteActiveProject();
@@ -280,6 +295,17 @@ bool ApplicationController::settingsScreenSharingEnabled() const
 QString ApplicationController::settingsScreenSharingStatus() const
 {
     return m_runtime ? m_runtime->screenSharingStatus() : QString();
+}
+
+bool ApplicationController::settingsAudioSharingEnabled() const
+{
+    const auto* settings = m_runtime ? m_runtime->getSettingsManager() : nullptr;
+    return settings && settings->getAudioSharingEnabled();
+}
+
+QString ApplicationController::settingsAudioSharingStatus() const
+{
+    return m_runtime ? m_runtime->audioSharingStatus() : QString();
 }
 
 void ApplicationController::start()
@@ -383,10 +409,12 @@ void ApplicationController::initializeBackend()
     m_runtime = std::make_unique<ApplicationRuntime>(m_runtimeProfile);
     connect(m_runtime.get(), &ApplicationRuntime::screenSharingStatusChanged,
             this, &ApplicationController::screenSharingStatusChanged);
+    connect(m_runtime.get(), &ApplicationRuntime::audioSharingStatusChanged,
+            this, &ApplicationController::audioSharingStatusChanged);
     connect(m_runtime->getSettingsManager(), &SettingsManager::screenContentVisibleChanged,
             this, &ApplicationController::screenContentVisibleChanged);
-    connect(m_runtime->getSettingsManager(), &SettingsManager::remoteAudioMutedChanged,
-            this, &ApplicationController::remoteAudioMutedChanged);
+    connect(m_runtime->getSettingsManager(), &SettingsManager::systemAudioEnabledChanged,
+            this, &ApplicationController::systemAudioEnabledChanged);
     auto* profiles = m_runtime->profileCache();
     profiles->setLocalPicture(QStringLiteral("saved"), m_runtime->getSettingsManager()->profilePictureJpeg());
     QmlRuntime::engine()->addImageProvider(QStringLiteral("profiles"), new ProfilePictureProvider(profiles));
@@ -440,8 +468,9 @@ void ApplicationController::initializeBackend()
     m_ready = true;
     emit settingsChanged();
     emit screenContentVisibleChanged();
-    emit remoteAudioMutedChanged();
+    emit systemAudioEnabledChanged();
     emit screenSharingStatusChanged();
+    emit audioSharingStatusChanged();
     emit readyChanged();
     emit bootstrapChanged();
     refreshPresentation();
@@ -536,15 +565,15 @@ void ApplicationController::setScreenContentVisible(bool visible)
     }
 }
 
-void ApplicationController::setRemoteAudioMuted(bool muted)
+void ApplicationController::setSystemAudioEnabled(bool enabled)
 {
     if (!m_runtime || m_clearingStorage) return;
     QString error;
-    if (!m_runtime->getSettingsManager()->setRemoteAudioMuted(muted, &error)) {
+    if (!m_runtime->getSettingsManager()->setSystemAudioEnabled(enabled, &error)) {
         NotificationRequest request;
         request.severity = NotificationSeverity::Error;
         request.category = QStringLiteral("Settings");
-        request.message = tr("Could not save the remote audio preference: %1").arg(error);
+        request.message = tr("Could not save the system audio preference: %1").arg(error);
         m_runtime->getNotificationCenter()->publish(request);
     }
 }
@@ -588,12 +617,21 @@ QString ApplicationController::saveSettings(const QString& serverUrl,
                                             const QString& username)
 {
     return saveSettings(serverUrl, autoUpload, appAlwaysOnTop, username,
-                        settingsScreenSharingEnabled());
+                        settingsScreenSharingEnabled(), settingsAudioSharingEnabled());
 }
 
 QString ApplicationController::saveSettings(const QString& serverUrl,
                                             bool autoUpload, bool appAlwaysOnTop,
                                             const QString& username, bool screenSharingEnabled)
+{
+    return saveSettings(serverUrl, autoUpload, appAlwaysOnTop, username,
+                        screenSharingEnabled, settingsAudioSharingEnabled());
+}
+
+QString ApplicationController::saveSettings(const QString& serverUrl,
+                                            bool autoUpload, bool appAlwaysOnTop,
+                                            const QString& username, bool screenSharingEnabled,
+                                            bool audioSharingEnabled)
 {
     if (m_clearingStorage) return QStringLiteral("The application is closing.");
     if (!m_runtime || !m_runtime->getSettingsManager()) {
@@ -609,7 +647,7 @@ QString ApplicationController::saveSettings(const QString& serverUrl,
     const bool reconnect = canonical != settings->getServerUrl();
     const QByteArray picture = m_profileEditing ? m_draftProfilePicture : settings->profilePictureJpeg();
     if (!settings->commitSettings(canonical, autoUpload, appAlwaysOnTop, username, picture,
-                                  screenSharingEnabled, &error)) return error;
+                                  screenSharingEnabled, audioSharingEnabled, &error)) return error;
     m_runtime->profileCache()->setLocalPicture(QStringLiteral("saved"), picture);
     cancelProfileEdit();
     if (reconnect) {

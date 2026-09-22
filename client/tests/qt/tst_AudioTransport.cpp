@@ -3,6 +3,8 @@
 #include "backend/network/AudioPacketFreshness.h"
 #include "backend/network/AudioPlayoutPolicy.h"
 #include "backend/audiosharing/MediaCaptureClock.h"
+#include "backend/audiosharing/AudioSharingService.h"
+#include "backend/audiosharing/AudioWorkerClient.h"
 #include "backend/network/WebSocketClient.h"
 #include "backend/network/RemoteSessionCoordinator.h"
 #include <QProcess>
@@ -64,6 +66,111 @@ private slots:
         if(relay.state()!=QProcess::NotRunning) { relay.write("{\"action\":\"shutdown\"}\n");
             if(!relay.waitForFinished(2000)) { relay.kill(); relay.waitForFinished(2000); } }
         disconnect(&relay,nullptr,this,nullptr);
+    }
+    void listeningStatesAndFailuresAreIndependentOfScreenSharing() {
+        QTemporaryDir identities;
+        WebSocketClient owner(identities.filePath("owner"),false),source(identities.filePath("source"),false);
+        AudioSharingService listener(&owner);
+        AudioTransport publisher(&source);
+        auto* receiver=listener.findChild<AudioTransport*>(); QVERIFY(receiver);
+        auto* worker=AudioWorkerClient::instance();
+        QSignalSpy issues(&listener,&AudioSharingService::remoteIssue);
+        QString session; connectPeers(owner,source,session);
+        source.setScreenSharingEnabled(false);
+        listener.setViewedEndpoint(source.endpointId());
+        QCOMPARE(listener.state(),QStringLiteral("disabled"));
+        QVERIFY(receiver->viewerStreamId().isEmpty());
+        listener.setListeningEnabled(true);
+        QTRY_COMPARE_WITH_TIMEOUT(listener.state(),QStringLiteral("sharing_disabled"),5000);
+        QVERIFY(listener.remoteStatus().contains(QStringLiteral("disabled system audio sharing")));
+        publisher.setSharingEnabled(true);
+        QTRY_VERIFY_WITH_TIMEOUT(publisher.isPublishing() && !receiver->viewerStreamId().isEmpty(),5000);
+        QTRY_COMPARE_WITH_TIMEOUT(listener.state(),QStringLiteral("loading"),3000);
+        const auto stream=receiver->viewerStreamId();
+        // A successfully started but silent system has no packets or output
+        // clock yet. Its capture readiness must not remain loading forever.
+        publisher.sendStatus(QStringLiteral("streaming"));
+        QTRY_COMPARE_WITH_TIMEOUT(listener.state(),QStringLiteral("available"),3000);
+        QVERIFY(listener.remoteStatus().contains(QStringLiteral("sharing is active")));
+        worker->playbackClock(source.endpointId(),stream,100,200);
+        QCOMPARE(listener.state(),QStringLiteral("available"));
+
+        // Source capture/codec failure is visible even with screen consent off.
+        issues.clear(); publisher.sendStatus(QStringLiteral("capture_error"));
+        QTRY_COMPARE_WITH_TIMEOUT(listener.state(),QStringLiteral("error"),3000);
+        QVERIFY(listener.remoteStatus().contains(QStringLiteral("captured or encoded")));
+        QCOMPARE(issues.size(),1);
+        publisher.sendStatus(QStringLiteral("capture_error"));
+        QTest::qWait(150);
+        QCOMPARE(issues.size(),1);
+        QCOMPARE(receiver->viewerStreamId(),stream);
+        publisher.sendStatus(QStringLiteral("starting"));
+        QTRY_COMPARE_WITH_TIMEOUT(listener.state(),QStringLiteral("loading"),3000);
+        publisher.sendStatus(QStringLiteral("streaming"));
+        QTRY_COMPARE_WITH_TIMEOUT(listener.state(),QStringLiteral("available"),3000);
+        worker->playbackClock(source.endpointId(),stream,300,400);
+        QCOMPARE(listener.state(),QStringLiteral("available"));
+
+        // Late decoder/device errors cannot belong to a replacement stream.
+        worker->playbackFailed(source.endpointId(),QStringLiteral("old-epoch"),QStringLiteral("Old codec error"));
+        QCOMPARE(listener.state(),QStringLiteral("available"));
+        worker->playbackFailed(QStringLiteral("other-client"),stream,QStringLiteral("Other device error"));
+        QCOMPARE(listener.state(),QStringLiteral("available"));
+        issues.clear();
+        worker->playbackFailed(source.endpointId(),stream,QStringLiteral("Audio decoder failed"));
+        QCOMPARE(listener.state(),QStringLiteral("error"));
+        QCOMPARE(listener.remoteStatus(),QStringLiteral("Audio decoder failed"));
+        QCOMPARE(issues.size(),1);
+        worker->playbackFailed(source.endpointId(),stream,QStringLiteral("Audio decoder failed"));
+        QCOMPARE(issues.size(),1);
+        publisher.sendStatus(QStringLiteral("streaming"));
+        QTest::qWait(150);
+        QCOMPARE(listener.state(),QStringLiteral("error"));
+        worker->playbackClock(source.endpointId(),stream,500,600);
+        QCOMPARE(listener.state(),QStringLiteral("available"));
+
+        source.setScreenSharingEnabled(true);
+        source.setScreenSharingEnabled(false);
+        QTest::qWait(250);
+        QCOMPARE(receiver->viewerStreamId(),stream);
+        QCOMPARE(listener.state(),QStringLiteral("available"));
+        listener.setListeningEnabled(false);
+        QCOMPARE(listener.state(),QStringLiteral("disabled"));
+        QVERIFY(receiver->viewerStreamId().isEmpty());
+        QTRY_VERIFY_WITH_TIMEOUT(!publisher.isPublishing(),3000);
+        worker->playbackFailed(source.endpointId(),stream,QStringLiteral("Late failure"));
+        QCOMPARE(listener.state(),QStringLiteral("disabled"));
+        listener.setListeningEnabled(true);
+        QTRY_VERIFY_WITH_TIMEOUT(publisher.isPublishing(),3000);
+        publisher.setSharingEnabled(false);
+        QTRY_COMPARE_WITH_TIMEOUT(listener.state(),QStringLiteral("sharing_disabled"),3000);
+    }
+    void captureFailureRemainsVisibleDuringRetryBackoff() {
+        QTemporaryDir identities;
+        WebSocketClient owner(identities.filePath("owner"),false),source(identities.filePath("source"),false);
+        AudioTransport receiver(&owner);
+        AudioSharingService publisher(&source);
+        auto* transport=publisher.findChild<AudioTransport*>(); QVERIFY(transport);
+        QSignalSpy remoteStates(&receiver,&AudioTransport::remoteStateChanged);
+        QString session; connectPeers(owner,source,session);
+        source.setScreenSharingEnabled(false);
+        // This headless binary deliberately has no audio worker executable.
+        // Capture failure must reach the receiver without touching video.
+        publisher.setSharingEnabled(true);
+        receiver.setSubscription(session,owner.remoteSessionCoordinator()->byId(session).generation,true);
+        QTRY_VERIFY_WITH_TIMEOUT(!remoteStates.isEmpty()
+            && remoteStates.last().first().toString()==QLatin1String("capture_error"),5000);
+        QVERIFY(publisher.status().contains(QStringLiteral("executable is unavailable")));
+        const auto epoch=transport->publicationId(); QVERIFY(!epoch.isEmpty());
+        QTest::qWait(1000);
+        QCOMPARE(transport->publicationId(),epoch);
+        QCOMPARE(remoteStates.last().first().toString(),QStringLiteral("capture_error"));
+        QVERIFY(publisher.status().contains(QStringLiteral("executable is unavailable")));
+        QTRY_VERIFY_WITH_TIMEOUT(!transport->publicationId().isEmpty() && transport->publicationId()!=epoch
+            && remoteStates.last().first().toString()==QLatin1String("capture_error"),5000);
+        publisher.setSharingEnabled(false);
+        QVERIFY(publisher.status().isEmpty());
+        QTRY_COMPARE_WITH_TIMEOUT(remoteStates.last().first().toString(),QStringLiteral("disabled"),3000);
     }
     void wirePreservesEpochSequenceAndCapturePts() {
         const auto epoch=QUuid::createUuid().toString(QUuid::WithoutBraces);

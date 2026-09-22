@@ -43,6 +43,7 @@ signals:
     void remoteStateChanged(const QString& reason);
     void sourceReservationChanged(int bitsPerSecond);
     void issue(const QString& message);
+    void publicationIssue(const QString& message);
 
 private:
     struct Private;

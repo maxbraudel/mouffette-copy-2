@@ -8,9 +8,10 @@ and command sessions retain their existing transport and lifetime.
 ## Consent, grants and identity
 
 `audio_share_consent {audioVersion:1,enabled}` announces client support and
-replays the local screen-and-audio sharing preference. Both this consent and
-`screen_share_consent` must be enabled. Consent is false on each new control
-connection; no publication exists until an authorized viewer subscribes.
+replays the local system-audio sharing preference. Audio consent is independent
+of `screen_share_consent`; no screen consent, video subscription, physical display
+or video socket is required. Consent is false on each new control connection;
+no publication exists until an authorized viewer subscribes.
 
 `request_audio_channel {requestId,audioVersion:1,role:"publish"|"view"}` returns
 `audio_channel_token` with the same request, version and role, and a random
@@ -24,7 +25,9 @@ on control. The relay checks the current endpoint/runtime/generation, active
 command-ready session, leases, consent and both sockets. The subscription has
 no screen ID or viewport demand. Monitor changes do not change its identity.
 The default admission limit follows the existing ten viewers per publisher
-and 256 publisher limits.
+and 256 publisher limits. An admission rejection sends a disabled
+`audio_share_state` with `reason: "capacity_limited"` and empty stream/publication
+IDs so the viewer can explain the failure.
 
 The publisher receives `audio_publication_request {publicationId,enabled,
 bitrateBps}`. One source packet is uploaded once and relayed to every listening viewer,
@@ -37,6 +40,9 @@ revoking consent or changing session generation invalidates that viewer epoch.
 Publishers report `audio_publication_status {publicationId,reason}` using
 `starting`, `streaming`, `permission_denied`, `unavailable` or `capture_error`.
 Failure statuses suppress late media until `starting` or `streaming` resumes.
+They survive subscription state queries while the publication exists and do not
+change video publications. Screen failures and screen consent revocation likewise
+leave an authorized audio publication running.
 State additionally reports `disabled`, `unsupported`, `session_unavailable`,
 `channel_unavailable`, `capacity_limited` or `unsubscribed` as appropriate.
 
@@ -70,7 +76,7 @@ profiles through this audio feedback.
 
 Source timestamps use the same monotonic media domain as screen video. The
 relay never substitutes wall time or receipt time. Decode/playout buffering,
-capture application exclusion and local mute are client responsibilities.
+capture application exclusion and local listening preferences are client responsibilities.
 
 ## Receipts, budgets and recovery
 

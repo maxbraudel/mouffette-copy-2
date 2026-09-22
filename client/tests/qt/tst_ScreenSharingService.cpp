@@ -7,6 +7,7 @@
 #include "backend/managers/network/ConnectionManager.h"
 #include "backend/managers/system/SystemMonitor.h"
 #include "backend/network/RemoteSessionCoordinator.h"
+#include "backend/network/AudioTransport.h"
 #include "backend/network/WebSocketClient.h"
 #include "backend/notifications/NotificationCenter.h"
 #include "backend/runtime/ApplicationRuntime.h"
@@ -412,6 +413,8 @@ private slots:
         QVERIFY(frames.isEmpty());
         QCOMPARE(issues.count(), 1);
         QVERIFY(issues.last().at(1).toString().contains(QStringLiteral("disabled")));
+        QCOMPARE(viewer.remoteState(target.endpointId()), QStringLiteral("sharing_disabled"));
+        QCOMPARE(viewer.remoteStatus(target.endpointId()), issues.last().at(1).toString());
 
         target.setScreenSharingEnabled(true);
         QTRY_VERIFY_WITH_TIMEOUT(owner.isScreenChannelConnected() && target.isScreenChannelConnected(), 4000);
@@ -536,6 +539,8 @@ private slots:
             QVERIFY(target.sendScreenFrame(header(grant, packet, ++sequence), packet.annexB));
             QTRY_COMPARE_WITH_TIMEOUT(frames.count(), oldFrames + 1, 4000);
             QVERIFY(viewer.isRemoteScreenAvailable(target.endpointId()));
+            QCOMPARE(viewer.remoteState(target.endpointId()), QStringLiteral("available"));
+            QVERIFY(viewer.remoteStatus(target.endpointId()).isEmpty());
             QVERIFY(!viewer.isRemoteScreenLoading(target.endpointId()));
             const int oldIssues = issues.count();
             const int oldClears = cleared.count();
@@ -548,6 +553,8 @@ private slots:
             QCOMPARE(issues.count(), oldIssues + 1);
             QCOMPARE(issues.last().first().toString(), target.endpointId());
             const auto message = issues.last().at(1).toString();
+            QCOMPARE(viewer.remoteState(target.endpointId()), QStringLiteral("error"));
+            QCOMPARE(viewer.remoteStatus(target.endpointId()), message);
             if (reason == QLatin1String("permission_denied")) {
                 QVERIFY2(message.contains(QStringLiteral("Allow screen recording")), qPrintable(message));
                 QVERIFY2(message.contains(QStringLiteral("system settings")), qPrintable(message));
@@ -627,8 +634,19 @@ private slots:
         QVERIFY(!viewer.isRemoteScreenAvailable(target.endpointId()));
         QCOMPARE(issues.count(), 3);
         QVERIFY(issues.last().at(1).toString().contains(QStringLiteral("connection is unavailable")));
+        QCOMPARE(viewer.remoteState(target.endpointId()), QStringLiteral("error"));
+        const auto channelError = viewer.remoteStatus(target.endpointId());
         owner.screenShareStateReceived(lostChannel);
         QCOMPARE(issues.count(), 3);
+        QCOMPARE(viewer.remoteState(target.endpointId()), QStringLiteral("error"));
+        QCOMPARE(viewer.remoteStatus(target.endpointId()), channelError);
+        auto* socket = videoSocket(owner);
+        QVERIFY(socket);
+        socket->abort();
+        QVERIFY(!owner.isScreenChannelConnected());
+        viewer.refresh();
+        QCOMPARE(viewer.remoteState(target.endpointId()), QStringLiteral("error"));
+        QCOMPARE(viewer.remoteStatus(target.endpointId()), channelError);
         viewer.setViewedEndpoint({});
         QVERIFY(!viewer.isRemoteScreenAvailable(target.endpointId()));
         QCOMPARE(issues.count(), 3); // Hiding the canvas is not a connection error.
@@ -885,6 +903,14 @@ private slots:
             }
             return count;
         };
+        const auto audioToasts = [&] {
+            int count = 0;
+            for (const auto& toast : toasts) {
+                const auto entry = qvariant_cast<NotificationEntry>(toast.first());
+                if (entry.category == QLatin1String("Audio sharing")) ++count;
+            }
+            return count;
+        };
         runtime.getProjectManager()->stopAutomaticTimersForTesting();
         runtime.setQmlWindowVisible(true);
         runtime.setPointerInsideControlWindow(true);
@@ -898,6 +924,8 @@ private slots:
         QSignalSpy states(owner, &WebSocketClient::screenShareStateReceived);
         WebSocketClient target(directory.filePath(QStringLiteral("publisher")), false);
         configure(target, QStringLiteral("publisher"));
+        AudioTransport audioPublisher(&target);
+        audioPublisher.setSharingEnabled(true);
         QSignalSpy grants(&target, &WebSocketClient::screenShareRequestReceived);
         target.setScreenSharingEnabled(true);
         connection->connectToServer(m_url);
@@ -925,6 +953,10 @@ private slots:
         QVERIFY(!source->hasFrame());
         QVERIFY(!runtime.remoteScreenAvailable());
         QVERIFY(!runtime.remoteScreenLoading());
+        // A hidden screen does not suppress the independent audio subscription.
+        QTRY_VERIFY_WITH_TIMEOUT(audioPublisher.isPublishing(), 4000);
+        QTRY_COMPARE_WITH_TIMEOUT(runtime.remoteAudioState(), QStringLiteral("loading"), 4000);
+        QVERIFY(!settings->getAudioSharingEnabled()); // Listening grants no local capture consent.
 
         QVERIFY2(settings->setScreenContentVisible(true, &error), qPrintable(error));
         QVERIFY(runtime.remoteScreenLoading());
@@ -946,9 +978,32 @@ private slots:
         QVERIFY(runtime.remoteScreenAvailable());
         QVERIFY(!runtime.remoteScreenLoading());
         QCOMPARE(screenToasts(), 0);
+        // Stopping audio tears down only its subscription; the screen stays available.
+        QVERIFY2(settings->setSystemAudioEnabled(false, &error), qPrintable(error));
+        QTRY_COMPARE_WITH_TIMEOUT(runtime.remoteAudioState(), QStringLiteral("disabled"), 4000);
+        QTRY_VERIFY_WITH_TIMEOUT(!audioPublisher.isPublishing(), 4000);
+        QVERIFY(runtime.remoteScreenAvailable());
+        QVERIFY(source->hasFrame());
+        QVERIFY2(settings->setSystemAudioEnabled(true, &error), qPrintable(error));
+        QTRY_VERIFY_WITH_TIMEOUT(audioPublisher.isPublishing(), 4000);
+        QTRY_COMPARE_WITH_TIMEOUT(runtime.remoteAudioState(), QStringLiteral("loading"), 4000);
+        const int audioWarnings = audioToasts();
+        audioPublisher.sendStatus(QStringLiteral("capture_error"));
+        QTRY_COMPARE_WITH_TIMEOUT(runtime.remoteAudioState(), QStringLiteral("error"), 4000);
+        QTRY_COMPARE_WITH_TIMEOUT(audioToasts(), audioWarnings + 1, 4000);
+        QVERIFY(runtime.remoteScreenAvailable());
+        QVERIFY(source->hasFrame());
+        audioPublisher.sendStatus(QStringLiteral("capture_error"));
+        QTest::qWait(50);
+        QCOMPARE(audioToasts(), audioWarnings + 1);
+        audioPublisher.sendStatus(QStringLiteral("starting"));
+        QTRY_COMPARE_WITH_TIMEOUT(runtime.remoteAudioState(), QStringLiteral("loading"), 4000);
         QVERIFY(target.sendScreenShareStatus(session,
             quint64(grant.value("generation").toDouble()), QStringLiteral("permission_denied")));
         QTRY_COMPARE_WITH_TIMEOUT(screenToasts(), 1, 4000);
+        QCOMPARE(runtime.remoteScreenState(), QStringLiteral("error"));
+        QCOMPARE(runtime.remoteAudioState(), QStringLiteral("loading"));
+        QVERIFY(audioPublisher.isPublishing());
         QVERIFY(!source->hasFrame());
         QVERIFY(!runtime.remoteScreenAvailable());
         QVERIFY(!runtime.remoteScreenLoading());
@@ -973,6 +1028,8 @@ private slots:
         QVERIFY(!target.sendScreenFrame(header(grant, packet, 2), packet.annexB));
         QVERIFY(owner->canIssueSessionCommands(session));
         QVERIFY(canvas->hasActiveScreens());
+        QVERIFY(audioPublisher.isPublishing());
+        QCOMPARE(runtime.remoteAudioState(), QStringLiteral("loading"));
 
         const int grantsWhileHidden = grants.count();
         runtime.navigateToClients();

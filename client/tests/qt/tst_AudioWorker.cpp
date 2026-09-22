@@ -604,6 +604,25 @@ private slots:
         QTest::qWait(30);
         client.shutdown();
     }
+    void malformedRemoteAudioReportsTheFailingSourceAndEpoch() {
+        AudioWorkerClient client;
+        QSignalSpy states(&client, &AudioWorkerClient::captureStateChanged);
+        QSignalSpy errors(&client, &AudioWorkerClient::playbackFailed);
+        // Preparation authenticates the helper without starting native capture.
+        auto preview = client.createPreviewChannel(); QVERIFY(preview);
+        QTRY_VERIFY_WITH_TIMEOUT(!states.isEmpty(), 5000);
+        const auto source = QStringLiteral("decoder-failure-source");
+        const auto epoch = QUuid::createUuid().toString(QUuid::WithoutBraces);
+        for (int i = 0; i < 5; ++i)
+            client.playPacket(source, epoch, i + 1, AudioWorkerClient::nowUs(), QByteArray::fromHex("ff"));
+        QTRY_COMPARE_WITH_TIMEOUT(errors.size(), 1, 3000);
+        QCOMPARE(errors.first().at(0).toString(), source);
+        QCOMPARE(errors.first().at(1).toString(), epoch);
+        QVERIFY(errors.first().at(2).toString().contains(QStringLiteral("could not be decoded")));
+        QTest::qWait(100);
+        QCOMPARE(errors.size(), 1);
+        client.shutdown();
+    }
     void helperRemoteEpochMuteAndClock() {
         if (QMediaDevices::defaultAudioOutput().isNull()) QSKIP("No audio output");
         AudioWorkerClient client; QSignalSpy state(&client, &AudioWorkerClient::captureStateChanged);

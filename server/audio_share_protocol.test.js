@@ -25,10 +25,7 @@ function context(config = {}) {
     const control=(peer,type,fields={})=>relay.handleControl(peer.id,{type,connectionGeneration:peer.connectionGeneration,...fields});
     const token=(peer,role)=>{ assert.equal(control(peer,'request_audio_channel',{role,audioVersion:1,requestId:crypto.randomUUID()}),true); return peer.ws.messages.at(-1); };
     const connect=(peer,role)=>{ const issued=token(peer,role),ws=socket(); relay.acceptSocket(ws,issued.token); return ws; };
-    const consent=(peer,enabled=true)=>{
-        server.screenShare.handleControl(peer.id,{type:'screen_share_consent',enabled});
-        return control(peer,'audio_share_consent',{enabled,audioVersion:1});
-    };
+    const consent=(peer,enabled=true)=>control(peer,'audio_share_consent',{enabled,audioVersion:1});
     const subscribe=(owner,target)=>{
         const session=server.remoteSessions.open({ownerEndpointId:owner.endpointId,targetEndpointId:target.endpointId,
             ownerRuntimeId:owner.runtimeId,targetRuntimeId:target.runtimeId,ownerConnectionGeneration:1,targetConnectionGeneration:1}).session;
@@ -44,6 +41,12 @@ function context(config = {}) {
 const frames=ws=>ws.messages.filter(Buffer.isBuffer).map(parseAudioPacket).filter(Boolean);
 const receipts=ws=>ws.messages.filter(Buffer.isBuffer).map(parseAudioAck).filter(Boolean);
 const frame=(publication,sequence=1,timestamp=20000)=>encodeAudioPacket(publication.id,sequence,timestamp,Buffer.from([0xfc,1,2,3]));
+function screenFrame(entry,sequence) {
+    const header=Buffer.from(JSON.stringify({remoteSessionId:entry.session.remoteSessionId,generation:entry.generation,
+        streamId:entry.streamId,screenId:0,sequence,width:640,height:360,keyFrame:true,codec:'h264'}));
+    const prefix=Buffer.alloc(6); prefix.write('MSV1'); prefix.writeUInt16BE(header.length,4);
+    return Buffer.concat([prefix,header,Buffer.from([0,0,0,1,0x65,1,2,3])]);
+}
 
 // Compact framing, integer bounds, strict message kinds and truncated payloads.
 {
@@ -99,6 +102,91 @@ const frame=(publication,sequence=1,timestamp=20000)=>encodeAudioPacket(publicat
     source.connectionGeneration=1; c.relay.refreshAll();
     output.emit('message',frame(entry.publication),true); assert.equal(output.closed.code,1008);
     c.relay.removeSession(session); assert.equal(c.relay.subscriptions.size,0);
+}
+// Screen consent, physical displays and video subscriptions are irrelevant to
+// audio authority. Showing or hiding screens preserves the live audio epoch.
+{
+    const c=context(),source=c.client('source'),viewer=c.client('viewer');
+    const input=c.connect(source,'publish'),output=c.connect(viewer,'view');
+    c.consent(source); source.screens=[];
+    const {entry}=c.subscribe(viewer,source),publication=entry.publication,streamId=entry.streamId;
+    assert.ok(publication,'audio starts without screen consent, displays or video sockets');
+    assert.equal(c.server.screenShare.subscriptions.size,0);
+    for(const enabled of [false,true,false]) {
+        assert.equal(c.server.screenShare.handleControl(source.id,{type:'screen_share_consent',enabled}),true);
+        c.relay.refreshAll();
+        assert.equal(entry.publication,publication); assert.equal(entry.streamId,streamId);
+        c.tick(20); input.emit('message',frame(publication,publication.sequence+1,(publication.sequence+1)*20000),true);
+    }
+    assert.equal(frames(output).length,3);
+    assert.equal(receipts(input).length,3);
+    c.consent(source,false);
+    assert.equal(entry.reason,'disabled'); assert.equal(entry.publication,null);
+    assert.equal(viewer.ws.messages.at(-1).reason,'disabled');
+}
+// Capture failures and consent changes affect only the selected medium. Audio
+// errors survive state queries and recover without restarting a video stream.
+{
+    const c=context(),source=c.client('source'),viewer=c.client('viewer');
+    const input=c.connect(source,'publish'),output=c.connect(viewer,'view'); c.consent(source);
+    const {entry,session,message}=c.subscribe(viewer,source),publication=entry.publication;
+    const video=c.server.screenShare,screenInput=socket(),screenOutput=socket();
+    for(const [peer,ws] of [[source,screenInput],[viewer,screenOutput]]) {
+        ws.screenFeedbackVersion=1; ws.screenMaximumEdge=3840; video.sockets.set(peer,ws);
+    }
+    const screenControl=(peer,type,fields={})=>video.handleControl(peer.id,{type,
+        remoteSessionId:session.remoteSessionId,generation:session.generation,
+        connectionGeneration:peer.connectionGeneration,...fields});
+    assert.equal(screenControl(source,'screen_share_consent',{enabled:true}),true);
+    assert.equal(screenControl(viewer,'screen_share_subscribe',{enabled:true}),true);
+    const screenEntry=video.subscriptions.get(session.remoteSessionId),screenStreamId=screenEntry.streamId;
+    const screenStatus=reason=>screenControl(source,'screen_share_status',{streamId:screenEntry.streamId,screenId:0,reason});
+    const audioStatus=reason=>c.control(source,'audio_publication_status',{publicationId:publication.id,reason});
+    assert.equal(video.handleFrame(source,screenInput,screenFrame(screenEntry,1)),true);
+    assert.equal(screenStatus('capture_error'),true);
+    input.emit('message',frame(publication,1),true);
+    assert.equal(frames(output).length,1,'screen capture failure does not block system audio');
+    assert.equal(video.handleFrame(source,screenInput,screenFrame(screenEntry,2)),false);
+    assert.equal(audioStatus('capture_error'),true);
+    assert.equal(screenStatus('starting'),true);
+    assert.equal(video.handleFrame(source,screenInput,screenFrame(screenEntry,3)),true,
+        'audio capture failure does not block screen recovery');
+    input.emit('message',frame(publication,2,40000),true);
+    assert.equal(frames(output).length,1,'failed audio is not forwarded');
+    assert.equal(entry.reason,'capture_error'); assert.equal(screenEntry.streamId,screenStreamId);
+    assert.equal(c.control(viewer,'audio_share_subscribe',message),true);
+    assert.equal(viewer.ws.messages.at(-1).reason,'capture_error','resubscription replays the independent audio failure');
+    assert.equal(audioStatus('streaming'),true);
+    input.emit('message',frame(publication,3,60000),true);
+    assert.equal(frames(output).length,2); assert.equal(entry.reason,'streaming');
+    c.consent(source,false);
+    assert.equal(entry.reason,'disabled'); assert.equal(screenEntry.streamId,screenStreamId);
+    assert.equal(video.handleFrame(source,screenInput,screenFrame(screenEntry,4)),true,
+        'revoking audio consent leaves screen publication running');
+    c.consent(source,true);
+    assert.notEqual(entry.publication.id,publication.id);
+    const next=entry.publication,nextStreamId=entry.streamId;
+    assert.equal(screenControl(source,'screen_share_consent',{enabled:false}),true);
+    c.relay.refreshAll();
+    assert.equal(entry.publication,next); assert.equal(entry.streamId,nextStreamId);
+    input.emit('message',frame(next),true);
+    assert.equal(frames(output).length,3,'revoking screen consent leaves system audio running');
+}
+// A rejected viewer receives a usable audio status, without changing an
+// existing listener or requiring the screen feature to be enabled.
+{
+    const c=context({screenMaxViewersPerPublisher:1}),source=c.client('source');
+    c.connect(source,'publish'); c.consent(source);
+    const first=c.client('first'); c.connect(first,'view'); const active=c.subscribe(first,source);
+    const second=c.client('second'); c.connect(second,'view');
+    const session=c.server.remoteSessions.open({ownerEndpointId:second.endpointId,targetEndpointId:source.endpointId,
+        ownerRuntimeId:second.runtimeId,targetRuntimeId:source.runtimeId,ownerConnectionGeneration:1,targetConnectionGeneration:1}).session;
+    assert.equal(c.control(second,'audio_share_subscribe',{
+        remoteSessionId:session.remoteSessionId,generation:session.generation,enabled:true}),false);
+    const state=second.ws.messages.at(-1);
+    assert.equal(state.type,'audio_share_state'); assert.equal(state.reason,'capacity_limited');
+    assert.equal(state.enabled,false); assert.equal(state.remoteSessionId,session.remoteSessionId);
+    assert.equal(c.relay.subscriptions.size,1); assert.ok(active.entry.publication);
 }
 // A replacement publish pipe rotates all matching epochs; tokens are single-use
 // and invalid after expiry, replacement of the control object or lease loss.

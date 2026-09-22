@@ -116,6 +116,7 @@ public:
     bool captureFailed = false;
     int bitrate = 96000;
     QHash<QString, std::shared_ptr<RemoteSource>> remote;
+    QHash<QString, QPair<QString, qint64>> playbackErrors;
     QHash<QString, std::shared_ptr<PreviewMapping>> previews;
     std::vector<std::unique_ptr<OutputDevice>> outputs;
     bool remoteMuted = false;
@@ -140,9 +141,25 @@ public:
         QTimer::singleShot(5000, this, [this] { if (socket.state() != QLocalSocket::ConnectedState) QCoreApplication::quit(); });
     }
     ~AudioWorker() override { stopCapture(); outputs.clear(); }
-    void error(const QString& value) {
+    void error(const QString& value, const QString& sourceId, const QString& epoch) {
+        const auto key = epoch + QLatin1Char('\n') + value;
+        const auto now = MediaCaptureClock::nowUs();
+        const auto previous = playbackErrors.constFind(sourceId);
+        if (previous != playbackErrors.cend() && previous->first == key && now - previous->second < 1000000) return;
+        if (previous == playbackErrors.cend() && playbackErrors.size() >= 64)
+            playbackErrors.erase(playbackErrors.begin());
+        playbackErrors.insert(sourceId, {key, now});
         auto message = command("error"); message.insert(QStringLiteral("error"), value);
+        message.insert(QStringLiteral("source"), sourceId);
+        message.insert(QStringLiteral("epoch"), epoch);
         AudioWorkerProtocol::sendControl(&socket, message);
+    }
+    void outputError(const QString& value, const QByteArray& outputId) {
+        // Preview-only devices must not invalidate another device's remote
+        // audio. Fence queued errors by source and epoch like playback clocks.
+        if (outputId != QMediaDevices::defaultAudioOutput().id()) return;
+        for (auto it = remote.cbegin(); it != remote.cend(); ++it)
+            error(value, it.key(), it.value()->epoch);
     }
     void previewState(const QString& key, const QString& failure = {}) {
         auto message = command("preview-state");
@@ -288,7 +305,7 @@ public:
             } else if (type == QLatin1String("mute")) {
                 remoteMuted = message.value(QStringLiteral("muted")).toBool();
                 for (const auto& source : remote) source->enabled.store(false, std::memory_order_release);
-                remote.clear(); ++mixerRevision;
+                remote.clear(); playbackErrors.clear(); ++mixerRevision;
                 ensureOutputs();
             } else if (type == QLatin1String("preview-add")) {
                 addPreview(message);
@@ -316,6 +333,7 @@ public:
         if (!source || source->epoch != epoch) {
             if (source) source->enabled.store(false, std::memory_order_release);
             source = std::make_shared<RemoteSource>(); source->epoch = epoch;
+            source->lastPacketUs = MediaCaptureClock::nowUs();
             ++mixerRevision;
         }
         if (source->received && quint64(sequence) <= source->sequence) return;
@@ -348,7 +366,10 @@ public:
             queuePcm(pcm, lostTime, presentation < 0 ? -1 : presentation - qint64(missing - lost) * 20000);
         }
         const auto pcm = source->decoder.decode(packet, failure);
-        if (pcm.isEmpty()) return;
+        if (pcm.isEmpty()) {
+            error(QStringLiteral("Remote system audio could not be decoded: %1").arg(failure), sourceId, epoch);
+            return;
+        }
         queuePcm(pcm, timestamp, presentation);
         source->sequence = quint64(sequence); source->received = true;
         source->lastTimestampUs = timestamp; source->lastPacketUs = MediaCaptureClock::nowUs();
@@ -363,10 +384,10 @@ public:
         bool restart = false;
         for (const auto& output : outputs) {
             if (output->sink->error() == QtAudio::NoError && output->sink->state() != QtAudio::StoppedState) continue;
+            outputError(QStringLiteral("Audio output stopped; retrying the device"), output->id);
             outputRetryUs.insert(output->id, now + 1000000); restart = true;
         }
         if (restart) {
-            error(QStringLiteral("Audio output stopped; retrying the device"));
             outputs.clear();
             for (auto& source : remote) {
                 auto replacement = std::make_shared<RemoteSource>(); replacement->epoch = source->epoch;
@@ -377,6 +398,8 @@ public:
         }
         QList<QByteArray> ids;
         const auto defaultDevice = QMediaDevices::defaultAudioOutput();
+        if (!remote.isEmpty() && defaultDevice.isNull())
+            outputError(QStringLiteral("No audio output device is available on this device."), defaultDevice.id());
         if (defaultOutputId != defaultDevice.id()) {
             if (!defaultOutputId.isEmpty()) {
                 // A default-device change can leave the old sink alive for a
@@ -412,7 +435,7 @@ public:
             if (output->format.channelCount() > 8) output->format.setChannelCount(2);
             if (!device.isFormatSupported(output->format) || output->format.sampleRate() < 8000) {
                 outputRetryUs.insert(id, now + 1000000);
-                error(QStringLiteral("No supported audio output format")); continue;
+                outputError(QStringLiteral("No supported audio output format"), id); continue;
             }
             output->sink = std::make_unique<QAudioSink>(device, output->format);
             // Qt's callback API bypasses its software ringbuffer; setBufferSize
@@ -421,7 +444,7 @@ public:
             output->sink->start([this, pointer](QSpan<float> samples) { render(*pointer, samples); });
             if (output->sink->error() != QtAudio::NoError) {
                 outputRetryUs.insert(id, now + 1000000);
-                error(QStringLiteral("Audio output could not start")); continue;
+                outputError(QStringLiteral("Audio output could not start"), id); continue;
             }
             outputRetryUs.remove(id);
             outputs.push_back(std::move(output));
@@ -523,6 +546,7 @@ public:
         for (auto it = remote.begin(); it != remote.end();) {
             if (now - it.value()->lastPacketUs > 5000000) {
                 it.value()->enabled.store(false, std::memory_order_release);
+                playbackErrors.remove(it.key());
                 it = remote.erase(it); ++mixerRevision; continue;
             }
             auto& source = *it.value();

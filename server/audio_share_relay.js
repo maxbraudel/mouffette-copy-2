@@ -132,7 +132,11 @@ class AudioShareRelay {
             if (entry && entry.generation !== session.generation) { this.removeSession(session,'session_changed'); entry = null; }
             if (!entry) {
                 const count = [...this.subscriptions.values()].filter(v => v.session.targetEndpointId === session.targetEndpointId).length;
-                if (count >= this.maxViewers || this.subscriptions.size >= this.maxPublications * this.maxViewers) return false;
+                if (count >= this.maxViewers || this.subscriptions.size >= this.maxPublications * this.maxViewers) {
+                    this.send(client,{type:'audio_share_state',remoteSessionId:session.remoteSessionId,generation:session.generation,
+                        enabled:false,reason:'capacity_limited',streamId:'',publicationId:'',bitrateBps:96000});
+                    return false;
+                }
                 entry = {session,generation:session.generation,streamId:'',publication:null,reason:'',sequence:0,
                     congestedUntil:0,lastFeedback:-Infinity,targetBps:this.server.config?.screenViewerInitialBps ?? 3000000};
                 this.subscriptions.set(session.remoteSessionId,entry);
@@ -159,7 +163,7 @@ class AudioShareRelay {
         if (!this.current(owner) || !this.current(target) || owner.runtimeId !== s.ownerRuntimeId || target.runtimeId !== s.targetRuntimeId
             || owner.connectionGeneration !== s.ownerConnectionGeneration || target.connectionGeneration !== s.targetConnectionGeneration) return 'session_unavailable';
         if (target.audioVersion !== 1) return 'unsupported';
-        if (!target.screenSharingEnabled || !target.audioSharingEnabled) return 'disabled';
+        if (target.audioSharingEnabled !== true) return 'disabled';
         if (!this.socket(owner,'view') || !this.socket(target,'publish')) return 'channel_unavailable';
         return 'ready';
     }
@@ -271,7 +275,7 @@ class AudioShareRelay {
         // Delayed valid packets cannot revive retired epochs; consuming them is
         // harmless, but only current authority earns publisher receipt credit.
         if (!this.current(client) || this.socket(client,'publish') !== ws || !publication || publication.id !== frame.epoch) return true;
-        if (!client.screenSharingEnabled || !client.audioSharingEnabled) return true;
+        if (client.audioSharingEnabled !== true) return true;
         this.count('receivedPackets');
         this.maximum('maximumSocketQueueBytes',ws.bufferedAmount || 0);
         if ((ws.bufferedAmount || 0) > this.maxBufferedBytes) { this.abort(ws); return true; }

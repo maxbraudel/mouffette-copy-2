@@ -65,16 +65,4 @@ Row {
             }
         }
     }
-    CanvasControls.OverlayButton {
-        objectName: "canvasRemoteAudioButton"
-        iconSource: root.controller && root.controller.remoteAudioMuted
-            ? "qrc:/icons/icons/volume-off.svg" : "qrc:/icons/icons/volume-on.svg"
-        accessibleName: root.controller && root.controller.remoteAudioMuted
-            ? "Unmute remote audio" : "Mute remote audio"
-        Accessible.description: (root.controller && root.controller.remoteAudioState) || ""
-        isToggle: true
-        toggled: root.controller && !root.controller.remoteAudioMuted
-        enabled: !!root.controller && !!root.session
-        onClicked: root.controller.setRemoteAudioMuted(!root.controller.remoteAudioMuted)
-    }
 }

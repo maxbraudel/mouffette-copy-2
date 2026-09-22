@@ -42,8 +42,9 @@ class ApplicationController final : public QObject
 
     Q_PROPERTY(bool connectionEnabled READ connectionEnabled NOTIFY presentationChanged)
     Q_PROPERTY(bool screenContentVisible READ screenContentVisible NOTIFY screenContentVisibleChanged)
-    Q_PROPERTY(bool remoteAudioMuted READ remoteAudioMuted NOTIFY remoteAudioMutedChanged)
+    Q_PROPERTY(bool systemAudioEnabled READ systemAudioEnabled NOTIFY systemAudioEnabledChanged)
     Q_PROPERTY(QString remoteAudioState READ remoteAudioState NOTIFY presentationChanged)
+    Q_PROPERTY(QString remoteAudioStatus READ remoteAudioStatus NOTIFY presentationChanged)
     Q_PROPERTY(QString localStatusText READ localStatusText NOTIFY presentationChanged)
     Q_PROPERTY(ConnectionState localConnectionState READ localConnectionState NOTIFY presentationChanged)
     Q_PROPERTY(QString remoteDisplayName READ remoteDisplayName NOTIFY presentationChanged)
@@ -56,6 +57,8 @@ class ApplicationController final : public QObject
     Q_PROPERTY(bool remoteVolumeVisible READ remoteVolumeVisible NOTIFY presentationChanged)
     Q_PROPERTY(bool remoteScreenAvailable READ remoteScreenAvailable NOTIFY presentationChanged)
     Q_PROPERTY(bool remoteScreenLoading READ remoteScreenLoading NOTIFY presentationChanged)
+    Q_PROPERTY(QString remoteScreenState READ remoteScreenState NOTIFY presentationChanged)
+    Q_PROPERTY(QString remoteScreenStatus READ remoteScreenStatus NOTIFY presentationChanged)
     Q_PROPERTY(bool canDeleteProject READ canDeleteProject NOTIFY presentationChanged)
     Q_PROPERTY(bool hasProject READ hasProject NOTIFY presentationChanged)
 
@@ -64,6 +67,8 @@ class ApplicationController final : public QObject
     Q_PROPERTY(bool settingsAppAlwaysOnTop READ settingsAppAlwaysOnTop NOTIFY settingsChanged)
     Q_PROPERTY(bool settingsScreenSharingEnabled READ settingsScreenSharingEnabled NOTIFY settingsChanged)
     Q_PROPERTY(QString settingsScreenSharingStatus READ settingsScreenSharingStatus NOTIFY screenSharingStatusChanged)
+    Q_PROPERTY(bool settingsAudioSharingEnabled READ settingsAudioSharingEnabled NOTIFY settingsChanged)
+    Q_PROPERTY(QString settingsAudioSharingStatus READ settingsAudioSharingStatus NOTIFY audioSharingStatusChanged)
     Q_PROPERTY(QString settingsUsername READ settingsUsername NOTIFY settingsChanged)
     Q_PROPERTY(QString settingsHostname READ settingsHostname NOTIFY settingsChanged)
     Q_PROPERTY(QString settingsProfilePictureSource READ settingsProfilePictureSource NOTIFY settingsChanged)
@@ -111,8 +116,9 @@ public:
 
     bool connectionEnabled() const;
     bool screenContentVisible() const;
-    bool remoteAudioMuted() const;
+    bool systemAudioEnabled() const;
     QString remoteAudioState() const;
+    QString remoteAudioStatus() const;
     QString localStatusText() const;
     Q_INVOKABLE QString localConnectionDetail() const;
     Q_INVOKABLE QString remoteConnectionDetail() const;
@@ -131,6 +137,8 @@ public:
     bool remoteVolumeVisible() const;
     bool remoteScreenAvailable() const;
     bool remoteScreenLoading() const;
+    QString remoteScreenState() const;
+    QString remoteScreenStatus() const;
     bool canDeleteProject() const;
     bool hasProject() const;
 
@@ -139,6 +147,8 @@ public:
     bool settingsAppAlwaysOnTop() const;
     bool settingsScreenSharingEnabled() const;
     QString settingsScreenSharingStatus() const;
+    bool settingsAudioSharingEnabled() const;
+    QString settingsAudioSharingStatus() const;
     QString settingsUsername() const;
     QString settingsHostname() const;
     QString settingsProfilePictureSource() const;
@@ -167,7 +177,7 @@ public:
     Q_INVOKABLE void toggleConnection();
     Q_INVOKABLE void setConnectionEnabled(bool enabled);
     Q_INVOKABLE void setScreenContentVisible(bool visible);
-    Q_INVOKABLE void setRemoteAudioMuted(bool muted);
+    Q_INVOKABLE void setSystemAudioEnabled(bool enabled);
     Q_INVOKABLE void requestDeleteProject();
     Q_INVOKABLE void requestClearHistory();
     Q_INVOKABLE void acceptDialog();
@@ -176,6 +186,8 @@ public:
                                     const QString& username = QString());
     Q_INVOKABLE QString saveSettings(const QString& serverUrl, bool autoUpload, bool appAlwaysOnTop,
                                     const QString& username, bool screenSharingEnabled);
+    Q_INVOKABLE QString saveSettings(const QString& serverUrl, bool autoUpload, bool appAlwaysOnTop,
+                                    const QString& username, bool screenSharingEnabled, bool audioSharingEnabled);
     Q_INVOKABLE void clearStorageAndClose();
     Q_INVOKABLE void hideWindow();
     Q_INVOKABLE void setWindowVisible(bool visible);
@@ -193,9 +205,10 @@ signals:
     void activeWorkspaceChanged();
     void presentationChanged();
     void screenContentVisibleChanged();
-    void remoteAudioMutedChanged();
+    void systemAudioEnabledChanged();
     void settingsChanged();
     void screenSharingStatusChanged();
+    void audioSharingStatusChanged();
     void profilesChanged();
     void profileDraftChanged();
     void clearingStorageChanged();
