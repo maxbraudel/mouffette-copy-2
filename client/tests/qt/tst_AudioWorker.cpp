@@ -4,13 +4,17 @@
 #include "backend/audiosharing/AudioPlaybackTimeline.h"
 #include "backend/audiosharing/AudioPlaybackBuffer.h"
 #include "backend/audiosharing/AudioStreamCodec.h"
+#include "backend/media/MediaDecoder.h"
+#include "backend/media/PlaybackAudio.h"
 #include <QGuiApplication>
 #include <QAudioDevice>
 #include <QAudioSink>
+#include <QAudioOutput>
 #include <QLocalServer>
 #include <QMediaDevices>
 #include <QProcess>
 #include <QScopeGuard>
+#include <QSharedMemory>
 #include <QSignalSpy>
 #include <QTimer>
 #include <QUuid>
@@ -23,6 +27,193 @@
 class AudioWorkerTest final : public QObject {
     Q_OBJECT
 private slots:
+    void helperPreviewMappingValidation_data() {
+        QTest::addColumn<int>("capacity");
+        QTest::addColumn<int>("headerFault");
+        QTest::addColumn<QString>("expectedError");
+        const int bytes = sizeof(AudioPreviewState);
+        QTest::newRow("exact") << bytes << 0 << QString();
+        // Explicit padding reproduces Windows allocation semantics on macOS and
+        // Linux too. Acceptance must not depend on a particular OS page size.
+        QTest::newRow("windows-page-rounded") << ((bytes + 4095) / 4096 * 4096) << 0 << QString();
+        QTest::newRow("larger-allocation") << (bytes + 16384) << 0 << QString();
+        QTest::newRow("truncated") << 16 << 0 << QStringLiteral("too small");
+        QTest::newRow("wrong-magic") << bytes << 1 << QStringLiteral("Incompatible");
+        QTest::newRow("wrong-version") << bytes << 2 << QStringLiteral("Incompatible");
+        QTest::newRow("smaller-logical-size") << bytes << 3 << QStringLiteral("Incompatible");
+        QTest::newRow("larger-logical-size") << bytes << 4 << QStringLiteral("Incompatible");
+        QTest::newRow("missing-segment") << 0 << 0 << QStringLiteral("Could not attach");
+        QTest::newRow("invalid-key") << 0 << 5 << QStringLiteral("Invalid");
+    }
+    void helperPreviewMappingValidation() {
+        QFETCH(int, capacity); QFETCH(int, headerFault); QFETCH(QString, expectedError);
+        const auto id = QUuid::createUuid().toString(QUuid::WithoutBraces);
+        const auto key = (headerFault == 5 ? QStringLiteral("invalid-") : QStringLiteral("mouffette-pcm-")) + id;
+        QSharedMemory memory(key);
+        AudioPreviewState* shared = nullptr;
+        if (capacity > 0) {
+            QVERIFY2(memory.create(capacity), qPrintable(memory.errorString()));
+            if (capacity >= int(sizeof(AudioPreviewState))) {
+                shared = new (memory.data()) AudioPreviewState;
+                if (headerFault == 1) shared->magic = 0;
+                if (headerFault == 2) ++shared->version;
+                if (headerFault == 3) --shared->byteSize;
+                if (headerFault == 4) ++shared->byteSize;
+            }
+        }
+        QLocalServer server;
+        server.setSocketOptions(QLocalServer::UserAccessOption);
+        QVERIFY2(server.listen(QStringLiteral("mft-%1").arg(id)), qPrintable(server.errorString()));
+        QProcess helper;
+        const auto cleanup = qScopeGuard([&] {
+            if (helper.state() != QProcess::NotRunning) {
+                helper.terminate();
+                if (!helper.waitForFinished(1000)) { helper.kill(); helper.waitForFinished(1000); }
+            }
+        });
+        helper.start(qApp->property("mouffetteAudioWorkerExecutable").toString(),
+            {QStringLiteral("--audio-worker"), server.serverName(), QStringLiteral("test-token")});
+        QTRY_VERIFY_WITH_TIMEOUT(server.hasPendingConnections(), 5000);
+        auto* socket = server.nextPendingConnection();
+        QByteArray input;
+        QList<QCborMap> replies;
+        auto receive = [&] {
+            input += socket->readAll();
+            QCborMap message; bool malformed = false;
+            while (AudioWorkerProtocol::take(input, message, malformed))
+                if (message.value(QStringLiteral("type")).toString() == QLatin1String("preview-state")) replies.append(message);
+            QVERIFY(!malformed);
+        };
+        const auto connection = connect(socket, &QLocalSocket::readyRead, this, receive);
+        const auto disconnectReceiver = qScopeGuard([&] { disconnect(connection); });
+        receive();
+        const QCborMap registration{{QStringLiteral("type"), QStringLiteral("preview-add")},
+            {QStringLiteral("key"), key}, {QStringLiteral("device"), QByteArray()}};
+        // Validate replay as well as initial registration. These checks must
+        // run without an audio device; attachment is not device availability.
+        for (int attempt = 1; attempt <= 2; ++attempt) {
+            QVERIFY(AudioWorkerProtocol::sendControl(socket, registration));
+            QTRY_COMPARE_WITH_TIMEOUT(replies.size(), attempt, 3000);
+            const auto reply = replies.last();
+            QCOMPARE(reply.value(QStringLiteral("key")).toString(), key);
+            QCOMPARE(reply.value(QStringLiteral("attached")).toBool(), expectedError.isEmpty());
+            const auto failure = reply.value(QStringLiteral("error")).toString();
+            if (expectedError.isEmpty()) QVERIFY2(failure.isEmpty(), qPrintable(failure));
+            else QVERIFY2(failure.contains(expectedError), qPrintable(failure));
+        }
+        if (shared && expectedError.isEmpty() && !QMediaDevices::defaultAudioOutput().isNull()) {
+            QTRY_VERIFY_WITH_TIMEOUT(shared->consumerAvailable.load(), 3000);
+            const auto start = AudioWorkerClient::nowUs() + 80000;
+            for (int index = 0; index < AudioPreviewBlockCount; ++index) {
+                auto& block = shared->blocks[index];
+                block.generation.store(1); block.startUs.store(start + index * 50000);
+                block.state.store(2, std::memory_order_release);
+            }
+            shared->playing.store(true, std::memory_order_release);
+            QTRY_VERIFY_WITH_TIMEOUT(shared->presented.load(), 1000);
+            QTRY_COMPARE_WITH_TIMEOUT(shared->blocks.back().state.load(), 0, 1500);
+        }
+        QVERIFY(AudioWorkerProtocol::sendControl(socket, {{QStringLiteral("type"), QStringLiteral("quit")}}));
+        QTRY_COMPARE_WITH_TIMEOUT(helper.state(), QProcess::NotRunning, 3000);
+        QCOMPARE(helper.exitStatus(), QProcess::NormalExit); QCOMPARE(helper.exitCode(), 0);
+    }
+    void previewRejectionIsScopedToItsChannel() {
+        AudioWorkerClient client;
+        QSignalSpy attachments(&client, &AudioWorkerClient::previewAttachmentChanged);
+        QSignalSpy remoteFailure(&client, &AudioWorkerClient::playbackFailed);
+        QSignalSpy workerFailure(&client, &AudioWorkerClient::failed);
+        auto rejected = client.createPreviewChannel(); QVERIFY(rejected);
+        // The parent has not handled the handshake yet, so registration cannot
+        // race this intentionally incompatible immutable header.
+        ++rejected->state()->version;
+        auto accepted = client.createPreviewChannel(); QVERIFY(accepted);
+        QVERIFY(!rejected->isAttachedToWorker()); QVERIFY(!accepted->isAttachedToWorker());
+        QTRY_COMPARE_WITH_TIMEOUT(attachments.size(), 2, 5000);
+        QVERIFY(!rejected->isAttachedToWorker()); QVERIFY(accepted->isAttachedToWorker());
+        QVERIFY(!rejected->state()->consumerAvailable.load());
+        for (const auto& reply : attachments) {
+            const bool valid = reply.at(0).toString() == accepted->key();
+            QCOMPARE(reply.at(1).toBool(), valid);
+            if (valid) QVERIFY(reply.at(2).toString().isEmpty());
+            else {
+                QCOMPARE(reply.at(0).toString(), rejected->key());
+                QVERIFY(reply.at(2).toString().contains(QStringLiteral("Incompatible")));
+            }
+        }
+        QVERIFY(remoteFailure.isEmpty()); QVERIFY(workerFailure.isEmpty());
+        client.shutdown();
+        QVERIFY(!accepted->isAttachedToWorker());
+    }
+    void unacknowledgedPreviewFailsWithoutResettingRemotePlayback() {
+        // A protocol peer that authenticates but never acknowledges previews
+        // models an incompatible or stalled helper, independently of devices.
+        const auto previousMode = qgetenv("MOUFFETTE_TEST_IGNORE_PREVIEW_REGISTRATION");
+        const auto previousExecutable = qApp->property("mouffetteAudioWorkerExecutable");
+        const auto restore = qScopeGuard([&] {
+            if (previousMode.isNull()) qunsetenv("MOUFFETTE_TEST_IGNORE_PREVIEW_REGISTRATION");
+            else qputenv("MOUFFETTE_TEST_IGNORE_PREVIEW_REGISTRATION", previousMode);
+            qApp->setProperty("mouffetteAudioWorkerExecutable", previousExecutable);
+        });
+        qputenv("MOUFFETTE_TEST_IGNORE_PREVIEW_REGISTRATION", "1");
+        qApp->setProperty("mouffetteAudioWorkerExecutable", QCoreApplication::applicationFilePath());
+        AudioWorkerClient client;
+        QSignalSpy attachments(&client, &AudioWorkerClient::previewAttachmentChanged);
+        QSignalSpy remoteFailure(&client, &AudioWorkerClient::playbackFailed);
+        QSignalSpy workerFailure(&client, &AudioWorkerClient::failed);
+        QSignalSpy captureState(&client, &AudioWorkerClient::captureStateChanged);
+        auto preview = client.createPreviewChannel(); QVERIFY(preview);
+        QTRY_VERIFY_WITH_TIMEOUT(!captureState.isEmpty(), 3000); // Real authenticated handshake.
+        auto removed = client.createPreviewChannel(); QVERIFY(removed);
+        removed.reset(); // An unanswered, deleted channel must not emit a failure.
+        QTRY_COMPARE_WITH_TIMEOUT(attachments.size(), 1, 8000);
+        QCOMPARE(attachments.first().at(0).toString(), preview->key());
+        QVERIFY(!attachments.first().at(1).toBool());
+        QVERIFY(attachments.first().at(2).toString().contains(QStringLiteral("did not acknowledge")));
+        QVERIFY(!preview->isAttachedToWorker());
+        QVERIFY(remoteFailure.isEmpty()); QVERIFY(workerFailure.isEmpty());
+        client.shutdown();
+    }
+    void canvasAudioWaitsForAttachment_data() {
+        QTest::addColumn<bool>("ignoreRegistration");
+        QTest::newRow("decode-and-play") << false;
+        QTest::newRow("attachment-timeout-reaches-player") << true;
+    }
+    void canvasAudioWaitsForAttachment() {
+        QFETCH(bool, ignoreRegistration);
+        if (QMediaDevices::defaultAudioOutput().isNull()) QSKIP("No audio output; protocol tests still cover attachment");
+        const auto path = QFINDTESTDATA("../fixtures/resident-timeline.mp4");
+        QVERIFY(!path.isEmpty());
+        const auto asset = MediaDecoder::decode(path);
+        QVERIFY(asset && asset->audioPackets.codec);
+        const auto previousMode = qgetenv("MOUFFETTE_TEST_IGNORE_PREVIEW_REGISTRATION");
+        const auto previousExecutable = qApp->property("mouffetteAudioWorkerExecutable");
+        const auto restore = qScopeGuard([&] {
+            if (previousMode.isNull()) qunsetenv("MOUFFETTE_TEST_IGNORE_PREVIEW_REGISTRATION");
+            else qputenv("MOUFFETTE_TEST_IGNORE_PREVIEW_REGISTRATION", previousMode);
+            qApp->setProperty("mouffetteAudioWorkerExecutable", previousExecutable);
+        });
+        qputenv("MOUFFETTE_TEST_IGNORE_PREVIEW_REGISTRATION", ignoreRegistration ? "1" : "0");
+        if (ignoreRegistration) qApp->setProperty("mouffetteAudioWorkerExecutable", QCoreApplication::applicationFilePath());
+        auto* worker = AudioWorkerClient::instance();
+        const auto cleanup = qScopeGuard([worker] { delete worker; });
+        QAudioOutput output; output.setMuted(true);
+        PlaybackAudio audio;
+        QSignalSpy failures(&audio, &PlaybackAudio::failed);
+        audio.setRole(PlaybackAudio::Role::ControlPreview);
+        audio.setOutput(&output); audio.setAsset(asset);
+        // Decoder readiness alone must not hide an unattached preview channel.
+        QVERIFY(!audio.preparedAt(0)); QVERIFY(!audio.presentedSincePlay());
+        if (ignoreRegistration) {
+            QTRY_COMPARE_WITH_TIMEOUT(failures.size(), 1, 8000);
+            QVERIFY(failures.first().first().toString().contains(QStringLiteral("did not acknowledge")));
+            QVERIFY(!audio.preparedAt(0)); QVERIFY(!audio.presentedSincePlay());
+        } else {
+            QTRY_VERIFY_WITH_TIMEOUT(audio.preparedAt(0), 5000);
+            audio.play(0);
+            QTRY_VERIFY_WITH_TIMEOUT(audio.presentedSincePlay(), 2000);
+            QVERIFY(failures.isEmpty());
+        }
+    }
     void codecProfiles_data() {
         QTest::addColumn<int>("bitrate");
         QTest::newRow("music-96k") << 96000;
@@ -381,11 +572,16 @@ private slots:
         AudioWorkerClient client;
         QSignalSpy state(&client, &AudioWorkerClient::captureStateChanged);
         QSignalSpy failure(&client, &AudioWorkerClient::failed);
+        QSignalSpy attachments(&client, &AudioWorkerClient::previewAttachmentChanged);
         auto preview = client.createPreviewChannel(); QVERIFY(preview && preview->state());
         QTRY_VERIFY_WITH_TIMEOUT(!state.isEmpty(), 5000);
         QVERIFY2(failure.isEmpty(), failure.isEmpty() ? "" : qPrintable(failure.first().first().toString()));
         QCOMPARE(state.first().at(0).toBool(), false); QVERIFY(state.first().at(1).toString().isEmpty());
-        if (QMediaDevices::defaultAudioOutput().isNull()) QSKIP("No audio output; helper handshake verified");
+        QTRY_COMPARE_WITH_TIMEOUT(attachments.size(), 1, 3000);
+        QCOMPARE(attachments.first().at(0).toString(), preview->key());
+        QVERIFY(attachments.first().at(1).toBool()); QVERIFY(attachments.first().at(2).toString().isEmpty());
+        QVERIFY(preview->isAttachedToWorker());
+        if (QMediaDevices::defaultAudioOutput().isNull()) QSKIP("No audio output; helper handshake and preview attachment verified");
         QTRY_VERIFY_WITH_TIMEOUT(preview->state()->consumerAvailable.load(), 3000);
         auto* shared = preview->state();
         auto& stale = shared->blocks[0];
@@ -430,7 +626,27 @@ private slots:
         });
         producer.start(); QTRY_VERIFY_WITH_TIMEOUT(!clocks.isEmpty(), 3000);
         QCOMPARE(clocks.last().at(0).toString(), QStringLiteral("endpoint")); QCOMPARE(clocks.last().at(1).toString(), epoch);
+        QTRY_VERIFY_WITH_TIMEOUT(preview->isAttachedToWorker() && preview->state()->consumerAvailable.load(), 3000);
+        auto* shared = preview->state();
+        auto publishPreview = [&] {
+            shared->presented.store(false);
+            const auto start = AudioWorkerClient::nowUs() + 80000;
+            for (int index = 0; index < AudioPreviewBlockCount; ++index) {
+                auto& block = shared->blocks[index];
+                QCOMPARE(block.state.load(), 0);
+                block.generation.store(1); block.startUs.store(start + index * 50000);
+                block.state.store(2, std::memory_order_release);
+            }
+            shared->playing.store(true, std::memory_order_release);
+        };
+        publishPreview();
+        QTRY_VERIFY_WITH_TIMEOUT(shared->presented.load(), 1000);
+        QTRY_COMPARE_WITH_TIMEOUT(shared->blocks.back().state.load(), 0, 1500);
         client.setPlaybackMuted(true); QTest::qWait(80); clocks.clear(); QTest::qWait(150); QVERIFY(clocks.isEmpty());
+        publishPreview();
+        QTRY_VERIFY_WITH_TIMEOUT(shared->presented.load(), 1000);
+        QTRY_COMPARE_WITH_TIMEOUT(shared->blocks.back().state.load(), 0, 1500);
+        QVERIFY(clocks.isEmpty());
         epoch = QStringLiteral("second"); sequence = 0; client.setPlaybackMuted(false);
         QTRY_VERIFY_WITH_TIMEOUT(!clocks.isEmpty(), 3000); QCOMPARE(clocks.last().at(1).toString(), epoch);
         producer.stop(); client.resetPlayback(QStringLiteral("endpoint")); QTest::qWait(80);
@@ -506,7 +722,34 @@ private slots:
 };
 
 int main(int argc, char** argv) {
-    if (argc > 1 && QByteArray(argv[1]) == "--audio-worker") return runAudioWorker(argc, argv);
+    if (argc > 1 && QByteArray(argv[1]) == "--audio-worker") {
+        if (argc == 4 && qEnvironmentVariableIntValue("MOUFFETTE_TEST_IGNORE_PREVIEW_REGISTRATION")) {
+            QCoreApplication app(argc, argv);
+            QLocalSocket socket;
+            QByteArray input;
+            QObject::connect(&socket, &QLocalSocket::connected, &app, [&] {
+                AudioWorkerProtocol::sendControl(&socket, {{QStringLiteral("type"), QStringLiteral("hello")},
+                    {QStringLiteral("token"), QString::fromLocal8Bit(argv[3])}});
+            });
+            QObject::connect(&socket, &QLocalSocket::readyRead, &app, [&] {
+                input += socket.readAll();
+                QCborMap message; bool malformed = false;
+                while (AudioWorkerProtocol::take(input, message, malformed)) {
+                    const auto type = message.value(QStringLiteral("type")).toString();
+                    if (type == QLatin1String("quit")) app.quit();
+                    if (type == QLatin1String("capture-stop"))
+                        AudioWorkerProtocol::sendControl(&socket, {{QStringLiteral("type"), QStringLiteral("capture-state")},
+                            {QStringLiteral("active"), false}});
+                }
+                if (malformed) app.quit();
+            });
+            QObject::connect(&socket, &QLocalSocket::disconnected, &app, &QCoreApplication::quit);
+            socket.connectToServer(QString::fromLocal8Bit(argv[2]));
+            QTimer::singleShot(15000, &app, &QCoreApplication::quit);
+            return app.exec();
+        }
+        return runAudioWorker(argc, argv);
+    }
     QGuiApplication app(argc, argv);
     app.setProperty("mouffetteAudioWorkerExecutable", qEnvironmentVariable(
         "MOUFFETTE_TEST_AUDIO_WORKER_EXECUTABLE", QCoreApplication::applicationFilePath()));

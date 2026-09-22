@@ -28,6 +28,7 @@ signals:
     void playbackClock(const QString& source, const QString& epoch, qint64 timestampUs, qint64 localUs);
     void playbackFeedback(const QString& source, const QString& epoch, int droppedPackets, int bufferedMs);
     void playbackFailed(const QString& error);
+    void previewAttachmentChanged(const QString& key, bool attached, const QString& error);
     void failed(const QString& error);
 private:
     struct Private;
@@ -35,6 +36,7 @@ private:
     void ensureWorker();
     void readMessages();
     void replayPreviews();
+    void previewAttachment(const QString& key, bool attached, const QString& error = {});
     void removePreview(const QString& key);
     friend class AudioPreviewChannel;
 };

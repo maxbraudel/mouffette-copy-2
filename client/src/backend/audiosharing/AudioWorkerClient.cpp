@@ -31,8 +31,9 @@ struct AudioWorkerClient::Private {
     bool unavailableReported = false;
     int restarts = 0;
     qint64 lastPlaybackDiagnosticUs = 0;
-    QTimer handshake, previewReplay;
+    QTimer handshake, previewReplay, previewWatchdog;
     QList<QString> pendingPreviews;
+    QHash<QString, qint64> awaitingPreviews;
     QHash<QString, std::weak_ptr<AudioPreviewChannel>> previews;
     void sendCapture() {
         auto message = command(capture ? "capture" : "capture-stop");
@@ -44,7 +45,10 @@ struct AudioWorkerClient::Private {
         auto message = command("preview-add");
         message.insert(QStringLiteral("key"), channel->key());
         message.insert(QStringLiteral("device"), channel->deviceId);
-        AudioWorkerProtocol::sendControl(socket, message);
+        if (AudioWorkerProtocol::sendControl(socket, message)) {
+            awaitingPreviews.insert(channel->key(), AudioWorkerClient::nowUs());
+            if (!previewWatchdog.isActive()) previewWatchdog.start();
+        }
     }
 };
 AudioWorkerClient* AudioWorkerClient::instance() {
@@ -57,6 +61,15 @@ AudioWorkerClient::AudioWorkerClient(QObject* parent) : QObject(parent), d(std::
     d->handshake.setInterval(5000);
     d->previewReplay.setSingleShot(true); d->previewReplay.setInterval(5);
     connect(&d->previewReplay, &QTimer::timeout, this, &AudioWorkerClient::replayPreviews);
+    d->previewWatchdog.setInterval(1000);
+    connect(&d->previewWatchdog, &QTimer::timeout, this, [this] {
+        QList<QString> expired;
+        const auto now = nowUs();
+        for (auto it = d->awaitingPreviews.cbegin(); it != d->awaitingPreviews.cend(); ++it)
+            if (now - it.value() >= 5000000) expired.append(it.key());
+        for (const auto& key : expired)
+            previewAttachment(key, false, QStringLiteral("The audio worker did not acknowledge the preview audio channel"));
+    });
     connect(&d->handshake, &QTimer::timeout, this, [this] {
         if (!d->ready && d->process.state() != QProcess::NotRunning) d->process.kill();
     });
@@ -69,6 +82,7 @@ AudioWorkerClient::AudioWorkerClient(QObject* parent) : QObject(parent), d(std::
                 if (d->socket == candidate) {
                     d->socket = nullptr; d->ready = false; d->input.clear();
                     d->previewReplay.stop(); d->pendingPreviews.clear();
+                    d->previewWatchdog.stop(); d->awaitingPreviews.clear();
                     // Critical IPC failure is fail-closed even if the helper's
                     // GUI thread cannot promptly process socket disconnection.
                     if (!d->closing && d->process.state() != QProcess::NotRunning) d->process.kill();
@@ -87,8 +101,11 @@ AudioWorkerClient::AudioWorkerClient(QObject* parent) : QObject(parent), d(std::
     connect(&d->process, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this,
         [this](int exitCode, QProcess::ExitStatus exitStatus) {
             d->handshake.stop(); d->ready = false;
-            for (const auto& weak : d->previews) if (const auto preview = weak.lock())
+            d->previewWatchdog.stop(); d->awaitingPreviews.clear();
+            for (const auto& weak : d->previews) if (const auto preview = weak.lock()) {
+                preview->workerAttached = false;
                 preview->state()->consumerAvailable.store(false);
+            }
             if (auto* socket = d->socket.data()) {
                 d->socket = nullptr;
                 socket->abort(); socket->deleteLater();
@@ -153,6 +170,9 @@ void AudioWorkerClient::readMessages() {
                 else it = d->previews.erase(it);
             }
             replayPreviews();
+        } else if (type == QLatin1String("preview-state")) {
+            previewAttachment(message.value(QStringLiteral("key")).toString(),
+                message.value(QStringLiteral("attached")).toBool(), message.value(QStringLiteral("error")).toString());
         } else if (type == QLatin1String("packet")) {
             if (!d->capture || message.value(QStringLiteral("epoch")).toString() != d->captureEpoch) continue;
             const auto timestamp = message.value(QStringLiteral("timestamp")).toInteger(-1);
@@ -199,6 +219,22 @@ void AudioWorkerClient::readMessages() {
         } else if (type == QLatin1String("error")) emit playbackFailed(message.value(QStringLiteral("error")).toString());
     }
     if (malformed && d->socket) d->socket->abort();
+}
+void AudioWorkerClient::previewAttachment(const QString& key, bool attached, const QString& error) {
+    // Ignore late replies for deleted channels, expired requests or old workers.
+    if (!d->awaitingPreviews.remove(key)) return;
+    if (d->awaitingPreviews.isEmpty()) d->previewWatchdog.stop();
+    const auto channel = d->previews.value(key).lock();
+    if (!channel) return;
+    channel->workerAttached = attached;
+    const auto failure = attached ? QString() : error.isEmpty()
+        ? QStringLiteral("The audio worker rejected the preview audio channel") : error;
+    if (!attached) {
+        channel->state()->consumerAvailable.store(false, std::memory_order_release);
+        qCWarning(audioPlaybackLog).noquote() << "Preview audio channel" << key << "failed:" << failure;
+    }
+    // A local preview failure must never reset otherwise healthy remote audio.
+    emit previewAttachmentChanged(key, attached, failure);
 }
 void AudioWorkerClient::replayPreviews() {
     if (!d->ready || !d->socket) return;
@@ -248,13 +284,18 @@ void AudioWorkerClient::setPlaybackMuted(bool muted) {
     if (d->ready) { auto message = command("mute"); message.insert(QStringLiteral("muted"), muted); AudioWorkerProtocol::sendControl(d->socket, message); }
 }
 std::shared_ptr<AudioPreviewChannel> AudioWorkerClient::createPreviewChannel(const QByteArray& deviceId) {
-    if (d->previews.size() >= 256) return {};
+    if (d->previews.size() >= 256) {
+        qCWarning(audioPlaybackLog) << "Too many preview audio channels"; return {};
+    }
     auto channel = std::make_shared<AudioPreviewChannel>();
     channel->owner = this;
     channel->deviceId = deviceId;
     channel->memory = std::make_unique<QSharedMemory>(QStringLiteral("mouffette-pcm-%1")
         .arg(QUuid::createUuid().toString(QUuid::WithoutBraces)));
-    if (!channel->memory->create(sizeof(AudioPreviewState))) return {};
+    if (!channel->memory->create(sizeof(AudioPreviewState))) {
+        qCWarning(audioPlaybackLog) << "Could not allocate preview audio shared memory:" << channel->memory->errorString();
+        return {};
+    }
     new (channel->memory->data()) AudioPreviewState;
     d->previews.insert(channel->key(), channel);
     ensureWorker();
@@ -263,11 +304,15 @@ std::shared_ptr<AudioPreviewChannel> AudioWorkerClient::createPreviewChannel(con
 }
 void AudioWorkerClient::removePreview(const QString& key) {
     d->previews.remove(key);
+    d->pendingPreviews.removeAll(key); d->awaitingPreviews.remove(key);
+    if (d->awaitingPreviews.isEmpty()) d->previewWatchdog.stop();
     if (d->ready) { auto message = command("preview-remove"); message.insert(QStringLiteral("key"), key); AudioWorkerProtocol::sendControl(d->socket, message); }
 }
 void AudioWorkerClient::shutdown() {
     if (!d || d->closing) return;
     d->closing = true; d->handshake.stop();
+    d->previewReplay.stop(); d->previewWatchdog.stop();
+    d->pendingPreviews.clear(); d->awaitingPreviews.clear();
     if (const QPointer<QLocalSocket> socket = d->socket) {
         AudioWorkerProtocol::sendControl(socket, command("quit"));
         if (socket) socket->flush();

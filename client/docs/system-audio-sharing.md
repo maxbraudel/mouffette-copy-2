@@ -34,6 +34,23 @@ authenticates its parent connection; playback buffers are bounded shared memory.
 Loss of the parent ends the worker. Loss of the worker never falls back to playing
 control audio in the main process, which would violate the exclusion.
 
+Preview shared memory has an immutable magic/version/logical-size header followed
+by lock-free PCM blocks. This is a private ABI between processes running the same
+executable; layout or semantic changes require a version increment. The worker
+checks mapped capacity **at least** equal to the expected state size before
+reading the header, then requires an exact ABI match. Allocation size is not the
+logical format size: [Qt permits larger segments](https://doc.qt.io/qt-6/qsharedmemory.html#size),
+and Windows reports page-rounded capacity. No page-size assumption belongs in
+the production validation.
+
+Every preview registration receives a keyed acceptance or error response, even
+without an output device. The parent times out unanswered registrations after
+five seconds (checked once per second), resets attachment state on worker exit,
+and replays live channels on restart. Preparation waits for attachment confirmation;
+device availability remains separate so headless video still works. Rejected
+channels produce a playback diagnostic and fail the affected media cursor without
+resetting remote listening. No additional work is added to the audio callback.
+
 macOS uses ScreenCaptureKit system audio (macOS 13+ API, subject to the application's
 actual Qt/deployment minimum). Its minimal reference video output is discarded,
 independent of viewer monitor demand. Windows uses native process loopback and
@@ -121,6 +138,14 @@ Automated checks cover codec/framing, timing bounds, shared PCM generations,
 native-window policy/lifecycle, relay authorization and congestion, toolbar
 preferences, and existing media/scene/video behavior. Tests use synthetic audio
 and do not implicitly request screen-recording permission.
+
+`AudioWorker` exercises exact and padded allocations through the real helper on
+every OS, without skipping registration checks on headless CI. It also rejects
+truncated, missing and incompatible segments, verifies keyed client error
+propagation, and checks local PCM consumption during remote playback and mute
+when an output device is available. Windows release checks must include a local
+canvas video while listening to a remote client, then mute/unmute remote audio:
+the local video must remain audible in both states.
 
 `WindowsAudioActivation` exercises late completion after cancellation, agile
 marshaling, HRESULT propagation and a malformed successful activation without

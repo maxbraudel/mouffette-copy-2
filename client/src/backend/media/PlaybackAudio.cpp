@@ -180,7 +180,9 @@ struct PlaybackAudio::Impl {
     bool seeking = false;
     PlaybackAudio::Role role = PlaybackAudio::Role::ReceivedScene;
     QTimer timer;
+    QMetaObject::Connection previewAttachment, workerFailure;
     void detach() {
+        QObject::disconnect(previewAttachment); QObject::disconnect(workerFailure);
         if (voice) voice->playing.store(false, std::memory_order_release);
         if (mixer && voice) mixer->remove(slot, std::move(voice));
         voice.reset(); mixer.reset(); slot = -1;
@@ -227,9 +229,17 @@ void PlaybackAudio::rebuildOutput() {
         // They retain video-only preparation; excluded audio never falls back
         // to a sink in this process.
         if (QCoreApplication::instance()->property("mouffetteAudioWorkerExecutable").toString().isEmpty()) return;
-        auto preview = AudioWorkerClient::instance()->createPreviewChannel(device.id());
+        auto* worker = AudioWorkerClient::instance();
+        auto preview = worker->createPreviewChannel(device.id());
         if (!preview) { emit failed(QStringLiteral("The isolated preview audio buffer could not be allocated")); return; }
         d->voice = std::make_shared<Voice>(48000, 2, std::move(preview));
+        d->previewAttachment = connect(worker, &AudioWorkerClient::previewAttachmentChanged, this,
+            [this](const QString& key, bool attached, const QString& error) {
+                if (!d->voice || !d->voice->preview || d->voice->preview->key() != key) return;
+                if (!attached) { emit failed(error); return; }
+                emit prepared();
+            });
+        d->workerFailure = connect(worker, &AudioWorkerClient::failed, this, &PlaybackAudio::failed);
         d->voice->gain.store(d->output->isMuted() ? 0.0f : float(d->output->volume()));
         d->timer.start(); prepare(position);
         if (playing) play(position);
@@ -260,6 +270,7 @@ void PlaybackAudio::prepare(qint64 positionUs) {
 }
 bool PlaybackAudio::preparedAt(qint64 positionUs) const {
     if (!d->voice) return true;
+    if (d->voice->preview && !d->voice->preview->isAttachedToWorker()) return false;
     if (d->voice->preview && !d->voice->preview->state()->consumerAvailable.load()) return true;
     return hasPreparedBlock(*d->voice, positionUs);
 }
@@ -272,6 +283,7 @@ void PlaybackAudio::play(qint64 positionUs) {
     d->voice->playing.store(true, std::memory_order_release);
 }
 bool PlaybackAudio::presentedSincePlay() const {
+    if (d->voice && d->voice->preview && !d->voice->preview->isAttachedToWorker()) return false;
     return !d->voice || (d->voice->preview && !d->voice->preview->state()->consumerAvailable.load())
         || d->voice->presented.load(std::memory_order_relaxed);
 }

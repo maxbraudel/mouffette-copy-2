@@ -18,7 +18,14 @@ struct AudioPreviewBlock {
     std::array<float, AudioPreviewBlockFrames * 2> samples{};
 };
 struct AudioPreviewState {
-    quint32 magic = 0x4d415031;
+    // Private ABI between instances of the same executable. Bump Version when
+    // changing the layout or meaning of shared fields. The immutable header is
+    // initialized before preview-add; OS allocation size is only a capacity.
+    static constexpr quint32 Magic = 0x4d415031;
+    static constexpr quint32 Version = 1;
+    quint32 magic = Magic;
+    quint32 version = Version;
+    quint32 byteSize = sizeof(AudioPreviewState);
     std::atomic<quint64> generation{1};
     std::atomic<bool> playing{false};
     std::atomic<bool> presented{false};
@@ -27,16 +34,20 @@ struct AudioPreviewState {
     std::atomic<qint64> clockOffsetUs{0};
     std::array<AudioPreviewBlock, AudioPreviewBlockCount> blocks;
 };
-static_assert(std::atomic<qint64>::is_always_lock_free && std::atomic<float>::is_always_lock_free
+static_assert(std::atomic<qint64>::is_always_lock_free && std::atomic<quint64>::is_always_lock_free
+    && std::atomic<bool>::is_always_lock_free && std::atomic<float>::is_always_lock_free
     && std::atomic<int>::is_always_lock_free, "Shared audio state needs process-shared lock-free atomics");
 class AudioPreviewChannel {
 public:
     ~AudioPreviewChannel();
     AudioPreviewState* state() const;
     QString key() const;
+    // Main-thread control state, distinct from availability of an audio device.
+    bool isAttachedToWorker() const { return workerAttached; }
     QByteArray deviceId;
 private:
     friend class AudioWorkerClient;
     QPointer<AudioWorkerClient> owner;
+    bool workerAttached = false;
     std::unique_ptr<QSharedMemory> memory;
 };

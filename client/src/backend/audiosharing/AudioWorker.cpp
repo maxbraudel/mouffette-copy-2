@@ -144,6 +144,46 @@ public:
         auto message = command("error"); message.insert(QStringLiteral("error"), value);
         AudioWorkerProtocol::sendControl(&socket, message);
     }
+    void previewState(const QString& key, const QString& failure = {}) {
+        auto message = command("preview-state");
+        message.insert(QStringLiteral("key"), key);
+        message.insert(QStringLiteral("attached"), failure.isEmpty());
+        message.insert(QStringLiteral("error"), failure);
+        AudioWorkerProtocol::sendControl(&socket, message);
+    }
+    void addPreview(const QCborMap& message) {
+        const auto key = message.value(QStringLiteral("key")).toString();
+        if (!key.startsWith(QLatin1String("mouffette-pcm-")) || key.size() > 100) {
+            previewState(key, QStringLiteral("Invalid preview audio shared-memory key")); return;
+        }
+        if (previews.contains(key)) { previewState(key); return; } // Idempotent replay.
+        if (previews.size() >= 256) {
+            previewState(key, QStringLiteral("Too many preview audio channels")); return;
+        }
+        auto mapping = std::make_shared<PreviewMapping>(key);
+        if (!mapping->memory.attach()) {
+            previewState(key, QStringLiteral("Could not attach preview audio shared memory: %1")
+                .arg(mapping->memory.errorString())); return;
+        }
+        // QSharedMemory::size() may exceed create()'s request (VirtualQuery
+        // reports page-rounded capacity on Windows). Validate capacity before
+        // reading the header, then validate the logical ABI independently.
+        if (mapping->memory.size() < qsizetype(sizeof(AudioPreviewState))) {
+            previewState(key, QStringLiteral("Preview audio shared memory is too small: %1 bytes; need %2")
+                .arg(mapping->memory.size()).arg(sizeof(AudioPreviewState))); return;
+        }
+        const auto* shared = mapping->state();
+        if (shared->magic != AudioPreviewState::Magic || shared->version != AudioPreviewState::Version
+            || shared->byteSize != sizeof(AudioPreviewState)) {
+            previewState(key, QStringLiteral("Incompatible preview audio shared-memory format "
+                "(magic %1, version %2, size %3)")
+                .arg(shared->magic, 0, 16).arg(shared->version).arg(shared->byteSize)); return;
+        }
+        mapping->deviceId = message.value(QStringLiteral("device")).toByteArray();
+        previews.insert(key, mapping); ++mixerRevision;
+        ensureOutputs();
+        previewState(key);
+    }
     void state(bool active, const QString& value = {}, const QString& stoppedEpoch = {}) {
         auto message = command("capture-state"); message.insert(QStringLiteral("active"), active);
         message.insert(QStringLiteral("epoch"), stoppedEpoch.isEmpty() ? captureEpoch : stoppedEpoch);
@@ -251,14 +291,7 @@ public:
                 remote.clear(); ++mixerRevision;
                 ensureOutputs();
             } else if (type == QLatin1String("preview-add")) {
-                const auto key = message.value(QStringLiteral("key")).toString();
-                if (!key.startsWith(QLatin1String("mouffette-pcm-")) || key.size() > 100 || previews.size() >= 256) continue;
-                auto mapping = std::make_shared<PreviewMapping>(key);
-                if (!mapping->memory.attach() || mapping->memory.size() != sizeof(AudioPreviewState)
-                    || mapping->state()->magic != 0x4d415031) continue;
-                mapping->deviceId = message.value(QStringLiteral("device")).toByteArray();
-                previews.insert(key, mapping); ++mixerRevision;
-                ensureOutputs();
+                addPreview(message);
             } else if (type == QLatin1String("preview-remove")) {
                 previews.remove(message.value(QStringLiteral("key")).toString()); ++mixerRevision;
                 ensureOutputs();
