@@ -25,7 +25,7 @@ public:
 signals:
     void packetReady(const QString& epoch, quint64 sequence, qint64 timestampUs, const QByteArray& opus);
     void captureStateChanged(bool active, const QString& error);
-    void playbackClock(const QString& source, const QString& epoch, qint64 timestampUs);
+    void playbackClock(const QString& source, const QString& epoch, qint64 timestampUs, qint64 localUs);
     void playbackFeedback(const QString& source, const QString& epoch, int droppedPackets, int bufferedMs);
     void playbackFailed(const QString& error);
     void failed(const QString& error);

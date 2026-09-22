@@ -1,6 +1,7 @@
 #include "backend/audiosharing/SystemAudioCapture.h"
 #include "backend/audiosharing/MediaCaptureClock.h"
 #include "backend/audiosharing/AudioCaptureTiming.h"
+#include "backend/audiosharing/AudioCaptureTimestamp.h"
 #include <QTimer>
 #include <algorithm>
 #include <atomic>
@@ -21,6 +22,9 @@ struct NativeAudio {
     dispatch_queue_t queue = nil;
     bool starting = false, started = false, stopping = false;
     AudioCaptureTiming timing;
+    AudioCaptureTimestamp timestamp;
+    int invalidBuffers = 0;
+    bool discontinuityPending = false;
     CGDirectDisplayID display = 0;
 };
 void stopNative(std::shared_ptr<NativeAudio> state) {
@@ -32,6 +36,15 @@ void stopNative(std::shared_ptr<NativeAudio> state) {
             state->stream = nil; state->delegate = nil; state->queue = nil;
         });
     }];
+}
+void rejectBuffer(const std::shared_ptr<NativeAudio>& current, const char* reason) {
+    current->discontinuityPending = true;
+    // A transient incomplete callback can recover. A sustained native format
+    // mismatch must surface an error instead of advertising active silent audio.
+    if (++current->invalidBuffers < 8 || current->closed.exchange(true)) return;
+    current->state(false, QStringLiteral("System audio capture returned invalid buffers: %1")
+        .arg(QString::fromLatin1(reason)));
+    dispatch_async(dispatch_get_main_queue(), ^{ stopNative(current); });
 }
 QString describe(NSError* error) {
     if (error.code == SCStreamErrorUserDeclined)
@@ -45,27 +58,38 @@ QString describe(NSError* error) {
 @end
 @implementation MouffetteAudioCaptureOutput
 - (void)stream:(SCStream*)stream didOutputSampleBuffer:(CMSampleBufferRef)sample ofType:(SCStreamOutputType)type {
-    if (type != SCStreamOutputTypeAudio || !CMSampleBufferIsValid(sample)) return;
+    if (type != SCStreamOutputTypeAudio) return;
     const auto current = state.lock();
     if (!current || current->closed.load()) return;
+    if (!CMSampleBufferIsValid(sample) || !CMSampleBufferDataIsReady(sample)) {
+        rejectBuffer(current, "sample data is unavailable"); return;
+    }
     @autoreleasepool {
         const auto format = CMSampleBufferGetFormatDescription(sample);
         const auto* audio = format ? CMAudioFormatDescriptionGetStreamBasicDescription(format) : nullptr;
         if (!audio || audio->mFormatID != kAudioFormatLinearPCM || !(audio->mFormatFlags & kAudioFormatFlagIsFloat)
             || audio->mBitsPerChannel != 32 || audio->mSampleRate != 48000
-            || audio->mChannelsPerFrame < 1 || audio->mChannelsPerFrame > 2) return;
+            || audio->mChannelsPerFrame < 1 || audio->mChannelsPerFrame > 2) {
+            rejectBuffer(current, "expected 48 kHz mono/stereo float PCM"); return;
+        }
         const auto frames = CMSampleBufferGetNumSamples(sample);
-        if (frames < 1 || frames > 4800) return;
+        if (!frames) return;
+        if (frames < 0 || frames > 48000) { rejectBuffer(current, "invalid frame count"); return; }
         size_t needed = 0;
         if (CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(sample, &needed, nullptr, 0,
                 kCFAllocatorDefault, kCFAllocatorDefault, kCMSampleBufferFlag_AudioBufferList_Assure16ByteAlignment,
-                nullptr) != noErr || needed > 65536) return;
+                nullptr) != noErr || needed < sizeof(AudioBufferList) || needed > 65536) {
+            rejectBuffer(current, "invalid audio buffer layout"); return;
+        }
         QByteArray storage(qsizetype(needed), Qt::Uninitialized);
         auto* buffers = reinterpret_cast<AudioBufferList*>(storage.data());
         CMBlockBufferRef block = nullptr;
         if (CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(sample, nullptr, buffers, needed,
                 kCFAllocatorDefault, kCFAllocatorDefault, kCMSampleBufferFlag_AudioBufferList_Assure16ByteAlignment,
-                &block) != noErr) return;
+                &block) != noErr) {
+            if (block) CFRelease(block);
+            rejectBuffer(current, "audio buffer extraction failed"); return;
+        }
         const bool planar = audio->mFormatFlags & kAudioFormatFlagIsNonInterleaved;
         const int channels = int(audio->mChannelsPerFrame);
         const bool valid = buffers->mNumberBuffers >= (planar ? channels : 1)
@@ -84,10 +108,13 @@ QString describe(NSError* error) {
             if (stream.synchronizationClock && CMTIME_IS_NUMERIC(pts))
                 pts = CMSyncConvertTime(pts, stream.synchronizationClock, CMClockGetHostTimeClock());
             const auto now = MediaCaptureClock::nowUs();
-            qint64 native = CMTIME_IS_NUMERIC(pts) ? CMTimeConvertScale(pts, 1000000, kCMTimeRoundingMethod_Default).value : now;
-            current->timing.observe("sck", now, native, native, int(frames));
-            if (!current->closed.load()) current->pcm(std::move(pcm), native);
-        }
+            const qint64 native = CMTIME_IS_NUMERIC(pts)
+                ? CMTimeConvertScale(pts, 1000000, kCMTimeRoundingMethod_Default).value : -1;
+            const auto mapped = current->timestamp.map(native, int(frames), now, current->discontinuityPending);
+            current->invalidBuffers = 0; current->discontinuityPending = false;
+            current->timing.observe("sck", now, native, mapped.timestampUs, int(frames));
+            if (!current->closed.load()) current->pcm(std::move(pcm), mapped.timestampUs, mapped.discontinuity);
+        } else rejectBuffer(current, "truncated PCM audio buffers");
         if (block) CFRelease(block);
     }
 }
@@ -160,7 +187,8 @@ public:
                         if (@available(macOS 15.0, *)) config.captureMicrophone = NO;
                         auto* output = [[MouffetteAudioCaptureOutput alloc] init]; output->state = current;
                         current->delegate = output;
-                        current->queue = dispatch_queue_create("Mouffette.SystemAudio", DISPATCH_QUEUE_SERIAL);
+                        current->queue = dispatch_queue_create("Mouffette.SystemAudio",
+                            dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INTERACTIVE, 0));
                         current->stream = [[SCStream alloc] initWithFilter:filter configuration:config delegate:output];
                         NSError* attachError = nil;
                         // SCK expects a screen output on some OS releases. Its

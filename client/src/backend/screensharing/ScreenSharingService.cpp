@@ -4,6 +4,7 @@
 #include "ScreenPublicationProfiles.h"
 #include "ScreenFrameAdmissionCeiling.h"
 #include "ScreenAudioClock.h"
+#include "ScreenPresentationQueue.h"
 #include "backend/audiosharing/MediaCaptureClock.h"
 #include "backend/config/AppConfig.h"
 #include "backend/network/NetworkDiagnostics.h"
@@ -150,8 +151,7 @@ struct ScreenSharingService::Private {
         qint64 lastFrameAt = -1;
         qint64 lastKeyRequestAt = -1;
         int droppedFrames = 0;
-        QVideoFrame presentation;
-        qint64 presentationDueUs = 0;
+        ScreenPresentationQueue<QVideoFrame> presentations;
         quint64 presentationEpoch = 0;
     };
     QHash<int, std::shared_ptr<Decode>> decoders;
@@ -164,33 +164,46 @@ struct ScreenSharingService::Private {
         setRemoteState(RemoteState::Available);
     }
     void presentFrame(int screen, const std::shared_ptr<Decode>& state, const QVideoFrame& frame) {
-        const qint64 nowUs = clock.nsecsElapsed() / 1000;
-        const qint64 delay = viewedEndpoint == audioEndpoint
-            ? audioClock.videoDelayUs(frame.startTime(), nowUs) : 0;
-        if (!delay) {
-            state->presentation = {};
-            deliverFrame(screen, state, frame);
-            return;
-        }
-        // Replacing a waiting image cannot postpone presentation indefinitely.
-        state->presentationDueUs = state->presentation.isValid()
-            ? std::min(state->presentationDueUs, nowUs + delay) : nowUs + delay;
-        state->presentation = frame;
+        const qint64 nowUs = MediaCaptureClock::nowUs();
+        if (state->presentationEpoch != state->epoch) state->presentations.clear();
         state->presentationEpoch = state->epoch;
-        if (!presentationTimer.isActive()) presentationTimer.start();
+        const bool independent = viewedEndpoint != audioEndpoint;
+        // Release already-due surfaces before applying the memory budget to a
+        // newly decoded frame. The arrival at the exact deadline must not cost
+        // one unnecessary extra retained surface.
+        auto readyFrame = state->presentations.takeReady(audioClock, nowUs, independent);
+        const qint64 budget = std::min<qint64>(ScreenPresentationQueue<QVideoFrame>::MaximumBytes,
+            192 * 1024 * 1024 / std::max<qsizetype>(1, decoders.size()));
+        qint64 retainedBytes = 0;
+        // ScreenStreamDecoder returns software YUV planes. Mapping this shallow
+        // handle exposes their actual strides without a conversion or GPU
+        // readback. Charging RGBA bytes would needlessly drop 4K frames.
+        QVideoFrame mapped = frame;
+        if (mapped.map(QVideoFrame::ReadOnly)) {
+            for (int plane = 0; plane < mapped.planeCount(); ++plane)
+                retainedBytes += mapped.mappedBytes(plane);
+            mapped.unmap();
+        }
+        if (retainedBytes <= 0) retainedBytes = qint64(frame.width()) * frame.height() * 4;
+        state->presentations.push(frame, frame.startTime(), nowUs, retainedBytes, budget);
+        if (auto newer = state->presentations.takeReady(audioClock, nowUs, independent))
+            readyFrame = std::move(newer);
+        if (readyFrame) deliverFrame(screen, state, *readyFrame);
+        if (!state->presentations.empty() && !presentationTimer.isActive()) presentationTimer.start();
     }
     void flushPresentations(bool immediate = false) {
         const auto current = decoders;
-        const qint64 nowUs = clock.nsecsElapsed() / 1000;
+        const qint64 nowUs = MediaCaptureClock::nowUs();
         bool pending = false;
         for (auto it = current.cbegin(); it != current.cend(); ++it) {
             const auto state = it.value();
-            if (!state->presentation.isValid()) continue;
+            if (state->presentations.empty()) continue;
             if (decoders.value(it.key()) != state || state->epoch != state->presentationEpoch
-                || !ready(subscribedSession, false)) { state->presentation = {}; continue; }
-            if (!immediate && state->presentationDueUs > nowUs) { pending = true; continue; }
-            const QVideoFrame frame = std::exchange(state->presentation, {});
-            deliverFrame(it.key(), state, frame);
+                || !ready(subscribedSession, false)) { state->presentations.clear(); continue; }
+            const auto frame = state->presentations.takeReady(audioClock, nowUs,
+                immediate || viewedEndpoint != audioEndpoint);
+            if (frame) deliverFrame(it.key(), state, *frame);
+            pending |= !state->presentations.empty();
         }
         if (!pending) presentationTimer.stop();
     }
@@ -929,15 +942,21 @@ void ScreenSharingService::setAudioReservationBps(int bitrate)
     d->updateProfiles(true);
 }
 
-void ScreenSharingService::setAudioPlaybackClock(const QString& endpoint, const QString& epoch, qint64 sourceUs)
+void ScreenSharingService::setAudioPlaybackClock(const QString& endpoint, const QString& epoch,
+                                                qint64 sourceUs, qint64 localUs)
 {
+    const qint64 age = MediaCaptureClock::nowUs() - localUs;
+    if (endpoint != d->viewedEndpoint || endpoint.isEmpty() || epoch.isEmpty()
+        || sourceUs < 0 || localUs < 0 || age < -ScreenAudioClock::MaximumClockLeadUs
+        || age > ScreenAudioClock::MaximumClockAgeUs) return;
     if (d->audioEndpoint != endpoint || d->audioEpoch != epoch) {
         d->audioClock.reset();
         d->flushPresentations(true);
     }
     d->audioEndpoint = endpoint;
     d->audioEpoch = epoch;
-    d->audioClock.update(sourceUs, d->clock.nsecsElapsed() / 1000);
+    d->audioClock.update(sourceUs, localUs);
+    d->flushPresentations();
 }
 
 void ScreenSharingService::clearAudioPlaybackClock(const QString& endpoint)

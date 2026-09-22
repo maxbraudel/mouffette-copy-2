@@ -20,9 +20,14 @@ public:
     // Video and audio use the same source clock; receipt uses MediaCaptureClock.
     void observeVideoTimestamp(qint64 sourceUs, qint64 receivedAtUs);
     qint64 playbackTimeUs(qint64 sourceUs) const;
-    bool sendPacket(const QByteArray& opus, qint64 timestampUs);
+    // Preserve capture sequence gaps through IPC, admission and the relay so
+    // the receiver can conceal loss and report it. Zero allocates locally.
+    bool sendPacket(const QByteArray& opus, qint64 timestampUs, quint64 captureSequence = 0);
     void sendStatus(const QString& reason);
     void sendPlaybackFeedback(int droppedPackets, int bufferedMs);
+    // A replacement capture process loses codec and capture sequence state.
+    // Rotate its publication so old packets cannot alias that new incarnation.
+    void restartPublication();
     void stop();
     bool isSupported() const;
     bool isPublishing() const;

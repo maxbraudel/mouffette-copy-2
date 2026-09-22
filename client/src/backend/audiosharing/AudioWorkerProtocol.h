@@ -10,14 +10,18 @@ inline constexpr qsizetype MaximumMessage = 64 * 1024;
 // Four worst-case Opus frames plus their envelopes fit in this bound.
 inline constexpr qint64 MaximumBacklog = 8 * 1024;
 inline bool send(QLocalSocket* socket, const QCborMap& message) {
-    if (!socket || socket->state() != QLocalSocket::ConnectedState
-        || socket->bytesToWrite() > MaximumBacklog) return false;
+    if (!socket || socket->state() != QLocalSocket::ConnectedState) return false;
     const auto body = QCborValue(message).toCbor();
-    if (body.size() > MaximumMessage) return false;
+    if (body.isEmpty() || body.size() > MaximumMessage
+        || socket->bytesToWrite() + body.size() + 4 > MaximumBacklog) return false;
     QByteArray frame(4, Qt::Uninitialized);
     qToBigEndian<quint32>(quint32(body.size()), frame.data());
     frame.append(body);
-    return socket->write(frame) == frame.size();
+    const auto written = socket->write(frame);
+    // A partial length-prefixed frame cannot be followed by another message:
+    // that would permanently desynchronize every subsequent control command.
+    if (written != frame.size()) { socket->abort(); return false; }
+    return true;
 }
 // Control commands must either arrive or tear down the audio process. Dropping
 // a mute/stop/reset would leave an audible or capturing stream alive.

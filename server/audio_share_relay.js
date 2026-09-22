@@ -39,6 +39,8 @@ function parseAudioAck(data) {
     return UUID.test(epoch) && sequence > 0n && sequence <= MAX_SAFE ? { epoch, sequence: Number(sequence) } : null;
 }
 const reservation = bitrate => bitrate === 32000 ? 48000 : 112000;
+const receiptGraceMs = baseline => baseline === null ? 1000 : baseline + 150;
+const receiptTimeoutMs = baseline => baseline === null ? 2000 : Math.min(2000,Math.max(500,baseline+500));
 
 class AudioShareRelay {
     constructor(server) {
@@ -47,9 +49,13 @@ class AudioShareRelay {
         this.publications = new Map(); this.subscriptions = new Map(); this.windows = new Map();
         this.maxViewers = server.config?.screenMaxViewersPerPublisher ?? 10;
         this.maxPublications = server.config?.screenMaxPublications ?? 256;
-        this.ackTimeoutMs = 500; this.maxBufferedBytes = 4096; this.maxInflight = 16;
+        this.maxBufferedBytes = 4096; this.maxInflight = 128;
         this.queueTargetMs = 150; this.lastSweep = 0; this.nextEgressAt = 0; this.deliveryTurn = 0;
+        this.diagnostics = {};
+        this.lastDiagnosticsAt = server.monotonicNow();
     }
+    count(name,amount=1) { this.diagnostics[name]=(this.diagnostics[name] || 0)+amount; }
+    maximum(name,value) { this.diagnostics[name]=Math.max(this.diagnostics[name] || 0,value); }
     current(client) { return this.server.screenShare.current(client); }
     client(endpoint) { return this.server.currentTransportByEndpoint.get(endpoint); }
     socket(client, role) {
@@ -139,6 +145,8 @@ class AudioShareRelay {
             if (!entry || entry.streamId !== message.streamId || !entry.publication) return true;
             if (now-entry.lastFeedback < 500) return true;
             entry.lastFeedback = now;
+            this.count('playbackDrops',message.droppedPackets);
+            this.maximum('maximumPlaybackBufferedMs',message.bufferedMs);
             if (message.droppedPackets || message.bufferedMs > this.queueTargetMs) this.congested(entry,now);
             this.updateProfiles(); return true;
         }
@@ -246,6 +254,16 @@ class AudioShareRelay {
             entry.targetBps = Math.max(64000,Math.floor(entry.targetBps*.7)); entry.lastDecrease = now;
         }
     }
+    sourceRouteStalled(publication,sourceUs,arrivalUs) {
+        const cadence=publication.lastStaleSourceUs!==undefined && sourceUs>publication.lastStaleSourceUs
+            && arrivalUs>publication.lastStaleArrivalUs && arrivalUs-publication.lastStaleArrivalUs<=250000
+            && Math.abs((sourceUs-publication.lastStaleSourceUs)-(arrivalUs-publication.lastStaleArrivalUs))<=60000;
+        if(!cadence || publication.staleSinceUs===undefined) {
+            publication.staleSinceUs=arrivalUs; publication.staleSourceUs=sourceUs;
+        }
+        publication.lastStaleSourceUs=sourceUs; publication.lastStaleArrivalUs=arrivalUs;
+        return arrivalUs-publication.staleSinceUs>=1000000 && sourceUs-publication.staleSourceUs>=800000;
+    }
     handleFrame(client,ws,data) {
         const frame = parseAudioPacket(data);
         if (!frame) return false;
@@ -254,22 +272,36 @@ class AudioShareRelay {
         // harmless, but only current authority earns publisher receipt credit.
         if (!this.current(client) || this.socket(client,'publish') !== ws || !publication || publication.id !== frame.epoch) return true;
         if (!client.screenSharingEnabled || !client.audioSharingEnabled) return true;
-        if (frame.sequence <= publication.sequence || frame.timestampUs < publication.timestampUs) return true;
-        publication.sequence = frame.sequence; publication.timestampUs = frame.timestampUs;
+        this.count('receivedPackets');
+        this.maximum('maximumSocketQueueBytes',ws.bufferedAmount || 0);
         if ((ws.bufferedAmount || 0) > this.maxBufferedBytes) { this.abort(ws); return true; }
-        ws.send(encodeAudioAck(frame.epoch,frame.sequence),{binary:true,compress:false});
+        // Current-epoch packets release their exact receipt credit even when
+        // stale or duplicate; temporal admission must never strand a receipt.
+        try { ws.send(encodeAudioAck(frame.epoch,frame.sequence),{binary:true,compress:false},error => { if(error) this.abort(ws); }); }
+        catch (_) { this.abort(ws); return true; }
+        if (frame.sequence <= publication.sequence || frame.timestampUs <= publication.timestampUs) return true;
+        publication.sequence = frame.sequence; publication.timestampUs = frame.timestampUs;
         if (!['starting','streaming'].includes(publication.reason)) return true;
         const now = this.server.monotonicNow();
         // A delayed publishing TCP burst must not become new live sound. The
         // minimum source/arrival offset has no dependency on clock epochs and
         // only allows 200 ppm of drift, not a multi-second queue reset.
         const arrivalUs=now*1000,offsetUs=arrivalUs-frame.timestampUs;
-        publication.bestArrivalOffsetUs=publication.bestArrivalOffsetUs===null ? offsetUs
+        const candidate=publication.bestArrivalOffsetUs===null ? offsetUs
             : Math.min(offsetUs,publication.bestArrivalOffsetUs+Math.max(0,arrivalUs-publication.lastArrivalUs)/5000);
         publication.lastArrivalUs=arrivalUs;
-        if(offsetUs-publication.bestArrivalOffsetUs>150000) return true;
+        if(offsetUs-candidate>150000) {
+            this.count('stalePackets');
+            // A permanent route change must not mute this epoch forever. A
+            // fresh authenticated publication flushes old TCP bytes before
+            // relearning the path; a compressed burst cannot earn a rebase.
+            if(this.sourceRouteStalled(publication,frame.timestampUs,arrivalUs)) this.abort(ws);
+            return true;
+        }
+        publication.staleSinceUs=undefined; publication.lastStaleSourceUs=undefined;
+        publication.bestArrivalOffsetUs=candidate;
         // Bound malicious ingress bursts without retaining compressed sound.
-        if (publication.nextIngressAt > now + 100) return true;
+        if (publication.nextIngressAt > now + 100) { this.count('ingressAdmissionDrops'); return true; }
         publication.nextIngressAt = Math.max(now,publication.nextIngressAt)+20;
         const entries = [...this.subscriptions.values()].filter(e => e.publication === publication);
         const aggregateBudget = Math.max(1,this.totalReservation());
@@ -278,21 +310,38 @@ class AudioShareRelay {
             const entry = entries[(index+offset)%entries.length];
             if (entry.publication !== publication || this.allowed(entry) !== 'ready') continue;
             const output = this.socket(this.client(entry.session.ownerEndpointId),'view'), window = this.window(output);
+            this.maximum('maximumSocketQueueBytes',output.bufferedAmount || 0);
             const oldest = window.frames.values().next().value;
-            if(oldest && now-oldest.sentAt>=this.ackTimeoutMs) { this.abort(output); continue; }
-            const grace = window.baseline === null ? 250 : Math.min(250,window.baseline + this.queueTargetMs);
-            if (window.frames.size >= this.maxInflight || window.bytes+data.length > this.maxBufferedBytes
+            if(oldest && now-oldest.sentAt>=receiptTimeoutMs(window.baseline)) { this.abort(output); continue; }
+            const grace = receiptGraceMs(window.baseline);
+            const creditMs = Math.min(2000,Math.max(250,grace));
+            // Profile changes do not retroactively shrink receipt credit for
+            // larger packets already in flight at the previous bitrate.
+            const creditBytes = Math.max(this.maxBufferedBytes,reservation(96000)*creditMs/8000);
+            // Acknowledgement credit includes the propagation RTT. Only the
+            // actual socket queue represents audio waiting to be transmitted.
+            if (window.frames.size >= Math.min(this.maxInflight,Math.floor(creditMs/20)+2) || window.bytes+data.length > creditBytes
                 || (output.bufferedAmount || 0)+data.length > this.maxBufferedBytes
                 || (oldest && now-oldest.sentAt > grace) || window.nextSendAt > now+100 || this.nextEgressAt > now+100) {
-                this.congested(entry,now); continue;
+                this.count('egressAdmissionDrops'); this.congested(entry,now); continue;
             }
-            const sequence = ++entry.sequence, packet = encodeAudioPacket(entry.streamId,sequence,frame.timestampUs,frame.payload);
+            // Rewriting the identity is sufficient for viewer isolation. Keep
+            // capture sequence gaps visible to Opus concealment and feedback.
+            const sequence = frame.sequence, packet = encodeAudioPacket(entry.streamId,sequence,frame.timestampUs,frame.payload);
+            entry.sequence = sequence;
             const key = `${entry.streamId}:${sequence}`, pending = {epoch:entry.streamId,sequence,bytes:packet.length,sentAt:now,entry};
             window.frames.set(key,pending); window.bytes += packet.length;
             window.nextSendAt = Math.max(now,window.nextSendAt)+packet.length*8000/Math.min(reservation(publication.bitrate),this.viewerBudget(entry));
             this.nextEgressAt = Math.max(now,this.nextEgressAt)+packet.length*8000/aggregateBudget;
-            const failed = () => { if (window.frames.get(key) === pending) { window.frames.delete(key); window.bytes -= pending.bytes; } this.congested(entry,now); };
-            try { output.send(packet,{binary:true,compress:false},error => { if(error) failed(); }); } catch (_) { failed(); }
+            const failed = () => {
+                if (window.frames.get(key) === pending) { window.frames.delete(key); window.bytes -= pending.bytes; }
+                this.congested(entry,this.server.monotonicNow()); this.abort(output);
+            };
+            try {
+                output.send(packet,{binary:true,compress:false},error => {
+                    if(error) failed(); else this.count('forwardedPackets');
+                });
+            } catch (_) { failed(); }
         }
         return true;
     }
@@ -303,8 +352,9 @@ class AudioShareRelay {
         if (!pending) return true;
         window.frames.delete(key); window.bytes -= pending.bytes;
         const now = this.server.monotonicNow(), rtt = now-pending.sentAt;
+        this.maximum('maximumReceiptRttMs',rtt);
         // A late first ACK cannot normalize a seconds-old queue as baseline.
-        if(rtt>=this.ackTimeoutMs) { this.abort(ws); return true; }
+        if(rtt>=receiptTimeoutMs(window.baseline)) { this.abort(ws); return true; }
         if (window.baseline === null || rtt <= window.baseline || now-window.baselineAt > 30000) { window.baseline=rtt; window.baselineAt=now; }
         if (rtt > window.baseline+this.queueTargetMs) this.congested(pending.entry,now);
         else if (now-pending.entry.congestedUntil > 3000 && now-(pending.entry.lastIncrease ?? 0) > 1000) {
@@ -313,17 +363,25 @@ class AudioShareRelay {
         }
         return true;
     }
-    abort(ws) { if (typeof ws.terminate === 'function') ws.terminate(); else ws.close(1008,'Audio receipt timeout'); }
+    abort(ws) {
+        this.count('retiredSockets');
+        if (typeof ws.terminate === 'function') ws.terminate(); else ws.close(1008,'Audio receipt timeout');
+    }
     sweep() {
         const now = this.server.monotonicNow();
         for (const [token,binding] of this.tokens) if (binding.expiresAt <= now || !this.current(binding.client)) this.tokens.delete(token);
         for (const [ws,window] of this.windows) {
             const oldest = window.frames.values().next().value;
-            if (oldest && now-oldest.sentAt >= this.ackTimeoutMs) { this.windows.delete(ws); this.abort(ws); }
+            if (oldest && now-oldest.sentAt >= receiptTimeoutMs(window.baseline)) { this.windows.delete(ws); this.abort(ws); }
             else if (oldest && window.baseline !== null && now-oldest.sentAt > window.baseline+this.queueTargetMs)
                 this.congested(oldest.entry,now);
         }
         this.refreshAll();
+        if (now-this.lastDiagnosticsAt>=5000) {
+            if(Object.keys(this.diagnostics).length)
+                this.server.logProtocolEvent('audio_transport_summary',{intervalMs:now-this.lastDiagnosticsAt,...this.diagnostics});
+            this.diagnostics={}; this.lastDiagnosticsAt=now;
+        }
     }
     removeSession(session,reason='session_unavailable') {
         const entry = this.subscriptions.get(session.remoteSessionId); if (!entry) return;

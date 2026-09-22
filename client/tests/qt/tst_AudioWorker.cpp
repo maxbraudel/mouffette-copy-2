@@ -2,6 +2,7 @@
 #include "backend/audiosharing/AudioWorkerClient.h"
 #include "backend/audiosharing/AudioWorkerProtocol.h"
 #include "backend/audiosharing/AudioPlaybackTimeline.h"
+#include "backend/audiosharing/AudioPlaybackBuffer.h"
 #include "backend/audiosharing/AudioStreamCodec.h"
 #include <QGuiApplication>
 #include <QAudioDevice>
@@ -96,6 +97,169 @@ private slots:
         QVERIFY(!AudioWorkerProtocol::take(scalar, actual, malformed)); QVERIFY(malformed);
         QLocalSocket disconnected; QVERIFY(!AudioWorkerProtocol::sendControl(&disconnected, expected));
         QCOMPARE(disconnected.state(), QLocalSocket::UnconnectedState);
+    }
+    void playbackPreservesPhaseAcrossCaptureAndNetworkJitter_data() {
+        QTest::addColumn<int>("rate");
+        QTest::newRow("48k") << 48000;
+        QTest::newRow("44k1") << 44100;
+        QTest::newRow("96k") << 96000;
+    }
+    void playbackPreservesPhaseAcrossCaptureAndNetworkJitter() {
+        QFETCH(int, rate);
+        AudioPlaybackBuffer queue; AudioPlaybackRenderer renderer(rate);
+        constexpr qint64 sourceEpoch = 900000000, localEpoch = 1000000;
+        constexpr double pi = 3.14159265358979323846;
+        std::array<float, 1920> pcm{};
+        std::vector<float> output(size_t(rate / 100) * 2);
+        int packet = 0;
+        float previous = 0, maximumJump = 0;
+        double energy = 0;
+        AudioPlaybackRenderer::Clock lastClock;
+        for (int callback = 0; callback < 600; ++callback) {
+            const auto local = localEpoch + callback * 10000;
+            // 200 ppm clock mismatch, +/-500 us native timestamp jitter, and
+            // a separate changing network delay of up to 25 ms.
+            while (localEpoch + packet * 20004 + 20000 + (packet * 13 % 26) * 1000 <= local) {
+                const qint64 captureJitter = (packet % 3 - 1) * 500;
+                for (int frame = 0; frame < 960; ++frame) {
+                    const auto sample = float(0.3 * std::sin(2 * pi * 997 * (packet * 960 + frame) / 48000));
+                    pcm[frame * 2] = sample; pcm[frame * 2 + 1] = -sample;
+                }
+                const auto timestamp = sourceEpoch + packet * 20004 + captureJitter;
+                QVERIFY(queue.push(pcm.data(), timestamp, localEpoch + 80000 + packet * 20004 + captureJitter));
+                ++packet;
+            }
+            std::fill(output.begin(), output.end(), 0.0f);
+            const auto clock = renderer.render(queue, output.data(), rate / 100, 2, rate, local);
+            if (clock.sourceUs >= 0) lastClock = clock;
+            for (size_t frame = 0; frame < output.size() / 2; ++frame) {
+                const auto value = output[frame * 2];
+                QVERIFY(std::isfinite(value));
+                QCOMPARE(output[frame * 2 + 1], -value);
+                if (callback > 12) {
+                    maximumJump = std::max(maximumJump, std::abs(value - previous));
+                    energy += value * value;
+                }
+                previous = value;
+            }
+        }
+        const float expectedMaximumJump = float(0.6 * std::sin(pi * 997 / rate));
+        QVERIFY2(maximumJump < expectedMaximumJump * 1.15f,
+            qPrintable(QStringLiteral("A packet boundary changed waveform phase: jump=%1 bound=%2")
+                .arg(maximumJump).arg(expectedMaximumJump * 1.15f)));
+        QVERIFY(energy > rate * 0.2);
+        QCOMPARE(renderer.takeUnderruns(), 0);
+        QCOMPARE(renderer.takeRebuffers(), 0);
+        QVERIFY(lastClock.sourceUs > sourceEpoch);
+        QVERIFY(std::abs((lastClock.localUs - localEpoch) - (lastClock.sourceUs - sourceEpoch) - 80000) < 5000);
+    }
+    void playbackFadesDropoutsAndRebuffersChangedDeadlines() {
+        AudioPlaybackBuffer queue; AudioPlaybackRenderer renderer;
+        std::array<float, 1920> pcm; pcm.fill(0.25f);
+        std::array<float, 960> output{};
+        constexpr qint64 epoch = 900000000, local = 1000000;
+        QVERIFY(queue.push(pcm.data(), epoch, local));
+        QVERIFY(queue.push(pcm.data(), epoch + 20000, local + 20000));
+        float previous = 0, maximumJump = 0;
+        for (int callback = 0; callback < 6; ++callback) {
+            output.fill(0);
+            renderer.render(queue, output.data(), 480, 2, 48000, local + callback * 10000);
+            for (int frame = 0; frame < 480; ++frame) {
+                maximumJump = std::max(maximumJump, std::abs(output[frame * 2] - previous));
+                previous = output[frame * 2];
+            }
+        }
+        QCOMPARE(renderer.takeUnderruns(), 1);
+        QVERIFY(maximumJump < 0.003f); // 3 ms fades, no hard step into silence.
+        QVERIFY(std::all_of(output.begin(), output.end(), [](float value) { return value == 0; }));
+        // An adaptive jitter target rose 50 ms. Recovery must respect the new
+        // deadline immediately, not spend seconds drifting toward it.
+        QVERIFY(queue.push(pcm.data(), epoch + 60000, local + 110000));
+        for (int callback = 6; callback < 11; ++callback) {
+            output.fill(0);
+            const auto clock = renderer.render(queue, output.data(), 480, 2, 48000, local + callback * 10000);
+            QCOMPARE(clock.sourceUs, qint64(-1));
+        }
+        output.fill(0);
+        const auto clock = renderer.render(queue, output.data(), 480, 2, 48000, local + 110000);
+        QVERIFY(clock.sourceUs >= epoch + 60000 && clock.sourceUs < epoch + 71000);
+        QVERIFY(renderer.takeRebuffers() > 0);
+    }
+    void playbackBandlimitsLowRateDeviceFallback() {
+        auto energy = [](double frequency) {
+            AudioPlaybackBuffer queue; AudioPlaybackRenderer renderer(16000);
+            std::array<float, 1920> pcm{};
+            std::array<float, 160> output{};
+            constexpr double pi = 3.14159265358979323846;
+            int packet = 0;
+            double sum = 0;
+            for (int callback = 0; callback < 30; ++callback) {
+                while (queue.size() < 4) {
+                    for (int frame = 0; frame < 960; ++frame) {
+                        const auto sample = float(0.3 * std::sin(2 * pi * frequency * (packet * 960 + frame) / 48000));
+                        pcm[frame * 2] = sample; pcm[frame * 2 + 1] = sample;
+                    }
+                    queue.push(pcm.data(), 900000000 + packet * 20000, 1000000 + packet * 20000); ++packet;
+                }
+                output.fill(0);
+                renderer.render(queue, output.data(), 160, 1, 16000, 1000000 + callback * 10000);
+                if (callback > 5) for (float value : output) sum += value * value;
+            }
+            return sum;
+        };
+        const auto passband = energy(3000), aboveNyquist = energy(13000);
+        QVERIFY(passband > 100);
+        QVERIFY2(aboveNyquist < passband * 0.001,
+            qPrintable(QStringLiteral("Resampling aliased high-frequency audio: energy ratio=%1").arg(aboveNyquist / passband)));
+    }
+    void playbackHandlesAnEarlierDeadlineWithoutExtrapolatingPcm() {
+        AudioPlaybackBuffer queue; AudioPlaybackRenderer renderer;
+        std::array<float, 1920> pcm{};
+        for (int frame = 0; frame < 960; ++frame) {
+            pcm[frame * 2] = 0.2f + float(frame % 2) * 0.05f;
+            pcm[frame * 2 + 1] = pcm[frame * 2];
+        }
+        for (int packet = 0; packet < 8; ++packet)
+            QVERIFY(queue.push(pcm.data(), 900000000 + packet * 20000,
+                1000000 + packet * 20000 + (packet < 2 ? 140000 : 80000)));
+        std::array<float, 960> output{};
+        for (int callback = 0; callback < 12; ++callback) {
+            output.fill(0);
+            renderer.render(queue, output.data(), 480, 2, 48000, 1140000 + callback * 10000);
+            for (float value : output) { QVERIFY(std::isfinite(value)); QVERIFY(std::abs(value) < 0.3f); }
+        }
+        QVERIFY(renderer.takeRebuffers() > 0);
+    }
+    void playbackQueueIsBoundedAndPublishesCompletePcm() {
+        AudioPlaybackBuffer queue;
+        std::array<float, 1920> pcm{};
+        for (int i = 0; i < AudioPlaybackBuffer::Capacity; ++i)
+            QVERIFY(queue.push(pcm.data(), i * 20000, i * 20000));
+        QVERIFY(!queue.push(pcm.data(), AudioPlaybackBuffer::Capacity * 20000, 0));
+        QCOMPARE(queue.size(), size_t(AudioPlaybackBuffer::Capacity));
+        while (queue.peek()) queue.pop();
+        std::atomic<bool> valid{true};
+        constexpr int packets = 20000;
+        std::thread producer([&] {
+            std::array<float, 1920> samples{};
+            for (int packet = 0; packet < packets; ++packet) {
+                samples.fill(float(packet));
+                // Producer retries are only for this stress test; the live
+                // producer drops newest when full to keep latency bounded.
+                while (!queue.push(samples.data(), qint64(packet + 20) * 20000, packet))
+                    std::this_thread::yield();
+            }
+        });
+        for (int packet = 0; packet < packets; ++packet) {
+            const AudioPlaybackBuffer::Block* block;
+            while (!(block = queue.peek())) std::this_thread::yield();
+            if (block->sourceTimestampUs != qint64(packet + 20) * 20000 || block->presentationUs != packet
+                || !std::all_of(block->pcm.begin(), block->pcm.end(), [packet](float value) { return value == float(packet); }))
+                valid.store(false);
+            queue.pop();
+        }
+        producer.join();
+        QVERIFY(valid.load()); QCOMPARE(queue.size(), size_t(0));
     }
     void timelineRecoversLatencyChanges() {
         AudioPlaybackTimeline timeline;

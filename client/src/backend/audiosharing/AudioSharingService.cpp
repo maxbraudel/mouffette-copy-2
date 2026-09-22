@@ -43,9 +43,9 @@ AudioSharingService::AudioSharingService(WebSocketClient* network, QObject* pare
     });
     connect(m_transport, &AudioTransport::issue, this, &AudioSharingService::report);
     connect(m_worker, &AudioWorkerClient::packetReady, this,
-            [this](const QString& epoch, quint64, qint64 timestampUs, const QByteArray& opus) {
+            [this](const QString& epoch, quint64 sequence, qint64 timestampUs, const QByteArray& opus) {
         if (m_enabled && !m_suspended && !m_stopped && epoch == m_captureEpoch
-            && epoch == m_transport->publicationId()) m_transport->sendPacket(opus, timestampUs);
+            && epoch == m_transport->publicationId()) m_transport->sendPacket(opus, timestampUs, sequence);
     });
     connect(m_worker, &AudioWorkerClient::captureStateChanged, this,
             [this](bool active, const QString& error) {
@@ -59,15 +59,16 @@ AudioSharingService::AudioSharingService(WebSocketClient* network, QObject* pare
             m_captureEpoch.clear();
             m_captureRetryAt = MediaCaptureClock::nowUs() + 3000000;
             m_worker->stopCapture();
+            m_transport->restartPublication();
         } else if (active) m_transport->sendStatus(QStringLiteral("streaming"));
     });
     connect(m_worker, &AudioWorkerClient::playbackClock, this,
-            [this](const QString& source, const QString& epoch, qint64 sourceUs) {
+            [this](const QString& source, const QString& epoch, qint64 sourceUs, qint64 localUs) {
         if (m_stopped || m_muted || m_suspended || !m_playbackAllowed || source != m_endpoint
             || epoch != m_stream || m_session.isEmpty()) return;
         setState(QStringLiteral("available"));
         m_reported.clear();
-        emit playbackClock(source, epoch, sourceUs);
+        emit playbackClock(source, epoch, sourceUs, localUs);
     });
     connect(m_worker, &AudioWorkerClient::playbackFeedback, this,
             [this](const QString& source, const QString& epoch, int dropped, int bufferedMs) {
@@ -79,6 +80,10 @@ AudioSharingService::AudioSharingService(WebSocketClient* network, QObject* pare
         clearPlayback();
         m_captureEpoch.clear();
         m_captureRetryAt = MediaCaptureClock::nowUs() + 3000000;
+        // A new process has lost its codec and capture sequence state. Give it
+        // a fresh wire epoch so receivers cannot reject its new sequence forever
+        // or decode across a state reset with the old prediction history.
+        m_transport->restartPublication();
         if (m_status != error) { m_status = error; emit statusChanged(); }
         if (!m_endpoint.isEmpty() && !m_muted) { setState(QStringLiteral("unavailable")); report(error); }
     });

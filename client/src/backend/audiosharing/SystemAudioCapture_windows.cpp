@@ -1,6 +1,7 @@
 #include "backend/audiosharing/SystemAudioCapture.h"
 #include "backend/audiosharing/MediaCaptureClock.h"
 #include "backend/audiosharing/AudioCaptureTiming.h"
+#include "backend/audiosharing/AudioCaptureTimestamp.h"
 #include <QSysInfo>
 #include <algorithm>
 #include <atomic>
@@ -180,7 +181,23 @@ public:
         if (SUCCEEDED(result)) result = client->Start();
         if (FAILED(result)) { state(false, describe("Process audio capture startup failed", result)); return; }
         state(true, {});
+        // Native audio work needs the scheduler's multimedia class; a normal
+        // priority std::thread can miss capture periods during UI/GPU load.
+        // Resolve dynamically to retain the existing MinGW/SDK link contract.
+        using SetCharacteristics = HANDLE(WINAPI*)(LPCWSTR, LPDWORD);
+        using RevertCharacteristics = BOOL(WINAPI*)(HANDLE);
+        static HMODULE avrt = LoadLibraryExW(L"avrt.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+        const auto setCharacteristics = avrt ? reinterpret_cast<SetCharacteristics>(GetProcAddress(avrt, "AvSetMmThreadCharacteristicsW")) : nullptr;
+        const auto revertCharacteristics = avrt ? reinterpret_cast<RevertCharacteristics>(GetProcAddress(avrt, "AvRevertMmThreadCharacteristics")) : nullptr;
+        DWORD taskIndex = 0;
+        struct MultimediaGuard {
+            HANDLE value;
+            RevertCharacteristics revert;
+            ~MultimediaGuard() { if (value && revert) revert(value); }
+        } multimedia{setCharacteristics && revertCharacteristics ? setCharacteristics(L"Audio", &taskIndex) : nullptr, revertCharacteristics};
         AudioCaptureTiming timing;
+        AudioCaptureTimestamp timestamp;
+        bool discontinuityPending = false;
         HANDLE events[]{stopped, ready};
         bool running = true;
         while (running) {
@@ -194,6 +211,7 @@ public:
                 BYTE* bytes = nullptr; DWORD flags = 0; UINT64 devicePosition = 0, qpcPosition = 0;
                 result = captureClient->GetBuffer(&bytes, &frames, &flags, &devicePosition, &qpcPosition);
                 if (FAILED(result)) break;
+                if (!frames) break; // AUDCLNT_S_BUFFER_EMPTY does not acquire a packet.
                 if (frames <= 48000) {
                     QByteArray samples(qsizetype(frames) * 2 * sizeof(float), Qt::Uninitialized);
                     auto* output = reinterpret_cast<float*>(samples.data());
@@ -202,15 +220,19 @@ public:
                     // WASAPI's QPC timestamp and MediaCaptureClock share the
                     // native epoch. Keep the sample's age instead of concealing
                     // capture backlog behind a first-arrival clock offset.
-                    qint64 native = qint64(qpcPosition / 10);
+                    const qint64 native = (flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR) || !qpcPosition
+                        ? -1 : qint64(qpcPosition / 10);
                     const auto now = MediaCaptureClock::nowUs();
-                    if ((flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR) || !native) native = now;
+                    const auto mapped = timestamp.map(native, int(frames), now,
+                        discontinuityPending || (flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY));
+                    discontinuityPending = false;
                     result = captureClient->ReleaseBuffer(frames);
                     if (FAILED(result)) break;
-                    timing.observe("wasapi-process-loopback", now, native, native, int(frames));
+                    timing.observe("wasapi-process-loopback", now, native, mapped.timestampUs, int(frames));
                     if (WaitForSingleObject(stopped, 0) == WAIT_OBJECT_0) { running = false; break; }
-                    pcm(std::move(samples), native);
+                    pcm(std::move(samples), mapped.timestampUs, mapped.discontinuity);
                 } else {
+                    discontinuityPending = true;
                     result = captureClient->ReleaseBuffer(frames);
                     if (FAILED(result)) break;
                 }

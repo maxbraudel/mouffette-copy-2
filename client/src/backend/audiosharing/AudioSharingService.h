@@ -27,7 +27,7 @@ signals:
     void stateChanged();
     void statusChanged();
     void sourceReservationChanged(int bps);
-    void playbackClock(const QString& endpoint, const QString& epoch, qint64 sourceUs);
+    void playbackClock(const QString& endpoint, const QString& epoch, qint64 sourceUs, qint64 localUs);
     void playbackReset(const QString& endpoint);
     void remoteIssue(const QString& endpoint, const QString& message);
 private:

@@ -43,7 +43,8 @@ State additionally reports `disabled`, `unsupported`, `session_unavailable`,
 ## Binary framing and codec
 
 All integers are unsigned big-endian and at most JavaScript's safe integer
-maximum. Sequences start at one. An audio data message is:
+maximum. Capture sequences start at one for a new publication; the first
+delivered sequence can be larger after an upstream drop. An audio data message is:
 
 | Offset | Bytes | Meaning |
 | --- | ---: | --- |
@@ -53,8 +54,10 @@ maximum. Sequences start at one. An audio data message is:
 | 28 | 8 | Source capture timestamp, microseconds |
 | 36 | 1–1275 | One Opus packet |
 
-The source uses its publication UUID. The relay rewrites only UUID and delivery
-sequence for each viewer; it preserves the capture timestamp and payload. The
+The source uses its publication UUID. The relay rewrites only the UUID for each
+viewer; it preserves capture sequence, timestamp and payload. Sequence gaps
+remain visible across capture IPC, sender admission and relay admission, so the
+receiver can apply Opus packet loss concealment and report actual loss. The
 grant binds that compact UUID to authenticated publication/session authority.
 There is no repeated JSON header, base64, WebSocket compression, container,
 transcoding or retained audio history.
@@ -77,12 +80,20 @@ waiting for viewers. Viewers acknowledge transport consumption before decoding,
 including obsolete epochs, then discard any packet without a current grant.
 Forged or duplicate tuples free no other packet's credit.
 
-Each viewer has at most 16 outstanding packets and 4 KiB, including socket
-backlog. After the first measured ACK, a pending age above baseline RTT plus
-150 ms stops new admission, with an absolute 250 ms cap including initial
-admission. Baselines expire after 30 seconds. An unacknowledged packet older
-than 500 ms terminates only the disposable audio pipe; a late first receipt
-cannot establish a slow baseline. No queue of unsent encoded audio is kept. Publisher
+Actual socket backlog is bounded separately at 4 KiB. Receipt credit includes
+propagation and reverse-path latency, so a healthy long RTT does not create
+artificial media loss. Before the first ACK, the receipt window permits one
+second at the normal-profile application reservation. After measurement its duration is
+`clamp(baseline RTT + 150 ms, 250 ms, 2000 ms)`, with at least 4 KiB of byte
+credit and at most `min(128, floor(window / 20 ms) + 2)` packets. Byte credit
+uses the normal profile even during fallback, so a bitrate reduction
+does not invalidate larger packets already in flight. Pending age
+above the baseline plus 150 ms stops admission (one second before measurement).
+Baselines refresh after 30 seconds. Receipt timeout is two seconds before the
+first ACK, then `clamp(baseline RTT + 500 ms, 500 ms, 2000 ms)`. Expiration
+terminates only the disposable audio pipe; late receipts cannot normalize
+unbounded queues. This RTT allowance never extends a stale packet's playback
+deadline. No queue of unsent encoded audio is kept. Publisher
 ingress is limited to a 20 ms cadence with at most 100 ms burst debt. Viewer
 and aggregate egress are paced with a 100 ms debt bound; viewer ordering rotates.
 
@@ -92,6 +103,34 @@ offset and discard audio more than 150 ms behind it, allowing only 200 ppm of
 positive clock drift. Received video timestamps can seed this same viewer
 estimate before audio arrives, so delayed first audio cannot legitimize an
 initial TCP backlog. Audio remains independent when no screen is visible.
+Sub-microsecond drift allowance accumulates across frequent interleaved audio
+and video observations. Rejected backlog cannot move the accepted offset.
+
+The viewer uses a separate bounded jitter target, initially 80 ms and at most
+150 ms. After at least 200 ms of advancing packets under deadline pressure,
+it can raise the target to the measured lag plus 40 ms, within that bound.
+After 30 seconds with spare margin it can reduce the target by 1 ms per second.
+This changes the playout margin without teaching old packets a new capture
+time. Audio output clocks carry paired source/local timestamps back from the
+worker; video presentation follows that pair without rebasing it at GUI receipt.
+
+A permanent route change must not mute an epoch forever. Sustained late ingress
+with one second of both source-time and arrival-time progress retires the
+publishing pipe. A viewer similarly retires its pipe for persistent lateness
+beyond the maximum target. If recent video demonstrates a faster path, its
+source/local clock evidence survives the audio reconnect: a new late audio
+packet cannot legitimize a late baseline. A compressed TCP backlog alone
+cannot trigger that reanchor. Reconnection obtains a fresh epoch and flushes
+queued bytes before relearning the path when no faster clock evidence exists.
+Capture process replacement and capture failure also rotate the
+publication, fencing old encoder state and restarted capture sequences.
+
+This recovery handles flushable audio backlog and common-path route changes.
+A permanent audio-only path delay beyond the 150 ms differential budget cannot
+both play and satisfy that limit. The viewer reports local `timing_unavailable`
+with a diagnostic issue and reconnects with bounded exponential backoff until
+the path recovers; it does not silently present late audio as synchronized.
+Only timely media, rather than authentication alone, resets that backoff.
 
 `audio_source_budget {totalBps,congested}` is sent at most twice per second.
 `audio_view_feedback {remoteSessionId,generation,streamId,droppedPackets,
@@ -108,15 +147,31 @@ Clients retry failed audio sockets from 500 ms up to ten seconds, replaying
 desired consent/subscription. Replacement epochs fence queued transport and
 decoder work. Stopping or muting a viewer clears its local stream immediately.
 
+Every five seconds with activity, the relay emits `audio_transport_summary`
+with packet/drop counts, retired socket counts and maximum receipt RTT, socket
+backlog and reported playback backlog. The desktop logging category
+`mouffette.audio.transport` records the corresponding admission/staleness counts,
+capture age, receipt state and current jitter target. No encoded packet content
+is logged. These counters distinguish local capture/IPC stalls from relay
+admission and receiver buffering.
+
+This remains a reliable TCP transport, with TCP head-of-line blocking under
+loss. Desktop packet dispatch also passes through the GUI event loop. Bounded
+queues, concealment and recovery limit their impact; they do not provide the
+loss-independent delivery of RTP/WebRTC or an exact physical DAC timestamp.
+
 ## Verification
 
 `audio_share_protocol.test.js` runs with `npm test`. It covers compact framing,
 safe integers, authorization, exact receipts, consent/revocation, role misuse,
 single source fan-out, monitor independence, socket replacement, bounded slow
-viewers, stale TCP bursts, late first ACKs, profile hysteresis, aggregate pacing
-and real WebSocket connections.
+viewers, healthy long RTT, stale TCP bursts, route-shift epoch recovery, capture
+sequence gaps, late first ACKs, failed writes, bounded diagnostics, profile
+hysteresis, aggregate pacing and real WebSocket connections.
 `tst_AudioTransport` exercises the desktop transport against the real Node
 coordinator using synthetic packets, without capture permissions or playback.
+It also covers fractional clock drift, bounded jitter adaptation, faster-video
+clock fencing, capture-process epoch replacement and control-session survival.
 
 ## Build dependencies
 

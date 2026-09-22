@@ -64,7 +64,10 @@ proxy policy and TLS verification and use single-use authenticated role tokens.
 Session, connection, consent and audio epochs fence delayed work. Monitor topology
 does not reset the audio epoch. See the [wire protocol](../../server/AUDIO_SHARING_PROTOCOL.md).
 
-Opus uses 48 kHz stereo, 20 ms packets, complexity 5 and constrained VBR. The normal
+Opus uses 48 kHz stereo, 20 ms packets, complexity 7 and constrained VBR, with DTX
+disabled to preserve quiet system-audio content. Decoder PLC and available in-band
+FEC bridge short packet gaps; CELT music packets can use PLC without carrying FEC.
+Capture sequences remain visible through IPC and relay drops. The normal
 96 kbit/s mode falls to 32 kbit/s after one second of congestion or a total budget
 below 256 kbit/s; recovery requires ten healthy seconds at or above 384 kbit/s.
 One common audio quality serves all viewers, so a weak viewer may lower audio
@@ -72,24 +75,40 @@ quality without lowering the other viewers' video quality. Audio reservations
 are deducted from existing source/viewer/relay preview budgets. Real TCP/TLS
 headers and retransmissions add traffic beyond application byte budgets.
 
-Native capture timestamps use a common monotonic source clock and are kept
-through the codec and relay. On macOS this is the CoreMedia host clock's
+Native capture timestamps use a common monotonic source clock. Sample-aware
+packetization preserves partial native buffers and marks capture discontinuities;
+Opus lookahead is subtracted so packet timestamps name the decoded first sample.
+On macOS this is the CoreMedia host clock's
 `mach_absolute_time` epoch, including after sleep; native capture timestamps are
 never reanchored to a delayed first callback. Windows uses QPC directly, matching
 WASAPI's native sample timestamps. Network timeouts continue using local arrival
 clocks.
 
 The fastest observed audio/video transit establishes the source-to-viewer clock
-mapping. Audio's 80 ms jitter allowance starts from that shared mapping, rather
-than adding another buffer after an already delayed audio arrival. The helper
+mapping. Audio's jitter allowance starts at 80 ms and can adapt up to 150 ms
+under sustained timing pressure, from that shared mapping. The helper
 receives an absolute local playback deadline and discards expired packets. Source
 and listener IPC also enforce packet age limits, including data buffered inside
-the operating system's sockets. Audio acknowledgement deadlines and small flight
-windows prevent TCP backlogs from turning into seconds of delayed playback.
-Video may wait at most an additional 40 ms for the current
-audio consumption clock, with only one decoded image waiting per screen. Without
-an active recent audio clock, video presents immediately. This is bounded preview
-synchronization, not a promise of perfect synchronization on a congested link.
+the operating system's sockets. Audio acknowledgement windows account for network
+RTT separately from bytes waiting in the socket; healthy propagation delay does
+not itself discard packets. A sustained route change retires the disposable audio
+epoch before learning a fresh mapping. A delayed burst cannot reanchor itself.
+
+Playback uses fixed SPSC PCM storage and a continuous sample cursor. The native
+audio callback takes no mixer mutex and does not allocate or release stream
+objects. Interpolation spans packet boundaries and clock drift changes playback
+rate gradually instead of jumping sample position at every packet.
+
+Video may wait at most an additional 150 ms for the paired source/local audio
+output estimate. A bounded queue holds each image at its own timestamp and skips
+images already superseded at presentation time. IPC receipt does not become
+the audio clock's origin. Without a recent audio clock, video presents immediately.
+Qt's public callback API does not expose the DAC timestamp or Bluetooth latency;
+the output clock is an estimate based on callback periods and device frame count.
+`setBufferSize()` does not control callback mode. This is bounded preview
+synchronization, not a guarantee of acoustic synchronization on every device.
+See the [reliability audit](audio-reliability-audit.md) for causes, regression
+coverage and remaining transport/device limits.
 
 The capture backend forwards the system mix at its native level. It does not
 read or reapply the sharing computer's speaker volume or mute. The viewer's

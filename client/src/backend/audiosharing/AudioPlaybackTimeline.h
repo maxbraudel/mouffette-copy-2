@@ -10,6 +10,7 @@ public:
     struct Decision { bool accept = false; bool rebuffer = false; };
     static constexpr qint64 PacketUs = 20000, TargetDelayUs = 80000, MaximumDelayUs = 150000;
     qint64 sourceAt(qint64 localUs) const { return remoteAnchor + localUs - localAnchor; }
+    qint64 presentationAt(qint64 sourceUs) const { return localAnchor + sourceUs - remoteAnchor; }
     void reset() { started = false; }
     Decision enqueue(qint64 timestampUs, qint64 arrivalUs, bool full = false, qint64 presentationUs = -1) {
         if (presentationUs >= 0) {

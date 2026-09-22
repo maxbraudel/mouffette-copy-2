@@ -6,7 +6,9 @@
 
 class SystemAudioCapture {
 public:
-    using Pcm = std::function<void(QByteArray, qint64)>;
+    // Timestamp of the first sample in MediaCaptureClock's native epoch;
+    // discontinuity marks a native overrun/restart even when PTS is unavailable.
+    using Pcm = std::function<void(QByteArray, qint64, bool discontinuity)>;
     using State = std::function<void(bool, QString)>;
     virtual ~SystemAudioCapture() = default;
     virtual void start(Pcm pcm, State state) = 0;

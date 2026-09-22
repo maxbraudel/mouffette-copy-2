@@ -1,5 +1,6 @@
 #include "backend/screensharing/ScreenSharingService.h"
 #include "backend/screensharing/ScreenStreamCodec.h"
+#include "backend/audiosharing/MediaCaptureClock.h"
 #include "backend/config/AppConfig.h"
 #include "backend/domain/project/ProjectManager.h"
 #include "backend/managers/app/SettingsManager.h"
@@ -211,6 +212,60 @@ private slots:
         metadata.insert("sequence", 3);
         QVERIFY(!source.sendScreenPublicationFrame(metadata, packet.annexB));
         first.disconnect(); second.disconnect(); source.disconnect();
+    }
+
+    void sharedPresentationUsesWorkerClockDespiteDelayedIpc() {
+        QTemporaryDir identities;
+        WebSocketClient viewer(identities.filePath("viewer"), false);
+        WebSocketClient publisher(identities.filePath("publisher"), false);
+        SystemMonitor monitor(nullptr, emptyDesktop());
+        ScreenSharingService view(&viewer, &monitor);
+        QSignalSpy frames(&view, &ScreenSharingService::frameReady);
+        QSignalSpy publication(&publisher, &WebSocketClient::screenPublicationRequested);
+        QString session;
+        connectPeers(viewer, publisher, &session);
+        publisher.setScreenSharingEnabled(true);
+        view.setViewedEndpoint(publisher.endpointId());
+        QTRY_VERIFY_WITH_TIMEOUT(publisher.isScreenPublicationChannelConnected()
+            && viewer.isScreenChannelConnected() && !publication.isEmpty()
+            && publication.last().first().toJsonObject().value("enabled").toBool(), 4000);
+        QTest::qWait(100);
+        QImage pixels(640, 360, QImage::Format_RGBA8888);
+        pixels.fill(Qt::blue);
+        ScreenStreamEncoder encoder(false);
+        QString error;
+        const auto packets = encoder.encode(QVideoFrame(pixels), true, error);
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QCOMPARE(packets.size(), 1);
+        const auto packet = packets.first();
+        const auto grant = publication.last().first().toJsonObject();
+        constexpr qint64 sourceOrigin = 10000000;
+        const qint64 localOrigin = MediaCaptureClock::nowUs();
+        // Simulate a clock report delayed 40 ms in IPC. The matching video
+        // image is due 80 ms from now, not 120 ms from report arrival.
+        view.setAudioPlaybackClock(publisher.endpointId(), "audio-epoch",
+            sourceOrigin, localOrigin - 40000);
+        qint64 presentedAt = -1;
+        connect(&view, &ScreenSharingService::frameReady, &view,
+            [&](const QString&, int, const QVideoFrame&) { presentedAt = MediaCaptureClock::nowUs(); });
+        QJsonObject metadata{{"publicationId", grant.value("publicationId")},
+            {"screenId", 0}, {"layer", "main"}, {"sequence", 1}, {"width", 640},
+            {"height", 360}, {"keyFrame", true}, {"codec", "h264"},
+            {"bitrateBps", 200000}, {"fps", 5}, {"timestampUs", double(sourceOrigin + 120000)}};
+        QVERIFY(publisher.sendScreenPublicationFrame(metadata, packet.annexB));
+        QTRY_COMPARE_WITH_TIMEOUT(frames.count(), 1, 4000);
+        QVERIFY(presentedAt >= localOrigin + 80000);
+        QCOMPARE(qvariant_cast<QVideoFrame>(frames.first().at(2)).startTime(), sourceOrigin + 120000);
+        // Muting flushes a waiting image and leaves independent video live.
+        QTRY_VERIFY_WITH_TIMEOUT(publisher.screenSendWindowOpen(), 4000);
+        metadata.insert("sequence", 2);
+        metadata.insert("timestampUs", double(sourceOrigin + 400000));
+        view.setAudioPlaybackClock(publisher.endpointId(), "audio-epoch",
+            sourceOrigin + 120000, MediaCaptureClock::nowUs());
+        QVERIFY(publisher.sendScreenPublicationFrame(metadata, packet.annexB));
+        view.clearAudioPlaybackClock(publisher.endpointId());
+        QTRY_COMPARE_WITH_TIMEOUT(frames.count(), 2, 4000);
+        viewer.disconnect(); publisher.disconnect();
     }
 
     void sharedPublicationSelectsIndependentDecodableLayers() {

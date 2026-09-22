@@ -176,11 +176,51 @@ const frame=(publication,sequence=1,timestamp=20000)=>encodeAudioPacket(publicat
     const publication=fastView.entry.publication;
     input.emit('message',frame(publication,1,1000000),true);
     c.relay.handleAck(fast,fastWs,encodeAudioAck(fastView.entry.streamId,1));
-    c.tick(501);
+    c.tick(2001);
     c.relay.handleAck(slow,slowWs,encodeAudioAck(slowView.entry.streamId,1));
     assert.equal(slowWs.readyState,3); assert.equal(slow.ws.readyState,1);
-    input.emit('message',frame(publication,2,1501000),true);
+    input.emit('message',frame(publication,2,3001000),true);
     assert.equal(frames(fastWs).length,2); assert.equal(fastWs.readyState,1);
+}
+
+// A permanent ingress route shift recovers through a new disposable source
+// publication. It never makes old buffered audio current in the old epoch.
+{
+    const c=context(),source=c.client('source'),input=c.connect(source,'publish'); c.consent(source);
+    const viewer=c.client('viewer'),output=c.connect(viewer,'view'),{entry}=c.subscribe(viewer,source);
+    const publication=entry.publication,oldStream=entry.streamId;
+    input.emit('message',frame(publication,1,1000000),true);
+    c.relay.handleAck(viewer,output,encodeAudioAck(oldStream,1));
+    c.tick(220);
+    for(let sequence=2;sequence<=52;++sequence) {
+        input.emit('message',frame(publication,sequence,1000000+(sequence-1)*20000),true);
+        c.tick(20);
+    }
+    assert.equal(input.readyState,3); assert.equal(frames(output).length,1);
+    assert.equal(source.ws.readyState,1);
+    const resumed=c.connect(source,'publish'),next=entry.publication;
+    assert.notEqual(next.id,publication.id); assert.notEqual(entry.streamId,oldStream);
+    resumed.emit('message',frame(publication,53,2040000),true);
+    assert.equal(frames(output).length,1,'retired source bytes cannot cross the epoch fence');
+    resumed.emit('message',frame(next,1,2260000),true);
+    assert.equal(frames(output).length,2); assert.equal(frames(output).at(-1).epoch,entry.streamId);
+}
+
+// Replaying a compressed backlog in one turn cannot trigger a clock rebase
+// or flush a healthy source publication.
+{
+    const c=context(),source=c.client('source'),input=c.connect(source,'publish'); c.consent(source);
+    const viewer=c.client('viewer'),output=c.connect(viewer,'view'),{entry}=c.subscribe(viewer,source);
+    const publication=entry.publication;
+    input.emit('message',frame(publication,1,1000000),true);
+    c.relay.handleAck(viewer,output,encodeAudioAck(entry.streamId,1));
+    c.tick(10000);
+    for(let sequence=2;sequence<=102;++sequence)
+        input.emit('message',frame(publication,sequence,1000000+(sequence-1)*20000),true);
+    assert.equal(input.readyState,1); assert.equal(entry.publication,publication);
+    assert.equal(frames(output).length,1);
+    input.emit('message',frame(publication,103,11000000),true);
+    assert.equal(frames(output).length,2);
 }
 // Admission itself also retires an expired pipe even before the next sweep.
 {
@@ -188,8 +228,75 @@ const frame=(publication,sequence=1,timestamp=20000)=>encodeAudioPacket(publicat
     const viewer=c.client('viewer'),output=c.connect(viewer,'view'),{entry}=c.subscribe(viewer,source);
     const publication=entry.publication;
     input.emit('message',frame(publication,1,1000000),true);
-    c.tick(501); input.emit('message',frame(publication,2,1501000),true);
+    c.tick(2001); input.emit('message',frame(publication,2,3001000),true);
     assert.equal(output.readyState,3); assert.equal(frames(output).length,1);
+}
+
+// Propagation RTT is not a media queue: a stable 600 ms acknowledgement
+// round-trip must not force packet loss through a fixed 250 ms credit window.
+// The application socket backlog remains bounded independently.
+{
+    const c=context(),source=c.client('source'),input=c.connect(source,'publish'); c.consent(source);
+    const viewer=c.client('viewer'),output=c.connect(viewer,'view'),{entry}=c.subscribe(viewer,source);
+    const publication=entry.publication;
+    for(let sequence=1;sequence<=100;++sequence) {
+        c.tick(20);
+        if(sequence>30) c.relay.handleAck(viewer,output,encodeAudioAck(entry.streamId,sequence-30));
+        if(sequence===51) publication.bitrate=32000;
+        input.emit('message',encodeAudioPacket(publication.id,sequence,sequence*20000,
+            Buffer.alloc(publication.bitrate===32000 ? 80 : 240)),true);
+    }
+    assert.equal(frames(output).length,100,'healthy long RTT and profile changes must not create artificial loss');
+    assert.equal(c.relay.window(output).baseline,600);
+    assert.ok(c.relay.window(output).bytes<=31*276);
+    output.bufferedAmount=4096; c.tick(20); input.emit('message',frame(publication,101,2020000),true);
+    assert.equal(frames(output).length,100,'RTT allowance must not permit a growing socket queue');
+    assert.equal(output.readyState,1);
+}
+
+// Once RTT is known, an actual stall is still retired promptly. The initial
+// discovery allowance must not become a two-second steady-state audio queue.
+{
+    const c=context(),source=c.client('source'),input=c.connect(source,'publish'); c.consent(source);
+    const viewer=c.client('viewer'),output=c.connect(viewer,'view'),{entry}=c.subscribe(viewer,source);
+    const publication=entry.publication;
+    input.emit('message',frame(publication,1,1000000),true);
+    c.relay.handleAck(viewer,output,encodeAudioAck(entry.streamId,1));
+    c.tick(20); input.emit('message',frame(publication,2,1020000),true);
+    c.tick(501); c.relay.sweep();
+    assert.equal(output.readyState,3); assert.equal(source.ws.readyState,1);
+}
+
+// Sender/IPC loss and per-viewer admission loss remain visible as sequence
+// gaps. Rewriting only the epoch keeps receipt credit isolated per viewer.
+{
+    const c=context(),source=c.client('source'),input=c.connect(source,'publish'); c.consent(source);
+    const fast=c.client('fast'),fastWs=c.connect(fast,'view'),fastView=c.subscribe(fast,source);
+    const slow=c.client('slow'),slowWs=c.connect(slow,'view'),slowView=c.subscribe(slow,source);
+    const publication=fastView.entry.publication;
+    input.emit('message',frame(publication,5,1000000),true);
+    slowWs.bufferedAmount=4096; c.tick(20); input.emit('message',frame(publication,6,1020000),true);
+    slowWs.bufferedAmount=0; c.tick(40); input.emit('message',frame(publication,8,1060000),true);
+    assert.deepEqual(frames(fastWs).map(p=>p.sequence),[5,6,8]);
+    assert.deepEqual(frames(slowWs).map(p=>p.sequence),[5,8]);
+    c.relay.handleAck(slow,slowWs,encodeAudioAck(fastView.entry.streamId,5));
+    assert.equal(c.relay.window(slowWs).frames.size,2,'another viewer epoch cannot release receipt credit');
+    c.relay.handleAck(slow,slowWs,encodeAudioAck(slowView.entry.streamId,5));
+    assert.equal(c.relay.window(slowWs).frames.size,1);
+    // Discarding a current-epoch duplicate timestamp still releases its ACK.
+    input.emit('message',frame(publication,9,1060000),true);
+    assert.equal(receipts(input).at(-1).sequence,9); assert.equal(frames(fastWs).length,3);
+}
+
+// A throwing websocket write cannot escape the relay or leave stranded
+// receipt state on a broken channel.
+{
+    const c=context(),source=c.client('source'),input=c.connect(source,'publish'); c.consent(source);
+    const viewer=c.client('viewer'),output=c.connect(viewer,'view'),{entry}=c.subscribe(viewer,source);
+    output.send=()=>{throw new Error('simulated closed socket');};
+    assert.doesNotThrow(()=>input.emit('message',frame(entry.publication),true));
+    assert.equal(output.readyState,3); assert.equal(c.relay.windows.has(output),false);
+    assert.equal(source.ws.readyState,1);
 }
 
 // The aggregate audio pacer accounts for every recipient, even when their
@@ -208,6 +315,22 @@ const frame=(publication,sequence=1,timestamp=20000)=>encodeAudioPacket(publicat
     const bytes=viewers.reduce((sum,v)=>sum+v.output.messages.filter(Buffer.isBuffer).reduce((n,p)=>n+p.length,0),0);
     assert.ok(bytes<=112000*2.1/8+276,`bounded aggregate output: ${bytes}`);
     for(const viewer of viewers) assert.ok(frames(viewer.output).length>10,'rotation prevents a stable first-viewer monopoly');
+}
+
+// Diagnostics aggregate counts and buffer/RTT maxima, with no packet content
+// and at most one transport summary every five seconds.
+{
+    const c=context(),events=[]; c.server.protocolLogger=record=>events.push(JSON.parse(record));
+    const source=c.client('source'),input=c.connect(source,'publish'); c.consent(source);
+    const viewer=c.client('viewer'),output=c.connect(viewer,'view'),{entry}=c.subscribe(viewer,source);
+    input.emit('message',frame(entry.publication),true);
+    c.relay.handleAck(viewer,output,encodeAudioAck(entry.streamId,1));
+    c.tick(4999); c.relay.sweep(); assert.equal(events.length,0);
+    c.tick(1); c.relay.sweep(); assert.equal(events.length,1);
+    assert.equal(events[0].event,'audio_transport_summary');
+    assert.equal(events[0].receivedPackets,1); assert.equal(events[0].forwardedPackets,1);
+    assert.equal(events[0].intervalMs,5000); assert.equal(events[0].payload,undefined);
+    c.tick(5000); c.relay.sweep(); assert.equal(events.length,1,'idle intervals do not spam logs');
 }
 
 async function integration() {

@@ -21,7 +21,7 @@ public:
     void setViewedScreens(const QJsonArray& screens);
     void setSuspended(bool suspended);
     void setAudioReservationBps(int bitrate);
-    void setAudioPlaybackClock(const QString& endpoint, const QString& epoch, qint64 sourceUs);
+    void setAudioPlaybackClock(const QString& endpoint, const QString& epoch, qint64 sourceUs, qint64 localUs);
     void clearAudioPlaybackClock(const QString& endpoint);
     void refresh();
     void stop();

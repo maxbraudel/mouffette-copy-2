@@ -1,6 +1,7 @@
 #include "backend/network/AudioTransport.h"
 #include "backend/network/AudioWire.h"
 #include "backend/network/AudioPacketFreshness.h"
+#include "backend/network/AudioPlayoutPolicy.h"
 #include "backend/audiosharing/MediaCaptureClock.h"
 #include "backend/network/WebSocketClient.h"
 #include "backend/network/RemoteSessionCoordinator.h"
@@ -95,6 +96,65 @@ private slots:
         // Ordinary relative clock drift stays below the 200 ppm allowance.
         QVERIFY(freshness.observe(3600001000LL,3700360000LL));
     }
+    void frequentObservationsPreserveFractionalClockDrift() {
+        AudioPacketFreshness freshness;
+        QVERIFY(freshness.observe(10000000,20000000));
+        // Several screens and audio can interleave observations more often
+        // than the 5 ms needed to accumulate one microsecond at 200 ppm.
+        for(qint64 i=1;i<=10000;++i)
+            QVERIFY(freshness.observe(10000000+i*1000,20000000+i*1000+i/5));
+        QVERIFY(qAbs(freshness.localTimeUs(20000000)-30002000)<=1);
+        const auto before=freshness.localTimeUs(20000000);
+        for(qint64 i=1;i<=1000;++i)
+            QVERIFY(!freshness.observe(10000000+i*1000,40000000+i*1000));
+        QCOMPARE(freshness.localTimeUs(20000000),before);
+        freshness.reset();
+        QVERIFY(freshness.observe(10000000,20000000));
+        QCOMPARE(freshness.localTimeUs(20000000),qint64(30000000));
+    }
+    void jitterTargetAndRouteRecoveryStayBounded() {
+        AudioPlayoutPolicy policy;
+        QCOMPARE(policy.targetDelayUs(),qint64(80000));
+        for(qint64 i=0;i<20;++i) {
+            const qint64 source=1000000+i*20000;
+            QVERIFY(!policy.observe(source,source+100000,source));
+        }
+        QCOMPARE(policy.targetDelayUs(),qint64(140000));
+        // Very late TCP bursts cannot create a new epoch or exceed150ms.
+        policy.reset();
+        for(qint64 i=0;i<100;++i)
+            QVERIFY(!policy.observe(1000000+i*20000,10000000,1000000+i*20000));
+        QVERIFY(policy.targetDelayUs()<=150000);
+        // A sustained path shift requires one second of source and arrival
+        // progress, even if the video path remains fast.
+        policy.reset();
+        for(qint64 i=0;i<50;++i) {
+            const qint64 source=1000000+i*20000;
+            QVERIFY(!policy.observe(source,source+200000,source));
+        }
+        QCOMPARE(policy.targetDelayUs(),qint64(150000));
+        QVERIFY(policy.observe(2000000,2200000,2000000));
+        policy.reset();
+        QCOMPARE(policy.targetDelayUs(),qint64(80000));
+    }
+    void captureSequenceGapsSurviveTransportAndRelay() {
+        QTemporaryDir identities;
+        WebSocketClient owner(identities.filePath("owner"),false),source(identities.filePath("source"),false);
+        AudioTransport receiver(&owner),publisher(&source); QString session;
+        QSignalSpy packets(&receiver,&AudioTransport::packetReceived);
+        activate(owner,source,receiver,publisher,session);
+        const auto payload=QByteArray::fromHex("fc010203");
+        const auto capturedAt=MediaCaptureClock::nowUs();
+        QVERIFY(publisher.sendPacket(payload,capturedAt,5));
+        QTRY_COMPARE_WITH_TIMEOUT(packets.size(),1,3000);
+        QVERIFY(!publisher.sendPacket(payload,capturedAt,6));
+        QVERIFY(!publisher.sendPacket(payload,MediaCaptureClock::nowUs(),5));
+        QTest::qWait(20);
+        QVERIFY(publisher.sendPacket(payload,MediaCaptureClock::nowUs(),8));
+        QTRY_COMPARE_WITH_TIMEOUT(packets.size(),2,3000);
+        QCOMPARE(packets[0][2].toULongLong(),quint64(5));
+        QCOMPARE(packets[1][2].toULongLong(),quint64(8));
+    }
     void oneAudioPacketForThreeScreensAndImmediateMute() {
         QTemporaryDir identities;
         WebSocketClient owner(identities.filePath("owner"),false),source(identities.filePath("source"),false);
@@ -128,6 +188,54 @@ private slots:
         const auto payload=QByteArray::fromHex("fc010203");
         QVERIFY(publisher.sendPacket(payload,MediaCaptureClock::nowUs())); QTRY_COMPARE_WITH_TIMEOUT(packets.size(),1,3000);
         QCOMPARE(packets[0][2].toULongLong(),quint64(1));
+    }
+    void restartedCaptureProcessUsesAFreshPublicationSequence() {
+        QTemporaryDir identities;
+        WebSocketClient owner(identities.filePath("owner"),false),source(identities.filePath("source"),false);
+        AudioTransport receiver(&owner),publisher(&source); QString session;
+        QSignalSpy packets(&receiver,&AudioTransport::packetReceived);
+        activate(owner,source,receiver,publisher,session);
+        const auto oldPublication=publisher.publicationId(),oldStream=receiver.viewerStreamId();
+        const auto payload=QByteArray::fromHex("fc010203");
+        QVERIFY(publisher.sendPacket(payload,MediaCaptureClock::nowUs(),5));
+        QTRY_COMPARE_WITH_TIMEOUT(packets.size(),1,3000);
+        publisher.restartPublication();
+        QVERIFY(!publisher.isPublishing());
+        QTRY_VERIFY_WITH_TIMEOUT(publisher.isPublishing() && publisher.publicationId()!=oldPublication,5000);
+        QTRY_VERIFY_WITH_TIMEOUT(!receiver.viewerStreamId().isEmpty() && receiver.viewerStreamId()!=oldStream,5000);
+        QVERIFY(publisher.sendPacket(payload,MediaCaptureClock::nowUs(),1));
+        QTRY_COMPARE_WITH_TIMEOUT(packets.size(),2,3000);
+        QCOMPARE(packets.last()[2].toULongLong(),quint64(1));
+        QVERIFY(owner.canIssueSessionCommands(session)); QVERIFY(source.canIssueSessionCommands(session));
+    }
+    void staleAudioPipeRetiresWithoutForgettingFasterVideo() {
+        QTemporaryDir identities;
+        WebSocketClient owner(identities.filePath("owner"),false),source(identities.filePath("source"),false);
+        AudioTransport receiver(&owner),publisher(&source); QString session;
+        QSignalSpy packets(&receiver,&AudioTransport::packetReceived),states(&receiver,&AudioTransport::remoteStateChanged);
+        activate(owner,source,receiver,publisher,session);
+        const auto oldStream=receiver.viewerStreamId();
+        const auto payload=QByteArray::fromHex("fc010203");
+        qint64 videoAt=0;
+        bool unavailable=false;
+        for(int i=0;i<75 && !unavailable;++i) {
+            videoAt=MediaCaptureClock::nowUs();
+            receiver.observeVideoTimestamp(videoAt,videoAt);
+            if(publisher.isPublishing()) publisher.sendPacket(payload,videoAt-200000);
+            QTest::qWait(20);
+            for(const auto& state:states) if(state.first().toString()==QStringLiteral("timing_unavailable")) unavailable=true;
+        }
+        QVERIFY(unavailable); QVERIFY(packets.isEmpty());
+        QTRY_VERIFY_WITH_TIMEOUT(publisher.isPublishing() && !receiver.viewerStreamId().isEmpty()
+            && receiver.viewerStreamId()!=oldStream,5000);
+        // Reauthentication must not turn an old audio-only delay into a new
+        // source clock when recent video already proved that clock's origin.
+        QVERIFY(qAbs(receiver.playbackTimeUs(videoAt)-(videoAt+80000))<1000);
+        QVERIFY(publisher.sendPacket(payload,MediaCaptureClock::nowUs()-200000));
+        QTest::qWait(30); QVERIFY(packets.isEmpty());
+        QVERIFY(publisher.sendPacket(payload,MediaCaptureClock::nowUs()));
+        QTRY_COMPARE_WITH_TIMEOUT(packets.size(),1,3000);
+        QVERIFY(owner.canIssueSessionCommands(session)); QVERIFY(source.canIssueSessionCommands(session));
     }
     void consentAndSuspensionFenceQueuedPlayback() {
         QTemporaryDir identities;

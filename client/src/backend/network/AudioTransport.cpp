@@ -1,6 +1,7 @@
 #include "backend/network/AudioTransport.h"
 #include "backend/network/AudioWire.h"
 #include "backend/network/AudioPacketFreshness.h"
+#include "backend/network/AudioPlayoutPolicy.h"
 #include "backend/audiosharing/MediaCaptureClock.h"
 #include "backend/network/WebSocketClient.h"
 #include "backend/network/RemoteSessionCoordinator.h"
@@ -9,13 +10,18 @@
 #include <QPointer>
 #include <QTimer>
 #include <QElapsedTimer>
+#include <QLoggingCategory>
 #include <QUrlQuery>
 #include <QWebSocket>
 #include <algorithm>
 
+Q_LOGGING_CATEGORY(audioTransportLog, "mouffette.audio.transport")
+
 namespace {
 bool uuid(const QString& value) { return !QUuid(value).isNull() && QUuid(value).toString(QUuid::WithoutBraces)==value; }
 int reservation(int bitrate) { return bitrate==32000 ? 48000 : 112000; }
+qint64 receiptGraceMs(qint64 baseline) { return baseline < 0 ? 1000 : baseline + 150; }
+qint64 receiptTimeoutMs(qint64 baseline) { return baseline < 0 ? 2000 : std::clamp<qint64>(baseline + 500, 500, 2000); }
 }
 
 struct AudioTransport::Private {
@@ -35,7 +41,7 @@ struct AudioTransport::Private {
     qint64 pendingBytes=0,baseline=-1,baselineAt=0,nextSendAt=0,lastBudgetAt=-1000,lastFeedbackAt=-1000;
     quint64 sequence=0,receivedSequence=0;
     qint64 lastTimestamp=-1;
-    bool sharing=false,suspended=false,stopped=false;
+    bool sharing=false,suspended=false,stopped=false,sourceCongested=false;
     quint64 consentGeneration=0;
     bool consentValue=false;
     QString session,stream,publication,grantPublication;
@@ -43,6 +49,30 @@ struct AudioTransport::Private {
     int bitrate=96000,grantBitrate=96000,totalBudget=1200000;
     QString lastState;
     AudioPacketFreshness viewerFreshness;
+    AudioPlayoutPolicy playoutPolicy;
+    qint64 lastVideoArrivalUs=-1,lastVideoSourceUs=-1;
+    struct Diagnostics {
+        quint64 sent=0,received=0,stale=0,admissionDrops=0,playbackDrops=0;
+        qint64 maximumCaptureAgeUs=0,maximumQueueBytes=0;
+        int maximumPlaybackBufferedMs=0;
+    } diagnostics;
+    qint64 lastDiagnosticsAt=0;
+
+    void reportDiagnostics() {
+        const qint64 now=clock.elapsed();
+        if(now-lastDiagnosticsAt<5000) return;
+        const qint64 interval=now-lastDiagnosticsAt;
+        lastDiagnosticsAt=now;
+        if(diagnostics.sent || diagnostics.received || diagnostics.stale || diagnostics.admissionDrops || diagnostics.playbackDrops)
+            qCDebug(audioTransportLog).nospace() << "audio_transport interval_ms=" << interval << " sent=" << diagnostics.sent
+                << " received=" << diagnostics.received << " stale=" << diagnostics.stale
+                << " admission_drops=" << diagnostics.admissionDrops << " playback_drops=" << diagnostics.playbackDrops
+                << " max_capture_age_us=" << diagnostics.maximumCaptureAgeUs << " max_socket_queue_bytes=" << diagnostics.maximumQueueBytes
+                << " max_playback_buffered_ms=" << diagnostics.maximumPlaybackBufferedMs << " receipt_rtt_ms=" << baseline
+                << " pending_receipts=" << receipts.size() << " pending_bytes=" << pendingBytes << " bitrate_bps=" << bitrate
+                << " target_delay_us=" << playoutPolicy.targetDelayUs();
+        diagnostics={};
+    }
 
     bool connected() const { return network && network->isConnected() && network->hasUnexpiredLease(); }
     bool supported() const { return connected() && network->audioSharingSupported(); }
@@ -57,6 +87,7 @@ struct AudioTransport::Private {
     void clearView() {
         lastState.clear();
         viewerFreshness.reset();
+        playoutPolicy.reset(); lastVideoArrivalUs=-1; lastVideoSourceUs=-1;
         if(stream.isEmpty()) return;
         stream.clear(); receivedSequence=0;
         emit q->playbackStreamChanged({});
@@ -65,7 +96,7 @@ struct AudioTransport::Private {
         const QString next=wantsPublish() && publish.authenticated ? grantPublication : QString();
         if(publication==next && (next.isEmpty() || bitrate==grantBitrate)) return;
         const bool changed=publication!=next;
-        if(changed) { receipts.clear(); pendingBytes=0; sequence=0; lastTimestamp=-1; nextSendAt=0; }
+        if(changed) { receipts.clear(); pendingBytes=0; sequence=0; lastTimestamp=-1; nextSendAt=0; sourceCongested=false; }
         publication=next; bitrate=grantBitrate;
         emit q->sourceReservationChanged(publication.isEmpty() ? 0 : reservation(bitrate));
         emit q->publicationChanged(!publication.isEmpty(),bitrate);
@@ -79,11 +110,22 @@ struct AudioTransport::Private {
         if(retry) { pipe.retryAt=clock.elapsed()+std::min(10000,500*(1<<std::min(pipe.attempts++,5))); }
         else { pipe.retryAt=0; pipe.attempts=0; }
     }
-    void fail(Pipe& pipe) {
+    void fail(Pipe& pipe,bool preserveVideoClock=false,bool timingFailure=false) {
         const bool wasReady=pipe.authenticated;
+        const auto freshness=viewerFreshness;
+        const auto videoArrival=lastVideoArrivalUs,videoSource=lastVideoSourceUs;
         close(pipe,true);
-        if(&pipe==&view) state(QStringLiteral("channel_unavailable"));
-        if(wasReady) emit q->issue(AudioTransport::tr("The remote audio connection was interrupted. Reconnecting…"));
+        if(&pipe==&view) {
+            // Retiring stale audio must not erase a recent faster video's
+            // clock evidence and make the next late packet look current.
+            if(preserveVideoClock) {
+                viewerFreshness=freshness; lastVideoArrivalUs=videoArrival; lastVideoSourceUs=videoSource;
+            }
+            state(timingFailure ? QStringLiteral("timing_unavailable") : QStringLiteral("channel_unavailable"));
+        }
+        if(wasReady) emit q->issue(timingFailure
+            ? AudioTransport::tr("Remote audio exceeded the synchronization delay limit. Reconnecting…")
+            : AudioTransport::tr("The remote audio connection was interrupted. Reconnecting…"));
     }
     bool authenticatedMessage(const QJsonObject& message) const {
         return connected() && message.value("protocolVersion").toInt(-1)==WebSocketClient::ProtocolVersion
@@ -109,8 +151,8 @@ struct AudioTransport::Private {
             const auto message=QJsonDocument::fromJson(text.toUtf8()).object();
             if(!authenticatedMessage(message) || pipe.authenticated || message.value("type")!="audio_channel_ready"
                 || message.value("audioVersion").toInt()!=1 || message.value("role")!=role) { fail(pipe); return; }
-            pipe.authenticated=true; pipe.attempts=0; pipe.deadline=0;
-            if(&pipe==&publish) applyPublication();
+            pipe.authenticated=true; pipe.deadline=0;
+            if(&pipe==&publish) { pipe.attempts=0; applyPublication(); }
             else subscribe(true);
         });
         QObject::connect(socket,&QWebSocket::binaryMessageReceived,q,[this,&pipe,socket](const QByteArray& data) {
@@ -121,16 +163,27 @@ struct AudioTransport::Private {
                 if(frame.epoch!=publication) return;
                 auto pending=receipts.find(frame.sequence); if(pending==receipts.end()) return;
                 const auto now=clock.elapsed(),rtt=now-pending->sentAt;
-                if(rtt>=500) { fail(pipe); return; }
+                if(rtt>=receiptTimeoutMs(baseline)) { fail(pipe); return; }
                 pendingBytes-=pending->bytes; receipts.erase(pending);
                 if(baseline<0 || rtt<=baseline || now-baselineAt>=30000) { baseline=rtt; baselineAt=now; }
             } else {
                 // Even an obsolete epoch consumes only its own relay credit.
-                if(socket->bytesToWrite()>32768) { fail(pipe); return; }
-                socket->sendBinaryMessage(AudioWire::ack(frame.epoch,frame.sequence));
+                if(socket->bytesToWrite()+28>4096) { fail(pipe); return; }
+                if(socket->sendBinaryMessage(AudioWire::ack(frame.epoch,frame.sequence))<0) { fail(pipe); return; }
                 if(!wantsView() || frame.epoch!=stream || frame.sequence<=receivedSequence) return;
                 receivedSequence=frame.sequence;
-                if(!viewerFreshness.observe(frame.timestampUs,MediaCaptureClock::nowUs())) return;
+                const qint64 arrivalUs=MediaCaptureClock::nowUs();
+                const bool fresh=viewerFreshness.observe(frame.timestampUs,arrivalUs);
+                const qint64 mappedUs=viewerFreshness.localTimeUs(frame.timestampUs);
+                const qint64 videoMappedUs=viewerFreshness.localTimeUs(lastVideoSourceUs);
+                const bool fasterVideo=lastVideoArrivalUs>=0 && arrivalUs-lastVideoArrivalUs<=1000000
+                    && videoMappedUs>=0 && lastVideoArrivalUs-videoMappedUs+20000<arrivalUs-mappedUs;
+                if(playoutPolicy.observe(frame.timestampUs,arrivalUs,mappedUs)) { fail(pipe,fasterVideo,true); return; }
+                if(!fresh) { ++diagnostics.stale; return; }
+                // Authentication alone does not prove media has recovered;
+                // retain exponential backoff across repeatedly stale pipes.
+                if(arrivalUs-mappedUs<playoutPolicy.targetDelayUs()) pipe.attempts=0;
+                ++diagnostics.received;
                 emit q->packetReceived(frame.payload,frame.timestampUs,frame.sequence);
             }
         });
@@ -145,11 +198,12 @@ struct AudioTransport::Private {
             {"generation",double(generation)},{"enabled",enabled}});
     }
     bool congested() const {
-        const qint64 now=clock.elapsed(),grace=baseline<0 ? 250 : std::min<qint64>(250,baseline+150);
+        const qint64 now=clock.elapsed(),grace=receiptGraceMs(baseline);
         for(const auto& receipt:receipts) if(now-receipt.sentAt>grace) return true;
         return publish.socket && publish.socket->bytesToWrite()>8192;
     }
     void reconcile() {
+        reportDiagnostics();
         if(!supported()) {
             if(publish.socket || !publish.requestId.isEmpty()) close(publish);
             if(view.socket || !view.requestId.isEmpty()) close(view);
@@ -170,10 +224,11 @@ struct AudioTransport::Private {
         else if(view.socket || !view.requestId.isEmpty() || !stream.isEmpty()) close(view);
         const qint64 now=clock.elapsed();
         for(auto* pipe:{&publish,&view}) if(pipe->deadline && now>=pipe->deadline) fail(*pipe);
-        for(const auto& receipt:receipts) if(now-receipt.sentAt>=500) { fail(publish); break; }
+        for(const auto& receipt:receipts) if(now-receipt.sentAt>=receiptTimeoutMs(baseline)) { fail(publish); break; }
         if(wantsPublish() && now-lastBudgetAt>=500) {
             lastBudgetAt=now;
-            send({{"type","audio_source_budget"},{"totalBps",totalBudget},{"congested",congested()}});
+            if(send({{"type","audio_source_budget"},{"totalBps",totalBudget},{"congested",congested() || sourceCongested}}))
+                sourceCongested=false;
         }
     }
     void control(const QJsonObject& message) {
@@ -204,7 +259,7 @@ struct AudioTransport::Private {
             if(stream!=id) {
                 // Keep a video observation that arrived before the first audio
                 // grant, but do not carry an old audio epoch's baseline forward.
-                if(!stream.isEmpty()) viewerFreshness.reset();
+                if(!stream.isEmpty()) { viewerFreshness.reset(); playoutPolicy.reset(); lastVideoArrivalUs=-1; lastVideoSourceUs=-1; }
                 stream=id; receivedSequence=0; lastState.clear(); emit q->playbackStreamChanged(stream);
             }
             state(message.value("reason").toString());
@@ -239,28 +294,42 @@ void AudioTransport::setSourceBudget(int totalBps) { d->totalBudget=std::clamp(t
 void AudioTransport::observeVideoTimestamp(qint64 sourceUs,qint64 receivedAtUs) {
     if(!d->wantsView() || sourceUs<0 || quint64(sourceUs)>AudioWire::MaximumInteger) return;
     d->viewerFreshness.observe(sourceUs,receivedAtUs);
+    d->lastVideoSourceUs=sourceUs; d->lastVideoArrivalUs=receivedAtUs;
 }
 qint64 AudioTransport::playbackTimeUs(qint64 sourceUs) const {
     const qint64 arrival=d->viewerFreshness.localTimeUs(sourceUs);
-    return arrival<0 ? -1 : arrival+80000;
+    return arrival<0 ? -1 : arrival+d->playoutPolicy.targetDelayUs();
 }
-bool AudioTransport::sendPacket(const QByteArray& opus,qint64 timestampUs) {
+bool AudioTransport::sendPacket(const QByteArray& opus,qint64 timestampUs,quint64 captureSequence) {
     if(!isPublishing() || opus.isEmpty() || opus.size()>AudioWire::MaximumPayloadBytes || timestampUs<0
-        || quint64(timestampUs)>AudioWire::MaximumInteger || timestampUs<d->lastTimestamp
-        || d->sequence>=AudioWire::MaximumInteger) return false;
+        || quint64(timestampUs)>AudioWire::MaximumInteger || timestampUs<=d->lastTimestamp
+        || d->sequence>=AudioWire::MaximumInteger || captureSequence>AudioWire::MaximumInteger
+        || (captureSequence && captureSequence<=d->sequence)) return false;
     const auto captureAge=MediaCaptureClock::nowUs()-timestampUs;
-    if(captureAge>250000 || captureAge < -250000) return false;
+    d->diagnostics.maximumCaptureAgeUs=std::max(d->diagnostics.maximumCaptureAgeUs,captureAge);
+    if(captureAge>250000 || captureAge < -250000) { ++d->diagnostics.stale; return false; }
+    // Sequence counts captured packets, including locally discarded ones.
+    const quint64 sequence=captureSequence ? captureSequence : d->sequence+1;
+    d->sequence=sequence; d->lastTimestamp=timestampUs;
     const auto now=d->clock.elapsed();
     const qint64 size=AudioWire::HeaderBytes+opus.size();
-    const qint64 limit=std::max<qint64>(4096,qint64(reservation(d->bitrate))*250/8000);
-    if(d->receipts.size()>=16 || d->pendingBytes+size>limit || d->publish.socket->bytesToWrite()+size>limit
-        || d->congested() || d->nextSendAt>now+40) return false;
-    const quint64 sequence=++d->sequence;
-    d->lastTimestamp=timestampUs;
+    d->diagnostics.maximumQueueBytes=std::max(d->diagnostics.maximumQueueBytes,d->publish.socket->bytesToWrite());
+    // Receipt credit includes propagation and reverse-path RTT; it is not
+    // queued audio. Bound socket backlog separately instead of dropping
+    // healthy audio whenever RTT exceeds a fixed 250 ms byte window.
+    const qint64 creditMs=std::clamp<qint64>(receiptGraceMs(d->baseline),250,2000);
+    // Existing normal-profile packets remain in flight after a bitrate
+    // downgrade. Shrinking their credit creates a fresh artificial dropout.
+    const qint64 limit=std::max<qint64>(4096,qint64(reservation(96000))*creditMs/8000);
+    if(d->receipts.size()>=std::min<qint64>(128,creditMs/20+2) || d->pendingBytes+size>limit
+        || d->publish.socket->bytesToWrite()+size>4096 || d->congested() || d->nextSendAt>now+40) {
+        d->sourceCongested=true; ++d->diagnostics.admissionDrops; return false;
+    }
     const auto bytes=AudioWire::packet(d->publication,sequence,timestampUs,opus);
     d->receipts.insert(sequence,{bytes.size(),now}); d->pendingBytes+=bytes.size();
     d->nextSendAt=std::max(now,d->nextSendAt)+std::max<qint64>(1,bytes.size()*8000/reservation(d->bitrate));
     if(d->publish.socket->sendBinaryMessage(bytes)<0) { d->fail(d->publish); return false; }
+    ++d->diagnostics.sent;
     return true;
 }
 void AudioTransport::sendStatus(const QString& reason) {
@@ -268,10 +337,16 @@ void AudioTransport::sendStatus(const QString& reason) {
     d->send({{"type","audio_publication_status"},{"publicationId",d->publication},{"reason",reason}});
 }
 void AudioTransport::sendPlaybackFeedback(int droppedPackets,int bufferedMs) {
+    d->diagnostics.playbackDrops+=std::clamp(droppedPackets,0,10000);
+    d->diagnostics.maximumPlaybackBufferedMs=std::max(d->diagnostics.maximumPlaybackBufferedMs,std::clamp(bufferedMs,0,10000));
     if(d->stream.isEmpty() || !d->wantsView() || d->clock.elapsed()-d->lastFeedbackAt<500) return;
     d->lastFeedbackAt=d->clock.elapsed();
     d->send({{"type","audio_view_feedback"},{"remoteSessionId",d->session},{"generation",double(d->generation)},
         {"streamId",d->stream},{"droppedPackets",std::clamp(droppedPackets,0,10000)},{"bufferedMs",std::clamp(bufferedMs,0,10000)}});
+}
+void AudioTransport::restartPublication() {
+    if(!isPublishing()) return;
+    d->close(d->publish,true); d->reconcile();
 }
 void AudioTransport::stop() {
     if(!d->session.isEmpty()) d->subscribe(false);

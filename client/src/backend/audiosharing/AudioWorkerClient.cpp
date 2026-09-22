@@ -3,6 +3,7 @@
 #include <QCoreApplication>
 #include <QDebug>
 #include <QLocalServer>
+#include <QLoggingCategory>
 #include <QProcess>
 #include <QSharedMemory>
 #include <QPointer>
@@ -13,6 +14,7 @@
 #include <new>
 
 namespace {
+Q_LOGGING_CATEGORY(audioPlaybackLog, "mouffette.audio.playback")
 QCborMap command(const char* type) {
     return {{QStringLiteral("type"), QString::fromLatin1(type)}};
 }
@@ -28,6 +30,7 @@ struct AudioWorkerClient::Private {
     bool capture = false, muted = false, ready = false, closing = false;
     bool unavailableReported = false;
     int restarts = 0;
+    qint64 lastPlaybackDiagnosticUs = 0;
     QTimer handshake, previewReplay;
     QList<QString> pendingPreviews;
     QHash<QString, std::weak_ptr<AudioPreviewChannel>> previews;
@@ -153,12 +156,14 @@ void AudioWorkerClient::readMessages() {
         } else if (type == QLatin1String("packet")) {
             if (!d->capture || message.value(QStringLiteral("epoch")).toString() != d->captureEpoch) continue;
             const auto timestamp = message.value(QStringLiteral("timestamp")).toInteger(-1);
+            const auto sequence = message.value(QStringLiteral("sequence")).toInteger(-1);
+            const auto packet = message.value(QStringLiteral("opus")).toByteArray();
             const auto age = nowUs() - timestamp;
             // A blocked UI can leave old packets inside the local socket's
             // kernel buffer even when bytesToWrite() was zero in the helper.
-            if (timestamp < 0 || age < -250000 || age > 150000) continue;
-            emit packetReady(d->captureEpoch, quint64(message.value(QStringLiteral("sequence")).toInteger()),
-                timestamp, message.value(QStringLiteral("opus")).toByteArray());
+            if (timestamp < 0 || sequence < 0 || packet.isEmpty() || packet.size() > 1275
+                || age < -250000 || age > 150000) continue;
+            emit packetReady(d->captureEpoch, quint64(sequence), timestamp, packet);
         } else if (type == QLatin1String("capture-state")) {
             const auto epoch = message.value(QStringLiteral("epoch")).toString();
             const bool active = message.value(QStringLiteral("active")).toBool();
@@ -166,9 +171,28 @@ void AudioWorkerClient::readMessages() {
             if (epoch == d->captureEpoch && (d->capture || (!active && failure.isEmpty())))
                 emit captureStateChanged(active, failure);
         } else if (type == QLatin1String("clock")) {
+            const auto localUs = message.value(QStringLiteral("localUs")).toInteger(-1);
+            const auto timestampUs = message.value(QStringLiteral("timestamp")).toInteger(-1);
+            const auto ageUs = nowUs() - localUs;
+            // The sample/device anchor belongs to the worker, not this queued
+            // IPC callback. A stalled GUI must never turn stale telemetry into
+            // an apparently fresh audio/video synchronization point.
+            if (d->muted || localUs < 0 || timestampUs < 0 || ageUs < -100000 || ageUs > 100000) continue;
             emit playbackClock(message.value(QStringLiteral("source")).toString(),
-                message.value(QStringLiteral("epoch")).toString(), message.value(QStringLiteral("timestamp")).toInteger());
+                message.value(QStringLiteral("epoch")).toString(), timestampUs, localUs);
         } else if (type == QLatin1String("feedback")) {
+            const auto concealed = message.value(QStringLiteral("concealed")).toInteger();
+            const auto underruns = message.value(QStringLiteral("underruns")).toInteger();
+            const auto rebuffers = message.value(QStringLiteral("rebuffers")).toInteger();
+            const auto diagnosticUs = nowUs();
+            if ((concealed > 0 || underruns > 0 || rebuffers > 0)
+                && diagnosticUs - d->lastPlaybackDiagnosticUs >= 5000000) {
+                d->lastPlaybackDiagnosticUs = diagnosticUs;
+                qCInfo(audioPlaybackLog) << "Playback recovery in latest feedback interval:"
+                    << "concealed" << concealed << "underruns" << underruns
+                    << "rebuffers" << rebuffers << "bufferedMs"
+                    << message.value(QStringLiteral("buffered")).toInteger();
+            }
             emit playbackFeedback(message.value(QStringLiteral("source")).toString(),
                 message.value(QStringLiteral("epoch")).toString(), int(message.value(QStringLiteral("dropped")).toInteger()),
                 int(message.value(QStringLiteral("buffered")).toInteger()));
