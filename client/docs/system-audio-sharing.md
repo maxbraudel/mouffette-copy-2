@@ -63,18 +63,31 @@ Audio uses the same distinction. `ReceivedScene` readers retain their normal
 output in the main process. `ControlPreview` readers decode the existing resident
 asset and share bounded PCM blocks with an audio worker. Received remote sound
 also plays in that worker. The worker captures system audio while excluding its
-own process, so editor previews and remote monitoring never feed another stream.
+own audio, so editor previews and remote monitoring never feed another stream.
+Received scenes remain included.
 The scene controller does not depend on the worker for playback or teardown.
 
-The worker is launched from the packaged executable with an internal mode before
-normal instance coordination, UI and persistence bootstrap. A user-local socket
+On macOS the worker is a nested `MouffetteAudioWorker.app` with its own bundle
+identifier (`<main bundle identifier>.audio-worker`), launched through macOS
+LaunchServices so it has its own responsible application identity. A direct child
+process still inherits the parent identity despite the distinct bundle.
+ScreenCaptureKit audio exclusion is application-wide, so launching the same main
+executable in a second process can also exclude received scenes. The separate
+bundle and independent launch are required; a missing helper never falls back to
+the main application. On Windows the worker
+uses the packaged executable's internal mode and excludes only its own process
+tree, preserving received-scene output in the parent process. Both paths start
+before normal instance coordination, UI and persistence bootstrap. macOS may
+require a separate recording authorization for **Mouffette Audio** under
+**Privacy & Security > Screen & System Audio Recording**; denial remains an
+explicit audio error and never enables unfiltered capture. A user-local socket
 authenticates its parent connection; playback buffers are bounded shared memory.
 Loss of the parent ends the worker. Loss of the worker never falls back to playing
 control audio in the main process, which would violate the exclusion.
 
 Preview shared memory has an immutable magic/version/logical-size header followed
-by lock-free PCM blocks. This is a private ABI between processes running the same
-executable; layout or semantic changes require a version increment. The worker
+by lock-free PCM blocks. This is a private ABI between the application and worker from the same
+build; layout or semantic changes require a version increment. The worker
 checks mapped capacity **at least** equal to the expected state size before
 reading the header, then requires an exact ABI match. Allocation size is not the
 logical format size: [Qt permits larger segments](https://doc.qt.io/qt-6/qsharedmemory.html#size),
@@ -217,3 +230,17 @@ to be installed or located after moving an application bundle.
 Native API references: [Windows capture exclusion](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setwindowdisplayaffinity),
 [OBS process audio compatibility](https://obsproject.com/kb/application-audio-capture-guide),
 [ScreenCaptureKit process audio exclusion](https://developer.apple.com/documentation/screencapturekit/scstreamconfiguration/excludescurrentprocessaudio).
+
+### Native routing regression probe
+
+`AudioWorker::workerApplicationIdentityIsSeparate` checks the macOS helper bundle
+contract. CTest supplies the production helper to the worker tests.
+
+With native recording permission already granted, run
+`tst_AudioWorker nativeCaptureIncludesSceneAndExcludesMonitoringOptIn` with
+`MOUFFETTE_TEST_SYSTEM_AUDIO_CAPTURE=1` and
+`MOUFFETTE_TEST_AUDIO_WORKER_EXECUTABLE` pointing to the production helper. This
+briefly plays quiet test tones and verifies the captured Opus contains the main
+process's scene tone but excludes both the preview and remote monitoring tones.
+It reports only measured amplitudes, never records system audio to disk. The
+ordinary silent smoke test checks transport/timing, not this routing distinction.

@@ -48,7 +48,7 @@ void rejectBuffer(const std::shared_ptr<NativeAudio>& current, const char* reaso
 }
 QString describe(NSError* error) {
     if (error.code == SCStreamErrorUserDeclined)
-        return QStringLiteral("System audio recording was denied. Allow Mouffette in System Settings > Privacy & Security > Screen & System Audio Recording, then restart Mouffette.");
+        return QStringLiteral("System audio recording was denied. Allow Mouffette Audio in System Settings > Privacy & Security > Screen & System Audio Recording, then retry audio sharing.");
     return error ? QString::fromNSString(error.localizedDescription) : QStringLiteral("System audio capture is unavailable");
 }
 }
@@ -182,6 +182,9 @@ public:
                         auto* config = [[SCStreamConfiguration alloc] init];
                         config.width = 2; config.height = 2; config.minimumFrameInterval = CMTimeMake(1, 1);
                         config.queueDepth = 3; config.showsCursor = NO;
+                        // Capture runs in the independently launched audio app.
+                        // Excluding that app removes previews/monitoring while
+                        // retaining received scenes played by the main app.
                         config.capturesAudio = YES; config.excludesCurrentProcessAudio = YES;
                         config.sampleRate = 48000; config.channelCount = 2;
                         if (@available(macOS 15.0, *)) config.captureMicrophone = NO;

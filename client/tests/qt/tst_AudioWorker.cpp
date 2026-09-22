@@ -1,4 +1,6 @@
 #include "backend/audiosharing/AudioWorker.h"
+#include "backend/audiosharing/AudioWorkerPaths.h"
+#include "backend/audiosharing/AudioWorkerProcess.h"
 #include "backend/audiosharing/AudioWorkerClient.h"
 #include "backend/audiosharing/AudioWorkerProtocol.h"
 #include "backend/audiosharing/AudioPlaybackTimeline.h"
@@ -13,6 +15,10 @@
 #include <QLocalServer>
 #include <QMediaDevices>
 #include <QProcess>
+#include <QFile>
+#include <QFileInfo>
+#include <QDir>
+#include <QXmlStreamReader>
 #include <QScopeGuard>
 #include <QSharedMemory>
 #include <QSignalSpy>
@@ -27,6 +33,87 @@
 class AudioWorkerTest final : public QObject {
     Q_OBJECT
 private slots:
+    void workerApplicationIdentityIsSeparate() {
+        const QString app = QStringLiteral("/Applications/Mouffette.app/Contents/MacOS/Mouffette");
+#ifdef Q_OS_MACOS
+        QCOMPARE(audioWorkerExecutablePath(app), QStringLiteral(
+            "/Applications/Mouffette.app/Contents/Helpers/MouffetteAudioWorker.app/Contents/MacOS/MouffetteAudioWorker"));
+        const auto executable = qApp->property("mouffetteAudioWorkerExecutable").toString();
+        // Standalone test binaries can still provide their internal fake worker.
+        // CTest supplies the production helper bundle to exercise this contract.
+        if (executable == QCoreApplication::applicationFilePath())
+            QSKIP("Set MOUFFETTE_TEST_AUDIO_WORKER_EXECUTABLE to the packaged audio helper");
+        QVERIFY(QFileInfo(executable).isExecutable());
+        QFile plist(QFileInfo(executable).dir().filePath("../Info.plist"));
+        QVERIFY(plist.open(QIODevice::ReadOnly));
+        QXmlStreamReader xml(plist.readAll());
+        QString identifier;
+        while (!xml.atEnd()) {
+            xml.readNext();
+            if (xml.isStartElement() && xml.name() == QLatin1String("key")
+                && xml.readElementText() == QLatin1String("CFBundleIdentifier")) {
+                QVERIFY(xml.readNextStartElement());
+                identifier = xml.readElementText();
+                break;
+            }
+        }
+        QVERIFY(!xml.hasError());
+        QVERIFY2(identifier.endsWith(".audio-worker"), qPrintable(identifier));
+#else
+        QCOMPARE(audioWorkerExecutablePath(app), app);
+#endif
+    }
+
+    void independentHelperProcessLifecycle_data() {
+        QTest::addColumn<bool>("cancelBeforeStarted");
+        QTest::newRow("running-kill") << false;
+        QTest::newRow("cancel-launch") << true;
+    }
+    void independentHelperProcessLifecycle() {
+#ifdef Q_OS_MACOS
+        QFETCH(bool, cancelBeforeStarted);
+        const auto executable = qApp->property("mouffetteAudioWorkerExecutable").toString();
+        if (!executable.contains(".app/Contents/MacOS/"))
+            QSKIP("Set MOUFFETTE_TEST_AUDIO_WORKER_EXECUTABLE to the packaged audio helper");
+        QLocalServer server;
+        server.setSocketOptions(QLocalServer::UserAccessOption);
+        QVERIFY(server.listen("mft-process-" + QUuid::createUuid().toString(QUuid::WithoutBraces)));
+        AudioWorkerProcess process;
+        QSignalSpy started(&process, &AudioWorkerProcess::started);
+        QSignalSpy finished(&process, &AudioWorkerProcess::finished);
+        process.start(executable, {"--audio-worker", server.serverName(), "test-token"});
+        if (!cancelBeforeStarted) {
+            QTRY_VERIFY_WITH_TIMEOUT(!started.isEmpty(), 5000);
+            QCOMPARE(process.state(), QProcess::Running);
+            QVERIFY(process.processId() > 0);
+            QVERIFY(process.processId() != QCoreApplication::applicationPid());
+            QTRY_VERIFY_WITH_TIMEOUT(server.hasPendingConnections(), 5000);
+            // An independently launched application must still authenticate to
+            // this instance's private IPC socket before receiving audio work.
+            std::unique_ptr<QLocalSocket> socket(server.nextPendingConnection());
+            QTRY_VERIFY_WITH_TIMEOUT(socket->bytesAvailable() > 0, 3000);
+            QByteArray input = socket->readAll();
+            QCborMap hello; bool malformed = false;
+            QVERIFY(AudioWorkerProtocol::take(input, hello, malformed));
+            QVERIFY(!malformed);
+            QCOMPARE(hello.value(QStringLiteral("token")).toString(), QString("test-token"));
+            process.kill();
+            if (finished.isEmpty()) QVERIFY(process.waitForFinished(3000));
+            QTRY_COMPARE_WITH_TIMEOUT(socket->state(), QLocalSocket::UnconnectedState, 3000);
+        } else {
+            process.kill(); // May arrive before LaunchServices supplies the PID.
+            if (finished.isEmpty()) QVERIFY(process.waitForFinished(3000));
+            // Exercise the queued late-completion path after cancellation.
+            QTest::qWait(500);
+            QCOMPARE(started.size(), 0);
+        }
+        QCOMPARE(process.state(), QProcess::NotRunning);
+        QCOMPARE(finished.size(), 1);
+#else
+        QSKIP("Independent application identity is specific to macOS");
+#endif
+    }
+
     void helperPreviewMappingValidation_data() {
         QTest::addColumn<int>("capacity");
         QTest::addColumn<int>("headerFault");
@@ -675,6 +762,106 @@ private slots:
         QVERIFY2(maximumAge < 250000, qPrintable(QStringLiteral("Remote playback clock lagged by %1 us").arg(maximumAge)));
         client.shutdown();
     }
+    void nativeCaptureIncludesSceneAndExcludesMonitoringOptIn() {
+        if (!qEnvironmentVariableIntValue("MOUFFETTE_TEST_SYSTEM_AUDIO_CAPTURE"))
+            QSKIP("Set MOUFFETTE_TEST_SYSTEM_AUDIO_CAPTURE=1 for the native audio routing probe (quiet test tones)");
+        const auto device = QMediaDevices::defaultAudioOutput();
+        QAudioFormat format;
+        format.setSampleRate(48000); format.setChannelCount(2); format.setSampleFormat(QAudioFormat::Float);
+        if (device.isNull() || !device.isFormatSupported(format))
+            QSKIP("A 48 kHz stereo float output is required for the native routing probe");
+        AudioWorkerClient client;
+        QSignalSpy state(&client, &AudioWorkerClient::captureStateChanged);
+        QSignalSpy clocks(&client, &AudioWorkerClient::playbackClock);
+        auto preview = client.createPreviewChannel(device.id());
+        QVERIFY(preview);
+        QTRY_VERIFY_WITH_TIMEOUT(preview->isAttachedToWorker() && preview->state()->consumerAvailable.load(), 5000);
+        state.clear();
+        client.startCapture(QUuid::createUuid().toString());
+        QTRY_VERIFY_WITH_TIMEOUT(!state.isEmpty(), 10000);
+        QVERIFY2(state.last().at(0).toBool(), qPrintable(state.last().at(1).toString()));
+
+        // Main-process audio models a ReceivedScene. ControlPreview and incoming
+        // monitoring audio use the real excluded worker. Nonzero tones catch the
+        // same-app exclusion bug which a silent native smoke test cannot detect.
+        constexpr double tau = 6.28318530717958647692;
+        constexpr float amplitude = 0.03f;
+        quint64 sceneFrames = 0;
+        QAudioSink scene(device, format);
+        scene.start([&](QSpan<float> samples) {
+            for (qsizetype i = 0; i < samples.size(); i += 2, ++sceneFrames) {
+                const float value = amplitude * std::sin(tau * 400 * double(sceneFrames) / 48000);
+                samples[i] = samples[i + 1] = value;
+            }
+        });
+        QCOMPARE(scene.error(), QtAudio::NoError);
+        AudioStreamEncoder encoder; QString error;
+        QVERIFY(encoder.initialize(96000, error));
+        std::array<float, 1920> monitor{};
+        for (int frame = 0; frame < 960; ++frame)
+            monitor[frame * 2] = monitor[frame * 2 + 1] = amplitude * std::sin(tau * 1600 * frame / 48000);
+        auto* shared = preview->state();
+        shared->playing.store(true);
+        qint64 nextPreviewUs = AudioWorkerClient::nowUs() + 80000;
+        quint64 sequence = 0;
+        QTimer producer;
+        producer.setInterval(20);
+        producer.setTimerType(Qt::PreciseTimer);
+        connect(&producer, &QTimer::timeout, &client, [&] {
+            const auto now = AudioWorkerClient::nowUs();
+            for (auto& block : shared->blocks) {
+                if (block.state.load(std::memory_order_acquire) != 0) continue;
+                nextPreviewUs = std::max(nextPreviewUs, now + 40000);
+                for (int frame = 0; frame < AudioPreviewBlockFrames; ++frame)
+                    block.samples[frame * 2] = block.samples[frame * 2 + 1]
+                        = amplitude * std::sin(tau * 1000 * frame / 48000);
+                block.generation.store(shared->generation.load());
+                block.startUs.store(nextPreviewUs);
+                block.state.store(2, std::memory_order_release);
+                nextPreviewUs += 50000;
+            }
+            const auto opus = encoder.encode(monitor.data(), error);
+            QVERIFY2(!opus.isEmpty(), qPrintable(error));
+            client.playPacket("routing-probe", "routing-probe", ++sequence, now, opus, now + 80000);
+        });
+        producer.start();
+        const auto cleanup = qScopeGuard([&] {
+            producer.stop(); scene.stop(); shared->playing.store(false);
+            client.resetPlayback("routing-probe"); client.stopCapture(); client.shutdown();
+        });
+        QTRY_VERIFY_WITH_TIMEOUT(shared->presented.load() && !clocks.isEmpty(), 3000);
+        QTest::qWait(300); // Native capture and monitoring buffers have settled.
+        AudioStreamDecoder decoder;
+        std::array<double, 3> amplitudes{};
+        int packets = 0;
+        QString decodeError;
+        const auto connection = connect(&client, &AudioWorkerClient::packetReady, &client,
+            [&](const QString&, quint64, qint64, const QByteArray& encoded) {
+                const auto pcm = decoder.decode(encoded, decodeError);
+                if (pcm.size() != 1920 * qsizetype(sizeof(float)) || !decodeError.isEmpty()) return;
+                const auto* samples = reinterpret_cast<const float*>(pcm.constData());
+                const std::array<int, 3> frequencies{400, 1000, 1600};
+                for (int frequency = 0; frequency < 3; ++frequency) {
+                    double real = 0, imaginary = 0;
+                    for (int frame = 0; frame < 960; ++frame) {
+                        const double angle = tau * frequencies[frequency] * frame / 48000;
+                        const double value = (samples[frame * 2] + samples[frame * 2 + 1]) * 0.5;
+                        real += value * std::cos(angle); imaginary += value * std::sin(angle);
+                    }
+                    amplitudes[frequency] += 2 * std::hypot(real, imaginary) / 960;
+                }
+                ++packets;
+            });
+        const auto disconnect = qScopeGuard([&] { QObject::disconnect(connection); });
+        QTRY_VERIFY_WITH_TIMEOUT(packets >= 50, 5000);
+        QVERIFY2(decodeError.isEmpty(), qPrintable(decodeError));
+        for (auto& value : amplitudes) value /= packets;
+        qInfo() << "routing_probe scene=" << amplitudes[0] << "preview=" << amplitudes[1] << "monitor=" << amplitudes[2];
+        QVERIFY2(amplitudes[0] > 0.003, "Received scene audio was excluded from system capture");
+        QVERIFY2(amplitudes[1] < amplitudes[0] * 0.15, "Control preview leaked into system capture");
+        QVERIFY2(amplitudes[2] < amplitudes[0] * 0.15, "Remote monitoring leaked into system capture");
+    }
+
     void nativeCaptureSmokeOptIn() {
         if (!qEnvironmentVariableIntValue("MOUFFETTE_TEST_SYSTEM_AUDIO_CAPTURE"))
             QSKIP("Set MOUFFETTE_TEST_SYSTEM_AUDIO_CAPTURE=1 to test the authorized native capture backend");

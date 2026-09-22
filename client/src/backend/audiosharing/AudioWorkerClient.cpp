@@ -1,5 +1,6 @@
 #include "backend/audiosharing/AudioWorkerClient.h"
 #include "backend/audiosharing/AudioWorkerProtocol.h"
+#include "backend/audiosharing/AudioWorkerProcess.h"
 #include <QCoreApplication>
 #include <QDebug>
 #include <QLocalServer>
@@ -22,7 +23,7 @@ QPointer<AudioWorkerClient> singleton;
 }
 struct AudioWorkerClient::Private {
     QLocalServer server;
-    QProcess process;
+    AudioWorkerProcess process;
     QPointer<QLocalSocket> socket;
     QByteArray input;
     QString token, captureEpoch;
@@ -91,14 +92,14 @@ AudioWorkerClient::AudioWorkerClient(QObject* parent) : QObject(parent), d(std::
             });
         }
     });
-    connect(&d->process, &QProcess::errorOccurred, this, [this](QProcess::ProcessError error) {
+    connect(&d->process, &AudioWorkerProcess::errorOccurred, this, [this](QProcess::ProcessError error) {
         if (d->closing || error != QProcess::FailedToStart) return;
         d->handshake.stop(); d->ready = false;
         ++d->restarts;
         const auto message = QStringLiteral("The audio worker could not start: %1").arg(d->process.errorString());
         emit captureStateChanged(false, message); emit failed(message);
     });
-    connect(&d->process, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this,
+    connect(&d->process, qOverload<int, QProcess::ExitStatus>(&AudioWorkerProcess::finished), this,
         [this](int exitCode, QProcess::ExitStatus exitStatus) {
             d->handshake.stop(); d->ready = false;
             d->previewWatchdog.stop(); d->awaitingPreviews.clear();
@@ -112,9 +113,10 @@ AudioWorkerClient::AudioWorkerClient(QObject* parent) : QObject(parent), d(std::
             }
             d->input.clear();
             if (d->closing) return;
-            const auto failure = QStringLiteral("The audio worker stopped (%1, exit code 0x%2)")
-                .arg(exitStatus == QProcess::CrashExit ? QStringLiteral("crash") : QStringLiteral("normal exit"))
-                .arg(quint32(exitCode), 8, 16, QLatin1Char('0'));
+            const auto failure = exitCode == -1 ? QStringLiteral("The audio worker application stopped")
+                : QStringLiteral("The audio worker stopped (%1, exit code 0x%2)")
+                    .arg(exitStatus == QProcess::CrashExit ? QStringLiteral("crash") : QStringLiteral("normal exit"))
+                    .arg(quint32(exitCode), 8, 16, QLatin1Char('0'));
             qWarning().noquote() << "[AudioWorker]" << failure;
             emit captureStateChanged(false, failure);
             // Never leak excluded preview audio into the main process as a fallback.
@@ -158,9 +160,11 @@ void AudioWorkerClient::readMessages() {
                 d->socket->abort(); return;
             }
             d->ready = true; d->handshake.stop();
-            const auto pid = d->process.processId();
-            QTimer::singleShot(30000, this, [this, pid] {
-                if (d->ready && d->process.processId() == pid) d->restarts = 0;
+            // The helper can authenticate before LaunchServices delivers its
+            // PID. Identify this launch by its existing unique IPC token.
+            const auto launchToken = d->token;
+            QTimer::singleShot(30000, this, [this, launchToken] {
+                if (d->ready && d->token == launchToken) d->restarts = 0;
             });
             auto muted = command("mute"); muted.insert(QStringLiteral("muted"), d->muted);
             AudioWorkerProtocol::sendControl(d->socket, muted);

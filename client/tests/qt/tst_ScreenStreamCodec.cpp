@@ -1,4 +1,5 @@
 #include "backend/screensharing/ScreenStreamCodec.h"
+#include "backend/screensharing/ScreenEncoderProbeCache.h"
 
 #include <QColor>
 #include <QElapsedTimer>
@@ -116,6 +117,84 @@ private:
     }
 
 private slots:
+    void unavailableHardwareIsNotReprobedForEveryEncoder() {
+        ScreenEncoderProbeCache probes;
+        const ScreenEncoderProbeCache::Configuration nvenc{"h264_nvenc", QSize(1920, 1080), 0};
+        const ScreenEncoderProbeCache::Configuration qsv{"h264_qsv", QSize(1920, 1080), 0};
+        int nvencAttempts = 0, qsvAttempts = 0;
+        // Model fresh encoders for changing profiles and parallel screen layers.
+        for (int reopen = 0; reopen < 40; ++reopen) {
+            QCOMPARE(probes.open(nvenc, reopen * 100, [&] { ++nvencAttempts; return -10; }), -10);
+            QCOMPARE(probes.open(qsv, reopen * 100, [&] { ++qsvAttempts; return -20; }), -20);
+        }
+        QCOMPARE(nvencAttempts, 1);
+        QCOMPARE(qsvAttempts, 1);
+    }
+
+    void failedHardwareIsRetriedAndCanRecover() {
+        ScreenEncoderProbeCache probes;
+        const ScreenEncoderProbeCache::Configuration qsv{"h264_qsv", QSize(1920, 1080), 0};
+        int attempts = 0;
+        QCOMPARE(probes.open(qsv, 0, [&] { ++attempts; return -9; }), -9);
+        QCOMPARE(probes.open(qsv, ScreenEncoderProbeCache::RetryIntervalMs - 1,
+            [&] { ++attempts; return 0; }), -9);
+        QCOMPARE(attempts, 1);
+        QCOMPARE(probes.open(qsv, ScreenEncoderProbeCache::RetryIntervalMs,
+            [&] { ++attempts; return 0; }), 0);
+        // Success permits every subsequent encoder to open its own context.
+        QCOMPARE(probes.open(qsv, ScreenEncoderProbeCache::RetryIntervalMs,
+            [&] { ++attempts; return 0; }), 0);
+        QCOMPARE(attempts, 3);
+    }
+
+    void hardwareProbeFailuresAreIndependentAndRenewTheirCooldown() {
+        ScreenEncoderProbeCache probes;
+        const ScreenEncoderProbeCache::Configuration nvenc{"h264_nvenc", QSize(1920, 1080), 0};
+        const ScreenEncoderProbeCache::Configuration amf{"h264_amf", QSize(1920, 1080), 0};
+        int unavailableAttempts = 0, availableAttempts = 0;
+        auto unavailable = [&] { return -(++unavailableAttempts); };
+        auto available = [&] { ++availableAttempts; return 0; };
+        QCOMPARE(probes.open(nvenc, 0, unavailable), -1);
+        QCOMPARE(probes.open(amf, 0, available), 0);
+        QCOMPARE(probes.open(nvenc, ScreenEncoderProbeCache::RetryIntervalMs, unavailable), -2);
+        QCOMPARE(probes.open(nvenc, ScreenEncoderProbeCache::RetryIntervalMs + 1, unavailable), -2);
+        QCOMPARE(probes.open(amf, ScreenEncoderProbeCache::RetryIntervalMs + 1, available), 0);
+        QCOMPARE(unavailableAttempts, 2);
+        QCOMPARE(availableAttempts, 2);
+    }
+
+    void unsupportedHardwareConfigurationDoesNotDisableOtherInputs() {
+        ScreenEncoderProbeCache probes;
+        const ScreenEncoderProbeCache::Configuration unsupported{"h264_videotoolbox", QSize(3840, 2160), 1};
+        QCOMPARE(probes.open(unsupported, 0, [] { return -22; }), -22);
+        int attempts = 0;
+        QCOMPARE(probes.open({unsupported.backend, QSize(1920, 1080), unsupported.pixelFormat}, 1,
+            [&] { ++attempts; return 0; }), 0);
+        QCOMPARE(probes.open({unsupported.backend, unsupported.size, 2}, 1,
+            [&] { ++attempts; return 0; }), 0);
+        QCOMPARE(attempts, 2);
+    }
+
+    void expiredHardwareInputsArePrunedDuringLaterOpens() {
+        ScreenEncoderProbeCache probes;
+        // Model changing dimensions which are never requested again.
+        for (int i = 0; i < 100; ++i)
+            QCOMPARE(probes.open({"h264_nvenc", QSize(640 + i * 2, 360), 0}, 0,
+                [] { return -10; }), -10);
+        QCOMPARE(probes.m_failures.size(), 100);
+        const ScreenEncoderProbeCache::Configuration recent{"h264_qsv", QSize(1920, 1080), 0};
+        QCOMPARE(probes.open(recent, ScreenEncoderProbeCache::RetryIntervalMs - 1,
+            [] { return -20; }), -20);
+        QCOMPARE(probes.open({"h264_amf", recent.size, recent.pixelFormat}, ScreenEncoderProbeCache::RetryIntervalMs,
+            [] { return 0; }), 0);
+        QCOMPARE(probes.m_failures.size(), 1);
+        // Pruning obsolete inputs must preserve a still-active cooldown.
+        int attempts = 0;
+        QCOMPARE(probes.open(recent, ScreenEncoderProbeCache::RetryIntervalMs,
+            [&] { ++attempts; return 0; }), -20);
+        QCOMPARE(attempts, 0);
+    }
+
     void roundTrip_data() {
         QTest::addColumn<QSize>("source");
         QTest::addColumn<QSize>("expected");

@@ -1,10 +1,12 @@
 #include "backend/screensharing/ScreenStreamCodec.h"
 #include "backend/screensharing/ScreenCaptureVideoBuffer.h"
+#include "backend/screensharing/ScreenEncoderProbeCache.h"
 
 #include <QAbstractVideoBuffer>
 #include <QVideoFrameFormat>
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <limits>
 
 extern "C" {
@@ -26,6 +28,18 @@ using Codec = std::unique_ptr<AVCodecContext, CodecDelete>;
 using Frame = std::unique_ptr<AVFrame, FrameDelete>;
 using Packet = std::unique_ptr<AVPacket, PacketDelete>;
 using Filter = std::unique_ptr<AVBSFContext, FilterDelete>;
+
+int openScreenEncoder(AVCodecContext* context, const AVCodec* codec, AVDictionary** options) {
+    const QByteArray name(codec->name);
+    if (!name.startsWith("h264_")) return avcodec_open2(context, codec, options);
+    static ScreenEncoderProbeCache hardwareProbes;
+    const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    // A format/resolution rejected by a driver must not disable a different
+    // screen or native-input path. Rate-control reconfigurations share probes.
+    return hardwareProbes.open({name, QSize(context->width, context->height), context->pix_fmt}, now,
+        [&] { return avcodec_open2(context, codec, options); });
+}
 
 QString failure(const char* operation, int status) {
     char buffer[AV_ERROR_MAX_STRING_SIZE]{};
@@ -237,7 +251,7 @@ struct ScreenStreamEncoder::Private {
             } else {
                 av_dict_set(&options, "usage", "screen", 0);
             }
-            const int result = avcodec_open2(candidate.get(), codec, &options);
+            const int result = openScreenEncoder(candidate.get(), codec, &options);
             av_dict_free(&options);
             if (result < 0) { failures.append(QString::fromLatin1(name) + QStringLiteral(" ") + failure("open", result)); continue; }
             AVBSFContext* filter = nullptr;

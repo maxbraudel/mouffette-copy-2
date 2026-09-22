@@ -9,6 +9,7 @@
 #include "backend/audiosharing/SystemAudioCapture.h"
 #include <QAudioDevice>
 #include <QAudioSink>
+#include <QDir>
 #include <QGuiApplication>
 #include <QMediaDevices>
 #include <QMutex>
@@ -580,6 +581,12 @@ int runAudioWorker(int argc, char** argv) {
     initializeAudioWorkerPlatform();
 #ifdef Q_OS_MACOS
     QCoreApplication::addLibraryPath(QCoreApplication::applicationDirPath() + QStringLiteral("/../PlugIns"));
+    // The shipped helper has its own application identity and shares the
+    // outer application's plugins. Its packaged qt.conf supplies this path
+    // before QGuiApplication loads Cocoa; this also selects our patched media
+    // plugins in development builds, which use the Qt installation for Cocoa.
+    QCoreApplication::addLibraryPath(QDir::cleanPath(QCoreApplication::applicationDirPath()
+        + QStringLiteral("/../../../../PlugIns")));
 #endif
     app.setQuitOnLastWindowClosed(false);
     AudioWorker worker(QString::fromLocal8Bit(argv[2]), QString::fromLocal8Bit(argv[3]));

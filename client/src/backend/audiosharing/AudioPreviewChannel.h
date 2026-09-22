@@ -18,7 +18,7 @@ struct AudioPreviewBlock {
     std::array<float, AudioPreviewBlockFrames * 2> samples{};
 };
 struct AudioPreviewState {
-    // Private ABI between instances of the same executable. Bump Version when
+    // Private ABI between the application and audio worker from the same build. Bump Version when
     // changing the layout or meaning of shared fields. The immutable header is
     // initialized before preview-add; OS allocation size is only a capacity.
     static constexpr quint32 Magic = 0x4d415031;
