@@ -1,9 +1,6 @@
 #include "backend/audiosharing/AudioCapturePacketizer.h"
 #include "backend/audiosharing/AudioCaptureTimestamp.h"
 #include "backend/audiosharing/AudioStreamCodec.h"
-#include "backend/audiosharing/AudioWorkerProtocol.h"
-#include <QLocalServer>
-#include <QUuid>
 #include <QtTest>
 #include <array>
 #include <cmath>
@@ -236,22 +233,7 @@ private slots:
         QVERIFY2(std::abs(bestDelay - lookahead) <= 1,
             qPrintable(QStringLiteral("Opus lookahead %1 samples, measured %2").arg(lookahead).arg(bestDelay)));
     }
-    void ipcRejectsFramesThatWouldExceedItsEntireBacklogBudget() {
-        QLocalServer server;
-        QVERIFY2(server.listen(QStringLiteral("mcp-%1").arg(QUuid::createUuid().toString(QUuid::Id128))),
-            qPrintable(server.errorString()));
-        QLocalSocket sender; sender.connectToServer(server.serverName());
-        QVERIFY(sender.waitForConnected(1000));
-        QVERIFY(server.waitForNewConnection(1000));
-        std::unique_ptr<QLocalSocket> receiver(server.nextPendingConnection()); QVERIFY(receiver);
-        QCborMap message{{QStringLiteral("type"), QStringLiteral("packet")},
-                         {QStringLiteral("data"), QByteArray(AudioWorkerProtocol::MaximumBacklog, 'x')}};
-        QVERIFY(!AudioWorkerProtocol::send(&sender, message));
-        QCOMPARE(sender.bytesToWrite(), 0);
-        QCOMPARE(sender.state(), QLocalSocket::ConnectedState);
-        QVERIFY(!AudioWorkerProtocol::sendControl(&sender, message));
-        QCOMPARE(sender.state(), QLocalSocket::UnconnectedState);
-    }
+
 };
 QTEST_GUILESS_MAIN(AudioCapturePipelineTest)
 #include "tst_AudioCapturePipeline.moc"

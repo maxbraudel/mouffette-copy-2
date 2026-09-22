@@ -7,4 +7,3 @@ public:
 };
 }
 std::unique_ptr<SystemAudioCapture> createSystemAudioCapture() { return std::make_unique<UnavailableCapture>(); }
-void initializeAudioWorkerPlatform() {}

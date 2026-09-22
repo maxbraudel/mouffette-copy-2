@@ -133,7 +133,7 @@ public:
     void run(const Pcm& pcm, const State& state) {
         using Activate = HRESULT(WINAPI*)(LPCWSTR, REFIID, PROPVARIANT*, IActivateAudioInterfaceCompletionHandler*, IActivateAudioInterfaceAsyncOperation**);
         // A cancelled asynchronous activation may still call back after run()
-        // returns. Keep its implementation loaded for the worker's lifetime.
+        // returns. Keep its implementation loaded for the capture thread's lifetime.
         static HMODULE module = LoadLibraryW(L"Mmdevapi.dll");
         auto activate = module ? reinterpret_cast<Activate>(GetProcAddress(module, "ActivateAudioInterfaceAsync")) : nullptr;
         if (!activate) { state(false, QStringLiteral("Process audio capture is unavailable on this Windows installation")); return; }
@@ -244,4 +244,3 @@ public:
 };
 }
 std::unique_ptr<SystemAudioCapture> createSystemAudioCapture() { return std::make_unique<WindowsAudioCapture>(); }
-void initializeAudioWorkerPlatform() {}

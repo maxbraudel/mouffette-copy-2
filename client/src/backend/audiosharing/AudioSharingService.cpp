@@ -1,14 +1,14 @@
 #include "AudioSharingService.h"
-#include "AudioWorkerClient.h"
+#include "AudioEngine.h"
 #include "MediaCaptureClock.h"
 #include "backend/network/AudioTransport.h"
 #include "backend/network/WebSocketClient.h"
 #include "backend/network/RemoteSessionCoordinator.h"
 #include <QDebug>
 
-AudioSharingService::AudioSharingService(WebSocketClient* network, QObject* parent)
+AudioSharingService::AudioSharingService(WebSocketClient* network, QObject* parent, AudioEngine* audio)
     : QObject(parent), m_network(network), m_transport(new AudioTransport(network, this)),
-      m_worker(AudioWorkerClient::instance())
+      m_audio(audio ? audio : AudioEngine::instance())
 {
     connect(m_transport, &AudioTransport::sourceReservationChanged,
             this, &AudioSharingService::sourceReservationChanged);
@@ -27,7 +27,7 @@ AudioSharingService::AudioSharingService(WebSocketClient* network, QObject* pare
             [this](const QByteArray& opus, qint64 timestampUs, quint64 sequence) {
         if (m_stopped || m_suspended || !m_listeningEnabled || !m_playbackAllowed || m_session.isEmpty()
             || m_endpoint.isEmpty() || m_stream.isEmpty()) return;
-        m_worker->playPacket(m_endpoint, m_stream, sequence, timestampUs, opus,
+        m_audio->playPacket(m_endpoint, m_stream, sequence, timestampUs, opus,
                              m_transport->playbackTimeUs(timestampUs));
     });
     connect(m_transport, &AudioTransport::remoteStateChanged, this, [this](const QString& reason) {
@@ -85,12 +85,12 @@ AudioSharingService::AudioSharingService(WebSocketClient* network, QObject* pare
             emit statusChanged();
         }
     });
-    connect(m_worker, &AudioWorkerClient::packetReady, this,
+    connect(m_audio, &AudioEngine::packetReady, this,
             [this](const QString& epoch, quint64 sequence, qint64 timestampUs, const QByteArray& opus) {
         if (m_enabled && !m_suspended && !m_stopped && epoch == m_captureEpoch
             && epoch == m_transport->publicationId()) m_transport->sendPacket(opus, timestampUs, sequence);
     });
-    connect(m_worker, &AudioWorkerClient::captureStateChanged, this,
+    connect(m_audio, &AudioEngine::captureStateChanged, this,
             [this](bool active, const QString& error) {
         if (m_stopped || m_captureEpoch.isEmpty()) return;
         const QString value = active ? tr("Sharing system audio.")
@@ -102,7 +102,7 @@ AudioSharingService::AudioSharingService(WebSocketClient* network, QObject* pare
             m_transport->sendStatus(QStringLiteral("streaming"));
         }
     });
-    connect(m_worker, &AudioWorkerClient::playbackClock, this,
+    connect(m_audio, &AudioEngine::playbackClock, this,
             [this](const QString& source, const QString& epoch, qint64 sourceUs, qint64 localUs) {
         if (m_stopped || !m_listeningEnabled || m_suspended || !m_playbackAllowed || source != m_endpoint
             || epoch != m_stream || m_session.isEmpty()) return;
@@ -110,22 +110,12 @@ AudioSharingService::AudioSharingService(WebSocketClient* network, QObject* pare
         m_reported.clear();
         emit playbackClock(source, epoch, sourceUs, localUs);
     });
-    connect(m_worker, &AudioWorkerClient::playbackFeedback, this,
+    connect(m_audio, &AudioEngine::playbackFeedback, this,
             [this](const QString& source, const QString& epoch, int dropped, int bufferedMs) {
         if (!m_stopped && m_listeningEnabled && !m_suspended && m_playbackAllowed && source == m_endpoint && epoch == m_stream)
             m_transport->sendPlaybackFeedback(dropped, bufferedMs);
     });
-    connect(m_worker, &AudioWorkerClient::failed, this, [this](const QString& error) {
-        if (m_stopped) return;
-        qWarning().noquote() << "[AudioSharing] Audio worker failed:" << error;
-        clearPlayback();
-        if (!m_captureEpoch.isEmpty()) captureFailed(error);
-        if (!m_endpoint.isEmpty() && m_listeningEnabled && !m_suspended && m_playbackAllowed) {
-            setState(QStringLiteral("error"), error);
-            report(error);
-        }
-    });
-    connect(m_worker, &AudioWorkerClient::playbackFailed, this,
+    connect(m_audio, &AudioEngine::playbackFailed, this,
             [this](const QString& source, const QString& epoch, const QString& error) {
         if (m_stopped || m_suspended || !m_listeningEnabled || source != m_endpoint
             || epoch != m_stream || !m_playbackAllowed) return;
@@ -163,7 +153,7 @@ void AudioSharingService::captureFailed(const QString& message)
     m_captureRetryAt = MediaCaptureClock::nowUs() + 3000000;
     m_captureNeedsNewEpoch = true;
     m_captureHasError = true;
-    m_worker->stopCapture();
+    m_audio->stopCapture();
     // Keep the publication's failure visible during backoff. Before restarting
     // the codec, rotate the wire epoch so old sequence state cannot survive.
 }
@@ -179,7 +169,7 @@ void AudioSharingService::report(const QString& message)
 void AudioSharingService::clearPlayback()
 {
     if (!m_endpoint.isEmpty()) {
-        m_worker->resetPlayback(m_endpoint);
+        m_audio->resetPlayback(m_endpoint);
         emit playbackReset(m_endpoint);
     }
 }
@@ -200,7 +190,7 @@ void AudioSharingService::setListeningEnabled(bool enabled)
 {
     if (m_listeningEnabled == enabled) return;
     m_listeningEnabled = enabled;
-    m_worker->setPlaybackMuted(!enabled);
+    m_audio->setPlaybackMuted(!enabled);
     if (!enabled) clearPlayback();
     m_reported.clear();
     refresh();
@@ -210,7 +200,7 @@ void AudioSharingService::setSharingEnabled(bool enabled)
 {
     m_enabled = enabled;
     if (!enabled) {
-        m_worker->stopCapture();
+        m_audio->stopCapture();
         m_captureEpoch.clear();
         m_captureRetryAt = 0;
         m_captureNeedsNewEpoch = false;
@@ -226,7 +216,7 @@ void AudioSharingService::setSuspended(bool suspended)
     if (m_suspended == suspended) return;
     m_suspended = suspended;
     if (suspended) {
-        m_worker->stopCapture(); m_captureEpoch.clear();
+        m_audio->stopCapture(); m_captureEpoch.clear();
         m_captureNeedsNewEpoch = false; m_captureRetryAt = 0;
     }
     m_transport->setSuspended(suspended);
@@ -271,7 +261,7 @@ void AudioSharingService::refresh()
         m_hadPlaybackStream = false;
         m_waitingForChannel = false;
         m_subscriptionStartedAt = MediaCaptureClock::nowUs();
-        m_worker->setPlaybackMuted(false);
+        m_audio->setPlaybackMuted(false);
         setState(QStringLiteral("loading"), tr("Connecting to remote system audio…"));
         m_transport->setSubscription(m_session, m_generation, true);
     }
@@ -294,12 +284,12 @@ void AudioSharingService::refresh()
             m_captureHasError = false;
             const auto message = tr("Starting system audio sharing…");
             if (m_status != message) { m_status = message; emit statusChanged(); }
-            m_worker->startCapture(epoch, m_transport->audioBitrateBps());
-        } else if (m_captureEpoch == epoch) m_worker->setCaptureBitrate(m_transport->audioBitrateBps());
+            m_audio->startCapture(epoch, m_transport->audioBitrateBps());
+        } else if (m_captureEpoch == epoch) m_audio->setCaptureBitrate(m_transport->audioBitrateBps());
     } else {
         if (!m_captureEpoch.isEmpty()) {
             m_captureEpoch.clear();
-            m_worker->stopCapture();
+            m_audio->stopCapture();
         }
         if (!m_status.isEmpty() && (!m_enabled || m_suspended || !m_captureHasError)) {
             m_status.clear(); emit statusChanged();
@@ -314,7 +304,7 @@ void AudioSharingService::stop()
     m_playbackAllowed = false;
     m_timer.stop();
     clearPlayback();
-    m_worker->stopCapture();
+    m_audio->stopCapture();
     m_transport->stop();
     m_session.clear(); m_stream.clear(); m_captureEpoch.clear();
     setState(QStringLiteral("unavailable"));

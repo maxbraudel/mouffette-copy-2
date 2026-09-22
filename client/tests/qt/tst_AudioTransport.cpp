@@ -4,7 +4,7 @@
 #include "backend/network/AudioPlayoutPolicy.h"
 #include "backend/audiosharing/MediaCaptureClock.h"
 #include "backend/audiosharing/AudioSharingService.h"
-#include "backend/audiosharing/AudioWorkerClient.h"
+#include "backend/audiosharing/AudioEngine.h"
 #include "backend/network/WebSocketClient.h"
 #include "backend/network/RemoteSessionCoordinator.h"
 #include <QProcess>
@@ -73,7 +73,7 @@ private slots:
         AudioSharingService listener(&owner);
         AudioTransport publisher(&source);
         auto* receiver=listener.findChild<AudioTransport*>(); QVERIFY(receiver);
-        auto* worker=AudioWorkerClient::instance();
+        auto* worker=AudioEngine::instance();
         QSignalSpy issues(&listener,&AudioSharingService::remoteIssue);
         QString session; connectPeers(owner,source,session);
         source.setScreenSharingEnabled(false);
@@ -149,23 +149,24 @@ private slots:
         QTemporaryDir identities;
         WebSocketClient owner(identities.filePath("owner"),false),source(identities.filePath("source"),false);
         AudioTransport receiver(&owner);
-        AudioSharingService publisher(&source);
+        AudioEngine audio(nullptr, [] { return std::unique_ptr<SystemAudioCapture>{}; });
+        AudioSharingService publisher(&source, nullptr, &audio);
         auto* transport=publisher.findChild<AudioTransport*>(); QVERIFY(transport);
         QSignalSpy remoteStates(&receiver,&AudioTransport::remoteStateChanged);
         QString session; connectPeers(owner,source,session);
         source.setScreenSharingEnabled(false);
-        // This headless binary deliberately has no audio worker executable.
-        // Capture failure must reach the receiver without touching video.
+        // Native capture is deliberately unavailable; do not request OS
+        // permissions in this relay test. Its error must remain independent of video.
         publisher.setSharingEnabled(true);
         receiver.setSubscription(session,owner.remoteSessionCoordinator()->byId(session).generation,true);
         QTRY_VERIFY_WITH_TIMEOUT(!remoteStates.isEmpty()
             && remoteStates.last().first().toString()==QLatin1String("capture_error"),5000);
-        QVERIFY(publisher.status().contains(QStringLiteral("executable is unavailable")));
+        QVERIFY(publisher.status().contains(QStringLiteral("capture is unavailable")));
         const auto epoch=transport->publicationId(); QVERIFY(!epoch.isEmpty());
         QTest::qWait(1000);
         QCOMPARE(transport->publicationId(),epoch);
         QCOMPARE(remoteStates.last().first().toString(),QStringLiteral("capture_error"));
-        QVERIFY(publisher.status().contains(QStringLiteral("executable is unavailable")));
+        QVERIFY(publisher.status().contains(QStringLiteral("capture is unavailable")));
         QTRY_VERIFY_WITH_TIMEOUT(!transport->publicationId().isEmpty() && transport->publicationId()!=epoch
             && remoteStates.last().first().toString()==QLatin1String("capture_error"),5000);
         publisher.setSharingEnabled(false);

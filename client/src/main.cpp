@@ -21,9 +21,7 @@
 #include "frontend/qml/ApplicationController.h"
 #include "frontend/qml/QmlRuntime.h"
 #include "frontend/rendering/canvas/CanvasQmlTypes.h"
-#include "backend/audiosharing/AudioWorker.h"
-#include "backend/audiosharing/AudioWorkerClient.h"
-#include "backend/audiosharing/AudioWorkerPaths.h"
+#include "backend/audiosharing/AudioEngine.h"
 
 // ── Dev flags ────────────────────────────────────────────────────────────────
 // ─────────────────────────────────────────────────────────────────────────────
@@ -60,15 +58,6 @@ void logRuntimeDiagnostics() {
 }
 
 int main(int argc, char *argv[]) {
-    if (argc > 1 && QByteArray(argv[1]) == QByteArrayLiteral("--audio-worker")) {
-#ifdef Q_OS_MACOS
-        // Never fall back to this bundle: SCK would also exclude scene audio.
-        std::fprintf(stderr, "Mouffette audio requires the dedicated audio helper application.\n");
-        return 64;
-#else
-        return runAudioWorker(argc, argv);
-#endif
-    }
     QStringList arguments;
     arguments.reserve(argc);
     for (int i = 0; i < argc; ++i) {
@@ -84,10 +73,8 @@ int main(int argc, char *argv[]) {
     AppConfig::instance().applyPreApplicationEnvironment();
 
     QApplication app(argc, argv);
-    app.setProperty("mouffetteAudioWorkerExecutable",
-        audioWorkerExecutablePath(QCoreApplication::applicationFilePath()));
     QObject::connect(&app, &QCoreApplication::aboutToQuit, &app, [] {
-        AudioWorkerClient::instance()->shutdown();
+        AudioEngine::instance()->shutdown();
     });
 #ifdef Q_OS_MACOS
     // Prefer our bundled Qt backend, including the precise first-seek fix.

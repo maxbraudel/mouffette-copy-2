@@ -106,22 +106,6 @@ if [[ ! -x "$APP/Contents/MacOS/Mouffette" ]]; then
     echo "Installed application not found at $APP" >&2
     exit 1
 fi
-AUDIO_HELPER_APP="$APP/Contents/Helpers/MouffetteAudioWorker.app"
-AUDIO_HELPER_EXECUTABLE="$AUDIO_HELPER_APP/Contents/MacOS/MouffetteAudioWorker"
-if [[ ! -x "$AUDIO_HELPER_EXECUTABLE" ]]; then
-    echo "The isolated audio helper is missing from $APP" >&2
-    exit 1
-fi
-# The platform plugin loads during QGuiApplication construction. Resolve it
-# through the parent bundle before any helper code can add a library path.
-# On macOS Qt interprets Prefix relative to this helper's Contents directory.
-cmake -E make_directory "$AUDIO_HELPER_APP/Contents/Resources"
-cat >"$AUDIO_HELPER_APP/Contents/Resources/qt.conf" <<'EOF'
-[Paths]
-Prefix=../../..
-Plugins=PlugIns
-EOF
-
 # Qt's generic `-qmldir` deployment copies every child of Homebrew's aggregate
 # QtQuick tree (including unrelated Qt3D/VirtualKeyboard modules). Install the
 # exact imports and runtime plugins used by Mouffette, then ask macdeployqt to
@@ -209,7 +193,6 @@ done
 
 DEPLOY_ARGS=(
     "$APP"
-    "-executable=$AUDIO_HELPER_EXECUTABLE"
     -no-plugins
     -always-overwrite
     -verbose=0
@@ -323,14 +306,6 @@ if ! otool -l "$APP/Contents/MacOS/Mouffette" \
     install_name_tool -add_rpath '@executable_path/../Frameworks' \
         "$APP/Contents/MacOS/Mouffette"
 fi
-# The helper uses the outer Frameworks directory, keeping both app identities
-# independent without duplicating Qt/FFmpeg. macdeployqt may strip build rpaths.
-if ! otool -l "$AUDIO_HELPER_EXECUTABLE" \
-    | grep -F 'path @executable_path/../../../../Frameworks (offset' >/dev/null; then
-    install_name_tool -add_rpath '@executable_path/../../../../Frameworks' \
-        "$AUDIO_HELPER_EXECUTABLE"
-fi
-
 if [[ -n "${MOUFFETTE_MACOS_SIGN_IDENTITY:-}" ]]; then
     echo "Signing with Developer ID: $MOUFFETTE_MACOS_SIGN_IDENTITY"
     SIGN_ARGS=(--force --options runtime --timestamp --sign "$MOUFFETTE_MACOS_SIGN_IDENTITY")

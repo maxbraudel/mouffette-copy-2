@@ -1,22 +1,21 @@
-#include "backend/audiosharing/AudioWorker.h"
-#include "backend/audiosharing/AudioWorkerProtocol.h"
-#include "backend/audiosharing/AudioPreviewChannel.h"
+#include "AudioEngine.h"
+#include "AudioCaptureMix.h"
+#include "AudioCapturePacketizer.h"
+#include "SceneAudioTap.h"
 #include "backend/audiosharing/AudioStreamCodec.h"
 #include "backend/audiosharing/AudioPlaybackTimeline.h"
 #include "backend/audiosharing/AudioPlaybackBuffer.h"
-#include "backend/audiosharing/AudioCapturePacketizer.h"
 #include "backend/audiosharing/MediaCaptureClock.h"
 #include "backend/audiosharing/SystemAudioCapture.h"
 #include <QAudioDevice>
 #include <QAudioSink>
-#include <QDir>
-#include <QGuiApplication>
+#include <QCoreApplication>
+#include <QHash>
 #include <QMediaDevices>
 #include <QMutex>
 #include <QMutexLocker>
 #include <QPointer>
 #include <QScopeGuard>
-#include <QSharedMemory>
 #include <QTimer>
 #include <algorithm>
 #include <atomic>
@@ -26,15 +25,6 @@
 #include <opus.h>
 
 namespace {
-QCborMap command(const char* type) { return {{QStringLiteral("type"), QString::fromLatin1(type)}}; }
-void mixStereo(float* output, int channels, const float* pcm, int count, double position, float gain = 1) {
-    const int first = std::clamp(int(position), 0, count - 1), second = std::min(first + 1, count - 1);
-    const float fraction = float(std::clamp(position - first, 0.0, 1.0));
-    const float left = (pcm[first * 2] + fraction * (pcm[second * 2] - pcm[first * 2])) * gain;
-    const float right = (pcm[first * 2 + 1] + fraction * (pcm[second * 2 + 1] - pcm[first * 2 + 1])) * gain;
-    if (channels == 1) output[0] += 0.5f * (left + right);
-    else { output[0] += left; output[1] += right; }
-}
 struct AudioBlock { QByteArray pcm; qint64 timestampUs = 0; bool discontinuity = false; };
 struct RemoteSource {
     QString epoch;
@@ -49,16 +39,8 @@ struct RemoteSource {
     qint64 lastTimestampUs = -1, lastPacketUs = 0, reportedLocalUs = -1;
     int dropped = 0, concealed = 0, rebuffers = 0;
 };
-struct PreviewMapping {
-    QSharedMemory memory;
-    QByteArray deviceId;
-    QByteArray resolvedDeviceId;
-    explicit PreviewMapping(const QString& key) : memory(key) {}
-    AudioPreviewState* state() { return static_cast<AudioPreviewState*>(memory.data()); }
-};
 struct MixerSnapshot {
     std::vector<std::shared_ptr<RemoteSource>> remote;
-    std::vector<std::shared_ptr<PreviewMapping>> previews;
 };
 struct OutputDevice {
     QByteArray id;
@@ -94,31 +76,33 @@ struct OutputDevice {
         }
     }
 };
-// Native threads only write this bounded mailbox. The helper main thread owns
-// the codec, IPC and stream state, so native callbacks never wait on a socket.
+// Native threads only write this bounded mailbox. The application thread owns
+// the codec and stream state; native callbacks never wait on network I/O.
 struct CaptureMailbox {
     QMutex mutex;
     std::deque<AudioBlock> blocks;
     qsizetype bytes = 0;
     bool queued = false, closed = false;
 };
-class AudioWorker final : public QObject {
-public:
-    QLocalSocket socket;
+}
+struct AudioEngine::Private : public QObject {
+    AudioEngine* owner;
+    CaptureFactory factory;
+    bool closing = false, capturing = false;
+    QTimer captureTimer;
+    AudioCaptureMix captureMix;
+    AudioCapturePacketizer nativePackets;
     QMediaDevices devices;
     QTimer reports;
-    QByteArray input;
     std::unique_ptr<SystemAudioCapture> capture;
     std::shared_ptr<CaptureMailbox> captureMailbox;
     AudioStreamEncoder encoder;
     QString captureEpoch, captureSequenceEpoch;
-    AudioCapturePacketizer capturePacketizer;
     quint64 captureSequence = 0;
     bool captureFailed = false;
     int bitrate = 96000;
     QHash<QString, std::shared_ptr<RemoteSource>> remote;
     QHash<QString, QPair<QString, qint64>> playbackErrors;
-    QHash<QString, std::shared_ptr<PreviewMapping>> previews;
     std::vector<std::unique_ptr<OutputDevice>> outputs;
     bool remoteMuted = false;
     QByteArray defaultOutputId;
@@ -126,22 +110,16 @@ public:
     quint64 mixerRevision = 1;
     QHash<QByteArray, qint64> outputRetryUs;
 
-    AudioWorker(const QString& server, const QString& token) {
-        connect(&socket, &QLocalSocket::connected, this, [this, token] {
-            auto hello = command("hello"); hello.insert(QStringLiteral("token"), token);
-            AudioWorkerProtocol::sendControl(&socket, hello);
-        });
-        connect(&socket, &QLocalSocket::readyRead, this, [this] { readMessages(); });
-        connect(&socket, &QLocalSocket::disconnected, this, [] { QCoreApplication::quit(); });
-        connect(&socket, &QLocalSocket::errorOccurred, this, [](QLocalSocket::LocalSocketError) { QCoreApplication::quit(); });
+    Private(AudioEngine* parent, CaptureFactory sourceFactory) : QObject(parent), owner(parent), factory(std::move(sourceFactory)) {
         connect(&devices, &QMediaDevices::audioOutputsChanged, this, [this] { rebuildOutputs(); });
         reports.setInterval(20);
         connect(&reports, &QTimer::timeout, this, [this] { reportClocks(); });
         reports.start();
-        socket.connectToServer(server);
-        QTimer::singleShot(5000, this, [this] { if (socket.state() != QLocalSocket::ConnectedState) QCoreApplication::quit(); });
+        captureTimer.setTimerType(Qt::PreciseTimer);
+        captureTimer.setInterval(10);
+        connect(&captureTimer, &QTimer::timeout, this, [this] { publishCapture(); });
     }
-    ~AudioWorker() override { stopCapture(); outputs.clear(); }
+    ~Private() override { stopCapture(); outputs.clear(); }
     void error(const QString& value, const QString& sourceId, const QString& epoch) {
         const auto key = epoch + QLatin1Char('\n') + value;
         const auto now = MediaCaptureClock::nowUs();
@@ -150,71 +128,30 @@ public:
         if (previous == playbackErrors.cend() && playbackErrors.size() >= 64)
             playbackErrors.erase(playbackErrors.begin());
         playbackErrors.insert(sourceId, {key, now});
-        auto message = command("error"); message.insert(QStringLiteral("error"), value);
-        message.insert(QStringLiteral("source"), sourceId);
-        message.insert(QStringLiteral("epoch"), epoch);
-        AudioWorkerProtocol::sendControl(&socket, message);
+        QTimer::singleShot(0, this, [this, sourceId, epoch, value] {
+            if (!closing) emit owner->playbackFailed(sourceId, epoch, value);
+        });
     }
     void outputError(const QString& value, const QByteArray& outputId) {
-        // Preview-only devices must not invalidate another device's remote
-        // audio. Fence queued errors by source and epoch like playback clocks.
+        // Playback failures stay scoped to the remote source and stream epoch.
         if (outputId != QMediaDevices::defaultAudioOutput().id()) return;
         for (auto it = remote.cbegin(); it != remote.cend(); ++it)
             error(value, it.key(), it.value()->epoch);
     }
-    void previewState(const QString& key, const QString& failure = {}) {
-        auto message = command("preview-state");
-        message.insert(QStringLiteral("key"), key);
-        message.insert(QStringLiteral("attached"), failure.isEmpty());
-        message.insert(QStringLiteral("error"), failure);
-        AudioWorkerProtocol::sendControl(&socket, message);
-    }
-    void addPreview(const QCborMap& message) {
-        const auto key = message.value(QStringLiteral("key")).toString();
-        if (!key.startsWith(QLatin1String("mouffette-pcm-")) || key.size() > 100) {
-            previewState(key, QStringLiteral("Invalid preview audio shared-memory key")); return;
-        }
-        if (previews.contains(key)) { previewState(key); return; } // Idempotent replay.
-        if (previews.size() >= 256) {
-            previewState(key, QStringLiteral("Too many preview audio channels")); return;
-        }
-        auto mapping = std::make_shared<PreviewMapping>(key);
-        if (!mapping->memory.attach()) {
-            previewState(key, QStringLiteral("Could not attach preview audio shared memory: %1")
-                .arg(mapping->memory.errorString())); return;
-        }
-        // QSharedMemory::size() may exceed create()'s request (VirtualQuery
-        // reports page-rounded capacity on Windows). Validate capacity before
-        // reading the header, then validate the logical ABI independently.
-        if (mapping->memory.size() < qsizetype(sizeof(AudioPreviewState))) {
-            previewState(key, QStringLiteral("Preview audio shared memory is too small: %1 bytes; need %2")
-                .arg(mapping->memory.size()).arg(sizeof(AudioPreviewState))); return;
-        }
-        const auto* shared = mapping->state();
-        if (shared->magic != AudioPreviewState::Magic || shared->version != AudioPreviewState::Version
-            || shared->byteSize != sizeof(AudioPreviewState)) {
-            previewState(key, QStringLiteral("Incompatible preview audio shared-memory format "
-                "(magic %1, version %2, size %3)")
-                .arg(shared->magic, 0, 16).arg(shared->version).arg(shared->byteSize)); return;
-        }
-        mapping->deviceId = message.value(QStringLiteral("device")).toByteArray();
-        previews.insert(key, mapping); ++mixerRevision;
-        ensureOutputs();
-        previewState(key);
-    }
-    void state(bool active, const QString& value = {}, const QString& stoppedEpoch = {}) {
-        auto message = command("capture-state"); message.insert(QStringLiteral("active"), active);
-        message.insert(QStringLiteral("epoch"), stoppedEpoch.isEmpty() ? captureEpoch : stoppedEpoch);
-        message.insert(QStringLiteral("error"), value); AudioWorkerProtocol::sendControl(&socket, message);
+    void state(bool active, const QString& value = {}) {
+        emit owner->captureStateChanged(active, value);
     }
     void stopCapture() {
+        captureTimer.stop(); capturing = false;
+        if (captureMailbox) SceneAudioBus::instance().setEnabled(false);
+        captureMix.clear(); nativePackets.reset();
         if (captureMailbox) { QMutexLocker lock(&captureMailbox->mutex); captureMailbox->closed = true; captureMailbox->blocks.clear(); }
         captureMailbox.reset();
         if (capture) capture->stop();
-        capture.reset(); capturePacketizer.reset(); captureEpoch.clear();
+        capture.reset(); captureEpoch.clear();
     }
     void startCapture(const QString& epoch, int requestedBitrate) {
-        if (epoch.isEmpty()) return;
+        if (epoch.isEmpty() || closing) return;
         bitrate = requestedBitrate <= 32000 ? 32000 : 96000;
         if (capture && captureEpoch == epoch && !captureFailed) { encoder.setBitrate(bitrate); return; }
         stopCapture();
@@ -226,7 +163,7 @@ public:
         captureEpoch = epoch; captureFailed = false;
         captureMailbox = std::make_shared<CaptureMailbox>();
         const auto mailbox = captureMailbox;
-        capture = createSystemAudioCapture();
+        capture = factory ? factory() : createSystemAudioCapture();
         if (!capture) { state(false, QStringLiteral("System audio capture is unavailable")); return; }
         capture->start([this, mailbox](QByteArray pcm, qint64 timestamp, bool discontinuity) {
             constexpr qsizetype maximumBytes = 4800 * 2 * sizeof(float);
@@ -253,7 +190,17 @@ public:
             QMutexLocker lock(&mailbox->mutex);
             if (mailbox->closed) return;
             QMetaObject::invokeMethod(this, [this, mailbox, active, failure] {
-                if (captureMailbox == mailbox) { captureFailed = !active; state(active, failure); }
+                if (captureMailbox != mailbox) return;
+                captureFailed = !active;
+                if (active && !capturing) {
+                    captureMix.reset(MediaCaptureClock::nowUs());
+                    SceneAudioBus::instance().setEnabled(true);
+                    capturing = true; captureTimer.start();
+                } else if (!active) {
+                    capturing = false; captureTimer.stop(); captureMix.clear();
+                    SceneAudioBus::instance().setEnabled(false);
+                }
+                state(active, failure);
             }, Qt::QueuedConnection);
         });
     }
@@ -264,71 +211,41 @@ public:
             if (mailbox->closed || captureMailbox != mailbox) return;
             blocks.swap(mailbox->blocks); mailbox->bytes = 0;
         }
-        for (auto& block : blocks) {
+        if (!capturing) return;
+        for (const auto& block : blocks) {
             const auto age = MediaCaptureClock::nowUs() - block.timestampUs;
-            if (age > 100000 || age < -250000) { capturePacketizer.reset(); continue; }
-            capturePacketizer.append(std::move(block.pcm), block.timestampUs, block.discontinuity);
-            while (auto chunk = capturePacketizer.take()) {
-                if (chunk->discontinuity) encoder.reset();
-                QString failure;
-                const auto packet = encoder.encode(reinterpret_cast<const float*>(chunk->pcm.constData()), failure);
-                if (!failure.isEmpty()) {
-                    const auto failedEpoch = captureEpoch;
-                    stopCapture(); state(false, failure, failedEpoch); return;
-                }
-                auto message = command("packet"); message.insert(QStringLiteral("epoch"), captureEpoch);
-                message.insert(QStringLiteral("sequence"), qint64(++captureSequence));
-                message.insert(QStringLiteral("timestamp"), std::max<qint64>(0, chunk->timestampUs - encoder.lookaheadUs()));
-                message.insert(QStringLiteral("opus"), packet); AudioWorkerProtocol::send(&socket, message);
-            }
+            if (age > 100000 || age < -250000) continue;
+            nativePackets.append(block.pcm, block.timestampUs, block.discontinuity);
+            while (auto packet = nativePackets.take())
+                captureMix.appendSystem(reinterpret_cast<const float*>(packet->pcm.constData()),
+                    AudioCapturePacketizer::PacketFrames, packet->timestampUs);
         }
     }
-    void readMessages() {
-        input += socket.readAll();
-        if (input.size() > 2 * AudioWorkerProtocol::MaximumMessage) { socket.abort(); return; }
-        QCborMap message;
-        bool malformed = false;
-        while (AudioWorkerProtocol::take(input, message, malformed)) {
-            const auto type = message.value(QStringLiteral("type")).toString();
-            if (type == QLatin1String("quit")) { QCoreApplication::quit(); return; }
-            if (type == QLatin1String("capture")) startCapture(message.value(QStringLiteral("epoch")).toString(), int(message.value(QStringLiteral("bitrate")).toInteger(96000)));
-            else if (type == QLatin1String("capture-stop")) {
-                const auto epoch = message.value(QStringLiteral("epoch")).toString();
-                stopCapture(); state(false, {}, epoch);
-            }
-            else if (type == QLatin1String("bitrate")) encoder.setBitrate(int(message.value(QStringLiteral("bitrate")).toInteger(96000)));
-            else if (type == QLatin1String("play")) receivePacket(message);
-            else if (type == QLatin1String("reset")) {
-                const auto source = remote.take(message.value(QStringLiteral("source")).toString());
-                if (source) source->enabled.store(false, std::memory_order_release);
-                ++mixerRevision;
-                ensureOutputs();
-            } else if (type == QLatin1String("mute")) {
-                remoteMuted = message.value(QStringLiteral("muted")).toBool();
-                for (const auto& source : remote) source->enabled.store(false, std::memory_order_release);
-                remote.clear(); playbackErrors.clear(); ++mixerRevision;
-                ensureOutputs();
-            } else if (type == QLatin1String("preview-add")) {
-                addPreview(message);
-            } else if (type == QLatin1String("preview-remove")) {
-                previews.remove(message.value(QStringLiteral("key")).toString()); ++mixerRevision;
-                ensureOutputs();
-            }
+    void publishCapture() {
+        if (!capturing || captureEpoch.isEmpty()) return;
+        const auto activeEpoch = captureEpoch;
+        for (const auto& tap : SceneAudioBus::instance().sources()) {
+            QByteArray pcm; qint64 timestamp = 0;
+            while (tap->take(pcm, timestamp))
+                captureMix.appendScene(reinterpret_cast<const float*>(pcm.constData()),
+                    int(pcm.size() / (2 * sizeof(float))), timestamp);
         }
-        if (malformed) socket.abort();
+        const auto now = MediaCaptureClock::nowUs();
+        while (auto chunk = captureMix.take(now)) {
+            if (chunk->discontinuity) encoder.reset();
+            QString failure;
+            const auto packet = encoder.encode(reinterpret_cast<const float*>(chunk->pcm.constData()), failure);
+            if (!failure.isEmpty()) { stopCapture(); state(false, failure); return; }
+            emit owner->packetReady(activeEpoch, ++captureSequence,
+                std::max<qint64>(0, chunk->timestampUs - encoder.lookaheadUs()), packet);
+            // Consumers may stop sharing synchronously from the signal.
+            if (!capturing || captureEpoch != activeEpoch) return;
+        }
     }
-    void receivePacket(const QCborMap& message) {
-        const auto sourceId = message.value(QStringLiteral("source")).toString();
-        const auto epoch = message.value(QStringLiteral("epoch")).toString();
-        const auto packet = message.value(QStringLiteral("opus")).toByteArray();
-        const qint64 timestamp = message.value(QStringLiteral("timestamp")).toInteger(-1);
-        const qint64 sequence = message.value(QStringLiteral("sequence")).toInteger(-1);
-        const qint64 receivedAt = message.value(QStringLiteral("receivedAt")).toInteger(-1);
-        const qint64 presentation = message.value(QStringLiteral("presentation")).toInteger(-1);
-        const qint64 ipcAge = MediaCaptureClock::nowUs() - receivedAt;
-        if (sourceId.isEmpty() || sourceId.size() > 256 || epoch.isEmpty() || epoch.size() > 256
-            || timestamp < 0 || sequence < 0 || remoteMuted || receivedAt < 0
-            || ipcAge < -250000 || ipcAge > 100000) return;
+    void receivePacket(const QString& sourceId, const QString& epoch, quint64 sequence,
+                       qint64 timestamp, const QByteArray& packet, qint64 presentation) {
+        if (closing || sourceId.isEmpty() || sourceId.size() > 256 || epoch.isEmpty() || epoch.size() > 256
+            || timestamp < 0 || remoteMuted) return;
         if (!remote.contains(sourceId) && remote.size() >= 64) return;
         auto& source = remote[sourceId];
         if (!source || source->epoch != epoch) {
@@ -403,8 +320,7 @@ public:
             outputError(QStringLiteral("No audio output device is available on this device."), defaultDevice.id());
         if (defaultOutputId != defaultDevice.id()) {
             if (!defaultOutputId.isEmpty()) {
-                // A default-device change can leave the old sink alive for a
-                // preview. Stop all callbacks before transferring remote voices,
+                // Stop all callbacks before transferring remote voices,
                 // preserving the SPSC queue's single-consumer contract.
                 outputs.clear();
                 for (auto& source : remote) {
@@ -416,11 +332,6 @@ public:
             defaultOutputId = defaultDevice.id(); ++mixerRevision;
         }
         if (!remote.isEmpty() && !defaultDevice.isNull()) ids.append(defaultDevice.id());
-        for (const auto& preview : previews) {
-            const auto device = deviceFor(preview->deviceId);
-            if (preview->resolvedDeviceId != device.id()) { preview->resolvedDeviceId = device.id(); ++mixerRevision; }
-            if (!device.isNull() && !ids.contains(device.id())) ids.append(device.id());
-        }
         outputs.erase(std::remove_if(outputs.begin(), outputs.end(), [&ids](const auto& output) {
             return !ids.contains(output->id);
         }), outputs.end());
@@ -451,10 +362,6 @@ public:
             outputs.push_back(std::move(output));
         }
         publishMixers();
-        for (const auto& preview : previews) preview->state()->consumerAvailable.store(
-            std::any_of(outputs.begin(), outputs.end(), [&preview](const auto& output) {
-                return output->id == preview->resolvedDeviceId;
-            }), std::memory_order_release);
     }
     void publishMixers() {
         for (auto& output : outputs) {
@@ -467,8 +374,6 @@ public:
                     source->renderer.configure(output->format.sampleRate());
                     snapshot->remote.push_back(source);
                 }
-            for (const auto& preview : previews)
-                if (preview->resolvedDeviceId == output->id) snapshot->previews.push_back(preview);
             output->publish(std::move(snapshot)); output->revision = mixerRevision;
         }
     }
@@ -515,30 +420,9 @@ public:
             const auto clockSample = source->renderer.render(source->blocks, samples.data(), frames, channels, rate, clock);
             if (clockSample.sourceUs >= 0) source->clock.publish(clockSample);
         }
-        for (const auto& mapping : snapshot->previews) {
-            auto* voice = mapping->state();
-            const auto generation = voice->generation.load(std::memory_order_acquire);
-            const bool playing = voice->playing.load(std::memory_order_acquire);
-            const float gain = voice->gain.load(std::memory_order_relaxed);
-            const qint64 target = clock + voice->clockOffsetUs.load(std::memory_order_relaxed);
-            for (auto& block : voice->blocks) {
-                if (block.state.load(std::memory_order_acquire) != 2) continue;
-                if (block.generation.load() != generation) { block.state.store(0, std::memory_order_release); continue; }
-                if (!playing) continue;
-                const qint64 start = qRound64((block.startUs.load() - target) * (double(rate) / 1000000));
-                const qint64 duration = qint64(AudioPreviewBlockFrames) * rate / 48000;
-                const qint64 first = std::max<qint64>(0, start), last = std::min<qint64>(frames, start + duration);
-                if (last > first) voice->presented.store(true, std::memory_order_relaxed);
-                for (qint64 frame = first; frame < last; ++frame) {
-                    const double position = (frame - start) * (48000.0 / rate);
-                    mixStereo(samples.data() + frame * channels, channels, block.samples.data(), AudioPreviewBlockFrames, position, gain);
-                }
-                if (start + duration <= frames) block.state.store(0, std::memory_order_release);
-            }
-        }
         for (auto& sample : samples) if (!std::isfinite(sample)) sample = 0;
         // Stateful libopus soft clipping avoids the harsh discontinuities of
-        // hard clipping when several remote sources or previews overlap.
+        // hard clipping when several remote sources overlap.
         opus_pcm_soft_clip(samples.data(), frames, channels, output.softClipMemory.data());
     }
     void reportClocks() {
@@ -552,21 +436,25 @@ public:
             }
             auto& source = *it.value();
             if (feedbackDue) {
-                auto feedback = command("feedback"); feedback.insert(QStringLiteral("source"), it.key());
-                feedback.insert(QStringLiteral("epoch"), source.epoch); feedback.insert(QStringLiteral("dropped"), source.dropped);
-                feedback.insert(QStringLiteral("buffered"), int(source.blocks.size()) * 20);
-                feedback.insert(QStringLiteral("concealed"), source.concealed);
-                feedback.insert(QStringLiteral("underruns"), source.renderer.takeUnderruns());
-                feedback.insert(QStringLiteral("rebuffers"), source.rebuffers + source.renderer.takeRebuffers());
-                source.concealed = 0; source.rebuffers = 0;
-                AudioWorkerProtocol::send(&socket, feedback); source.dropped = 0;
+                const auto sourceId = it.key(), epoch = source.epoch;
+                const int dropped = source.dropped, buffered = int(source.blocks.size()) * 20;
+                QTimer::singleShot(0, this, [this, sourceId, epoch, dropped, buffered] {
+                    const auto current = remote.value(sourceId);
+                    if (!closing && current && current->epoch == epoch)
+                        emit owner->playbackFeedback(sourceId, epoch, dropped, buffered);
+                });
+                source.renderer.takeUnderruns(); source.renderer.takeRebuffers();
+                source.concealed = 0; source.rebuffers = 0; source.dropped = 0;
             }
             const auto clock = source.clock.read();
             if (clock.sourceUs >= 0 && clock.localUs != source.reportedLocalUs && now - source.lastPacketUs < 300000) {
-                auto message = command("clock"); message.insert(QStringLiteral("source"), it.key());
-                message.insert(QStringLiteral("epoch"), source.epoch); message.insert(QStringLiteral("timestamp"), clock.sourceUs);
-                message.insert(QStringLiteral("localUs"), clock.localUs);
-                AudioWorkerProtocol::send(&socket, message); source.reportedLocalUs = clock.localUs;
+                const auto sourceId = it.key(), epoch = source.epoch;
+                QTimer::singleShot(0, this, [this, sourceId, epoch, clock] {
+                    const auto current = remote.value(sourceId);
+                    if (!closing && current && current->epoch == epoch)
+                        emit owner->playbackClock(sourceId, epoch, clock.sourceUs, clock.localUs);
+                });
+                source.reportedLocalUs = clock.localUs;
             }
             ++it;
         }
@@ -574,21 +462,33 @@ public:
         else publishMixers();
     }
 };
+namespace { QPointer<AudioEngine> singleton; }
+AudioEngine* AudioEngine::instance() {
+    if (!singleton) singleton = new AudioEngine(QCoreApplication::instance());
+    return singleton;
 }
-int runAudioWorker(int argc, char** argv) {
-    if (argc != 4) return 64;
-    QGuiApplication app(argc, argv);
-    initializeAudioWorkerPlatform();
-#ifdef Q_OS_MACOS
-    QCoreApplication::addLibraryPath(QCoreApplication::applicationDirPath() + QStringLiteral("/../PlugIns"));
-    // The shipped helper has its own application identity and shares the
-    // outer application's plugins. Its packaged qt.conf supplies this path
-    // before QGuiApplication loads Cocoa; this also selects our patched media
-    // plugins in development builds, which use the Qt installation for Cocoa.
-    QCoreApplication::addLibraryPath(QDir::cleanPath(QCoreApplication::applicationDirPath()
-        + QStringLiteral("/../../../../PlugIns")));
-#endif
-    app.setQuitOnLastWindowClosed(false);
-    AudioWorker worker(QString::fromLocal8Bit(argv[2]), QString::fromLocal8Bit(argv[3]));
-    return app.exec();
+AudioEngine::AudioEngine(QObject* parent, CaptureFactory factory)
+    : QObject(parent), d(std::make_unique<Private>(this, std::move(factory))) {}
+AudioEngine::~AudioEngine() = default;
+void AudioEngine::startCapture(const QString& epoch, int bitrate) { d->startCapture(epoch, bitrate); }
+void AudioEngine::setCaptureBitrate(int bitrate) { d->encoder.setBitrate(bitrate); }
+void AudioEngine::stopCapture() { d->stopCapture(); }
+void AudioEngine::playPacket(const QString& source, const QString& epoch, quint64 sequence,
+                            qint64 timestamp, const QByteArray& opus, qint64 presentation) {
+    d->receivePacket(source, epoch, sequence, timestamp, opus, presentation);
+}
+void AudioEngine::resetPlayback(const QString& sourceId) {
+    const auto source = d->remote.take(sourceId);
+    if (source) source->enabled.store(false, std::memory_order_release);
+    ++d->mixerRevision; d->ensureOutputs();
+}
+void AudioEngine::setPlaybackMuted(bool muted) {
+    if (d->remoteMuted == muted) return;
+    d->remoteMuted = muted;
+    for (const auto& source : d->remote) source->enabled.store(false, std::memory_order_release);
+    d->remote.clear(); d->playbackErrors.clear(); ++d->mixerRevision; d->ensureOutputs();
+}
+void AudioEngine::shutdown() {
+    d->closing = true; d->reports.stop(); d->stopCapture();
+    d->outputs.clear(); d->remote.clear();
 }

@@ -1,18 +1,19 @@
 #pragma once
-#include "backend/audiosharing/AudioPreviewChannel.h"
-#include "backend/audiosharing/MediaCaptureClock.h"
+#include "SystemAudioCapture.h"
+#include "MediaCaptureClock.h"
 #include <QObject>
-#include <memory>
 
-// One audio process per application instance. No network sockets, media files,
-// or persistent application state are opened by the worker.
-class AudioWorkerClient final : public QObject {
+// Capture, encoding and remote monitoring live in the Mouffette process.
+// Native capture excludes this application; only the ReceivedScene output bus
+// is added back. Canvas previews and received monitoring never enter that bus.
+class AudioEngine final : public QObject {
     Q_OBJECT
 public:
-    static AudioWorkerClient* instance();
+    using CaptureFactory = std::function<std::unique_ptr<SystemAudioCapture>()>;
+    static AudioEngine* instance();
     static qint64 nowUs() { return MediaCaptureClock::nowUs(); }
-    explicit AudioWorkerClient(QObject* parent = nullptr);
-    ~AudioWorkerClient() override;
+    explicit AudioEngine(QObject* parent = nullptr, CaptureFactory factory = {});
+    ~AudioEngine() override;
     void startCapture(const QString& epoch, int bitrateBps = 96000);
     void setCaptureBitrate(int bitrateBps);
     void stopCapture();
@@ -20,7 +21,6 @@ public:
                     qint64 timestampUs, const QByteArray& opus, qint64 presentationUs = -1);
     void resetPlayback(const QString& source);
     void setPlaybackMuted(bool muted);
-    std::shared_ptr<AudioPreviewChannel> createPreviewChannel(const QByteArray& deviceId = {});
     void shutdown();
 signals:
     void packetReady(const QString& epoch, quint64 sequence, qint64 timestampUs, const QByteArray& opus);
@@ -28,15 +28,7 @@ signals:
     void playbackClock(const QString& source, const QString& epoch, qint64 timestampUs, qint64 localUs);
     void playbackFeedback(const QString& source, const QString& epoch, int droppedPackets, int bufferedMs);
     void playbackFailed(const QString& source, const QString& epoch, const QString& error);
-    void previewAttachmentChanged(const QString& key, bool attached, const QString& error);
-    void failed(const QString& error);
 private:
     struct Private;
     std::unique_ptr<Private> d;
-    void ensureWorker();
-    void readMessages();
-    void replayPreviews();
-    void previewAttachment(const QString& key, bool attached, const QString& error = {});
-    void removePreview(const QString& key);
-    friend class AudioPreviewChannel;
 };

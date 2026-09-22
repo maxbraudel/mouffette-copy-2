@@ -164,9 +164,9 @@ pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET
     libavformat>=61 libavcodec>=61 libavutil libswscale libswresample)
 pkg_check_modules(OPUS REQUIRED IMPORTED_TARGET opus)
 add_library(MouffetteResidentMedia STATIC
-    src/backend/audiosharing/AudioWorker.cpp
-    src/backend/audiosharing/AudioWorkerClient.cpp
-    src/backend/audiosharing/AudioWorkerClient.h
+    src/backend/audiosharing/AudioEngine.cpp
+    src/backend/audiosharing/AudioEngine.h
+    src/backend/audiosharing/SceneAudioTap.cpp
     src/backend/audiosharing/AudioStreamCodec.cpp
     src/backend/audiosharing/AudioStreamCodec.h
     src/backend/media/MediaBackendBootstrap.h
@@ -195,11 +195,8 @@ target_link_libraries(MouffetteResidentMedia PUBLIC
     Qt6::Core Qt6::Gui Qt6::Network Qt6::Multimedia Qt6::Concurrent PkgConfig::FFMPEG PkgConfig::OPUS)
 target_link_libraries(MouffetteResidentMedia PUBLIC Qt6::MultimediaPrivate Qt6::GuiPrivate)
 if(APPLE)
-    target_sources(MouffetteResidentMedia PRIVATE src/backend/audiosharing/SystemAudioCapture_mac.mm
-        src/backend/audiosharing/AudioWorkerProcess.h
-        src/backend/audiosharing/AudioWorkerProcess_mac.mm)
+    target_sources(MouffetteResidentMedia PRIVATE src/backend/audiosharing/SystemAudioCapture_mac.mm)
     set_source_files_properties(src/backend/audiosharing/SystemAudioCapture_mac.mm
-        src/backend/audiosharing/AudioWorkerProcess_mac.mm
         PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
     target_link_libraries(MouffetteResidentMedia PRIVATE "-framework ScreenCaptureKit"
         "-framework CoreAudio" "-framework CoreMedia" "-framework CoreGraphics" "-framework AppKit")
@@ -707,27 +704,9 @@ if(APPLE)
     set_source_files_properties(src/backend/platform/macos/MacWindowManager.mm PROPERTIES COMPILE_FLAGS "-x objective-c++")
     set_source_files_properties(src/backend/managers/system/SystemLifecycleMonitor_mac.mm PROPERTIES COMPILE_FLAGS "-x objective-c++")
 
-    # SCK's audio exclusion is application-wide, even across separate PIDs
-    # running the same executable. Keep previews/monitoring in a distinct app
-    # identity, leaving received scenes in MouffetteClient capturable.
-    configure_file(cmake/AudioWorkerInfo.plist.in
-        "${CMAKE_CURRENT_BINARY_DIR}/generated/AudioWorkerInfo.plist" @ONLY)
-    add_executable(MouffetteAudioWorker MACOSX_BUNDLE
-        src/backend/audiosharing/AudioWorkerMain.cpp)
-    target_link_libraries(MouffetteAudioWorker PRIVATE MouffetteResidentMedia)
-    set_target_properties(MouffetteAudioWorker PROPERTIES
-        MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_BINARY_DIR}/generated/AudioWorkerInfo.plist"
-        MACOSX_BUNDLE_GUI_IDENTIFIER "${MOUFFETTE_BUNDLE_IDENTIFIER}.audio-worker"
-        INSTALL_RPATH "@executable_path/../../../../Frameworks")
-    add_dependencies(MouffetteClient MouffetteAudioWorker)
-    set_property(TARGET MouffetteClient APPEND PROPERTY LINK_DEPENDS
-        "$<TARGET_FILE:MouffetteAudioWorker>"
-        "${CMAKE_CURRENT_BINARY_DIR}/generated/AudioWorkerInfo.plist")
+    # Remove the retired helper from incremental app bundles as well as fresh builds.
     add_custom_command(TARGET MouffetteClient POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E make_directory
-            "$<TARGET_BUNDLE_DIR:MouffetteClient>/Contents/Helpers"
-        COMMAND ${CMAKE_COMMAND} -E copy_directory
-            "$<TARGET_BUNDLE_DIR:MouffetteAudioWorker>"
+        COMMAND ${CMAKE_COMMAND} -E rm -rf
             "$<TARGET_BUNDLE_DIR:MouffetteClient>/Contents/Helpers/MouffetteAudioWorker.app")
 endif()
 
@@ -737,8 +716,6 @@ install(TARGETS MouffetteClient
     BUNDLE DESTINATION .
     RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
 if(APPLE)
-    install(TARGETS MouffetteAudioWorker
-        BUNDLE DESTINATION "Mouffette.app/Contents/Helpers")
     install(FILES resources/licenses/opus.txt DESTINATION "Mouffette.app/Contents/Resources/licenses")
 else()
     install(FILES resources/licenses/opus.txt DESTINATION "${CMAKE_INSTALL_BINDIR}/licenses")
@@ -792,17 +769,10 @@ if(BUILD_TESTING)
         target_link_libraries(tst_WindowsAudioActivation PRIVATE Qt6::Test ole32 uuid)
         add_test(NAME WindowsAudioActivation COMMAND tst_WindowsAudioActivation)
     endif()
-    add_executable(tst_AudioWorker tests/qt/tst_AudioWorker.cpp)
-    target_link_libraries(tst_AudioWorker PRIVATE MouffetteResidentMedia Qt6::Test)
-    add_test(NAME AudioWorker COMMAND tst_AudioWorker)
-    set_tests_properties(AudioWorker PROPERTIES TIMEOUT 45 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
-    if(APPLE)
-        add_dependencies(tst_AudioWorker MouffetteAudioWorker)
-        # LaunchServices completion and NSRunningApplication termination updates
-        # require the native AppKit run loop. No test creates a visible window.
-        set_tests_properties(AudioWorker PROPERTIES ENVIRONMENT
-            "QT_QPA_PLATFORM=cocoa;MOUFFETTE_TEST_AUDIO_WORKER_EXECUTABLE=$<TARGET_FILE:MouffetteAudioWorker>")
-    endif()
+    add_executable(tst_AudioEngine tests/qt/tst_AudioEngine.cpp)
+    target_link_libraries(tst_AudioEngine PRIVATE MouffetteResidentMedia Qt6::Test)
+    add_test(NAME AudioEngine COMMAND tst_AudioEngine)
+    set_tests_properties(AudioEngine PROPERTIES TIMEOUT 45 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
     add_executable(tst_AudioCapturePipeline tests/qt/tst_AudioCapturePipeline.cpp)
     target_link_libraries(tst_AudioCapturePipeline PRIVATE MouffetteResidentMedia Qt6::Test)
     add_test(NAME AudioCapturePipeline COMMAND tst_AudioCapturePipeline)

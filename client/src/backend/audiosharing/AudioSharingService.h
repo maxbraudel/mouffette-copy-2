@@ -5,14 +5,14 @@
 
 class WebSocketClient;
 class AudioTransport;
-class AudioWorkerClient;
+class AudioEngine;
 
 // One ephemeral audio publication and one foreground listening subscription.
 // Monitor topology, project serialization and screen visibility are unrelated.
 class AudioSharingService final : public QObject {
     Q_OBJECT
 public:
-    explicit AudioSharingService(WebSocketClient* network, QObject* parent = nullptr);
+    explicit AudioSharingService(WebSocketClient* network, QObject* parent = nullptr, AudioEngine* audio = nullptr);
     ~AudioSharingService() override;
     void setSharingEnabled(bool enabled);
     void setViewedEndpoint(const QString& endpoint);
@@ -42,7 +42,7 @@ private:
     void report(const QString& message);
     WebSocketClient* m_network;
     AudioTransport* m_transport;
-    AudioWorkerClient* m_worker;
+    AudioEngine* m_audio;
     QTimer m_timer;
     QString m_endpoint, m_session, m_stream, m_captureEpoch;
     QString m_state = QStringLiteral("disabled"), m_status, m_remoteStatus;
