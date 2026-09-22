@@ -42,6 +42,20 @@ on Windows 10 22H2 is required. No virtual audio driver is installed. Missing OS
 permission or unavailable native support leaves audio unavailable rather than
 capturing an unfiltered mix. Ordinary video operation remains independent.
 
+Windows process loopback requests an explicit extensible 48 kHz stereo float
+format with an FL/FR channel mask. Its asynchronous activation callback owns the
+parameter blob until Windows releases the callback, including after a stop or
+timeout. The callback is agile and supports free-threaded COM marshaling. The
+MMDevice module remains loaded while late callbacks can still run.
+
+Publisher logs now include `[AudioSharing] System audio capture failed:` with
+the failing WASAPI stage, HRESULT, Windows version and native error text. A
+worker exit also reports its exit code and whether QProcess observed a crash.
+The viewer toast alone cannot distinguish an unsupported process-loopback API,
+format rejection, permission failure or worker termination. Runtime activation
+is authoritative for Windows 10 installations; the generic OS-version advice
+is not substituted for the actual error.
+
 ## Network, timing and volume
 
 Audio negotiates `audioVersion: 1` through protocol v12. Older servers/clients stay
@@ -88,6 +102,11 @@ Automated checks cover codec/framing, timing bounds, shared PCM generations,
 native-window policy/lifecycle, relay authorization and congestion, toolbar
 preferences, and existing media/scene/video behavior. Tests use synthetic audio
 and do not implicitly request screen-recording permission.
+
+`WindowsAudioActivation` exercises late completion after cancellation, agile
+marshaling, HRESULT propagation and a malformed successful activation without
+opening an audio device. Native capture is an explicit opt-in in
+`AudioWorker::nativeCaptureSmokeOptIn` (`MOUFFETTE_TEST_SYSTEM_AUDIO_CAPTURE=1`).
 
 Native release qualification must additionally exercise two physical computers:
 an animated desktop behind control windows, received scenes, three monitors,

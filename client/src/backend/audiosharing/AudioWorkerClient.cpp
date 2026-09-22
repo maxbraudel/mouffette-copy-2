@@ -1,6 +1,7 @@
 #include "backend/audiosharing/AudioWorkerClient.h"
 #include "backend/audiosharing/AudioWorkerProtocol.h"
 #include <QCoreApplication>
+#include <QDebug>
 #include <QLocalServer>
 #include <QProcess>
 #include <QSharedMemory>
@@ -81,7 +82,7 @@ AudioWorkerClient::AudioWorkerClient(QObject* parent) : QObject(parent), d(std::
         emit captureStateChanged(false, message); emit failed(message);
     });
     connect(&d->process, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this,
-        [this](int, QProcess::ExitStatus) {
+        [this](int exitCode, QProcess::ExitStatus exitStatus) {
             d->handshake.stop(); d->ready = false;
             for (const auto& weak : d->previews) if (const auto preview = weak.lock())
                 preview->state()->consumerAvailable.store(false);
@@ -91,7 +92,11 @@ AudioWorkerClient::AudioWorkerClient(QObject* parent) : QObject(parent), d(std::
             }
             d->input.clear();
             if (d->closing) return;
-            emit captureStateChanged(false, QStringLiteral("The audio worker stopped"));
+            const auto failure = QStringLiteral("The audio worker stopped (%1, exit code 0x%2)")
+                .arg(exitStatus == QProcess::CrashExit ? QStringLiteral("crash") : QStringLiteral("normal exit"))
+                .arg(quint32(exitCode), 8, 16, QLatin1Char('0'));
+            qWarning().noquote() << "[AudioWorker]" << failure;
+            emit captureStateChanged(false, failure);
             // Never leak excluded preview audio into the main process as a fallback.
             if (++d->restarts <= 3 && (d->capture || !d->previews.isEmpty()))
                 QTimer::singleShot(250 * d->restarts, this, [this] { ensureWorker(); });

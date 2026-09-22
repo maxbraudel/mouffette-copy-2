@@ -125,6 +125,16 @@ timeout. Legacy servers retain the original per-viewer-copy mode.
   is coalesced and stale surfaces are rejected. The native queue has three
   surfaces.
 - Windows uses Qt's FFmpeg-backed QScreenCapture and DXGI Desktop Duplication.
+  If DXGI fails (including `DuplicateOutput` returning `0x8000ffff`), the same
+  publication switches once to Windows Graphics Capture's monitor API. The
+  fallback keeps the window-exclusion policy, uses a two-surface native pool
+  with at most one pending frame,
+  and fences the old encoder chain before delivering frames with native QPC
+  timestamps. It polls on an MTA worker and copies only at the requested FPS.
+  D3D11 device creation can fall back to WARP. A failure of both capture APIs
+  reports both diagnostics; it never captures an unfiltered desktop via GDI.
+  WGC may display Windows' capture border. A missing first frame times out after
+  five seconds. C++/WinRT headers are required by the Windows build.
   Screen IDs use the discovery/cursor monitor inventory. Portrait rotation and
   mirroring are normalized. Scaling and encoder cadence follow the same profile;
   the Windows capture backend itself can still produce samples more frequently.
@@ -411,6 +421,13 @@ recovery/hiding, missing and stale frames, and runtime notification routing in
 `ScreenSharingService`. `MediaOverlay::screenAvailabilitySharesStatusCardWithVolume`
 checks both labels/icons and stable geometry at the minimum window width.
 
+`WindowsCaptureFailover` injects DXGI failures into the real facade using a fake
+WGC backend: duplicate errors switch only once, publication profiles survive,
+old frames are fenced, and callbacks after stop/replacement cannot affect a new
+capture. It runs offscreen and never captures the desktop. The native WGC path
+still requires Windows qualification with the failing GPU/session, multiple
+displays, scaling/rotation, exclusion, reconnect and lock/unlock.
+
 1. On two clients, open the target canvas with consent disabled: no pixels.
 2. Enable sharing on the target, grant macOS permission if requested, and save.
    Verify every physical monitor, including duplicate names and portrait/DPI
@@ -431,6 +448,7 @@ checks both labels/icons and stable geometry at the minimum window width.
    until the HTTPS session fallback has been implemented.
 
 API references: [Qt QScreenCapture](https://doc.qt.io/qt-6/qscreencapture.html),
+[Windows monitor capture](https://learn.microsoft.com/en-us/windows/win32/api/windows.graphics.capture.interop/nf-windows-graphics-capture-interop-igraphicscaptureiteminterop-createformonitor),
 [Qt QVideoSink](https://doc.qt.io/qt-6/qvideosink.html),
 [Apple ScreenCaptureKit](https://developer.apple.com/documentation/screencapturekit),
 [FFmpeg codec options](https://ffmpeg.org/ffmpeg-codecs.html).

@@ -731,8 +731,32 @@ if(WIN32)
 endif()
 
 include(CTest)
+if(WIN32)
+    add_library(MouffetteWindowsScreenCapture STATIC
+        src/backend/screensharing/WindowsScreenCapture.cpp)
+    target_include_directories(MouffetteWindowsScreenCapture PUBLIC src)
+    target_compile_features(MouffetteWindowsScreenCapture PRIVATE cxx_std_20)
+    target_link_libraries(MouffetteWindowsScreenCapture PUBLIC Qt6::Gui Qt6::Multimedia
+        PRIVATE d3d11 dxgi windowsapp)
+    target_link_libraries(MouffetteClient PRIVATE MouffetteWindowsScreenCapture)
+endif()
 if(BUILD_TESTING)
     find_package(Qt6 REQUIRED COMPONENTS Test)
+    if(WIN32)
+        add_executable(tst_WindowsCaptureFailover tests/qt/tst_WindowsCaptureFailover.cpp
+            src/backend/screensharing/ScreenCaptureSource.h
+            src/backend/screensharing/ScreenStreamCodec.cpp
+            src/backend/platform/WindowCaptureExclusion.cpp)
+        target_include_directories(tst_WindowsCaptureFailover PRIVATE src)
+        target_link_libraries(tst_WindowsCaptureFailover PRIVATE
+            Qt6::Gui Qt6::Multimedia Qt6::Test PkgConfig::FFMPEG user32)
+        add_test(NAME WindowsCaptureFailover COMMAND tst_WindowsCaptureFailover)
+        set_tests_properties(WindowsCaptureFailover PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+        add_executable(tst_WindowsAudioActivation tests/qt/tst_WindowsAudioActivation.cpp)
+        target_include_directories(tst_WindowsAudioActivation PRIVATE src)
+        target_link_libraries(tst_WindowsAudioActivation PRIVATE Qt6::Test ole32 uuid)
+        add_test(NAME WindowsAudioActivation COMMAND tst_WindowsAudioActivation)
+    endif()
     add_executable(tst_AudioWorker tests/qt/tst_AudioWorker.cpp)
     target_link_libraries(tst_AudioWorker PRIVATE MouffetteResidentMedia Qt6::Test)
     add_test(NAME AudioWorker COMMAND tst_AudioWorker)
@@ -768,6 +792,9 @@ if(BUILD_TESTING)
     target_include_directories(tst_ScreenCaptureLayers PRIVATE src)
     target_link_libraries(tst_ScreenCaptureLayers PRIVATE
         Qt6::Core Qt6::Gui Qt6::Multimedia Qt6::Test PkgConfig::FFMPEG)
+    if(WIN32)
+        target_link_libraries(tst_ScreenCaptureLayers PRIVATE MouffetteWindowsScreenCapture user32)
+    endif()
     if(APPLE)
         target_sources(tst_ScreenCaptureLayers PRIVATE src/backend/screensharing/MacScreenCapture.mm)
         target_link_libraries(tst_ScreenCaptureLayers PRIVATE "-framework ScreenCaptureKit"

@@ -4,6 +4,7 @@
 #include "backend/network/AudioTransport.h"
 #include "backend/network/WebSocketClient.h"
 #include "backend/network/RemoteSessionCoordinator.h"
+#include <QDebug>
 
 AudioSharingService::AudioSharingService(WebSocketClient* network, QObject* parent)
     : QObject(parent), m_network(network), m_transport(new AudioTransport(network, this)),
@@ -53,6 +54,7 @@ AudioSharingService::AudioSharingService(WebSocketClient* network, QObject* pare
             : !error.isEmpty() ? error : m_enabled ? m_status : QString();
         if (m_status != value) { m_status = value; emit statusChanged(); }
         if (!error.isEmpty() && !m_captureEpoch.isEmpty()) {
+            qWarning().noquote() << "[AudioSharing] System audio capture failed:" << error;
             m_transport->sendStatus(QStringLiteral("capture_error"));
             m_captureEpoch.clear();
             m_captureRetryAt = MediaCaptureClock::nowUs() + 3000000;
@@ -73,6 +75,7 @@ AudioSharingService::AudioSharingService(WebSocketClient* network, QObject* pare
             m_transport->sendPlaybackFeedback(dropped, bufferedMs);
     });
     connect(m_worker, &AudioWorkerClient::failed, this, [this](const QString& error) {
+        qWarning().noquote() << "[AudioSharing] Audio worker failed:" << error;
         clearPlayback();
         m_captureEpoch.clear();
         m_captureRetryAt = MediaCaptureClock::nowUs() + 3000000;

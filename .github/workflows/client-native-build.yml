@@ -146,6 +146,7 @@ jobs:
             mingw-w64-ucrt-x86_64-qt6-websockets
             mingw-w64-ucrt-x86_64-qt6-declarative
             mingw-w64-ucrt-x86_64-qt6-multimedia
+            mingw-w64-ucrt-x86_64-cppwinrt
             mingw-w64-ucrt-x86_64-qt6-imageformats
             mingw-w64-ucrt-x86_64-qt6-svg
             mingw-w64-ucrt-x86_64-ffmpeg

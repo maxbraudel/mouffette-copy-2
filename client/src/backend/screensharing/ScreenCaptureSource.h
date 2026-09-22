@@ -8,7 +8,7 @@
 
 class QScreen;
 
-// GUI-thread facade. ScreenCaptureKit on macOS, Qt's DXGI capture on Windows;
+// GUI-thread facade. ScreenCaptureKit on macOS, DXGI with WGC fallback on Windows;
 // conversion and H.264 encoding run on a worker with one pending captured frame.
 class ScreenCaptureSource final : public QObject {
     Q_OBJECT
@@ -39,6 +39,10 @@ signals:
     void encodingMeasured(int elapsedMs);
 
 private:
+    friend class WindowsCaptureFailoverTest;
+#ifdef Q_OS_WIN
+    void startWindowsFallback(const QString& dxgiError);
+#endif
     struct Private;
     std::unique_ptr<Private> d;
 };

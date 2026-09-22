@@ -5,6 +5,7 @@
 #include "backend/platform/LocalScreenTopology.h"
 #ifdef Q_OS_WIN
 #include "backend/platform/WindowCaptureExclusion.h"
+#include "backend/screensharing/WindowsScreenCapture.h"
 #endif
 #ifdef Q_OS_MACOS
 #include "backend/screensharing/MacScreenCapture.h"
@@ -12,6 +13,7 @@
 
 #include <QAbstractVideoBuffer>
 #include <QElapsedTimer>
+#include <QDebug>
 #include <QMediaCaptureSession>
 #include <QMutex>
 #include <QMutexLocker>
@@ -334,6 +336,10 @@ private:
 }
 
 struct ScreenCaptureSource::Private {
+#ifdef Q_OS_WIN
+    WindowsScreenCapture fallback;
+    bool fallbackAttempted = false;
+#endif
 #ifdef Q_OS_MACOS
     MacScreenCapture capture;
 #else
@@ -382,13 +388,49 @@ ScreenCaptureSource::ScreenCaptureSource(QObject* parent) : QObject(parent), d(s
             const auto generation = d->mailbox;
             QMetaObject::invokeMethod(this, [this, generation, message] {
                 if (d->mailbox != generation) return;
+#ifdef Q_OS_WIN
+                // Several DXGI errors can already be queued. Only the first
+                // may switch backend; later ones must not stop its replacement.
+                if (!d->fallbackAttempted) startWindowsFallback(message);
+#else
                 stop();
                 emit errorOccurred(ScreenCaptureError::CaptureFailed, message.isEmpty() ? QStringLiteral("Native screen capture failed") : message);
+#endif
             }, Qt::QueuedConnection);
         });
 #endif
 }
 ScreenCaptureSource::~ScreenCaptureSource() { stop(); }
+
+#ifdef Q_OS_WIN
+void ScreenCaptureSource::startWindowsFallback(const QString& dxgiError) {
+    d->fallbackAttempted = true;
+    disconnect(d->frameConnection);
+    d->capture.stop();
+    d->sink.setVideoFrame({});
+    // Preserve the publication and its profiles, but fence the old encoder
+    // chain before switching from DXGI's relative timestamps to native QPC.
+    const auto mailbox = d->mailbox;
+    {
+        QMutexLocker lock(&mailbox->mutex);
+        submitCaptureFrame(*mailbox, {});
+    }
+    qWarning().noquote() << "[ScreenSharing] DXGI capture failed; trying Windows Graphics Capture:" << dxgiError;
+    d->fallback.setProfile(nativeProfile(d->profiles));
+    d->fallback.start(d->screen, [mailbox](const QVideoFrame& frame) {
+        QMutexLocker lock(&mailbox->mutex);
+        submitCaptureFrame(*mailbox, frame, true);
+    }, [this, mailbox, dxgiError](ScreenCaptureError code, const QString& message) {
+        QMutexLocker lock(&mailbox->mutex);
+        if (mailbox->closed) return;
+        QMetaObject::invokeMethod(this, [this, mailbox, dxgiError, code, message] {
+            if (d->mailbox != mailbox) return;
+            stop();
+            emit errorOccurred(code, QStringLiteral("%1; DXGI: %2").arg(message, dxgiError));
+        }, Qt::QueuedConnection);
+    });
+}
+#endif
 
 bool ScreenCaptureSource::start(const QString& hardwareIdentity) {
     for (const auto& screen : LocalScreenTopology::screens())
@@ -456,7 +498,12 @@ bool ScreenCaptureSource::start(QScreen* screen) {
     return isActive();
 }
 
-bool ScreenCaptureSource::isActive() const { return d->mailbox && d->capture.isActive(); }
+bool ScreenCaptureSource::isActive() const {
+#ifdef Q_OS_WIN
+    if (d->fallbackAttempted) return d->mailbox && d->fallback.isActive();
+#endif
+    return d->mailbox && d->capture.isActive();
+}
 
 void ScreenCaptureSource::setProfile(const ScreenStreamProfile& profile) {
     setProfiles({{QStringLiteral("main"), profile}});
@@ -484,6 +531,9 @@ void ScreenCaptureSource::setProfiles(const QHash<QString, ScreenStreamProfile>&
     }
 #ifdef Q_OS_MACOS
     d->capture.setProfile(nextNative);
+#endif
+#ifdef Q_OS_WIN
+    d->fallback.setProfile(nativeProfile(values));
 #endif
 }
 
@@ -515,6 +565,10 @@ void ScreenCaptureSource::stop() {
     }
     disconnect(d->frameConnection);
     disconnect(d->screenConnection);
+#ifdef Q_OS_WIN
+    d->fallback.stop();
+    d->fallbackAttempted = false;
+#endif
     d->capture.stop();
 #ifndef Q_OS_MACOS
     d->sink.setVideoFrame({});
