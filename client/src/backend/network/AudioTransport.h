@@ -7,7 +7,7 @@
 class WebSocketClient;
 
 // Authenticated ephemeral audio. All methods/signals run on the GUI thread;
-// capture, codec, and output devices belong to the caller's audio worker.
+// capture, codec, and output devices belong to the in-process AudioEngine.
 class AudioTransport final : public QObject {
     Q_OBJECT
 public:
@@ -20,12 +20,13 @@ public:
     // Video and audio use the same source clock; receipt uses MediaCaptureClock.
     void observeVideoTimestamp(qint64 sourceUs, qint64 receivedAtUs);
     qint64 playbackTimeUs(qint64 sourceUs) const;
-    // Preserve capture sequence gaps through IPC, admission and the relay so
+    void setOutputQuantumUs(qint64 quantumUs);
+    // Preserve capture sequence gaps through admission and the relay so
     // the receiver can conceal loss and report it. Zero allocates locally.
     bool sendPacket(const QByteArray& opus, qint64 timestampUs, quint64 captureSequence = 0);
     void sendStatus(const QString& reason);
     void sendPlaybackFeedback(int droppedPackets, int bufferedMs);
-    // A replacement capture process loses codec and capture sequence state.
+    // A replacement capture session loses codec and capture sequence state.
     // Rotate its publication so old packets cannot alias that new incarnation.
     void restartPublication();
     void stop();

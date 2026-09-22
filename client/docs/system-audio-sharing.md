@@ -68,19 +68,32 @@ incoming remote monitoring remain audible locally but never enter that bus.
 There is no helper executable, local socket, shared-memory registration or second
 macOS recording authorization. Only Mouffette needs the native capture permission.
 
-The scene tap copies samples after media volume/mute has been applied, on the
-same device callback which plays them locally. Pause, seeks and device replacement
-therefore follow actual playback. Each output device has a bounded, lock-free
-single-producer queue; its callback never allocates, encodes, resamples or waits
-for the network. Conversion from the device format to 48 kHz stereo happens on
-the application thread with a stateful FFmpeg resampler.
+The scene tap copies samples after media volume/mute has been applied, before
+any physical mono averaging. Internal playback retains at least two channels;
+existing native surround output keeps its full layout and the tap separately
+downmixes it to stereo off the device callback. A publisher's mono speaker
+therefore cannot collapse the shared scene to mono.
+Pause, seeks and device replacement follow actual playback. Each output mixer
+has a bounded, lock-free single-producer queue; its callback never allocates,
+encodes or waits for the network. Conversion from its sample rate to 48 kHz and
+capture-clock correction happen on the application thread.
 
-Native samples and scene samples retain timestamps in `MediaCaptureClock`'s
-epoch. A 60 ms collection window combines independent callbacks before encoding
-20 ms Opus packets; the wire timestamp still names the original samples (including
-Opus lookahead compensation). Silence from either input does not block the other,
-so a scene is shared even when native capture emits no samples. Native capture
-must report success before either input can be published. Failure or revoked
+Native samples and each scene tap retain timestamps in `MediaCaptureClock`'s
+epoch. Their separate `AudioCaptureResampler` instances preserve contiguous PCM,
+filter small timestamp jitter, and correct sustained clock drift with FFmpeg's
+soft resampling compensation, bounded to 1000 ppm. Each first sample is anchored
+once on the common 48 kHz grid; later callback timestamps cannot create sample
+holes or overlaps. Duplicate buffers are rejected, partial overlaps are trimmed,
+and real gaps or restarts begin a marked segment.
+
+A 60 ms collection window combines these sources before encoding 20 ms Opus
+packets. Raw native callbacks enter the mixer without waiting for another packet
+boundary. The wire timestamp still names the original samples, including Opus
+lookahead compensation. Missing input and segment transitions use a 5 ms fade;
+stateful soft clipping handles the combined level without hard sample clipping.
+Silence from either input does not block the other, so a scene is shared even
+when native capture emits no samples. Native capture must report success before
+either input can be published. Failure or revoked
 consent stops both, with no unfiltered fallback. Stopping/restarting capture clears
 the mix and changes the tap generation so queued samples cannot leak across
 publications. A stalled consumer drops obsolete history and resumes live.
@@ -121,8 +134,11 @@ proxy policy and TLS verification and use single-use authenticated role tokens.
 Session, connection, consent and audio epochs fence delayed work. Monitor topology
 does not reset the audio epoch. See the [wire protocol](../../server/AUDIO_SHARING_PROTOCOL.md).
 
-Opus uses 48 kHz stereo, 20 ms packets, complexity 7 and constrained VBR, with DTX
-disabled to preserve quiet system-audio content. Decoder PLC and available in-band
+Opus explicitly retains two channels at both 96 and 32 kbit/s, using 48 kHz,
+20 ms packets, complexity 7 and constrained VBR. The music signal policy prevents
+automatic speech classification from collapsing spatial separation at low bitrate;
+a stereo packet header alone is insufficient. DTX is disabled to preserve
+quiet system-audio content. Decoder PLC and available in-band
 FEC bridge short packet gaps; CELT music packets can use PLC without carrying FEC.
 Capture sequences remain visible through local congestion and relay drops. The normal
 96 kbit/s mode falls to 32 kbit/s after one second of congestion or a total budget
@@ -132,8 +148,8 @@ quality without lowering the other viewers' video quality. Audio reservations
 are deducted from existing source/viewer/relay preview budgets. Real TCP/TLS
 headers and retransmissions add traffic beyond application byte budgets.
 
-Native capture timestamps use a common monotonic source clock. Sample-aware
-packetization preserves partial native buffers and marks capture discontinuities;
+Native capture timestamps use a common monotonic source clock. Continuous
+per-source resampling preserves sample order while marking real discontinuities;
 Opus lookahead is subtracted so packet timestamps name the decoded first sample.
 On macOS this is the CoreMedia host clock's
 `mach_absolute_time` epoch, including after sleep; native capture timestamps are
@@ -142,23 +158,44 @@ WASAPI's native sample timestamps. Network timeouts continue using local arrival
 clocks.
 
 The fastest observed audio/video transit establishes the source-to-viewer clock
-mapping. Audio's jitter allowance starts at 80 ms and can adapt up to 150 ms
-under sustained timing pressure, from that shared mapping. The audio engine
-receives an absolute local playback deadline and discards expired packets. Source
+mapping. With device callbacks up to 20 ms, audio's jitter allowance starts at
+120 ms, adapts within 80–150 ms, and immediately increases when needed to retain
+60 ms of reception headroom,
+within that ceiling. Healthy conditions lower the target slowly. This includes
+the publisher's collection and codec delay when video supplies faster clock
+observations. The audio engine receives an absolute local playback deadline and
+discards expired packets. Source
 and listener transports also enforce packet age limits, including data buffered
 inside the operating system's sockets. Audio acknowledgement windows account for network
 RTT separately from bytes waiting in the socket; healthy propagation delay does
 not itself discard packets. A sustained route change retires the disposable audio
 epoch before learning a fresh mapping. A delayed burst cannot reanchor itself.
 
-Playback uses fixed SPSC PCM storage and a continuous sample cursor. The native
-audio callback takes no mixer mutex and does not allocate or release stream
-objects. Interpolation spans packet boundaries and clock drift changes playback
-rate gradually instead of jumping sample position at every packet.
+Playback uses fixed SPSC PCM storage and a continuous sample cursor. Startup and
+recovery normally require 40 ms of contiguous audio at the live cursor;
+insufficient data remains silent rather than producing isolated bursts. A short fade joins starts,
+dropouts and changed deadlines without postponing the assigned live deadline.
+The native audio callback takes no mixer mutex and does not allocate or release
+stream objects. Interpolation spans packet boundaries and clock drift changes
+playback rate gradually instead of jumping sample position at every packet.
 
-Video may wait at most an additional 150 ms for the paired source/local audio
-output estimate. A bounded queue holds each image at its own timestamp and skips
-images already superseded at presentation time. Network receipt does not become
+Larger device callbacks need a larger reservoir. The measured callback duration
+`q` (bounded to 100 ms) raises recovery to `max(40 ms, q)` and required headroom
+to `q + recovery + 20 ms`. The excess over the ordinary 60 ms headroom is added
+to the initial/minimum/maximum playout targets and the paired video wait budget.
+For a 100 ms callback, the maximum becomes 310 ms. This device allowance is shared
+across the audio renderer, transport and video clock; it does not relax the
+independent 150 ms source-freshness check or reanchor old socket data.
+
+Playback retains canonical stereo until the final device write. The output
+selector tries supported stereo formats across common sample rates before a
+device's preferred mono format. Known FL/FR speaker positions receive their
+respective channels on multichannel devices; a genuinely mono-only output is
+downmixed locally, without changing the captured or transmitted stereo stream.
+
+Video may wait up to 150 ms plus the measured device allowance for the paired
+source/local audio output estimate. A bounded queue holds each image at its own
+timestamp and skips images already superseded at presentation time. Network receipt does not become
 the audio clock's origin. Without a recent audio clock, video presents immediately.
 Qt's public callback API does not expose the DAC timestamp or Bluetooth latency;
 the output clock is an estimate based on callback periods and device frame count.
@@ -189,6 +226,13 @@ frequencies verify that scene sound is included exactly once while canvas and
 remote-monitoring sounds are absent. Live media volume, mute, pause, replay and
 monitoring toggles are checked independently. Headless tests retain the mixer and
 capture lifecycle coverage; tests needing an output device skip explicitly.
+
+`AudioCaptureStability` exercises variable native block sizes, timestamp jitter,
+positive and negative 200 ppm clock drift, absolute sample-grid alignment,
+duplicates, partial overlaps, discontinuities and malformed float samples.
+Distinct left/right tones and waveform-boundary assertions detect mono collapse,
+zero holes and discontinuous sample jumps. These synthetic checks complement
+native device tests; they do not establish Windows runtime behavior.
 
 `WindowsAudioActivation` exercises late completion after cancellation, agile
 marshaling, HRESULT propagation and a malformed successful activation without

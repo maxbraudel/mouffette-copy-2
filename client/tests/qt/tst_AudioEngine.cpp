@@ -37,6 +37,85 @@ public:
     void start(Pcm pcm, State state) override { callbacks->pcm = std::move(pcm); callbacks->state = std::move(state); }
     void stop() override { ++callbacks->stops; }
 };
+// Test-only observation before the native PCM reaches the shared resampler or
+// scene mix. A fixed 20 ms window avoids misreading planar/callback boundaries
+// as channel leakage. Only aggregate amplitudes cross threads; PCM is neither
+// retained beyond one window nor written to a file.
+class CaptureStereoObservation {
+public:
+    struct Snapshot {
+        quint64 windows = 0;
+        // L400, L1000, L650, L1350, R400, R1000, R650, R1350.
+        std::array<double, 8> amplitude{};
+    };
+    CaptureStereoObservation() {
+        for (auto& sum : sums) sum.store(0, std::memory_order_relaxed);
+        constexpr std::array<int, 4> frequencies{400, 1000, 650, 1350};
+        for (int frequency = 0; frequency < int(frequencies.size()); ++frequency) {
+            for (int frame = 0; frame < Frames; ++frame) {
+                const double phase = 6.283185307179586 * frequencies[frequency] * frame / 48000;
+                cosine[frequency][frame] = std::cos(phase);
+                sine[frequency][frame] = std::sin(phase);
+            }
+        }
+    }
+    void observe(const QByteArray& pcm, bool discontinuity) {
+        if (discontinuity) buffered = 0;
+        if (pcm.size() % (2 * sizeof(float))) return;
+        const auto* samples = reinterpret_cast<const float*>(pcm.constData());
+        const int frames = int(pcm.size() / (2 * sizeof(float)));
+        for (int frame = 0; frame < frames; ++frame) {
+            window[buffered * 2] = samples[frame * 2];
+            window[buffered * 2 + 1] = samples[frame * 2 + 1];
+            if (++buffered != Frames) continue;
+            for (int channel = 0; channel < 2; ++channel) {
+                for (int frequency = 0; frequency < 4; ++frequency) {
+                    double real = 0, imaginary = 0;
+                    for (int sample = 0; sample < Frames; ++sample) {
+                        const auto value = window[sample * 2 + channel];
+                        if (!std::isfinite(value)) continue;
+                        real += value * cosine[frequency][sample];
+                        imaginary += value * sine[frequency][sample];
+                    }
+                    const double amplitude = std::min(16.0, 2 * std::hypot(real, imaginary) / Frames);
+                    sums[channel * 4 + frequency].fetch_add(qRound64(amplitude * Scale), std::memory_order_relaxed);
+                }
+            }
+            windows.fetch_add(1, std::memory_order_release);
+            buffered = 0;
+        }
+    }
+    Snapshot snapshot() const {
+        Snapshot result;
+        result.windows = windows.load(std::memory_order_acquire);
+        for (size_t index = 0; index < sums.size(); ++index)
+            result.amplitude[index] = double(sums[index].load(std::memory_order_relaxed)) / Scale;
+        return result;
+    }
+private:
+    static constexpr int Frames = 960;
+    static constexpr double Scale = 1000000000.0;
+    std::array<std::array<double, Frames>, 4> cosine{}, sine{};
+    std::array<float, Frames * 2> window{};
+    int buffered = 0; // Native capture's single callback queue owns this state.
+    std::array<std::atomic<qint64>, 8> sums{};
+    std::atomic<quint64> windows{0};
+};
+class ObservedNativeCapture final : public SystemAudioCapture {
+public:
+    explicit ObservedNativeCapture(std::shared_ptr<CaptureStereoObservation> observation)
+        : native(createSystemAudioCapture()), observation(std::move(observation)) {}
+    void start(Pcm pcm, State state) override {
+        native->start([observation = observation, pcm = std::move(pcm)](QByteArray samples, qint64 timestamp, bool discontinuity) {
+            observation->observe(samples, discontinuity);
+            pcm(std::move(samples), timestamp, discontinuity);
+        }, std::move(state));
+    }
+    void stop() override { native->stop(); }
+private:
+    std::unique_ptr<SystemAudioCapture> native;
+    std::shared_ptr<CaptureStereoObservation> observation;
+};
 QByteArray constantPcm(int frames, float value) {
     QByteArray result(frames * 2 * sizeof(float), Qt::Uninitialized);
     std::fill_n(reinterpret_cast<float*>(result.data()), frames * 2, value);
@@ -49,7 +128,7 @@ double energy(const QByteArray& pcm) {
     return pcm.isEmpty() ? 0 : std::sqrt(sum / (pcm.size() / sizeof(float)));
 }
 // Real decoder/output path, independent frequencies identify accidental routing.
-std::shared_ptr<const ResidentMediaAsset> toneAsset(int frequency) {
+std::shared_ptr<const ResidentMediaAsset> toneAsset(int frequency, int rightFrequency = 0) {
     auto asset = std::make_shared<ResidentMediaAsset>();
     asset->durationUs = 8000000;
     auto& store = asset->audioPackets;
@@ -63,8 +142,11 @@ std::shared_ptr<const ResidentMediaAsset> toneAsset(int frequency) {
     store.timeBaseNum = 1; store.timeBaseDen = 48000;
     store.bytes.resize(48000 * 8 * 2 * sizeof(float));
     auto* pcm = reinterpret_cast<float*>(store.bytes.data());
-    for (int frame = 0; frame < 48000 * 8; ++frame)
-        pcm[frame * 2] = pcm[frame * 2 + 1] = 0.03f * std::sin(6.283185307179586 * frequency * frame / 48000);
+    for (int frame = 0; frame < 48000 * 8; ++frame) {
+        pcm[frame * 2] = 0.03f * std::sin(6.283185307179586 * frequency * frame / 48000);
+        pcm[frame * 2 + 1] = 0.03f * std::sin(6.283185307179586
+            * (rightFrequency ? rightFrequency : frequency) * frame / 48000);
+    }
     for (int frame = 0; frame < 48000 * 8; frame += 960)
         store.packets.append({qint64(frame) * 8, 960 * 8, frame, frame, 960, 0, {}});
     asset->firstAudioPcm = store.bytes.left(9600 * 8);
@@ -204,11 +286,12 @@ private slots:
             }
         }
         QCOMPARE(renderer.takeUnderruns(), 1);
-        QVERIFY(maximumJump < 0.003f); // 3 ms fades, no hard step into silence.
+        QVERIFY(maximumJump < 0.003f); // 5 ms fades, no hard step into silence.
         QVERIFY(std::all_of(output.begin(), output.end(), [](float value) { return value == 0; }));
         // An adaptive jitter target rose 50 ms. Recovery must respect the new
         // deadline immediately, not spend seconds drifting toward it.
         QVERIFY(queue.push(pcm.data(), epoch + 60000, local + 110000));
+        QVERIFY(queue.push(pcm.data(), epoch + 80000, local + 130000));
         for (int callback = 6; callback < 11; ++callback) {
             output.fill(0);
             const auto clock = renderer.render(queue, output.data(), 480, 2, 48000, local + callback * 10000);
@@ -279,7 +362,7 @@ private slots:
             for (int packet = 0; packet < packets; ++packet) {
                 samples.fill(float(packet));
                 // Producer retries are only for this stress test; the live
-                // producer drops newest when full to keep latency bounded.
+                // live producer requests a callback-safe discard when full.
                 while (!queue.push(samples.data(), qint64(packet + 20) * 20000, packet))
                     std::this_thread::yield();
             }
@@ -372,12 +455,23 @@ private slots:
         auto first = mix.take(1080000); QVERIFY(first);
         QCOMPARE(first->timestampUs, 1000000); QVERIFY(first->discontinuity);
         const auto* pcm = reinterpret_cast<const float*>(first->pcm.constData());
-        for (int frame = 0; frame < 960; ++frame)
-            QVERIFY(std::abs(pcm[frame * 2] - (frame < 480 ? 0.1f : 0.3f)) < 0.00001);
+        QCOMPARE(pcm[0], 0.0f);
+        for (int frame = AudioCaptureMix::FadeFrames; frame < 480; ++frame)
+            QVERIFY(std::abs(pcm[frame * 2] - 0.1f) < 0.00001);
+        for (int frame = 480 + AudioCaptureMix::FadeFrames; frame < 960; ++frame)
+            QVERIFY(std::abs(pcm[frame * 2] - 0.3f) < 0.00001);
+        for (int frame = 1; frame < 960; ++frame)
+            QVERIFY(std::abs(pcm[frame * 2] - pcm[(frame - 1) * 2]) < 0.002f);
         mix.appendScene(reinterpret_cast<const float*>(system.constData()), 960, 1020000);
         auto second = mix.take(1100000); QVERIFY(second); QVERIFY(!second->discontinuity);
-        QCOMPARE(second->pcm, system); // No native callback is required.
-        auto silent = mix.take(1120000); QVERIFY(silent); QCOMPARE(energy(silent->pcm), 0);
+        pcm = reinterpret_cast<const float*>(second->pcm.constData());
+        // Native disappearance fades independently while scene audio continues.
+        for (int frame = AudioCaptureMix::FadeFrames; frame < 960; ++frame)
+            QVERIFY(std::abs(pcm[frame * 2] - 0.1f) < 0.00001);
+        auto silent = mix.take(1120000); QVERIFY(silent);
+        pcm = reinterpret_cast<const float*>(silent->pcm.constData());
+        for (int frame = AudioCaptureMix::FadeFrames; frame < 960; ++frame)
+            QCOMPARE(pcm[frame * 2], 0.0f);
     }
     void captureMixBoundsBacklogAndClearsOldEpochs() {
         AudioCaptureMix mix; mix.reset(1000000);
@@ -394,7 +488,9 @@ private slots:
         mix.appendScene(reinterpret_cast<const float*>(scene.constData()), 960, 5000000);
         mix.appendScene(reinterpret_cast<const float*>(scene.constData()), 960, 5000000);
         auto multiple = mix.take(5080000); QVERIFY(multiple);
-        QVERIFY(std::abs(energy(multiple->pcm) - 0.4) < 0.00001);
+        const auto* summed = reinterpret_cast<const float*>(multiple->pcm.constData());
+        for (int frame = AudioCaptureMix::FadeFrames; frame < 960; ++frame)
+            QVERIFY(std::abs(summed[frame * 2] - 0.4f) < 0.00001);
     }
     void sceneTapIsBoundedAndRejectsPreviousCaptureEpoch() {
         SceneAudioTap tap;
@@ -429,6 +525,28 @@ private slots:
         }
         QVERIFY(total > 4700 && total <= 4800); // Stateful resampler retains a short filter tail.
     }
+    void surroundSceneTapPreservesLeftAndRight_data() {
+        QTest::addColumn<int>("channels");
+        QTest::newRow("5.1") << 6;
+        QTest::newRow("7.1") << 8;
+    }
+    void surroundSceneTapPreservesLeftAndRight() {
+        QFETCH(int, channels);
+        SceneAudioTap tap; tap.setEnabled(true);
+        std::vector<float> input(size_t(960 * channels), 0);
+        for (int frame = 0; frame < 960; ++frame) {
+            input[size_t(frame * channels)] = 0.1f;
+            input[size_t(frame * channels + 1)] = -0.2f;
+        }
+        tap.push(input.data(), 960, channels, 48000, 1000000);
+        QByteArray pcm; qint64 timestamp = 0;
+        QVERIFY(tap.take(pcm, timestamp));
+        const auto* samples = reinterpret_cast<const float*>(pcm.constData());
+        for (int frame = 0; frame < pcm.size() / int(2 * sizeof(float)); ++frame) {
+            QVERIFY(samples[frame * 2] > 0.01f);
+            QVERIFY(std::abs(samples[frame * 2 + 1] + 2 * samples[frame * 2]) < 0.00001f);
+        }
+    }
     void capturePermissionFailureStopAndRestartFenceQueuedCallbacks() {
         auto callbacks = std::make_shared<FakeCaptureState>();
         AudioEngine engine(nullptr, [callbacks] { return std::make_unique<FakeCapture>(callbacks); });
@@ -459,6 +577,28 @@ private slots:
         engine.shutdown(); packets.clear(); engine.startCapture("after-shutdown");
         QTest::qWait(100); QVERIFY(packets.isEmpty());
     }
+    void sceneTapRecoversFromMalformedNativeRateSamples() {
+        SceneAudioTap tap; tap.setEnabled(true);
+        std::array<float, 882> input{};
+        input[0] = std::numeric_limits<float>::quiet_NaN();
+        input[1] = std::numeric_limits<float>::infinity();
+        input[2] = std::numeric_limits<float>::max();
+        input[3] = -std::numeric_limits<float>::max();
+        QByteArray pcm; qint64 timestamp = 0; bool transition = false; QString error;
+        int received = 0;
+        for (int block = 0; block < 20; ++block) {
+            if (block) input.fill(0.1f);
+            tap.push(input.data(), 441, 2, 44100, 1000000 + block * 10000);
+            while (tap.takeForCapture(pcm, timestamp, transition, error)) {
+                const auto* samples = reinterpret_cast<const float*>(pcm.constData());
+                for (int i = 0; i < pcm.size() / int(sizeof(float)); ++i) QVERIFY(std::isfinite(samples[i]));
+                if (block > 3) QVERIFY(std::abs(energy(pcm) - 0.1) < 0.001);
+                ++received;
+            }
+            QVERIFY2(error.isEmpty(), qPrintable(error));
+        }
+        QVERIFY(received >= 18);
+    }
     void remoteEpochMuteAndClock() {
         if (QMediaDevices::defaultAudioOutput().isNull()) QSKIP("No audio output");
         AudioEngine engine; QSignalSpy clocks(&engine, &AudioEngine::playbackClock);
@@ -477,6 +617,102 @@ private slots:
         QTRY_VERIFY_WITH_TIMEOUT(!clocks.isEmpty(), 3000); QCOMPARE(clocks.last().at(1).toString(), epoch);
         producer.stop(); engine.resetPlayback("endpoint"); QTest::qWait(80);
         clocks.clear(); QTest::qWait(150); QVERIFY(clocks.isEmpty());
+    }
+    void sceneCapturePreservesStereo_data() {
+        QTest::addColumn<bool>("native");
+        QTest::addColumn<int>("bitrate");
+        QTest::newRow("in-process-96k") << false << 96000;
+        QTest::newRow("in-process-32k") << false << 32000;
+        QTest::newRow("native-96k-opt-in") << true << 96000;
+        QTest::newRow("native-32k-opt-in") << true << 32000;
+    }
+    void sceneCapturePreservesStereo() {
+        QFETCH(bool, native);
+        QFETCH(int, bitrate);
+        if (native && !qEnvironmentVariableIntValue("MOUFFETTE_TEST_SYSTEM_AUDIO_CAPTURE"))
+            QSKIP("Set MOUFFETTE_TEST_SYSTEM_AUDIO_CAPTURE=1 for native stereo capture (quiet test tones)");
+        if (QMediaDevices::defaultAudioOutput().isNull()) QSKIP("No audio output for the real playback tap");
+        auto callbacks = std::make_shared<FakeCaptureState>();
+        const auto observation = native ? std::make_shared<CaptureStereoObservation>() : nullptr;
+        AudioEngine::CaptureFactory factory;
+        if (native) factory = [observation] { return std::make_unique<ObservedNativeCapture>(observation); };
+        else factory = [callbacks] { return std::make_unique<FakeCapture>(callbacks); };
+        AudioEngine engine(nullptr, std::move(factory));
+        QSignalSpy states(&engine, &AudioEngine::captureStateChanged);
+        QAudioOutput sceneOutput, previewOutput;
+        PlaybackAudio scene, preview;
+        const auto cleanup = qScopeGuard([&] { scene.pause(); preview.pause(); engine.shutdown(); });
+        engine.startCapture("stereo-routing", bitrate);
+        if (!native) callbacks->state(true, {});
+        QTRY_VERIFY_WITH_TIMEOUT(!states.isEmpty(), 10000);
+        QVERIFY2(states.last().at(0).toBool(), qPrintable(states.last().at(1).toString()));
+
+        // Real decoding and hardware rendering feed the ReceivedScene tap.
+        // Separate frequencies expose a downmix, channel swap, or recapture of
+        // app output; different preview tones also expose accidental inclusion.
+        const int leftFrequency = native ? 650 : 400, rightFrequency = native ? 1350 : 1000;
+        const auto sceneAsset = toneAsset(leftFrequency, rightFrequency), previewAsset = toneAsset(1600, 2000);
+        QVERIFY(sceneAsset && previewAsset);
+        scene.setRole(PlaybackAudio::Role::ReceivedScene);
+        preview.setRole(PlaybackAudio::Role::ControlPreview);
+        scene.setOutput(&sceneOutput); scene.setAsset(sceneAsset);
+        preview.setOutput(&previewOutput); preview.setAsset(previewAsset);
+        QTRY_VERIFY(scene.preparedAt(0) && preview.preparedAt(0));
+        scene.play(0); preview.play(0);
+        QTRY_VERIFY(scene.presentedSincePlay() && preview.presentedSincePlay());
+
+        AudioStreamDecoder decoder;
+        std::array<std::array<double, 4>, 2> amplitude{};
+        int packets = 0;
+        QString error;
+        const auto connection = connect(&engine, &AudioEngine::packetReady, &engine,
+            [&](const QString&, quint64, qint64, const QByteArray& packet) {
+                QCOMPARE(opus_packet_get_nb_channels(reinterpret_cast<const unsigned char*>(packet.constData())), 2);
+                const auto pcm = decoder.decode(packet, error);
+                QCOMPARE(pcm.size(), qsizetype(960 * 2 * sizeof(float)));
+                const auto* samples = reinterpret_cast<const float*>(pcm.constData());
+                const std::array<int, 4> frequencies{leftFrequency, rightFrequency, 1600, 2000};
+                for (int channel = 0; channel < 2; ++channel) {
+                    for (int frequency = 0; frequency < int(frequencies.size()); ++frequency) {
+                        double real = 0, imaginary = 0;
+                        for (int frame = 0; frame < 960; ++frame) {
+                            const double angle = 6.283185307179586 * frequencies[frequency] * frame / 48000;
+                            const float sample = samples[frame * 2 + channel];
+                            QVERIFY(std::isfinite(sample));
+                            real += sample * std::cos(angle); imaginary += sample * std::sin(angle);
+                        }
+                        amplitude[channel][frequency] += 2 * std::hypot(real, imaginary) / 960;
+                    }
+                }
+                ++packets;
+            });
+        const auto disconnectCapture = qScopeGuard([&] { disconnect(connection); });
+        QTest::qWait(300); amplitude = {}; packets = 0;
+        const auto rawStart = observation ? observation->snapshot() : CaptureStereoObservation::Snapshot{};
+        QTRY_VERIFY_WITH_TIMEOUT(packets >= 30, 2000);
+        const double left = amplitude[0][0] / packets, right = amplitude[1][1] / packets;
+        const double rightInLeft = amplitude[0][1] / packets, leftInRight = amplitude[1][0] / packets;
+        qInfo() << "stereo scene frequencies=" << leftFrequency << rightFrequency << "L/R/crosstalkL/crosstalkR="
+                << left << right << rightInLeft << leftInRight;
+        if (observation) {
+            const auto rawEnd = observation->snapshot();
+            const auto rawWindows = rawEnd.windows - rawStart.windows;
+            std::array<double, 8> raw{};
+            if (rawWindows) for (size_t index = 0; index < raw.size(); ++index)
+                raw[index] = (rawEnd.amplitude[index] - rawStart.amplitude[index]) / rawWindows;
+            qInfo() << "native before scene mix L400/L1000/L650/L1350/R400/R1000/R650/R1350="
+                    << raw[0] << raw[1] << raw[2] << raw[3]
+                    << raw[4] << raw[5] << raw[6] << raw[7] << "windows=" << rawWindows;
+        }
+        // Correct amplitude also rules out double capture of the scene.
+        QVERIFY(left > 0.018 && left < 0.038);
+        QVERIFY(right > 0.018 && right < 0.038);
+        QVERIFY2(rightInLeft < right * 0.05, "Right scene channel leaked into the left channel");
+        QVERIFY2(leftInRight < left * 0.05, "Left scene channel leaked into the right channel");
+        for (const auto& channel : amplitude) {
+            QVERIFY(channel[2] / packets < 0.002);
+            QVERIFY(channel[3] / packets < 0.002);
+        }
     }
     void sceneRoutingAndLiveVolume_data() {
         QTest::addColumn<bool>("native");
@@ -508,6 +744,7 @@ private slots:
         AudioStreamEncoder monitorEncoder; QString error; QVERIFY(monitorEncoder.initialize(96000, error));
         quint64 sequence = 0;
         const auto systemOrigin = AudioEngine::nowUs();
+        quint64 systemSequence = 0;
         QTimer producer; producer.setInterval(20); producer.setTimerType(Qt::PreciseTimer);
         connect(&producer, &QTimer::timeout, &engine, [&] {
             const auto now = AudioEngine::nowUs();
@@ -518,7 +755,13 @@ private slots:
                 monitor[frame * 2] = monitor[frame * 2 + 1] = 0.03f * std::sin(6.283185307179586 * 1600 * frame / 48000);
                 pcm[frame * 2] = pcm[frame * 2 + 1] = 0.015f * std::sin(6.283185307179586 * 800 * frame / 48000);
             }
-            if (!native) callbacks->pcm(system, systemOrigin + qint64(sequence) * 20000, false);
+            if (!native) {
+                // Model a native sample clock, not the number of GUI timer
+                // wakeups: Qt coalesces missed intervals during sink startup.
+                const auto complete = quint64(std::max<qint64>(0, now - systemOrigin) / 20000);
+                while (systemSequence < complete)
+                    callbacks->pcm(system, systemOrigin + qint64(systemSequence++) * 20000, false);
+            }
             engine.playPacket("monitor", "monitor", ++sequence, now, monitorEncoder.encode(monitor.data(), error), now + 80000);
         });
         producer.start();

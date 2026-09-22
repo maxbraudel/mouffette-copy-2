@@ -1,6 +1,8 @@
 #include "AudioEngine.h"
 #include "AudioCaptureMix.h"
-#include "AudioCapturePacketizer.h"
+#include "AudioCaptureResampler.h"
+#include "AudioOutputRouting.h"
+#include "AudioOutputTiming.h"
 #include "SceneAudioTap.h"
 #include "backend/audiosharing/AudioStreamCodec.h"
 #include "backend/audiosharing/AudioPlaybackTimeline.h"
@@ -11,6 +13,7 @@
 #include <QAudioSink>
 #include <QCoreApplication>
 #include <QHash>
+#include <QLoggingCategory>
 #include <QMediaDevices>
 #include <QMutex>
 #include <QMutexLocker>
@@ -24,6 +27,8 @@
 #include <vector>
 #include <opus.h>
 
+Q_LOGGING_CATEGORY(audioEngineLog, "mouffette.audio.engine", QtWarningMsg)
+
 namespace {
 struct AudioBlock { QByteArray pcm; qint64 timestampUs = 0; bool discontinuity = false; };
 struct RemoteSource {
@@ -35,7 +40,7 @@ struct RemoteSource {
     AudioPlaybackClock clock;
     std::atomic<bool> enabled{true};
     quint64 sequence = 0;
-    bool received = false;
+    bool received = false, discontinuityPending = false;
     qint64 lastTimestampUs = -1, lastPacketUs = 0, reportedLocalUs = -1;
     int dropped = 0, concealed = 0, rebuffers = 0;
 };
@@ -45,6 +50,7 @@ struct MixerSnapshot {
 struct OutputDevice {
     QByteArray id;
     QAudioFormat format;
+    AudioStereoOutputMapping routing;
     std::unique_ptr<QAudioSink> sink;
     std::atomic<const MixerSnapshot*> snapshot{nullptr};
     std::atomic<bool> rendering{false};
@@ -54,7 +60,8 @@ struct OutputDevice {
     quint64 revision = 0;
     qint64 anchorUs = 0;
     quint64 frames = 0;
-    std::array<float, 8> softClipMemory{};
+    std::atomic<qint64> maximumQuantumUs{20000};
+    std::array<float, 2> softClipMemory{};
     ~OutputDevice() { if (sink) sink->stop(); }
     void publish(std::unique_ptr<MixerSnapshot> next) {
         snapshot.store(next.get(), std::memory_order_seq_cst);
@@ -91,7 +98,7 @@ struct AudioEngine::Private : public QObject {
     bool closing = false, capturing = false;
     QTimer captureTimer;
     AudioCaptureMix captureMix;
-    AudioCapturePacketizer nativePackets;
+    AudioCaptureResampler nativeSamples;
     QMediaDevices devices;
     QTimer reports;
     std::unique_ptr<SystemAudioCapture> capture;
@@ -144,7 +151,7 @@ struct AudioEngine::Private : public QObject {
     void stopCapture() {
         captureTimer.stop(); capturing = false;
         if (captureMailbox) SceneAudioBus::instance().setEnabled(false);
-        captureMix.clear(); nativePackets.reset();
+        captureMix.clear(); nativeSamples.reset();
         if (captureMailbox) { QMutexLocker lock(&captureMailbox->mutex); captureMailbox->closed = true; captureMailbox->blocks.clear(); }
         captureMailbox.reset();
         if (capture) capture->stop();
@@ -215,24 +222,31 @@ struct AudioEngine::Private : public QObject {
         for (const auto& block : blocks) {
             const auto age = MediaCaptureClock::nowUs() - block.timestampUs;
             if (age > 100000 || age < -250000) continue;
-            nativePackets.append(block.pcm, block.timestampUs, block.discontinuity);
-            while (auto packet = nativePackets.take())
-                captureMix.appendSystem(reinterpret_cast<const float*>(packet->pcm.constData()),
-                    AudioCapturePacketizer::PacketFrames, packet->timestampUs);
+            auto samples = nativeSamples.append(block.pcm, block.timestampUs, block.discontinuity);
+            const auto failure = nativeSamples.errorString();
+            if (!failure.isEmpty()) { stopCapture(); state(false, failure); return; }
+            if (samples) captureMix.appendSystem(reinterpret_cast<const float*>(samples->pcm.constData()),
+                int(samples->pcm.size() / (2 * sizeof(float))), samples->timestampUs, samples->discontinuity);
         }
     }
     void publishCapture() {
         if (!capturing || captureEpoch.isEmpty()) return;
         const auto activeEpoch = captureEpoch;
+        // Drain native work before the deadline timer: Qt may deliver a timer
+        // before an already queued native notification after a GUI stall.
+        drainCapture(captureMailbox);
+        if (!capturing || captureEpoch != activeEpoch) return;
         for (const auto& tap : SceneAudioBus::instance().sources()) {
-            QByteArray pcm; qint64 timestamp = 0;
-            while (tap->take(pcm, timestamp))
+            QByteArray pcm; qint64 timestamp = 0; bool transition = false; QString failure;
+            while (tap->takeForCapture(pcm, timestamp, transition, failure))
                 captureMix.appendScene(reinterpret_cast<const float*>(pcm.constData()),
-                    int(pcm.size() / (2 * sizeof(float))), timestamp);
+                    int(pcm.size() / (2 * sizeof(float))), timestamp, transition);
+            if (!failure.isEmpty()) { stopCapture(); state(false, failure); return; }
         }
         const auto now = MediaCaptureClock::nowUs();
         while (auto chunk = captureMix.take(now)) {
-            if (chunk->discontinuity) encoder.reset();
+            // Codec prediction stays continuous within a wire epoch. A local
+            // backlog drop is a PCM fade/gap, not an unannounced encoder reset.
             QString failure;
             const auto packet = encoder.encode(reinterpret_cast<const float*>(chunk->pcm.constData()), failure);
             if (!failure.isEmpty()) { stopCapture(); state(false, failure); return; }
@@ -264,15 +278,27 @@ struct AudioEngine::Private : public QObject {
         const auto sequenceGap = source->received ? quint64(sequence) - source->sequence - 1 : 0;
         source->dropped += int(std::min<quint64>(std::max<quint64>(sequenceGap, missing), 1000));
         QString failure;
+        source->timeline.setOutputQuantumUs(owner->outputQuantumUs());
         auto queuePcm = [&](const QByteArray& pcm, qint64 time, qint64 deadline) {
             const auto now = MediaCaptureClock::nowUs();
-            const auto decision = source->timeline.enqueue(time, now, false, deadline);
+            const bool full = source->blocks.size() >= AudioPlaybackBuffer::Capacity;
+            const auto decision = source->timeline.enqueue(time, now, full, deadline);
             if (decision.rebuffer && source->received) ++source->rebuffers;
-            if (!decision.accept || !source->blocks.push(reinterpret_cast<const float*>(pcm.constData()),
-                    time, source->timeline.presentationAt(time))) ++source->dropped;
+            if (full) {
+                source->blocks.requestDiscardQueued();
+                source->discontinuityPending = true;
+                ++source->dropped; return;
+            }
+            if (!decision.accept) { ++source->dropped; return; }
+            const bool transition = source->discontinuityPending || decision.rebuffer;
+            if (source->blocks.push(reinterpret_cast<const float*>(pcm.constData()),
+                    time, source->timeline.presentationAt(time), transition))
+                source->discontinuityPending = false;
+            else { source->discontinuityPending = true; ++source->dropped; }
         };
-        if (source->received && (elapsed > 140000 || std::abs(elapsed - (missing + 1) * 20000) > 2000))
-            source->decoder.reset();
+        if (source->received && (elapsed > 140000 || std::abs(elapsed - (missing + 1) * 20000) > 2000)) {
+            source->decoder.reset(); source->discontinuityPending = true;
+        }
         for (int lost = 0; lost < missing; ++lost) {
             // The immediately following Opus packet may repair its predecessor.
             // For CELT-only/music packets libopus falls back to its native PLC.
@@ -340,12 +366,9 @@ struct AudioEngine::Private : public QObject {
             if (outputRetryUs.value(id) > now) continue;
             const auto device = deviceFor(id);
             auto output = std::make_unique<OutputDevice>();
-            output->id = id; output->format = device.preferredFormat(); output->format.setSampleFormat(QAudioFormat::Float);
-            QAudioFormat streamFormat;
-            streamFormat.setSampleRate(48000); streamFormat.setChannelCount(2); streamFormat.setSampleFormat(QAudioFormat::Float);
-            if (device.isFormatSupported(streamFormat)) output->format = streamFormat;
-            if (output->format.channelCount() > 8) output->format.setChannelCount(2);
-            if (!device.isFormatSupported(output->format) || output->format.sampleRate() < 8000) {
+            output->id = id; output->format = chooseStereoOutputFormat(device);
+            output->routing = AudioStereoOutputMapping(output->format);
+            if (!output->format.isValid() || !output->routing.isValid() || output->format.sampleRate() < 8000) {
                 outputRetryUs.insert(id, now + 1000000);
                 outputError(QStringLiteral("No supported audio output format"), id); continue;
             }
@@ -359,6 +382,8 @@ struct AudioEngine::Private : public QObject {
                 outputError(QStringLiteral("Audio output could not start"), id); continue;
             }
             outputRetryUs.remove(id);
+            qCDebug(audioEngineLog) << "output opened rate=" << output->format.sampleRate()
+                << "device_channels=" << output->format.channelCount() << "shared_channels=2";
             outputs.push_back(std::move(output));
         }
         publishMixers();
@@ -397,14 +422,17 @@ struct AudioEngine::Private : public QObject {
         });
         const auto* snapshot = output.snapshot.load(std::memory_order_seq_cst);
         output.reader.store(snapshot, std::memory_order_seq_cst);
-        if (!snapshot) return;
         const int rate = output.format.sampleRate(), channels = output.format.channelCount();
         const int frames = int(samples.size()) / channels;
+        const auto quantumUs = qint64(frames) * 1000000 / rate;
+        const auto measuredQuantum = AudioOutputTiming::normalizeQuantumUs(quantumUs);
+        if (measuredQuantum > output.maximumQuantumUs.load(std::memory_order_relaxed))
+            output.maximumQuantumUs.store(measuredQuantum, std::memory_order_release);
+        if (!snapshot) return;
         const auto wall = MediaCaptureClock::nowUs();
         // Public Qt callbacks expose neither the native DAC timestamp nor the
         // device's transport latency. One callback quantum is the explicit
         // presentation estimate; a frame counter filters callback wakeup jitter.
-        const auto quantumUs = qint64(frames) * 1000000 / rate;
         const auto observedPresentation = wall + quantumUs;
         if (!output.anchorUs) output.anchorUs = observedPresentation;
         qint64 clock = output.anchorUs + qint64(output.frames * 1000000 / rate);
@@ -415,15 +443,23 @@ struct AudioEngine::Private : public QObject {
             output.anchorUs += adjustment; clock += adjustment;
         }
         output.frames += frames;
-        for (const auto& source : snapshot->remote) {
-            if (!source->enabled.load(std::memory_order_acquire)) continue;
-            const auto clockSample = source->renderer.render(source->blocks, samples.data(), frames, channels, rate, clock);
-            if (clockSample.sourceUs >= 0) source->clock.publish(clockSample);
+        // Mix stereo independently of the device layout. Scratch storage is
+        // fixed; mono downmix/speaker routing happens only at the final write.
+        for (int offset = 0; offset < frames; offset += 1024) {
+            const int count = std::min(1024, frames - offset);
+            std::array<float, 1024 * 2> stereo{};
+            const auto chunkClock = clock + qint64(offset) * 1000000 / rate;
+            for (const auto& source : snapshot->remote) {
+                if (!source->enabled.load(std::memory_order_acquire)) continue;
+                const auto clockSample = source->renderer.render(source->blocks, stereo.data(), count, 2, rate, chunkClock, quantumUs);
+                if (clockSample.sourceUs >= 0) source->clock.publish(clockSample);
+            }
+            for (auto& sample : stereo) if (!std::isfinite(sample)) sample = 0;
+            opus_pcm_soft_clip(stereo.data(), count, 2, output.softClipMemory.data());
+            for (int frame = 0; frame < count; ++frame)
+                output.routing.add(samples.data() + (offset + frame) * channels,
+                    stereo[size_t(frame * 2)], stereo[size_t(frame * 2 + 1)]);
         }
-        for (auto& sample : samples) if (!std::isfinite(sample)) sample = 0;
-        // Stateful libopus soft clipping avoids the harsh discontinuities of
-        // hard clipping when several remote sources overlap.
-        opus_pcm_soft_clip(samples.data(), frames, channels, output.softClipMemory.data());
     }
     void reportClocks() {
         const auto now = MediaCaptureClock::nowUs();
@@ -443,7 +479,12 @@ struct AudioEngine::Private : public QObject {
                     if (!closing && current && current->epoch == epoch)
                         emit owner->playbackFeedback(sourceId, epoch, dropped, buffered);
                 });
-                source.renderer.takeUnderruns(); source.renderer.takeRebuffers();
+                const int underruns = source.renderer.takeUnderruns(), recoveries = source.renderer.takeRebuffers();
+                if (underruns || recoveries || dropped)
+                    qCDebug(audioEngineLog) << "playout interval_ms=500 underruns=" << underruns
+                        << "recoveries=" << recoveries << "dropped=" << dropped
+                        << "concealed=" << source.concealed << "buffered_ms=" << buffered
+                        << "output_quantum_us=" << owner->outputQuantumUs();
                 source.concealed = 0; source.rebuffers = 0; source.dropped = 0;
             }
             const auto clock = source.clock.read();
@@ -473,6 +514,12 @@ AudioEngine::~AudioEngine() = default;
 void AudioEngine::startCapture(const QString& epoch, int bitrate) { d->startCapture(epoch, bitrate); }
 void AudioEngine::setCaptureBitrate(int bitrate) { d->encoder.setBitrate(bitrate); }
 void AudioEngine::stopCapture() { d->stopCapture(); }
+qint64 AudioEngine::outputQuantumUs() const {
+    qint64 quantum = 20000;
+    for (const auto& output : d->outputs)
+        quantum = std::max(quantum, output->maximumQuantumUs.load(std::memory_order_acquire));
+    return quantum;
+}
 void AudioEngine::playPacket(const QString& source, const QString& epoch, quint64 sequence,
                             qint64 timestamp, const QByteArray& opus, qint64 presentation) {
     d->receivePacket(source, epoch, sequence, timestamp, opus, presentation);

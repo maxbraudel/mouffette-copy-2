@@ -21,6 +21,8 @@ public:
                     qint64 timestampUs, const QByteArray& opus, qint64 presentationUs = -1);
     void resetPlayback(const QString& source);
     void setPlaybackMuted(bool muted);
+    // Control-thread observation of the actual device callback size.
+    qint64 outputQuantumUs() const;
     void shutdown();
 signals:
     void packetReady(const QString& epoch, quint64 sequence, qint64 timestampUs, const QByteArray& opus);

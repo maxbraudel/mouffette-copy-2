@@ -31,12 +31,14 @@ signals:
     void remoteStatusChanged();
     void statusChanged();
     void sourceReservationChanged(int bps);
+    void outputQuantumChanged(qint64 quantumUs);
     void playbackClock(const QString& endpoint, const QString& epoch, qint64 sourceUs, qint64 localUs);
     void playbackReset(const QString& endpoint);
     void remoteIssue(const QString& endpoint, const QString& message);
 private:
     void refresh();
     void clearPlayback();
+    void refreshOutputTiming();
     void setState(const QString& state, const QString& message = {});
     void captureFailed(const QString& message);
     void report(const QString& message);
@@ -54,5 +56,6 @@ private:
     bool m_playbackAllowed = false;
     bool m_hadPlaybackStream = false, m_waitingForChannel = false;
     qint64 m_subscriptionStartedAt = 0;
+    qint64 m_outputQuantumUs = 0;
     QSet<QString> m_reported;
 };

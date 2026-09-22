@@ -1,6 +1,8 @@
 #include "backend/media/PlaybackAudio.h"
 #include "backend/media/IndexedMediaDecoder.h"
 #include "backend/audiosharing/SceneAudioTap.h"
+#include "backend/audiosharing/AudioOutputRouting.h"
+#include <opus.h>
 #include "backend/audiosharing/MediaCaptureClock.h"
 #include <QAudioDevice>
 #include <QCoreApplication>
@@ -57,6 +59,9 @@ bool hasPreparedBlock(const Voice& voice, qint64 positionUs) {
 class Mixer : public QObject {
 public:
     QAudioFormat format;
+    AudioStereoOutputMapping routing;
+    int mixChannels = 2;
+    std::array<float, SceneAudioTap::MaximumChannels> softClip{};
     std::unique_ptr<QAudioSink> sink;
     std::array<std::atomic<Voice*>, MaximumVoices> voices{};
     std::atomic<int> readers{0};
@@ -66,11 +71,20 @@ public:
     qint64 clockAnchorUs = 0;
     quint64 presentedFrames = 0;
     explicit Mixer(const QAudioDevice& device) {
-        format = device.preferredFormat();
-        format.setSampleFormat(QAudioFormat::Float);
-        // The capture tap resamples/downmixes off the real-time callback.
-        if (format.channelCount() > 8) format.setChannelCount(2);
-        if (!device.isFormatSupported(format)) return;
+        auto native = device.preferredFormat();
+        native.setSampleFormat(QAudioFormat::Float);
+        // Local scene playback keeps a supported surround device's full layout.
+        // Only the capture tap downmixes that bus to the stereo wire format.
+        if (native.channelCount() > 2 && native.channelCount() <= SceneAudioTap::MaximumChannels
+            && device.isFormatSupported(native)) format = native;
+        else format = chooseStereoOutputFormat(device);
+        if (!format.isValid() || format.channelCount() > SceneAudioTap::MaximumChannels
+            || format.sampleRate() < 8000) return;
+        mixChannels = std::max(2, format.channelCount());
+        if (format.channelCount() <= 2) {
+            routing = AudioStereoOutputMapping(format);
+            if (!routing.isValid()) return;
+        }
         sink = std::make_unique<QAudioSink>(device, format);
         sink->start([this](QSpan<float> output) {
             readers.fetch_add(1);
@@ -93,7 +107,7 @@ public:
                 const int chunkFrames = std::min(SceneAudioTap::BlockFrames, frames - offset);
                 const qint64 chunkClock = clock + qint64(offset) * 1000000 / rate;
                 auto chunk = output.subspan(offset * channels, chunkFrames * channels);
-                std::array<float, SceneAudioTap::BlockFrames * SceneAudioTap::MaximumChannels> scene{};
+                std::array<float, SceneAudioTap::BlockFrames * SceneAudioTap::MaximumChannels> scene{}, mixed{};
                 bool hasScene = false;
                 for (auto& slot : voices) {
                     Voice* voice = slot.load();
@@ -111,10 +125,10 @@ public:
                         const qint64 last = std::min<qint64>(chunkFrames, start + voice->blockFrames);
                         if (last > first) voice->presented.store(true, std::memory_order_relaxed);
                         for (qint64 frame = first; frame < last; ++frame) {
-                            const qint64 source = (frame-start) * channels, destination = frame * channels;
-                            for (int channel = 0; channel < channels; ++channel) {
+                            const qint64 source = (frame-start) * mixChannels, destination = frame * mixChannels;
+                            for (int channel = 0; channel < mixChannels; ++channel) {
                                 const auto value = block.samples[size_t(source+channel)] * gain;
-                                chunk[destination+channel] += value;
+                                mixed[size_t(destination+channel)] += value;
                                 if (voice->receivedScene) {
                                     scene[size_t(destination+channel)] += value;
                                     hasScene = true;
@@ -124,11 +138,16 @@ public:
                         if (start + voice->blockFrames <= chunkFrames) block.state.store(0, std::memory_order_release);
                     }
                 }
-                for (auto& sample : chunk) sample = std::clamp(sample, -1.0f, 1.0f);
-                if (hasScene) {
-                    for (auto& sample : scene) sample = std::clamp(sample, -1.0f, 1.0f);
-                    sceneTap->push(scene.data(), chunkFrames, channels, rate, chunkClock);
-                }
+                // The bus always retains at least stereo until after tapping.
+                // Native surround channels stay intact locally; the tap performs
+                // its own stereo conversion off the device callback.
+                if (hasScene) sceneTap->push(scene.data(), chunkFrames, mixChannels, rate, chunkClock);
+                for (int sample = 0; sample < chunkFrames * mixChannels; ++sample)
+                    if (!std::isfinite(mixed[size_t(sample)])) mixed[size_t(sample)] = 0;
+                opus_pcm_soft_clip(mixed.data(), chunkFrames, mixChannels, softClip.data());
+                if (channels > 2) std::copy_n(mixed.data(), chunkFrames * channels, chunk.data());
+                else for (int frame = 0; frame < chunkFrames; ++frame)
+                    routing.add(chunk.data() + frame * channels, mixed[size_t(frame * 2)], mixed[size_t(frame * 2 + 1)]);
             }
             readers.fetch_sub(1);
         });
@@ -210,7 +229,7 @@ void PlaybackAudio::rebuildOutput() {
     d->mixer = shared.lock();
     if (!d->mixer) { d->mixer = std::make_shared<Mixer>(device); shared = d->mixer; }
     if (!d->mixer->sink) { d->mixer.reset(); emit failed(QStringLiteral("No supported floating-point audio output format")); return; }
-    d->voice = std::make_shared<Voice>(d->mixer->format.sampleRate(), d->mixer->format.channelCount(),
+    d->voice = std::make_shared<Voice>(d->mixer->format.sampleRate(), d->mixer->mixChannels,
         d->role == Role::ReceivedScene);
     d->slot = d->mixer->add(d->voice);
     if (d->slot < 0) { d->detach(); emit failed(QStringLiteral("Too many simultaneous audio cursors")); return; }

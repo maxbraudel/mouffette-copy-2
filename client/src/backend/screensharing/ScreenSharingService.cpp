@@ -958,12 +958,17 @@ void ScreenSharingService::setAudioReservationBps(int bitrate)
     d->updateProfiles(true);
 }
 
+void ScreenSharingService::setAudioOutputQuantumUs(qint64 quantumUs)
+{
+    d->audioClock.setOutputQuantumUs(quantumUs);
+}
+
 void ScreenSharingService::setAudioPlaybackClock(const QString& endpoint, const QString& epoch,
                                                 qint64 sourceUs, qint64 localUs)
 {
     const qint64 age = MediaCaptureClock::nowUs() - localUs;
     if (endpoint != d->viewedEndpoint || endpoint.isEmpty() || epoch.isEmpty()
-        || sourceUs < 0 || localUs < 0 || age < -ScreenAudioClock::MaximumClockLeadUs
+        || sourceUs < 0 || localUs < 0 || age < -d->audioClock.maximumClockLeadUs()
         || age > ScreenAudioClock::MaximumClockAgeUs) return;
     if (d->audioEndpoint != endpoint || d->audioEpoch != epoch) {
         d->audioClock.reset();

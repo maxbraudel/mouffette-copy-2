@@ -166,6 +166,7 @@ pkg_check_modules(OPUS REQUIRED IMPORTED_TARGET opus)
 add_library(MouffetteResidentMedia STATIC
     src/backend/audiosharing/AudioEngine.cpp
     src/backend/audiosharing/AudioEngine.h
+    src/backend/audiosharing/AudioCaptureResampler.cpp
     src/backend/audiosharing/SceneAudioTap.cpp
     src/backend/audiosharing/AudioStreamCodec.cpp
     src/backend/audiosharing/AudioStreamCodec.h
@@ -773,6 +774,12 @@ if(BUILD_TESTING)
     target_link_libraries(tst_AudioEngine PRIVATE MouffetteResidentMedia Qt6::Test)
     add_test(NAME AudioEngine COMMAND tst_AudioEngine)
     set_tests_properties(AudioEngine PROPERTIES TIMEOUT 45 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+    foreach(audio_test AudioStereo AudioOutputRouting AudioCaptureStability AudioPlaybackStability AudioSharingContinuity)
+        add_executable(tst_${audio_test} tests/qt/tst_${audio_test}.cpp)
+        target_link_libraries(tst_${audio_test} PRIVATE MouffetteResidentMedia Qt6::Test)
+        add_test(NAME ${audio_test} COMMAND tst_${audio_test})
+        set_tests_properties(${audio_test} PROPERTIES TIMEOUT 45 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+    endforeach()
     add_executable(tst_AudioCapturePipeline tests/qt/tst_AudioCapturePipeline.cpp)
     target_link_libraries(tst_AudioCapturePipeline PRIVATE MouffetteResidentMedia Qt6::Test)
     add_test(NAME AudioCapturePipeline COMMAND tst_AudioCapturePipeline)

@@ -440,6 +440,8 @@ ApplicationRuntime::ApplicationRuntime(const RuntimeProfileContext& runtimeProfi
             m_screenSharing, &ScreenSharingService::setAudioReservationBps);
     connect(m_audioSharing, &AudioSharingService::playbackClock,
             m_screenSharing, &ScreenSharingService::setAudioPlaybackClock);
+    connect(m_audioSharing, &AudioSharingService::outputQuantumChanged,
+            m_screenSharing, &ScreenSharingService::setAudioOutputQuantumUs);
     connect(m_audioSharing, &AudioSharingService::playbackReset,
             m_screenSharing, &ScreenSharingService::clearAudioPlaybackClock);
     connect(m_screenSharing, &ScreenSharingService::sourceTimestampObserved,

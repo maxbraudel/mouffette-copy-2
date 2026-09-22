@@ -302,6 +302,7 @@ qint64 AudioTransport::playbackTimeUs(qint64 sourceUs) const {
     const qint64 arrival=d->viewerFreshness.localTimeUs(sourceUs);
     return arrival<0 ? -1 : arrival+d->playoutPolicy.targetDelayUs();
 }
+void AudioTransport::setOutputQuantumUs(qint64 quantumUs) { d->playoutPolicy.setOutputQuantumUs(quantumUs); }
 bool AudioTransport::sendPacket(const QByteArray& opus,qint64 timestampUs,quint64 captureSequence) {
     if(!isPublishing() || opus.isEmpty() || opus.size()>AudioWire::MaximumPayloadBytes || timestampUs<0
         || quint64(timestampUs)>AudioWire::MaximumInteger || timestampUs<=d->lastTimestamp
@@ -343,8 +344,12 @@ void AudioTransport::sendPlaybackFeedback(int droppedPackets,int bufferedMs) {
     d->diagnostics.maximumPlaybackBufferedMs=std::max(d->diagnostics.maximumPlaybackBufferedMs,std::clamp(bufferedMs,0,10000));
     if(d->stream.isEmpty() || !d->wantsView() || d->clock.elapsed()-d->lastFeedbackAt<500) return;
     d->lastFeedbackAt=d->clock.elapsed();
+    // The relay adapts network quality from queue pressure. A device's known
+    // extra PCM reservoir is not congestion; keep actual depth in diagnostics.
+    const auto hardwareMs=AudioOutputTiming::extraPlayoutDelayUs(d->playoutPolicy.outputQuantumUs())/1000;
+    const int networkBufferedMs=int(std::clamp<qint64>(qint64(bufferedMs)-hardwareMs,0,10000));
     d->send({{"type","audio_view_feedback"},{"remoteSessionId",d->session},{"generation",double(d->generation)},
-        {"streamId",d->stream},{"droppedPackets",std::clamp(droppedPackets,0,10000)},{"bufferedMs",std::clamp(bufferedMs,0,10000)}});
+        {"streamId",d->stream},{"droppedPackets",std::clamp(droppedPackets,0,10000)},{"bufferedMs",networkBufferedMs}});
 }
 void AudioTransport::restartPublication() {
     if(!isPublishing()) return;

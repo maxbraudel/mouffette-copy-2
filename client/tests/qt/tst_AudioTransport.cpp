@@ -220,14 +220,22 @@ private slots:
         QVERIFY(freshness.observe(10000000,20000000));
         QCOMPARE(freshness.localTimeUs(20000000),qint64(30000000));
     }
+    void startupReservesCaptureAndDeviceHeadroomImmediately() {
+        AudioPlayoutPolicy policy;
+        // A faster video observation maps source time without hiding the
+        // source audio's60ms collection+20ms packet+codec lookahead latency.
+        QVERIFY(!policy.observe(1000000,1086500,1000000));
+        QVERIFY(policy.targetDelayUs()-86500 >= 60000);
+        QVERIFY(policy.targetDelayUs()<=AudioPlayoutPolicy::MaximumDelayUs);
+    }
     void jitterTargetAndRouteRecoveryStayBounded() {
         AudioPlayoutPolicy policy;
-        QCOMPARE(policy.targetDelayUs(),qint64(80000));
+        QCOMPARE(policy.targetDelayUs(),qint64(120000));
         for(qint64 i=0;i<20;++i) {
             const qint64 source=1000000+i*20000;
             QVERIFY(!policy.observe(source,source+100000,source));
         }
-        QCOMPARE(policy.targetDelayUs(),qint64(140000));
+        QCOMPARE(policy.targetDelayUs(),qint64(150000));
         // Very late TCP bursts cannot create a new epoch or exceed150ms.
         policy.reset();
         for(qint64 i=0;i<100;++i)
@@ -243,7 +251,7 @@ private slots:
         QCOMPARE(policy.targetDelayUs(),qint64(150000));
         QVERIFY(policy.observe(2000000,2200000,2000000));
         policy.reset();
-        QCOMPARE(policy.targetDelayUs(),qint64(80000));
+        QCOMPARE(policy.targetDelayUs(),qint64(120000));
     }
     void captureSequenceGapsSurviveTransportAndRelay() {
         QTemporaryDir identities;
@@ -338,7 +346,7 @@ private slots:
             && receiver.viewerStreamId()!=oldStream,5000);
         // Reauthentication must not turn an old audio-only delay into a new
         // source clock when recent video already proved that clock's origin.
-        QVERIFY(qAbs(receiver.playbackTimeUs(videoAt)-(videoAt+80000))<1000);
+        QVERIFY(qAbs(receiver.playbackTimeUs(videoAt)-(videoAt+AudioPlayoutPolicy::InitialDelayUs))<1000);
         QVERIFY(publisher.sendPacket(payload,MediaCaptureClock::nowUs()-200000));
         QTest::qWait(30); QVERIFY(packets.isEmpty());
         QVERIFY(publisher.sendPacket(payload,MediaCaptureClock::nowUs()));
@@ -386,6 +394,25 @@ private slots:
         QVERIFY(!publisher.isPublishing()); QVERIFY(receiver.viewerStreamId().isEmpty());
         QVERIFY2(!log.contains("TEST_UNEXPECTED_AUDIO"),log.constData());
         QVERIFY(owner.canIssueSessionCommands(session)); QVERIFY(source.canIssueSessionCommands(session));
+    }
+    void hardwareReservoirDoesNotTriggerNetworkQualityDowngrade() {
+        QTemporaryDir identities;
+        WebSocketClient owner(identities.filePath("owner"),false),source(identities.filePath("source"),false);
+        AudioTransport receiver(&owner),publisher(&source); QString session;
+        activate(owner,source,receiver,publisher,session);
+        receiver.setOutputQuantumUs(100000);
+        for(int i=0;i<4;++i) {
+            receiver.sendPlaybackFeedback(0,240);
+            QTest::qWait(550);
+            QCOMPARE(publisher.audioBitrateBps(),96000);
+        }
+        // The same depth on an ordinary output really is excess buffering.
+        receiver.setOutputQuantumUs(20000);
+        for(int i=0;i<4;++i) {
+            receiver.sendPlaybackFeedback(0,240);
+            QTest::qWait(550);
+        }
+        QTRY_COMPARE_WITH_TIMEOUT(publisher.audioBitrateBps(),32000,3000);
     }
 };
 QTEST_GUILESS_MAIN(AudioTransportTest)

@@ -27,6 +27,7 @@ AudioSharingService::AudioSharingService(WebSocketClient* network, QObject* pare
             [this](const QByteArray& opus, qint64 timestampUs, quint64 sequence) {
         if (m_stopped || m_suspended || !m_listeningEnabled || !m_playbackAllowed || m_session.isEmpty()
             || m_endpoint.isEmpty() || m_stream.isEmpty()) return;
+        refreshOutputTiming();
         m_audio->playPacket(m_endpoint, m_stream, sequence, timestampUs, opus,
                              m_transport->playbackTimeUs(timestampUs));
     });
@@ -108,6 +109,7 @@ AudioSharingService::AudioSharingService(WebSocketClient* network, QObject* pare
             || epoch != m_stream || m_session.isEmpty()) return;
         setState(QStringLiteral("available"), tr("Receiving remote system audio."));
         m_reported.clear();
+        refreshOutputTiming();
         emit playbackClock(source, epoch, sourceUs, localUs);
     });
     connect(m_audio, &AudioEngine::playbackFeedback, this,
@@ -135,6 +137,15 @@ AudioSharingService::AudioSharingService(WebSocketClient* network, QObject* pare
 }
 
 AudioSharingService::~AudioSharingService() { stop(); }
+
+void AudioSharingService::refreshOutputTiming()
+{
+    const auto quantumUs = m_audio->outputQuantumUs();
+    m_transport->setOutputQuantumUs(quantumUs);
+    if (quantumUs == m_outputQuantumUs) return;
+    m_outputQuantumUs = quantumUs;
+    emit outputQuantumChanged(quantumUs);
+}
 
 void AudioSharingService::setState(const QString& value, const QString& message)
 {

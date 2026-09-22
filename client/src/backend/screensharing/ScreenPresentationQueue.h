@@ -46,7 +46,7 @@ public:
         std::optional<Frame> result;
         while (!empty()) {
             const auto& next = m_frames.front();
-            if (!immediate && nowUs - next.queuedUs < ScreenAudioClock::MaximumVideoWaitUs
+            if (!immediate && nowUs - next.queuedUs < clock.maximumVideoWaitUs()
                 && clock.videoDelayUs(next.sourceUs, nowUs) > 0) break;
             result = std::move(m_frames.front().frame);
             pop();

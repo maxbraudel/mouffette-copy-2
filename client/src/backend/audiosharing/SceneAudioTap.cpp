@@ -1,11 +1,13 @@
 #include "SceneAudioTap.h"
+#include "AudioCaptureResampler.h"
 #include <algorithm>
-#include <cstring>
+#include <cmath>
 extern "C" {
 #include <libswresample/swresample.h>
 }
 
 struct SceneAudioTap::Converter {
+    AudioCaptureResampler clock;
     SwrContext* context = nullptr;
     int rate = 0, channels = 0;
     qint64 endUs = -1;
@@ -27,7 +29,12 @@ void SceneAudioTap::push(const float* pcm, int frames, int channels, int rate, q
         block.frames = std::min(BlockFrames, frames - offset);
         block.channels = channels; block.rate = rate; block.epoch = generation;
         block.timestampUs = timestampUs + qint64(offset) * 1000000 / rate;
-        std::memcpy(block.pcm.data(), pcm + offset * channels, size_t(block.frames * channels) * sizeof(float));
+        // Sanitize before either persistent resampler sees the samples. A NaN
+        // in the native-rate filter would otherwise poison subsequent blocks.
+        for (int sample = 0; sample < block.frames * channels; ++sample) {
+            const float value = pcm[offset * channels + sample];
+            block.pcm[size_t(sample)] = std::isfinite(value) ? std::clamp(value, -16.0f, 16.0f) : 0;
+        }
         write.store(index + 1, std::memory_order_release);
     }
 }
@@ -69,6 +76,19 @@ bool SceneAudioTap::take(QByteArray& stereo, qint64& timestampUs) {
         read.store(index + 1, std::memory_order_release);
         if (!stereo.isEmpty()) return true;
     }
+}
+bool SceneAudioTap::takeForCapture(QByteArray& stereo, qint64& timestampUs, bool& discontinuity, QString& error) {
+    error.clear();
+    while (take(stereo, timestampUs)) {
+        auto result = converter->clock.append(std::move(stereo), timestampUs);
+        error = converter->clock.errorString();
+        if (!error.isEmpty()) return false;
+        if (!result) continue;
+        stereo = std::move(result->pcm); timestampUs = result->timestampUs;
+        discontinuity = result->discontinuity;
+        return true;
+    }
+    return false;
 }
 SceneAudioBus& SceneAudioBus::instance() { static SceneAudioBus bus; return bus; }
 std::shared_ptr<SceneAudioTap> SceneAudioBus::createTap() {

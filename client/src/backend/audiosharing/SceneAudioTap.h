@@ -1,5 +1,6 @@
 #pragma once
 #include <QByteArray>
+#include <QString>
 #include <array>
 #include <atomic>
 #include <memory>
@@ -15,6 +16,7 @@ public:
     void setEnabled(bool enabled); // Consumer / application thread only.
     void push(const float* pcm, int frames, int channels, int rate, qint64 timestampUs);
     bool take(QByteArray& stereo, qint64& timestampUs); // Converts to 48 kHz off the audio callback.
+    bool takeForCapture(QByteArray& stereo, qint64& timestampUs, bool& discontinuity, QString& error);
 private:
     struct Block {
         std::array<float, BlockFrames * MaximumChannels> pcm;

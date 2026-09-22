@@ -19,8 +19,17 @@ bool AudioStreamEncoder::initialize(int bitrateBps, QString& error) {
         if (!d->encoder) { error = QString::fromUtf8(opus_strerror(result)); return false; }
         // Keep music and quiet transients continuous. DTX is intended for voice
         // inactivity; dropping system-audio detail is not an acceptable tradeoff.
-        const std::array<int, 7> settings{
+        const std::array<int, 9> settings{
             opus_encoder_ctl(d->encoder, OPUS_SET_COMPLEXITY(7)),
+            // Two input channels alone do not guarantee stereo packets: Opus
+            // defaults to automatic channel selection. Preserve spatial audio
+            // in both quality profiles, including after a bitrate change.
+            opus_encoder_ctl(d->encoder, OPUS_SET_FORCE_CHANNELS(2)),
+            // AUTO plus FEC can classify quiet system audio as speech and
+            // select SILK/hybrid with zero stereo width even in a two-channel
+            // packet. Preserve spatial fidelity with the public music policy;
+            // at our 5% loss estimate it also avoids FEC forcing speech mode.
+            opus_encoder_ctl(d->encoder, OPUS_SET_SIGNAL(OPUS_SIGNAL_MUSIC)),
             opus_encoder_ctl(d->encoder, OPUS_SET_VBR(1)),
             opus_encoder_ctl(d->encoder, OPUS_SET_VBR_CONSTRAINT(1)),
             opus_encoder_ctl(d->encoder, OPUS_SET_DTX(0)),
