@@ -212,7 +212,8 @@ struct ScreenStreamEncoder::Private {
             if (name == "h264_videotoolbox") {
                 av_dict_set(&options, "realtime", "1", 0);
                 av_dict_set(&options, "allow_sw", "0", 0);
-                av_dict_set(&options, "prio_speed", "1", 0);
+                // Leave the optional speed/quality preference at its default.
+                // Unsupported devices warn on every encoder reopen if forced.
             } else if (name == "h264_nvenc") {
                 av_dict_set(&options, "preset", "p1", 0);
                 av_dict_set(&options, "tune", "ull", 0);
