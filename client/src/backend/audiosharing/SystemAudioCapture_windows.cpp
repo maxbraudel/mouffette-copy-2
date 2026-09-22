@@ -161,7 +161,9 @@ public:
         format.Format.cbSize = sizeof(format) - sizeof(WAVEFORMATEX);
         format.Samples.wValidBitsPerSample = 32;
         format.dwChannelMask = SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT;
-        format.SubFormat = KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
+        // Use the SDK's GUID initializer: MinGW declares the named GUID as an
+        // external symbol that is not supplied by ole32/uuid at link time.
+        format.SubFormat = GUID{STATIC_KSDATAFORMAT_SUBTYPE_IEEE_FLOAT};
         auto* client = completion->client.value;
         // Explicit float layout, as used by native process-loopback clients.
         // There is no physical endpoint mix format to request conversion from.
