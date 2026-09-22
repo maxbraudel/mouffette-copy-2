@@ -46,6 +46,8 @@ Rectangle {
     }
     readonly property var liveTransforms: canvasController ? canvasController.liveTransforms : ({})
     readonly property var hostingWindow: root.Window.window
+    property bool remoteScreenOverlayActive: canvasController
+                                             ? canvasController.remoteScreenOverlayActive : false
     property bool remoteActive: canvasController
                                 ? canvasController.remoteActive : false
     property var screensModel: canvasController
@@ -848,7 +850,19 @@ Rectangle {
                     pixelHeight: modelData.pixelHeight || 0
                     uiZonesModel: root.uiZonesModel
                     frameSource: modelData.frameSource || null
+                    surfaceParent: root.remoteScreenOverlayActive ? screenReturnLayer : null
                 }
+            }
+
+            // Only screen interiors move above media; labels keep their normal layer.
+            Item {
+                id: screenReturnLayer
+                parent: viewport
+                z: 2
+                x: root.panX
+                y: root.panY
+                scale: root.viewScale
+                transformOrigin: Item.TopLeft
             }
 
             MediaLayer {

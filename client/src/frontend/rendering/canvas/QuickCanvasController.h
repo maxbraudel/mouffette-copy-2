@@ -37,6 +37,7 @@ class QuickCanvasController final : public QObject
     Q_PROPERTY(QVariantList uiZonesModel READ uiZonesModel NOTIFY presentationChanged)
     Q_PROPERTY(QVariantList snapGuidesModel READ snapGuidesModel NOTIFY presentationChanged)
     Q_PROPERTY(QVariantMap videoStateModel READ videoStateModel NOTIFY presentationChanged)
+    Q_PROPERTY(bool remoteScreenOverlayActive READ remoteScreenOverlayActive NOTIFY presentationChanged)
     Q_PROPERTY(bool remoteActive READ remoteActive NOTIFY presentationChanged)
     Q_PROPERTY(bool textToolActive READ textToolActive NOTIFY presentationChanged)
     Q_PROPERTY(qreal viewScale READ viewScale NOTIFY presentationChanged)
@@ -84,6 +85,12 @@ public:
     QVariantList uiZonesModel() const { return m_uiZonesModel; }
     QVariantList snapGuidesModel() const { return m_snapGuidesModel; }
     QVariantMap videoStateModel() const { return m_videoStateModel; }
+    bool remoteScreenOverlayActive() const { return m_remoteScreenOverlayActive; }
+    void setRemoteScreenOverlayActive(bool active) {
+        if (m_remoteScreenOverlayActive == active) return;
+        m_remoteScreenOverlayActive = active;
+        emit presentationChanged();
+    }
     bool remoteActive() const { return m_shellActive; }
     bool projectEditingEnabled() const { return m_projectEditingEnabled; }
     bool editingEnabled() const { return m_projectEditingEnabled && !editsLocked(); }
@@ -257,6 +264,7 @@ private:
     QMetaObject::Connection m_screenPreviewWindowDestroyedConnection;
     QJsonValue m_screenPreviewDemand = QJsonValue(QJsonValue::Undefined);
     bool m_textToolActive = false;
+    bool m_remoteScreenOverlayActive = false;
     bool m_shellActive = false;
     bool m_projectEditingEnabled = false;
     QSizeF m_viewportSize;

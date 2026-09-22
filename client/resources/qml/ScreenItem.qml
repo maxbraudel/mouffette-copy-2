@@ -1,7 +1,7 @@
 import QtQuick
 import Mouffette.Canvas
 import Mouffette.App as AppStyle
-Rectangle {
+Item {
     id: root
 
     property real screenX: 0
@@ -19,6 +19,7 @@ Rectangle {
     property int  pixelHeight: 0
     property var uiZonesModel: []
     property var frameSource: null
+    property Item surfaceParent: null
 
     x: screenX
     y: screenY
@@ -27,96 +28,106 @@ Rectangle {
     z: -1000
     clip: false
 
-    color: primary ? AppStyle.Theme.canvasPrimaryScreenBackground : AppStyle.Theme.canvasScreenBackground
-
-    // Per-screen UI zones (taskbar/menu bar/dock) rendered INSIDE this screen,
-    // so they look painted into the screen background rather than global overlays.
-    Item {
-        id: zoneLayer
-        anchors.fill: parent
-        z: 0
+    Rectangle {
+        id: screenSurface
+        parent: root.surfaceParent || root
+        x: root.surfaceParent ? root.x : 0
+        y: root.surfaceParent ? root.y : 0
+        width: root.width
+        height: root.height
         clip: true
-        visible: !screenVideo.hasFrame
+        color: root.primary ? AppStyle.Theme.canvasPrimaryScreenBackground : AppStyle.Theme.canvasScreenBackground
 
-        Repeater {
-            model: root.uiZonesModel || []
-            delegate: Rectangle {
-                readonly property bool belongsToScreen: (modelData && modelData.screenId === root.screenId)
-                readonly property string zoneType: belongsToScreen ? String(modelData.type || "").toLowerCase() : ""
-                readonly property bool systemZone: zoneType === "taskbar" || zoneType === "dock" || zoneType === "menu_bar"
-                visible: belongsToScreen
+        // Per-screen UI zones (taskbar/menu bar/dock) rendered INSIDE this screen,
+        // so they look painted into the screen background rather than global overlays.
+        Item {
+            id: zoneLayer
+            anchors.fill: parent
+            z: 0
+            clip: true
+            visible: !screenVideo.hasFrame
 
-                x: belongsToScreen ? (modelData.x - root.screenX) : 0
-                y: belongsToScreen ? (modelData.y - root.screenY) : 0
-                width: belongsToScreen ? modelData.width : 0
-                height: belongsToScreen ? modelData.height : 0
+            Repeater {
+                model: root.uiZonesModel || []
+                delegate: Rectangle {
+                    readonly property bool belongsToScreen: (modelData && modelData.screenId === root.screenId)
+                    readonly property string zoneType: belongsToScreen ? String(modelData.type || "").toLowerCase() : ""
+                    readonly property bool systemZone: zoneType === "taskbar" || zoneType === "dock" || zoneType === "menu_bar"
+                    visible: belongsToScreen
 
-                color: !belongsToScreen ? "transparent"
-                     : systemZone ? AppStyle.Theme.uiZoneSystemFill : AppStyle.Theme.uiZoneFill
-                border.width: 0
+                    x: belongsToScreen ? (modelData.x - root.screenX) : 0
+                    y: belongsToScreen ? (modelData.y - root.screenY) : 0
+                    width: belongsToScreen ? modelData.width : 0
+                    height: belongsToScreen ? modelData.height : 0
+
+                    color: !belongsToScreen ? "transparent"
+                         : systemZone ? AppStyle.Theme.uiZoneSystemFill : AppStyle.Theme.uiZoneFill
+                    border.width: 0
+                }
             }
         }
-    }
 
-    // The immutable QVideoFrame stays in C++; the existing video scene-graph
-    // item imports its YUV planes directly into the Metal/D3D render pass.
-    RemoteVideoFrameItem {
-        id: screenVideo
-        objectName: "remoteScreenVideo"
-        anchors.fill: parent
-        z: 0
-        frameSource: root.frameSource
-        visible: hasFrame
-    }
-
-    // Zoom-invariant inner border (always 1 screen pixel)
-    // Uses the same counter-scale strategy as the screen label.
-    Item {
-        id: innerBorderOverlay
-        x: 0
-        y: 0
-        z: 1
-        width: Math.max(0, root.screenWidth * root.safeViewScale)
-        height: Math.max(0, root.screenHeight * root.safeViewScale)
-
-        transform: Scale {
-            xScale: 1.0 / root.safeViewScale
-            yScale: 1.0 / root.safeViewScale
-            origin.x: 0
-            origin.y: 0
+        // The immutable QVideoFrame stays in C++; the existing video scene-graph
+        // item imports its YUV planes directly into the Metal/D3D render pass.
+        RemoteVideoFrameItem {
+            id: screenVideo
+            objectName: "remoteScreenVideo"
+            anchors.fill: parent
+            z: 0
+            frameSource: root.frameSource
+            visible: hasFrame
         }
 
-        readonly property color strokeColor: AppStyle.Theme.canvasScreenBorder
-
-        Rectangle {
+        // Zoom-invariant inner border (always 1 screen pixel)
+        // Uses the same counter-scale strategy as the screen label.
+        Item {
+            id: innerBorderOverlay
             x: 0
             y: 0
-            width: innerBorderOverlay.width
-            height: 1
-            color: innerBorderOverlay.strokeColor
+            z: 1
+            width: Math.max(0, root.screenWidth * root.safeViewScale)
+            height: Math.max(0, root.screenHeight * root.safeViewScale)
+
+            transform: Scale {
+                xScale: 1.0 / root.safeViewScale
+                yScale: 1.0 / root.safeViewScale
+                origin.x: 0
+                origin.y: 0
+            }
+
+            readonly property color strokeColor: AppStyle.Theme.canvasScreenBorder
+
+            Rectangle {
+                x: 0
+                y: 0
+                width: innerBorderOverlay.width
+                height: 1
+                color: innerBorderOverlay.strokeColor
+            }
+            Rectangle {
+                x: 0
+                y: Math.max(0, innerBorderOverlay.height - 1)
+                width: innerBorderOverlay.width
+                height: 1
+                color: innerBorderOverlay.strokeColor
+            }
+            Rectangle {
+                x: 0
+                y: 0
+                width: 1
+                height: innerBorderOverlay.height
+                color: innerBorderOverlay.strokeColor
+            }
+            Rectangle {
+                x: Math.max(0, innerBorderOverlay.width - 1)
+                y: 0
+                width: 1
+                height: innerBorderOverlay.height
+                color: innerBorderOverlay.strokeColor
+            }
         }
-        Rectangle {
-            x: 0
-            y: Math.max(0, innerBorderOverlay.height - 1)
-            width: innerBorderOverlay.width
-            height: 1
-            color: innerBorderOverlay.strokeColor
-        }
-        Rectangle {
-            x: 0
-            y: 0
-            width: 1
-            height: innerBorderOverlay.height
-            color: innerBorderOverlay.strokeColor
-        }
-        Rectangle {
-            x: Math.max(0, innerBorderOverlay.width - 1)
-            y: 0
-            width: 1
-            height: innerBorderOverlay.height
-            color: innerBorderOverlay.strokeColor
-        }
-    }
+
+    } // screenSurface
 
     // ── Screen name label ──────────────────────────────────────────────────
     // Rendered at a fixed screen-pixel size regardless of canvas zoom,

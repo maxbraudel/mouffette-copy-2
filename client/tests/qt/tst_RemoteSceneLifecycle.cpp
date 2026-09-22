@@ -45,6 +45,90 @@ private slots:
     {
         MediaResidencyManager::instance().clearMemorySnapshotForTesting();
     }
+    void remoteFeedbackFollowsButtons_data()
+    {
+        QTest::addColumn<bool>("screen");
+        QTest::addColumn<bool>("audio");
+        for (bool screen : {false, true})
+            for (bool audio : {false, true})
+                QTest::newRow(qPrintable(QString("screen-%1-audio-%2").arg(screen).arg(audio))) << screen << audio;
+    }
+
+    void remoteFeedbackFollowsButtons()
+    {
+        QFETCH(bool, screen);
+        QFETCH(bool, audio);
+        std::unique_ptr<QuickCanvasHost> host(QuickCanvasHost::create());
+        QVERIFY(host);
+        auto* media = host->document()->addPreparedFile(QString::fromUtf8(TEST_VIDEO_FILE),
+                                                       QSize(160, 90), true, {});
+        QVERIFY(media);
+        QTRY_VERIFY_WITH_TIMEOUT(media->residencyReady(), 5000);
+        media->setMuted(false);
+        media->setVolume(0.4);
+        const auto saved = host->serializeProjectState();
+        host->setRemoteFeedbackEnabled(screen, audio);
+        QVERIFY(!host->controller()->remoteScreenOverlayActive());
+        QVERIFY(!host->remoteFeedbackAudioSuppressed());
+        // No received frame, audio stream or network connection is required:
+        // the buttons alone determine suppression during the presentation.
+        host->beginScenePresentation(true);
+        QCOMPARE(host->controller()->remoteScreenOverlayActive(), screen);
+        QCOMPARE(media->player()->audioOutput()->isMuted(), audio);
+        QCOMPARE(media->player()->audioOutput()->volume(), 0.4f);
+        host->setRemoteFeedbackEnabled(!screen, !audio);
+        QCOMPARE(host->controller()->remoteScreenOverlayActive(), !screen);
+        QCOMPARE(media->player()->audioOutput()->isMuted(), !audio);
+        host->applyTimeline(100, true);
+        QCOMPARE(media->player()->audioOutput()->isMuted(), !audio);
+        QVERIFY(!media->muted());
+        media->setMuted(true);
+        host->setRemoteFeedbackEnabled(false, false);
+        QVERIFY(media->player()->audioOutput()->isMuted());
+        media->setMuted(false);
+        host->stopScenePresentation();
+        QVERIFY(!host->controller()->remoteScreenOverlayActive());
+        QVERIFY(!host->remoteFeedbackAudioSuppressed());
+        QCOMPARE(host->serializeProjectState(), saved);
+        host->setRemoteFeedbackEnabled(true, true);
+        host->beginScenePresentation(false);
+        QVERIFY(!host->controller()->remoteScreenOverlayActive());
+        QVERIFY(!media->player()->audioOutput()->isMuted());
+        host->stopScenePresentation();
+    }
+
+    void remoteFeedbackClearedAtTermination_data()
+    {
+        QTest::addColumn<QString>("reason");
+        for (const auto* reason : {"stop", "finish", "failure", "disconnect"})
+            QTest::newRow(reason) << QString::fromLatin1(reason);
+    }
+
+    void remoteFeedbackClearedAtTermination()
+    {
+        QFETCH(QString, reason);
+        std::unique_ptr<QuickCanvasHost> host(QuickCanvasHost::create());
+        QVERIFY(host);
+        host->document()->addText({}, "Remote");
+        host->setRemoteFeedbackEnabled(true, true);
+        host->beginScenePresentation(true);
+        QVERIFY(host->controller()->remoteScreenOverlayActive());
+        QVERIFY(host->remoteFeedbackAudioSuppressed());
+        if (reason == "failure") host->failScene("test", false);
+        else if (reason == "disconnect") host->handleRemoteConnectionLost();
+        else if (reason == "finish") {
+            host->m_timelineAnchorPositionMs = host->timelineStopMs();
+            host->advanceTimeline();
+        } else host->stopScenePresentation();
+        QVERIFY(!host->controller()->remoteScreenOverlayActive());
+        QVERIFY(!host->remoteFeedbackAudioSuppressed());
+        // Cleanup is idempotent; the preferences remain for the next run.
+        host->stopScenePresentation();
+        host->beginScenePresentation(true);
+        QVERIFY(host->controller()->remoteScreenOverlayActive());
+        host->stopScenePresentation();
+    }
+
     void remoteTimelineLocksManualNavigation_data()
     {
         QTest::addColumn<QString>("phase");

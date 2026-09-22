@@ -2075,6 +2075,58 @@ private slots:
         scene.clear();
         QVERIFY(!scene.root->property("anyMediaEditing").toBool());
     }
+    void remoteScreenOverlayClipsMedia_data()
+    {
+        QTest::addColumn<QString>("type");
+        for (const auto* type : {"image", "video", "text"})
+            QTest::newRow(type) << QString::fromLatin1(type);
+    }
+
+    void remoteScreenOverlayClipsMedia()
+    {
+        QFETCH(QString, type);
+        CanvasFixture scene;
+        QVERIFY2(scene.initialize(), qPrintable(scene.error));
+        RemoteVideoFrameSource foreground;
+        QImage pixels(280, 170, QImage::Format_RGBA8888);
+        pixels.fill(Qt::red);
+        foreground.setFrame(pixels);
+        scene.add("spanning", type, 100, 150);
+        scene.change("spanning", {{type == "image" ? "residentFrameSource" : "remoteFrameSource",
+                                  QVariant::fromValue(&foreground)}});
+        RemoteVideoFrameSource screenFrame;
+        scene.root->setProperty("screensModel", QVariantList{
+            QVariantMap{{"x", 140}, {"y", 160}, {"width", 60}, {"height", 140}, {"primary", false},
+                        {"frameSource", QVariant::fromValue(&screenFrame)}},
+            QVariantMap{{"x", 240}, {"y", 160}, {"width", 60}, {"height", 140}, {"primary", false}}});
+        for (qreal scale : {1.0, 1.5}) {
+            scene.root->setProperty("viewScale", scale);
+            scene.root->setProperty("panX", 20.0);
+            scene.root->setProperty("panY", 10.0);
+            const auto point = [scale](int x, int y) { return QPoint(qRound(x * scale + 20), qRound(y * scale + 10)); };
+            scene.root->setProperty("remoteScreenOverlayActive", false);
+            QTest::qWait(50);
+            const auto outside = scene.pixelAt(point(120, 230));
+            const auto gap = scene.pixelAt(point(220, 230));
+            const auto inside = scene.pixelAt(point(170, 230));
+            scene.root->setProperty("remoteScreenOverlayActive", true);
+            QTRY_VERIFY(scene.pixelAt(point(170, 230)) != inside);
+            QCOMPARE(scene.pixelAt(point(120, 230)), outside);
+            QCOMPARE(scene.pixelAt(point(220, 230)), gap);
+            QCOMPARE(scene.pixelAt(point(170, 230)), scene.pixelAt(point(270, 230)));
+            const auto emptyScreen = scene.pixelAt(point(170, 230));
+            pixels.fill(Qt::blue);
+            screenFrame.setFrame(pixels);
+            QTRY_COMPARE(scene.pixelAt(point(170, 230)), QColor(Qt::blue));
+            QCOMPARE(scene.pixelAt(point(120, 230)), outside);
+            QCOMPARE(scene.pixelAt(point(220, 230)), gap);
+            screenFrame.setFrame(QImage());
+            QTRY_COMPARE(scene.pixelAt(point(170, 230)), emptyScreen);
+            scene.root->setProperty("remoteScreenOverlayActive", false);
+            QTRY_COMPARE(scene.pixelAt(point(170, 230)), inside);
+        }
+    }
+
 };
 
 QTEST_MAIN(CanvasInteractionTest)
