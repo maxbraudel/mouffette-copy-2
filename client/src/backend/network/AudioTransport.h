@@ -17,6 +17,9 @@ public:
     void setSubscription(const QString& remoteSessionId, quint64 generation, bool enabled);
     void setSuspended(bool suspended);
     void setSourceBudget(int totalBps);
+    // Video and audio use the same source clock; receipt uses MediaCaptureClock.
+    void observeVideoTimestamp(qint64 sourceUs, qint64 receivedAtUs);
+    qint64 playbackTimeUs(qint64 sourceUs) const;
     bool sendPacket(const QByteArray& opus, qint64 timestampUs);
     void sendStatus(const QString& reason);
     void sendPlaybackFeedback(int droppedPackets, int bufferedMs);

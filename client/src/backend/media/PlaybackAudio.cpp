@@ -1,6 +1,7 @@
 #include "backend/media/PlaybackAudio.h"
 #include "backend/media/IndexedMediaDecoder.h"
 #include "backend/audiosharing/AudioWorkerClient.h"
+#include "backend/audiosharing/MediaCaptureClock.h"
 #include <QAudioDevice>
 #include <QCoreApplication>
 #include <QAudioOutput>
@@ -13,11 +14,10 @@
 #include <QtConcurrent/QtConcurrentRun>
 #include <array>
 #include <atomic>
-#include <chrono>
 #include <vector>
 
 namespace {
-qint64 nowUs() { return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
+qint64 nowUs() { return MediaCaptureClock::nowUs(); }
 std::atomic<quint64> pcmBytes{0};
 std::atomic<quint64> decodeRequests{0};
 static_assert(std::atomic<qint64>::is_always_lock_free && std::atomic<float>::is_always_lock_free

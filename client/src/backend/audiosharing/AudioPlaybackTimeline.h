@@ -11,7 +11,23 @@ public:
     static constexpr qint64 PacketUs = 20000, TargetDelayUs = 80000, MaximumDelayUs = 150000;
     qint64 sourceAt(qint64 localUs) const { return remoteAnchor + localUs - localAnchor; }
     void reset() { started = false; }
-    Decision enqueue(qint64 timestampUs, qint64 arrivalUs, bool full = false) {
+    Decision enqueue(qint64 timestampUs, qint64 arrivalUs, bool full = false, qint64 presentationUs = -1) {
+        if (presentationUs >= 0) {
+            // The network uses the fastest audio/video observations of this
+            // source clock. Delayed audio cannot establish a later live edge.
+            if (presentationUs + PacketUs <= arrivalUs
+                || presentationUs - arrivalUs > MaximumDelayUs) return {};
+            const bool rebuffer = !started || full
+                || std::abs((timestampUs - sourceAt(arrivalUs)) - (presentationUs - arrivalUs)) > MaximumDelayUs;
+            remoteAnchor = timestampUs;
+            localAnchor = presentationUs;
+            lastArrival = arrivalUs;
+            lastTimestamp = timestampUs;
+            smoothedMargin = presentationUs - arrivalUs;
+            started = true;
+            latePackets = 0;
+            return {true, rebuffer};
+        }
         bool rebuffer = !started || full || arrivalUs - lastArrival > 300000
             || timestampUs < lastTimestamp - 1000000;
         const qint64 margin = started ? timestampUs - sourceAt(arrivalUs) : TargetDelayUs;

@@ -85,11 +85,16 @@ void updateLayerProfiles(CaptureMailbox& state, const QHash<QString, ScreenStrea
     state.changed.wakeOne();
 }
 
-void submitCaptureFrame(CaptureMailbox& state, const QVideoFrame& frame) {
+void submitCaptureFrame(CaptureMailbox& state, const QVideoFrame& frame, bool hostTimestamp = false) {
     if (state.closed) return;
     if (frame.isValid() && state.expectedNativeSize.isValid() && frame.size() != state.expectedNativeSize) return;
     state.latest = frame;
-    if (frame.isValid()) state.capturedAtUs = state.timestampMapper.map(frame.startTime(), MediaCaptureClock::nowUs());
+    if (frame.isValid()) {
+        const auto now = MediaCaptureClock::nowUs();
+        state.capturedAtUs = hostTimestamp
+            ? CaptureTimestampMapper::hostTimestamp(frame.startTime(), now)
+            : state.timestampMapper.map(frame.startTime(), now);
+    }
     if (!frame.isValid()) {
         for (auto& layer : state.layers) {
             layer.epoch = ++state.nextLayerEpoch;
@@ -415,7 +420,13 @@ bool ScreenCaptureSource::start(QScreen* screen) {
     d->worker = std::make_unique<CaptureWorker>(this, d->mailbox);
     const auto submit = [mailbox = d->mailbox](const QVideoFrame& frame) {
             QMutexLocker lock(&mailbox->mutex);
-            submitCaptureFrame(*mailbox, frame);
+            submitCaptureFrame(*mailbox, frame,
+#ifdef Q_OS_MACOS
+                true
+#else
+                false
+#endif
+            );
         };
 #ifndef Q_OS_MACOS
     d->frameConnection = connect(&d->sink, &QVideoSink::videoFrameChanged, this, submit, Qt::DirectConnection);

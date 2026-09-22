@@ -47,7 +47,7 @@ class AudioShareRelay {
         this.publications = new Map(); this.subscriptions = new Map(); this.windows = new Map();
         this.maxViewers = server.config?.screenMaxViewersPerPublisher ?? 10;
         this.maxPublications = server.config?.screenMaxPublications ?? 256;
-        this.ackTimeoutMs = 3000; this.maxBufferedBytes = 32768; this.maxInflight = 128;
+        this.ackTimeoutMs = 500; this.maxBufferedBytes = 4096; this.maxInflight = 16;
         this.queueTargetMs = 150; this.lastSweep = 0; this.nextEgressAt = 0; this.deliveryTurn = 0;
     }
     current(client) { return this.server.screenShare.current(client); }
@@ -182,7 +182,8 @@ class AudioShareRelay {
                 publication = this.publications.get(target);
                 if (!publication && this.publications.size < this.maxPublications) {
                     publication = {client:target,socket:this.socket(target,'publish'),id:crypto.randomUUID(),bitrate:96000,
-                        sequence:0,timestampUs:-1,nextIngressAt:0,badSince:null,healthySince:null,reason:'starting'};
+                        sequence:0,timestampUs:-1,nextIngressAt:0,badSince:null,healthySince:null,reason:'starting',
+                        bestArrivalOffsetUs:null,lastArrivalUs:0};
                     this.publications.set(target,publication);
                     this.send(target,{type:'audio_publication_request',enabled:true,publicationId:publication.id,bitrateBps:publication.bitrate});
                 }
@@ -259,6 +260,14 @@ class AudioShareRelay {
         ws.send(encodeAudioAck(frame.epoch,frame.sequence),{binary:true,compress:false});
         if (!['starting','streaming'].includes(publication.reason)) return true;
         const now = this.server.monotonicNow();
+        // A delayed publishing TCP burst must not become new live sound. The
+        // minimum source/arrival offset has no dependency on clock epochs and
+        // only allows 200 ppm of drift, not a multi-second queue reset.
+        const arrivalUs=now*1000,offsetUs=arrivalUs-frame.timestampUs;
+        publication.bestArrivalOffsetUs=publication.bestArrivalOffsetUs===null ? offsetUs
+            : Math.min(offsetUs,publication.bestArrivalOffsetUs+Math.max(0,arrivalUs-publication.lastArrivalUs)/5000);
+        publication.lastArrivalUs=arrivalUs;
+        if(offsetUs-publication.bestArrivalOffsetUs>150000) return true;
         // Bound malicious ingress bursts without retaining compressed sound.
         if (publication.nextIngressAt > now + 100) return true;
         publication.nextIngressAt = Math.max(now,publication.nextIngressAt)+20;
@@ -270,7 +279,8 @@ class AudioShareRelay {
             if (entry.publication !== publication || this.allowed(entry) !== 'ready') continue;
             const output = this.socket(this.client(entry.session.ownerEndpointId),'view'), window = this.window(output);
             const oldest = window.frames.values().next().value;
-            const grace = window.baseline === null ? 1000 : window.baseline + this.queueTargetMs;
+            if(oldest && now-oldest.sentAt>=this.ackTimeoutMs) { this.abort(output); continue; }
+            const grace = window.baseline === null ? 250 : Math.min(250,window.baseline + this.queueTargetMs);
             if (window.frames.size >= this.maxInflight || window.bytes+data.length > this.maxBufferedBytes
                 || (output.bufferedAmount || 0)+data.length > this.maxBufferedBytes
                 || (oldest && now-oldest.sentAt > grace) || window.nextSendAt > now+100 || this.nextEgressAt > now+100) {
@@ -293,6 +303,8 @@ class AudioShareRelay {
         if (!pending) return true;
         window.frames.delete(key); window.bytes -= pending.bytes;
         const now = this.server.monotonicNow(), rtt = now-pending.sentAt;
+        // A late first ACK cannot normalize a seconds-old queue as baseline.
+        if(rtt>=this.ackTimeoutMs) { this.abort(ws); return true; }
         if (window.baseline === null || rtt <= window.baseline || now-window.baselineAt > 30000) { window.baseline=rtt; window.baselineAt=now; }
         if (rtt > window.baseline+this.queueTargetMs) this.congested(pending.entry,now);
         else if (now-pending.entry.congestedUntil > 3000 && now-(pending.entry.lastIncrease ?? 0) > 1000) {

@@ -148,6 +148,50 @@ const frame=(publication,sequence=1,timestamp=20000)=>encodeAudioPacket(publicat
     assert.equal(source.audioBudgetBps,1200000);
 }
 
+// A publishing TCP backlog is acknowledged and discarded, never rebased as
+// current audio. The next live packet resumes without replaying that backlog.
+{
+    const c=context(),source=c.client('source'),input=c.connect(source,'publish'); c.consent(source);
+    const viewer=c.client('viewer'),output=c.connect(viewer,'view'),{entry}=c.subscribe(viewer,source);
+    const publication=entry.publication;
+    input.emit('message',frame(publication,1,1000000),true);
+    c.relay.handleAck(viewer,output,encodeAudioAck(entry.streamId,1));
+    c.tick(2000);
+    for(let sequence=2;sequence<=11;++sequence) {
+        input.emit('message',frame(publication,sequence,1000000+(sequence-1)*20000),true);
+        c.tick(20);
+    }
+    assert.equal(frames(output).length,1,'seconds-old audio must not establish a new arrival baseline');
+    assert.equal(receipts(input).length,11,'discarded stale audio still frees its exact source credit');
+    input.emit('message',frame(publication,12,3200000),true);
+    assert.equal(frames(output).length,2);
+    assert.equal(frames(output).at(-1).timestampUs,3200000);
+}
+// A late first ACK cannot teach the relay that seconds of latency are normal.
+// Only its disposable audio socket is retired; other viewers continue live.
+{
+    const c=context(),source=c.client('source'),input=c.connect(source,'publish'); c.consent(source);
+    const slow=c.client('slow'),slowWs=c.connect(slow,'view'),slowView=c.subscribe(slow,source);
+    const fast=c.client('fast'),fastWs=c.connect(fast,'view'),fastView=c.subscribe(fast,source);
+    const publication=fastView.entry.publication;
+    input.emit('message',frame(publication,1,1000000),true);
+    c.relay.handleAck(fast,fastWs,encodeAudioAck(fastView.entry.streamId,1));
+    c.tick(501);
+    c.relay.handleAck(slow,slowWs,encodeAudioAck(slowView.entry.streamId,1));
+    assert.equal(slowWs.readyState,3); assert.equal(slow.ws.readyState,1);
+    input.emit('message',frame(publication,2,1501000),true);
+    assert.equal(frames(fastWs).length,2); assert.equal(fastWs.readyState,1);
+}
+// Admission itself also retires an expired pipe even before the next sweep.
+{
+    const c=context(),source=c.client('source'),input=c.connect(source,'publish'); c.consent(source);
+    const viewer=c.client('viewer'),output=c.connect(viewer,'view'),{entry}=c.subscribe(viewer,source);
+    const publication=entry.publication;
+    input.emit('message',frame(publication,1,1000000),true);
+    c.tick(501); input.emit('message',frame(publication,2,1501000),true);
+    assert.equal(output.readyState,3); assert.equal(frames(output).length,1);
+}
+
 // The aggregate audio pacer accounts for every recipient, even when their
 // requested reservations exceed the relay's complete media egress ceiling.
 {

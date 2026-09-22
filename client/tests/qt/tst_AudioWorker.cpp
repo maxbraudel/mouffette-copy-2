@@ -8,6 +8,8 @@
 #include <QAudioSink>
 #include <QLocalServer>
 #include <QMediaDevices>
+#include <QProcess>
+#include <QScopeGuard>
 #include <QSignalSpy>
 #include <QTimer>
 #include <QUuid>
@@ -130,6 +132,87 @@ private slots:
             QVERIFY(margin > 40000 && margin <= 150000);
         }
     }
+    void lateAudioUsesTheVideoDeadlineInsteadOfStartingAnotherBuffer() {
+        AudioPlaybackTimeline timeline;
+        const qint64 source = 900000000;
+        // Video established source->local=1s; audio arrives 70ms later.
+        auto decision = timeline.enqueue(source, 1070000, false, 1080000);
+        QVERIFY(decision.accept);
+        QCOMPARE(timeline.sourceAt(1080000), source);
+        // An expired packet must not turn its late arrival into a new epoch.
+        decision = timeline.enqueue(source + 20000, 3100000, false, 1100000);
+        QVERIFY(!decision.accept);
+        QCOMPARE(timeline.sourceAt(1100000), source + 20000);
+        decision = timeline.enqueue(source + 2200000, 3260000, false, 3280000);
+        QVERIFY(decision.accept);
+        QCOMPARE(timeline.sourceAt(3280000), source + 2200000);
+    }
+    void helperDiscardsAudioDelayedInsideTheLocalSocket() {
+        if (QMediaDevices::defaultAudioOutput().isNull()) QSKIP("No audio output");
+        QLocalServer server;
+        server.setSocketOptions(QLocalServer::UserAccessOption);
+        const auto name = QStringLiteral("mft-%1").arg(QUuid::createUuid().toString(QUuid::WithoutBraces));
+        QVERIFY2(server.listen(name), qPrintable(server.errorString()));
+        QProcess helper;
+        const auto cleanup = qScopeGuard([&] {
+            if (helper.state() != QProcess::NotRunning) {
+                helper.terminate();
+                if (!helper.waitForFinished(1000)) { helper.kill(); helper.waitForFinished(1000); }
+            }
+        });
+        helper.start(qApp->property("mouffetteAudioWorkerExecutable").toString(),
+            {QStringLiteral("--audio-worker"), name, QStringLiteral("test-token")});
+        QTRY_VERIFY_WITH_TIMEOUT(server.hasPendingConnections(), 5000);
+        auto* socket = server.nextPendingConnection();
+        QByteArray input;
+        QList<QCborMap> messages;
+        auto receive = [&] {
+            input += socket->readAll();
+            QCborMap message; bool malformed = false;
+            while (AudioWorkerProtocol::take(input, message, malformed)) messages.append(message);
+        };
+        const auto receiveConnection = connect(socket, &QLocalSocket::readyRead, this, receive);
+        const auto disconnectReceiver = qScopeGuard([&] { disconnect(receiveConnection); });
+        receive();
+        QTRY_VERIFY_WITH_TIMEOUT(!messages.isEmpty(), 3000);
+        QCOMPARE(messages.first().value(QStringLiteral("token")).toString(), QStringLiteral("test-token"));
+        auto clockCount = [&] {
+            return std::count_if(messages.cbegin(), messages.cend(), [](const auto& message) {
+                return message.value(QStringLiteral("type")).toString() == QLatin1String("clock");
+            });
+        };
+        AudioStreamEncoder encoder; QString error;
+        QVERIFY(encoder.initialize(96000, error));
+        std::array<float, 1920> silence{};
+        const auto opus = encoder.encode(silence.data(), error);
+        quint64 sequence = 0;
+        auto sendPacket = [&](qint64 age) {
+            const auto time = AudioWorkerClient::nowUs();
+            return AudioWorkerProtocol::send(socket, {
+                {QStringLiteral("type"), QStringLiteral("play")},
+                {QStringLiteral("source"), QStringLiteral("endpoint")},
+                {QStringLiteral("epoch"), QStringLiteral("epoch")},
+                {QStringLiteral("sequence"), qint64(++sequence)},
+                {QStringLiteral("timestamp"), time - age},
+                {QStringLiteral("receivedAt"), time - age},
+                {QStringLiteral("opus"), opus}
+            });
+        };
+        // A kernel IPC backlog was invisible to bytesToWrite(). It previously
+        // reached the helper and became a fresh 80ms playback buffer.
+        for (int i = 0; i < 4; ++i) QVERIFY(sendPacket(2000000));
+        QTest::qWait(250);
+        QCOMPARE(clockCount(), 0);
+        QTimer producer;
+        producer.setInterval(20);
+        connect(&producer, &QTimer::timeout, this, [&] { sendPacket(0); });
+        producer.start();
+        QTRY_VERIFY_WITH_TIMEOUT(clockCount() > 0, 3000);
+        producer.stop();
+        QVERIFY(AudioWorkerProtocol::sendControl(socket, {{QStringLiteral("type"), QStringLiteral("quit")}}));
+        QTRY_COMPARE_WITH_TIMEOUT(helper.state(), QProcess::NotRunning, 3000);
+        QCOMPARE(helper.exitCode(), 0);
+    }
     void helperHandshakeAndSharedConsumption() {
         AudioWorkerClient client;
         QSignalSpy state(&client, &AudioWorkerClient::captureStateChanged);
@@ -165,6 +248,11 @@ private slots:
         if (QMediaDevices::defaultAudioOutput().isNull()) QSKIP("No audio output");
         AudioWorkerClient client; QSignalSpy state(&client, &AudioWorkerClient::captureStateChanged);
         QSignalSpy clocks(&client, &AudioWorkerClient::playbackClock);
+        QList<qint64> playbackAges;
+        connect(&client, &AudioWorkerClient::playbackClock, &client,
+            [&playbackAges](const QString&, const QString&, qint64 sourceTimestamp) {
+                playbackAges.append(AudioWorkerClient::nowUs() - sourceTimestamp);
+            });
         auto preview = client.createPreviewChannel(); QVERIFY(preview);
         QTRY_VERIFY_WITH_TIMEOUT(!state.isEmpty(), 5000);
         AudioStreamEncoder encoder; QString error; QVERIFY(encoder.initialize(96000, error));
@@ -173,7 +261,8 @@ private slots:
         QString epoch = QStringLiteral("first"); quint64 sequence = 0;
         QTimer producer; producer.setInterval(20);
         connect(&producer, &QTimer::timeout, &client, [&] {
-            client.playPacket(QStringLiteral("endpoint"), epoch, ++sequence, AudioWorkerClient::nowUs(), opus);
+            const auto now = AudioWorkerClient::nowUs();
+            client.playPacket(QStringLiteral("endpoint"), epoch, ++sequence, now, opus, now + 80000);
         });
         producer.start(); QTRY_VERIFY_WITH_TIMEOUT(!clocks.isEmpty(), 3000);
         QCOMPARE(clocks.last().at(0).toString(), QStringLiteral("endpoint")); QCOMPARE(clocks.last().at(1).toString(), epoch);
@@ -182,6 +271,9 @@ private slots:
         QTRY_VERIFY_WITH_TIMEOUT(!clocks.isEmpty(), 3000); QCOMPARE(clocks.last().at(1).toString(), epoch);
         producer.stop(); client.resetPlayback(QStringLiteral("endpoint")); QTest::qWait(80);
         clocks.clear(); QTest::qWait(150); QVERIFY(clocks.isEmpty());
+        QVERIFY(!playbackAges.isEmpty());
+        const auto maximumAge = *std::max_element(playbackAges.cbegin(), playbackAges.cend());
+        QVERIFY2(maximumAge < 250000, qPrintable(QStringLiteral("Remote playback clock lagged by %1 us").arg(maximumAge)));
         client.shutdown();
     }
     void nativeCaptureSmokeOptIn() {
@@ -189,6 +281,15 @@ private slots:
             QSKIP("Set MOUFFETTE_TEST_SYSTEM_AUDIO_CAPTURE=1 to test the authorized native capture backend");
         AudioWorkerClient client; QSignalSpy state(&client, &AudioWorkerClient::captureStateChanged);
         QSignalSpy packets(&client, &AudioWorkerClient::packetReady);
+        QList<qint64> ages, arrivalGaps;
+        qint64 lastArrival = 0;
+        connect(&client, &AudioWorkerClient::packetReady, &client,
+            [&ages, &arrivalGaps, &lastArrival](const QString&, quint64, qint64 timestamp, const QByteArray&) {
+                const auto arrival = AudioWorkerClient::nowUs();
+                ages.append(arrival - timestamp);
+                if (lastArrival) arrivalGaps.append(arrival - lastArrival);
+                lastArrival = arrival;
+            });
         const auto epoch = QUuid::createUuid().toString();
         client.startCapture(epoch);
         QTRY_VERIFY_WITH_TIMEOUT(!state.isEmpty(), 10000);
@@ -224,6 +325,15 @@ private slots:
             for (int sample = 0; sample < 960 * 2; ++sample) QVERIFY(std::isfinite(samples[sample]));
             previousSequence = sequence; previousTimestamp = timestamp;
         }
+        QTest::qWait(2000);
+        QVERIFY(ages.size() >= 3 && !arrivalGaps.isEmpty());
+        qint64 sum = 0;
+        for (const auto age : ages) sum += age;
+        qInfo().nospace() << "native_capture_probe packets=" << ages.size()
+            << " age_us_avg=" << (sum / ages.size())
+            << " age_us_min=" << *std::min_element(ages.cbegin(), ages.cend())
+            << " age_us_max=" << *std::max_element(ages.cbegin(), ages.cend())
+            << " arrival_gap_us_max=" << *std::max_element(arrivalGaps.cbegin(), arrivalGaps.cend());
         silence.stop();
         state.clear(); client.stopCapture(); QTRY_VERIFY_WITH_TIMEOUT(!state.isEmpty(), 3000);
         QCOMPARE(state.last().at(0).toBool(), false);

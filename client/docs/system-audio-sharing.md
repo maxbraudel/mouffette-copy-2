@@ -58,19 +58,29 @@ quality without lowering the other viewers' video quality. Audio reservations
 are deducted from existing source/viewer/relay preview budgets. Real TCP/TLS
 headers and retransmissions add traffic beyond application byte budgets.
 
-Native capture timestamps are mapped to a common monotonic source clock and kept
-through the codec and relay. Network timeouts continue using local arrival clocks.
-Audio starts with an 80 ms jitter allowance and drops stale queued sound instead
-of accumulating delay. Video may wait at most an additional 40 ms for the current
+Native capture timestamps use a common monotonic source clock and are kept
+through the codec and relay. On macOS this is the CoreMedia host clock's
+`mach_absolute_time` epoch, including after sleep; native capture timestamps are
+never reanchored to a delayed first callback. Windows uses QPC directly, matching
+WASAPI's native sample timestamps. Network timeouts continue using local arrival
+clocks.
+
+The fastest observed audio/video transit establishes the source-to-viewer clock
+mapping. Audio's 80 ms jitter allowance starts from that shared mapping, rather
+than adding another buffer after an already delayed audio arrival. The helper
+receives an absolute local playback deadline and discards expired packets. Source
+and listener IPC also enforce packet age limits, including data buffered inside
+the operating system's sockets. Audio acknowledgement deadlines and small flight
+windows prevent TCP backlogs from turning into seconds of delayed playback.
+Video may wait at most an additional 40 ms for the current
 audio consumption clock, with only one decoded image waiting per screen. Without
 an active recent audio clock, video presents immediately. This is bounded preview
 synchronization, not a promise of perfect synchronization on a congested link.
 
-The capture backend applies the default output device's exposed digital gain and
-mute once. The receiver adds no remote-volume attenuation; its own speaker/device
-volume still applies normally. The displayed percentage remains a UI reading,
-not an assumed linear multiplier. Multiple physical outputs, fixed-volume HDMI
-devices and external amplifiers can prevent exact reconstruction of acoustic level.
+The capture backend forwards the system mix at its native level. It does not
+read or reapply the sharing computer's speaker volume or mute. The viewer's
+own speaker/device volume and the canvas mute button control listening. This
+does not normalize media or undo individual applications' own mix levels.
 
 ## Validation
 
@@ -83,6 +93,9 @@ Native release qualification must additionally exercise two physical computers:
 an animated desktop behind control windows, received scenes, three monitors,
 mutual listening without echo, system volume/mute and balance, device hotplug,
 permission denial, sleep/reconnect, concurrent upload and weak-link recovery.
+Changing the publisher's output-device volume or mute must not change the shared
+mix; changing an application's own level still does. The viewer's canvas mute
+must stop only remote monitoring.
 Use a flash/bip source and measure A/V offset over a long session; target less than
 100 ms on a stable link. Qualify macOS, Windows 10 22H2 and Windows 11 separately.
 Platform behavior and acoustic synchronization cannot be certified by synthetic

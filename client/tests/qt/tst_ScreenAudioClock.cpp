@@ -38,6 +38,11 @@ private slots:
         QCOMPARE(second.map(20000000, 20008000), 20000000);
         QCOMPARE(first.map(22000000, 22001000), 22000000);
     }
+    void delayedHostTimestampsNeverBecomeFreshByReanchoring() {
+        QCOMPARE(CaptureTimestampMapper::hostTimestamp(20000000, 23000000), 20000000);
+        QCOMPARE(CaptureTimestampMapper::hostTimestamp(20000000, 20008000), 20000000);
+        QCOMPARE(CaptureTimestampMapper::hostTimestamp(-1, 23000000), 23000000);
+    }
 };
 QTEST_GUILESS_MAIN(ScreenAudioClockTest)
 #include "tst_ScreenAudioClock.moc"

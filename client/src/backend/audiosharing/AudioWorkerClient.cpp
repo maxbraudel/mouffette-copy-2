@@ -147,8 +147,13 @@ void AudioWorkerClient::readMessages() {
             replayPreviews();
         } else if (type == QLatin1String("packet")) {
             if (!d->capture || message.value(QStringLiteral("epoch")).toString() != d->captureEpoch) continue;
+            const auto timestamp = message.value(QStringLiteral("timestamp")).toInteger(-1);
+            const auto age = nowUs() - timestamp;
+            // A blocked UI can leave old packets inside the local socket's
+            // kernel buffer even when bytesToWrite() was zero in the helper.
+            if (timestamp < 0 || age < -250000 || age > 150000) continue;
             emit packetReady(d->captureEpoch, quint64(message.value(QStringLiteral("sequence")).toInteger()),
-                message.value(QStringLiteral("timestamp")).toInteger(), message.value(QStringLiteral("opus")).toByteArray());
+                timestamp, message.value(QStringLiteral("opus")).toByteArray());
         } else if (type == QLatin1String("capture-state")) {
             const auto epoch = message.value(QStringLiteral("epoch")).toString();
             const bool active = message.value(QStringLiteral("active")).toBool();
@@ -193,12 +198,14 @@ void AudioWorkerClient::setCaptureBitrate(int bitrateBps) {
 }
 void AudioWorkerClient::stopCapture() { d->capture = false; if (d->ready) d->sendCapture(); }
 void AudioWorkerClient::playPacket(const QString& source, const QString& epoch, quint64 sequence,
-                                  qint64 timestampUs, const QByteArray& opus) {
+                                  qint64 timestampUs, const QByteArray& opus, qint64 presentationUs) {
     if (d->muted || source.isEmpty() || epoch.isEmpty() || opus.isEmpty() || opus.size() > 1275 || timestampUs < 0) return;
     ensureWorker(); if (!d->ready) return; // A live stream never accumulates startup packets.
     auto message = command("play");
     message.insert(QStringLiteral("source"), source); message.insert(QStringLiteral("epoch"), epoch);
     message.insert(QStringLiteral("sequence"), qint64(sequence)); message.insert(QStringLiteral("timestamp"), timestampUs);
+    message.insert(QStringLiteral("receivedAt"), nowUs());
+    message.insert(QStringLiteral("presentation"), presentationUs);
     message.insert(QStringLiteral("opus"), opus); AudioWorkerProtocol::send(d->socket, message);
 }
 void AudioWorkerClient::resetPlayback(const QString& source) {

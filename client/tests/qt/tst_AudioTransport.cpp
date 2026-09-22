@@ -1,5 +1,7 @@
 #include "backend/network/AudioTransport.h"
 #include "backend/network/AudioWire.h"
+#include "backend/network/AudioPacketFreshness.h"
+#include "backend/audiosharing/MediaCaptureClock.h"
 #include "backend/network/WebSocketClient.h"
 #include "backend/network/RemoteSessionCoordinator.h"
 #include <QProcess>
@@ -72,6 +74,27 @@ private slots:
         QVERIFY(!AudioWire::parse(AudioWire::packet(epoch,1,1,{}),decoded));
         QVERIFY(!AudioWire::parse(AudioWire::packet(epoch,1,1,QByteArray(1276,'x')),decoded));
     }
+    void staleAudioCannotResetTheArrivalBaseline() {
+        AudioPacketFreshness freshness;
+        QCOMPARE(freshness.localTimeUs(5000000),qint64(-1));
+        // A current video frame seeds the source clock before delayed audio.
+        QVERIFY(freshness.observe(5000000,10000000));
+        QCOMPARE(freshness.localTimeUs(5040000),qint64(10040000));
+        QVERIFY(!freshness.observe(3000000,10010000));
+        QVERIFY(!freshness.observe(3020000,10030000));
+        QCOMPARE(freshness.localTimeUs(5040000),qint64(10040000));
+        QVERIFY(freshness.observe(5040000,10040000));
+        // A later TCP stall is dropped, then live delivery recovers directly.
+        QVERIFY(!freshness.observe(5060000,12060000));
+        QVERIFY(!freshness.observe(5080000,12060000));
+        QCOMPARE(freshness.localTimeUs(5060000),qint64(10060000));
+        QVERIFY(freshness.observe(7060000,12060000));
+        freshness.reset();
+        QCOMPARE(freshness.localTimeUs(5000000),qint64(-1));
+        QVERIFY(freshness.observe(1000,100000000));
+        // Ordinary relative clock drift stays below the 200 ppm allowance.
+        QVERIFY(freshness.observe(3600001000LL,3700360000LL));
+    }
     void oneAudioPacketForThreeScreensAndImmediateMute() {
         QTemporaryDir identities;
         WebSocketClient owner(identities.filePath("owner"),false),source(identities.filePath("source"),false);
@@ -80,14 +103,16 @@ private slots:
         activate(owner,source,receiver,publisher,session); QVERIFY(publisher.isSupported());
         QCOMPARE(publisher.reservedSourceBps(),112000);
         const auto payload=QByteArray::fromHex("fc010203");
-        QVERIFY(publisher.sendPacket(payload,1000000));
+        const auto capturedAt=MediaCaptureClock::nowUs();
+        QVERIFY(!publisher.sendPacket(payload,capturedAt-500000));
+        QVERIFY(publisher.sendPacket(payload,capturedAt));
         QTRY_COMPARE_WITH_TIMEOUT(packets.size(),1,3000);
-        QCOMPARE(packets[0][0].toByteArray(),payload); QCOMPARE(packets[0][1].toLongLong(),qint64(1000000));
+        QCOMPARE(packets[0][0].toByteArray(),payload); QCOMPARE(packets[0][1].toLongLong(),capturedAt);
         QCOMPARE(packets[0][2].toULongLong(),quint64(1));
         receiver.setSubscription(session,1,false);
         QVERIFY(receiver.viewerStreamId().isEmpty()); QVERIFY(!epochs.isEmpty()); QCOMPARE(epochs.last().first().toString(),QString());
         QTRY_VERIFY_WITH_TIMEOUT(!publisher.isPublishing(),3000); QCOMPARE(publisher.reservedSourceBps(),0);
-        QVERIFY(!publisher.sendPacket(payload,1020000)); QTest::qWait(50); QCOMPARE(packets.size(),1);
+        QVERIFY(!publisher.sendPacket(payload,MediaCaptureClock::nowUs())); QTest::qWait(50); QCOMPARE(packets.size(),1);
     }
     void sourcePipeReplacementChangesEpochAndKeepsCommandSession() {
         QTemporaryDir identities;
@@ -101,7 +126,7 @@ private slots:
         QTRY_VERIFY_WITH_TIMEOUT(!receiver.viewerStreamId().isEmpty() && receiver.viewerStreamId()!=oldStream,5000);
         QVERIFY(owner.canIssueSessionCommands(session)); QVERIFY(source.canIssueSessionCommands(session));
         const auto payload=QByteArray::fromHex("fc010203");
-        QVERIFY(publisher.sendPacket(payload,2000000)); QTRY_COMPARE_WITH_TIMEOUT(packets.size(),1,3000);
+        QVERIFY(publisher.sendPacket(payload,MediaCaptureClock::nowUs())); QTRY_COMPARE_WITH_TIMEOUT(packets.size(),1,3000);
         QCOMPARE(packets[0][2].toULongLong(),quint64(1));
     }
     void consentAndSuspensionFenceQueuedPlayback() {
@@ -130,7 +155,7 @@ private slots:
         QTRY_COMPARE_WITH_TIMEOUT(publisher.audioBitrateBps(),32000,4000);
         QCOMPARE(publisher.publicationId(),epoch); QCOMPARE(publisher.reservedSourceBps(),48000);
         QSignalSpy packets(&receiver,&AudioTransport::packetReceived);
-        QVERIFY(publisher.sendPacket(QByteArray::fromHex("fc010203"),1000000));
+        QVERIFY(publisher.sendPacket(QByteArray::fromHex("fc010203"),MediaCaptureClock::nowUs()));
         QTRY_COMPARE_WITH_TIMEOUT(packets.size(),1,3000);
     }
     void legacyWelcomeDoesNotTriggerAudioControlsOrRetries() {

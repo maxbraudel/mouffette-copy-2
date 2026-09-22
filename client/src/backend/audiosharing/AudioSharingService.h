@@ -19,6 +19,7 @@ public:
     void setMuted(bool muted);
     void setSuspended(bool suspended);
     void setSourceBudget(int totalBps);
+    void observeVideoTimestamp(const QString& endpoint, qint64 sourceUs, qint64 receivedAtUs);
     void stop();
     QString state() const { return m_state; }
     QString status() const { return m_status; }

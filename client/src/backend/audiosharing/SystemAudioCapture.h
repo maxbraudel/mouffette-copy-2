@@ -12,8 +12,8 @@ public:
     virtual void start(Pcm pcm, State state) = 0;
     virtual void stop() = 0;
 };
-// Native capture returns 48 kHz stereo float, with remote endpoint gain and
-// mute already applied exactly once; the worker's own process is excluded.
+// Native capture returns unattenuated 48 kHz stereo float. The remote output
+// device's volume/mute is not reapplied; the worker's own process is excluded.
 std::unique_ptr<SystemAudioCapture> createSystemAudioCapture();
 // Keep the auxiliary process invisible in the Dock and application switcher.
 void initializeAudioWorkerPlatform();

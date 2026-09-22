@@ -77,13 +77,21 @@ waiting for viewers. Viewers acknowledge transport consumption before decoding,
 including obsolete epochs, then discard any packet without a current grant.
 Forged or duplicate tuples free no other packet's credit.
 
-Each viewer has at most 128 outstanding packets and 32 KiB, including socket
+Each viewer has at most 16 outstanding packets and 4 KiB, including socket
 backlog. After the first measured ACK, a pending age above baseline RTT plus
-150 ms stops new admission; initial grace is one second. Baselines expire after
-30 seconds. An unacknowledged packet older than three seconds terminates only
-the disposable audio pipe. No queue of unsent encoded audio is kept. Publisher
+150 ms stops new admission, with an absolute 250 ms cap including initial
+admission. Baselines expire after 30 seconds. An unacknowledged packet older
+than 500 ms terminates only the disposable audio pipe; a late first receipt
+cannot establish a slow baseline. No queue of unsent encoded audio is kept. Publisher
 ingress is limited to a 20 ms cadence with at most 100 ms burst debt. Viewer
 and aggregate egress are paced with a 100 ms debt bound; viewer ordering rotates.
+
+The publisher discards capture timestamps more than 250 ms from its current
+local media clock. Relay and viewer retain the best source-to-arrival clock
+offset and discard audio more than 150 ms behind it, allowing only 200 ppm of
+positive clock drift. Received video timestamps can seed this same viewer
+estimate before audio arrives, so delayed first audio cannot legitimize an
+initial TCP backlog. Audio remains independent when no screen is visible.
 
 `audio_source_budget {totalBps,congested}` is sent at most twice per second.
 `audio_view_feedback {remoteSessionId,generation,streamId,droppedPackets,
@@ -105,7 +113,8 @@ decoder work. Stopping or muting a viewer clears its local stream immediately.
 `audio_share_protocol.test.js` runs with `npm test`. It covers compact framing,
 safe integers, authorization, exact receipts, consent/revocation, role misuse,
 single source fan-out, monitor independence, socket replacement, bounded slow
-viewers, profile hysteresis, aggregate pacing and real WebSocket connections.
+viewers, stale TCP bursts, late first ACKs, profile hysteresis, aggregate pacing
+and real WebSocket connections.
 `tst_AudioTransport` exercises the desktop transport against the real Node
 coordinator using synthetic packets, without capture permissions or playback.
 

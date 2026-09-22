@@ -243,8 +243,12 @@ public:
         const auto packet = message.value(QStringLiteral("opus")).toByteArray();
         const qint64 timestamp = message.value(QStringLiteral("timestamp")).toInteger(-1);
         const qint64 sequence = message.value(QStringLiteral("sequence")).toInteger(-1);
+        const qint64 receivedAt = message.value(QStringLiteral("receivedAt")).toInteger(-1);
+        const qint64 presentation = message.value(QStringLiteral("presentation")).toInteger(-1);
+        const qint64 ipcAge = MediaCaptureClock::nowUs() - receivedAt;
         if (sourceId.isEmpty() || sourceId.size() > 256 || epoch.isEmpty() || epoch.size() > 256
-            || timestamp < 0 || sequence < 0 || remoteMuted) return;
+            || timestamp < 0 || sequence < 0 || remoteMuted || receivedAt < 0
+            || ipcAge < -250000 || ipcAge > 100000) return;
         std::shared_ptr<RemoteSource> source;
         {
             QMutexLocker lock(&mixerMutex);
@@ -262,7 +266,7 @@ public:
         const auto now = MediaCaptureClock::nowUs();
         {
             QMutexLocker lock(&mixerMutex);
-            const auto decision = source->timeline.enqueue(timestamp, now, source->blocks.size() >= 7);
+            const auto decision = source->timeline.enqueue(timestamp, now, source->blocks.size() >= 7, presentation);
             if (decision.rebuffer) {
                 source->dropped += int(source->blocks.size());
                 source->blocks.clear(); source->consumedUs = -1;

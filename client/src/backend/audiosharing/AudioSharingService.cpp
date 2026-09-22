@@ -22,7 +22,8 @@ AudioSharingService::AudioSharingService(WebSocketClient* network, QObject* pare
             [this](const QByteArray& opus, qint64 timestampUs, quint64 sequence) {
         if (m_stopped || m_suspended || m_muted || !m_playbackAllowed || m_session.isEmpty()
             || m_endpoint.isEmpty() || m_stream.isEmpty()) return;
-        m_worker->playPacket(m_endpoint, m_stream, sequence, timestampUs, opus);
+        m_worker->playPacket(m_endpoint, m_stream, sequence, timestampUs, opus,
+                             m_transport->playbackTimeUs(timestampUs));
     });
     connect(m_transport, &AudioTransport::remoteStateChanged, this, [this](const QString& reason) {
         if (m_muted || m_endpoint.isEmpty() || m_suspended || m_stopped) return;
@@ -167,6 +168,12 @@ void AudioSharingService::setSuspended(bool suspended)
 }
 
 void AudioSharingService::setSourceBudget(int totalBps) { m_transport->setSourceBudget(totalBps); }
+
+void AudioSharingService::observeVideoTimestamp(const QString& endpoint, qint64 sourceUs, qint64 receivedAtUs)
+{
+    if (!m_stopped && endpoint == m_endpoint && !m_session.isEmpty())
+        m_transport->observeVideoTimestamp(sourceUs, receivedAtUs);
+}
 
 void AudioSharingService::refresh()
 {

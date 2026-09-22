@@ -1,20 +1,18 @@
 #include "backend/audiosharing/SystemAudioCapture.h"
 #include "backend/audiosharing/MediaCaptureClock.h"
+#include "backend/audiosharing/AudioCaptureTiming.h"
 #include <algorithm>
 #include <atomic>
-#include <cmath>
 #include <cstddef>
+#include <cstring>
 #include <thread>
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
-#include <windows.h>
+#include <qt_windows.h>
 #include <objbase.h>
 #include <mmdeviceapi.h>
 #include <audioclient.h>
 #if __has_include(<audioclientactivationparams.h>)
 #include <audioclientactivationparams.h>
 #endif
-#include <endpointvolume.h>
 #include <mmreg.h>
 
 namespace {
@@ -151,22 +149,13 @@ public:
         if (SUCCEEDED(result)) result = client->Start();
         if (FAILED(result)) { state(false, describe("Process audio capture startup failed", result)); return; }
         state(true, {});
-        Com<IMMDeviceEnumerator> enumerator;
-        CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, __uuidof(IMMDeviceEnumerator), reinterpret_cast<void**>(enumerator.put()));
-        qint64 nextVolume = 0, offset = 0;
-        bool haveOffset = false;
-        float left = 1, right = 1;
+        AudioCaptureTiming timing;
         HANDLE events[]{stopped, ready};
         bool running = true;
         while (running) {
             const DWORD event = WaitForMultipleObjects(2, events, FALSE, 100);
             if (event == WAIT_OBJECT_0) break;
             if (event != WAIT_OBJECT_0 + 1 && event != WAIT_TIMEOUT) break;
-            const auto now = MediaCaptureClock::nowUs();
-            if (now >= nextVolume && enumerator.value) {
-                nextVolume = now + 50000;
-                readVolume(enumerator.value, left, right);
-            }
             UINT32 frames = 0;
             while (SUCCEEDED(result = captureClient->GetNextPacketSize(&frames)) && frames) {
                 BYTE* bytes = nullptr; DWORD flags = 0; UINT64 devicePosition = 0, qpcPosition = 0;
@@ -176,48 +165,22 @@ public:
                     QByteArray samples(qsizetype(frames) * 2 * sizeof(float), Qt::Uninitialized);
                     auto* output = reinterpret_cast<float*>(samples.data());
                     if ((flags & AUDCLNT_BUFFERFLAGS_SILENT) || !bytes) std::fill(output, output + frames * 2, 0.0f);
-                    else {
-                        const auto* input = reinterpret_cast<const float*>(bytes);
-                        for (UINT32 index = 0; index < frames; ++index) {
-                            output[index * 2] = input[index * 2] * left;
-                            output[index * 2 + 1] = input[index * 2 + 1] * right;
-                        }
-                    }
-                    // WASAPI supplies the sample's QPC position in 100 ns units.
+                    else std::memcpy(output, bytes, size_t(samples.size()));
+                    // WASAPI's QPC timestamp and MediaCaptureClock share the
+                    // native epoch. Keep the sample's age instead of concealing
+                    // capture backlog behind a first-arrival clock offset.
                     qint64 native = qint64(qpcPosition / 10);
-                    if ((flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR) || !native) native = MediaCaptureClock::nowUs();
-                    if (!haveOffset) { haveOffset = true; offset = std::abs(now - native) < 5000000 ? 0 : now - native; }
+                    const auto now = MediaCaptureClock::nowUs();
+                    if ((flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR) || !native) native = now;
                     captureClient->ReleaseBuffer(frames);
+                    timing.observe("wasapi-process-loopback", now, native, native, int(frames));
                     if (WaitForSingleObject(stopped, 0) == WAIT_OBJECT_0) { running = false; break; }
-                    pcm(std::move(samples), native + offset);
+                    pcm(std::move(samples), native);
                 } else captureClient->ReleaseBuffer(frames);
             }
             if (FAILED(result)) { state(false, describe("Process audio capture stopped", result)); break; }
         }
         client->Stop();
-    }
-    static void readVolume(IMMDeviceEnumerator* enumerator, float& left, float& right) {
-        Com<IMMDevice> device;
-        HRESULT result = enumerator->GetDefaultAudioEndpoint(eRender, eMultimedia, device.put());
-        if (FAILED(result)) result = enumerator->GetDefaultAudioEndpoint(eRender, eConsole, device.put());
-        if (FAILED(result)) return; // Keep the last known attenuation during device transitions.
-        Com<IAudioEndpointVolume> volume;
-        result = device->Activate(__uuidof(IAudioEndpointVolume), CLSCTX_ALL, nullptr, reinterpret_cast<void**>(volume.put()));
-        if (FAILED(result)) return;
-        BOOL muted = FALSE;
-        if (SUCCEEDED(volume->GetMute(&muted)) && muted) { left = right = 0; return; }
-        float master = 0;
-        const bool hasMaster = SUCCEEDED(volume->GetMasterVolumeLevel(&master)) && !std::isnan(master) && master <= 0;
-        UINT channels = 0; volume->GetChannelCount(&channels);
-        const auto gain = [&](UINT channel) {
-            float db = master;
-            if (channel >= channels || FAILED(volume->GetChannelVolumeLevel(channel, &db)) || std::isnan(db) || db > 0) {
-                if (!hasMaster) return 1.0f;
-                db = master;
-            }
-            return std::clamp(std::pow(10.0f, db / 20.0f), 0.0f, 1.0f);
-        };
-        left = gain(0); right = gain(channels == 1 ? 0 : 1);
     }
 };
 }

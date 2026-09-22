@@ -4,6 +4,7 @@
 #include "ScreenPublicationProfiles.h"
 #include "ScreenFrameAdmissionCeiling.h"
 #include "ScreenAudioClock.h"
+#include "backend/audiosharing/MediaCaptureClock.h"
 #include "backend/config/AppConfig.h"
 #include "backend/network/NetworkDiagnostics.h"
 #include "ScreenStreamCodec.h"
@@ -459,6 +460,8 @@ struct ScreenSharingService::Private {
         const double timestamp = metadata.value("timestampUs").toDouble(-1);
         const qint64 sourceUs = std::isfinite(timestamp) && timestamp >= 0
             && timestamp <= 9007199254740991.0 ? qint64(timestamp) : -1;
+        if (sourceUs >= 0)
+            emit q->sourceTimestampObserved(viewedEndpoint, sourceUs, MediaCaptureClock::nowUs());
         state->pending.enqueue({bytes, sequence, size, key, sourceUs, clock.elapsed()});
         state->pendingBytes += bytes.size();
         decodeNext(screen, state);

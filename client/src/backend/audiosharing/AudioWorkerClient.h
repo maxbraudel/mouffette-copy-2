@@ -17,7 +17,7 @@ public:
     void setCaptureBitrate(int bitrateBps);
     void stopCapture();
     void playPacket(const QString& source, const QString& epoch, quint64 sequence,
-                    qint64 timestampUs, const QByteArray& opus);
+                    qint64 timestampUs, const QByteArray& opus, qint64 presentationUs = -1);
     void resetPlayback(const QString& source);
     void setPlaybackMuted(bool muted);
     std::shared_ptr<AudioPreviewChannel> createPreviewChannel(const QByteArray& deviceId = {});

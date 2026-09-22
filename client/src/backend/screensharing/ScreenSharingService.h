@@ -33,6 +33,7 @@ signals:
     void sourceBudgetChanged(int totalBps);
     void statusChanged();
     void frameReady(const QString& endpoint, int screenId, const QVideoFrame& frame);
+    void sourceTimestampObserved(const QString& endpoint, qint64 sourceUs, qint64 receivedAtUs);
     void frameCleared(const QString& endpoint, int screenId);
     void framesCleared(const QString& endpoint);
     void remoteStateChanged(const QString& endpoint);

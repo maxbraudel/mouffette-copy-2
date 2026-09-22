@@ -440,6 +440,8 @@ ApplicationRuntime::ApplicationRuntime(const RuntimeProfileContext& runtimeProfi
             m_screenSharing, &ScreenSharingService::setAudioPlaybackClock);
     connect(m_audioSharing, &AudioSharingService::playbackReset,
             m_screenSharing, &ScreenSharingService::clearAudioPlaybackClock);
+    connect(m_screenSharing, &ScreenSharingService::sourceTimestampObserved,
+            m_audioSharing, &AudioSharingService::observeVideoTimestamp);
     connect(m_audioSharing, &AudioSharingService::remoteIssue, this,
             [this](const QString& endpoint, const QString& message) {
         if (!m_toastSystem || m_cleanShutdownPrepared || isUserDisconnected()
