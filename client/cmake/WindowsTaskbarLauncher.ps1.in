@@ -1,0 +1,19 @@
+param(
+    [Parameter(ValueFromRemainingArguments = $true)]
+    [string[]]$ApplicationArguments
+)
+
+$ErrorActionPreference = 'Stop'
+$clientExe = Join-Path $PSScriptRoot 'Mouffette.exe'
+if (-not (Test-Path -LiteralPath $clientExe -PathType Leaf)) {
+    throw "Mouffette executable not found: $clientExe"
+}
+$msysRoot = if ($env:MOUFFETTE_MSYS2_ROOT) { $env:MOUFFETTE_MSYS2_ROOT } else { 'C:\msys64' }
+$ucrtBin = Join-Path $msysRoot 'ucrt64\bin'
+if (-not (Test-Path -LiteralPath $ucrtBin -PathType Container)) {
+    throw "MSYS2 UCRT64 runtime not found: $ucrtBin"
+}
+$env:Path = "$ucrtBin;$env:Path"
+
+& $clientExe @ApplicationArguments
+exit $LASTEXITCODE

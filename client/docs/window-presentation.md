@@ -14,8 +14,8 @@ leaves the current policy untouched. Existing settings without the key mean
 `true`. Only the interactive shell and its owned dialogs use this setting.
 On macOS this uses Qt's standard `WindowStaysOnTopHint`. The editor appears
 on all ordinary desktops in both priority modes, using native `CanJoinAllSpaces`.
-Fullscreen follows the normal macOS window behavior. On Windows, normal mode also removes
-automatic all-desktop pinning.
+Fullscreen follows the normal macOS window behavior. On Windows, the control
+window belongs to the current desktop in both priority modes.
 
 - On Windows, the native title bar, system menu and minimize/maximize/close controls are
   explicitly preserved alongside the topmost hint. Qt's Windows backend does
@@ -29,7 +29,10 @@ automatic all-desktop pinning.
   of `QScreen::availableGeometry()` (excluding Dock/menu bar/taskbar).
 - Coordinates remain in Qt logical pixels, including mixed-DPI and monitors
   positioned to the left of or above the primary screen.
-- Raising an already visible window preserves its current size and position.
+- Raising an already visible window preserves its current size and position on
+  the pointer's monitor. On Windows, a window on another monitor moves to the
+  center of the pointer's monitor, retaining its size where it fits. A
+  maximized window remains maximized after moving.
   Closing still hides it; its priority is not enforced while hidden/minimized.
   Live scene surfaces keep their independent visibility and priority.
 - macOS uses a standard `Qt::Window` backed by `NSWindow`. Qt and AppKit own
@@ -45,22 +48,22 @@ automatic all-desktop pinning.
   supported. Remote scene overlays retain their independent all-Space policy.
   The editor and its dialogs stay below the native drag layer so Finder drops
   can reach the canvas.
-- Windows uses `HWND_TOPMOST` without taking focus and pins the individual
-  window with the shell's `IVirtualDesktopPinnedApps::PinView`. It does not pin
-  every window of the application. Pinning is queried again after reopening or
-  native handle recreation, and shell services are reacquired to recover after
-  Explorer restarts. Normal mode unpins the control window and uses
-  `HWND_NOTOPMOST`. Before opening, the documented desktop manager moves it to
-  the foreground desktop. An invisible, nonactivating native reference window
-  supplies the current desktop ID when the foreground window has none.
+- Windows uses `HWND_TOPMOST` without taking focus. The control window stays on
+  one virtual desktop and follows the current desktop when opened. Normal mode
+  uses `HWND_NOTOPMOST`. If the foreground window has no desktop ID, a brief
+  offscreen Qt window supplies the current ID. Scene surfaces retain their
+  independent all-desktop pinning policy. Local builds set a taskbar relaunch
+  command that starts the executable beside a PowerShell launcher, which supplies
+  the MSYS2 runtime path. Packaged builds relaunch the deployed executable.
 - The coordinator applies scene priority on activation and after native
   surface/state changes, control-window reopening and popup activation. One
   500 ms timer enforces active scenes and Windows control windows, without
   taking focus. A macOS editor alone does not keep that timer running.
   Windows also constrains topmost raises in `WM_WINDOWPOSCHANGING` and listens
   to native show/reorder/foreground WinEvents (including native dialog loops).
-  Scene windows have a stable front-to-back order; the control window stays
-  below them without continuously raising and lowering itself.
+  Scene windows have a stable front-to-back order. A control window no longer
+  raises itself above unrelated topmost windows on each timer tick, so separate
+  Mouffette instances keep the user's chosen order.
 - Scene surfaces retain transparency, `WindowTransparentForInput` and
   `WindowDoesNotAcceptFocus`. They use the complete screen geometry, including
   Dock/menu/taskbar areas. macOS scenes join all Spaces, remain stationary,
@@ -76,9 +79,9 @@ Windows' pin interface is private, because the public
 only exposes desktop queries and moves. Its interface layout is isolated in
 `WindowsWindowManager.cpp` (see
 [VirtualDesktopAccessor](https://github.com/Ciantic/VirtualDesktopAccessor)). If
-unavailable, the client logs a warning and attempts to move its window to the
-foreground window's current desktop using the public API. This fallback can
-lag by one timer interval and needs a foreground window with a desktop ID.
+unavailable, the client logs a warning and attempts to move a scene surface to
+the foreground window's current desktop using the public API. The control
+window uses the public API when opened.
 
 This is application window priority, not a security override: lock/login/UAC
 secure desktops and exclusive fullscreen surfaces are controlled by the OS.
@@ -173,8 +176,9 @@ and `WM_NCHITTEST` returning `HTCAPTION` over the title bar.
 Before release, run on native macOS and Windows desktops: open on each monitor,
 switch Spaces/virtual desktops, activate another app (including fullscreen),
 open the color picker, hide/reopen, and change display scaling. On Windows also
-restart Explorer and confirm Task View still shows the window on all desktops.
-Native Windows desktop pinning cannot be validated by an offscreen test.
+restart Explorer and confirm Task View shows the control window on the desktop
+where it was last opened. Native Windows desktop movement cannot be validated
+by an offscreen test.
 
 `RemoteSceneDisplayTopology` runs the renderer lifecycle executable with the
 Qt offscreen/software plugins. It injects QPA screen-added, screen-removed and

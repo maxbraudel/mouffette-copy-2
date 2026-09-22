@@ -12,6 +12,7 @@
 #include <QQuickItem>
 
 #include "frontend/qml/WindowPresentation.h"
+#include "AppBuildConfig.h"
 #include "backend/platform/WindowStackingCoordinator.h"
 #include "backend/platform/WindowCaptureExclusion.h"
 
@@ -23,6 +24,11 @@
 #define NOMINMAX
 #include <windows.h>
 #include <windowsx.h>
+#include <wtypes.h>
+#include <propkey.h>
+#include <shellapi.h>
+#include <shobjidl.h>
+#include <wrl/client.h>
 #endif
 
 namespace {
@@ -332,6 +338,70 @@ private slots:
         QTRY_COMPARE(window->geometry(), WindowPresentation::openingGeometry(
             screen->availableGeometry(), window->frameMargins()));
         window->hide();
+    }
+
+    void topmostControlDoesNotFightAnotherWindow()
+    {
+#ifdef Q_OS_WIN
+        if (QGuiApplication::platformName() != QLatin1String("windows"))
+            QSKIP("Requires native Windows ordering");
+        QWindow control;
+        WindowPresentation presentation;
+        presentation.setWindow(&control);
+        presentation.open();
+        QVERIFY(QTest::qWaitForWindowExposed(&control));
+
+        QWindow other;
+        other.setFlags(Qt::Window | Qt::WindowStaysOnTopHint);
+        other.setGeometry(control.geometry().adjusted(30, 30, -30, -30));
+        other.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&other));
+        QVERIFY(SetWindowPos(reinterpret_cast<HWND>(other.winId()), HWND_TOPMOST,
+                             0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE));
+        QTRY_VERIFY(nativeAbove(other, control));
+        QTest::qWait(1200); // More than two priority-enforcement intervals.
+        QVERIFY(nativeAbove(other, control));
+        other.hide();
+        control.hide();
+#else
+        QSKIP("Windows cross-instance ordering regression");
+#endif
+    }
+
+    void taskbarRelaunchUsesLocalRuntime()
+    {
+#ifdef Q_OS_WIN
+        if (QGuiApplication::platformName() != QLatin1String("windows"))
+            QSKIP("Requires the Windows taskbar");
+        QWindow window;
+        WindowPresentation presentation;
+        presentation.setWindow(&window);
+        presentation.open();
+        const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+        QVERIFY(SUCCEEDED(com) || com == RPC_E_CHANGED_MODE);
+        Microsoft::WRL::ComPtr<IPropertyStore> store;
+        const HRESULT result = SHGetPropertyStoreForWindow(
+            reinterpret_cast<HWND>(window.winId()), IID_PPV_ARGS(store.GetAddressOf()));
+        QVERIFY(SUCCEEDED(result));
+        const auto property = [&](const PROPERTYKEY& key) {
+            PROPVARIANT value{};
+            const HRESULT read = store->GetValue(key, &value);
+            const QString text = SUCCEEDED(read) && value.vt == VT_LPWSTR
+                ? QString::fromWCharArray(value.pwszVal) : QString();
+            PropVariantClear(&value);
+            return text;
+        };
+        QCOMPARE(property(PKEY_AppUserModel_ID), QStringLiteral(MOUFFETTE_BUNDLE_IDENTIFIER));
+        QVERIFY(property(PKEY_AppUserModel_RelaunchCommand).contains(
+            QStringLiteral("Mouffette-taskbar-launch.ps1")));
+        QCOMPARE(property(PKEY_AppUserModel_RelaunchDisplayNameResource),
+                 QStringLiteral("Mouffette"));
+        store.Reset();
+        if (SUCCEEDED(com)) CoUninitialize();
+        window.hide();
+#else
+        QSKIP("Windows taskbar regression");
+#endif
     }
 
     void raisesAboveAnotherApplicationWithoutAlwaysOnTop()

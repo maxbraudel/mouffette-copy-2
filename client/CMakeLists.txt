@@ -45,6 +45,11 @@ configure_file(
     cmake/AppBuildConfig.h.in
     "${CMAKE_CURRENT_BINARY_DIR}/generated/AppBuildConfig.h"
     @ONLY)
+if(WIN32)
+    configure_file(
+        cmake/WindowsTaskbarLauncher.ps1.in
+        "${CMAKE_CURRENT_BINARY_DIR}/Mouffette-taskbar-launch.ps1" @ONLY)
+endif()
 
 # One machine-readable protocol contract owns the extensions accepted by the
 # server and every client-side boundary. Generate the Qt representation at
@@ -659,6 +664,8 @@ if(WIN32)
     target_link_libraries(MouffetteClient PRIVATE
         ole32
         uuid
+        shell32
+        shlwapi
         windowscodecs
         evr
         mfplat
@@ -858,7 +865,7 @@ if(BUILD_TESTING)
         target_link_libraries(tst_WindowPresentation PRIVATE "-framework AppKit" "-framework CoreGraphics")
     elseif(WIN32)
         target_sources(tst_WindowPresentation PRIVATE src/backend/platform/windows/WindowsWindowManager.cpp)
-        target_link_libraries(tst_WindowPresentation PRIVATE ole32 uuid user32)
+        target_link_libraries(tst_WindowPresentation PRIVATE ole32 uuid user32 shell32 shlwapi)
     endif()
     add_test(NAME WindowPresentation COMMAND tst_WindowPresentation)
 

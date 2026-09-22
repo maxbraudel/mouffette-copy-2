@@ -1,6 +1,11 @@
 #include "backend/platform/windows/WindowsWindowManager.h"
+#include "AppBuildConfig.h"
 
+#include <QCoreApplication>
 #include <QDebug>
+#include <QDir>
+#include <QEventLoop>
+#include <QFileInfo>
 #include <QGuiApplication>
 #include <QWindow>
 #include <QVariant>
@@ -12,12 +17,62 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <wtypes.h>
+#include <propkey.h>
+#include <propvarutil.h>
 #include <servprov.h>
+#include <shellapi.h>
 #include <shobjidl.h>
 #include <wrl/client.h>
 
 namespace {
 using Microsoft::WRL::ComPtr;
+
+HRESULT setWindowStringProperty(IPropertyStore* store, const PROPERTYKEY& key, const QString& value)
+{
+    PROPVARIANT variant{};
+    const HRESULT initialized = InitPropVariantFromString(
+        reinterpret_cast<PCWSTR>(value.utf16()), &variant);
+    if (FAILED(initialized)) return initialized;
+    const HRESULT result = store->SetValue(key, variant);
+    PropVariantClear(&variant);
+    return result;
+}
+
+void configureTaskbarRelaunch(QWindow* window, HWND hwnd)
+{
+    const qulonglong handle = reinterpret_cast<qulonglong>(hwnd);
+    if (window->property("mouffetteTaskbarHandle").toULongLong() == handle) return;
+
+    const QString exe = QDir::toNativeSeparators(QGuiApplication::applicationFilePath());
+    const QString launcher = QDir(QGuiApplication::applicationDirPath()).filePath(
+        QStringLiteral("Mouffette-taskbar-launch.ps1"));
+    QString command = QStringLiteral("\"%1\"").arg(exe);
+    if (QFileInfo::exists(launcher)) {
+        command = QStringLiteral("powershell.exe -NoProfile -WindowStyle Hidden "
+                                 "-ExecutionPolicy Bypass -File \"%1\"")
+                      .arg(QDir::toNativeSeparators(launcher));
+    }
+
+    const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    if (FAILED(com) && com != RPC_E_CHANGED_MODE) return;
+    ComPtr<IPropertyStore> store;
+    HRESULT configured = SHGetPropertyStoreForWindow(hwnd, IID_PPV_ARGS(store.GetAddressOf()));
+    if (SUCCEEDED(configured)) {
+        configured = setWindowStringProperty(store.Get(), PKEY_AppUserModel_RelaunchCommand, command);
+        if (SUCCEEDED(configured)) configured = setWindowStringProperty(store.Get(),
+            PKEY_AppUserModel_RelaunchDisplayNameResource, QStringLiteral("Mouffette"));
+        if (SUCCEEDED(configured)) configured = setWindowStringProperty(store.Get(),
+            PKEY_AppUserModel_ID, QStringLiteral(MOUFFETTE_BUNDLE_IDENTIFIER));
+    }
+    if (SUCCEEDED(configured)) window->setProperty("mouffetteTaskbarHandle", handle);
+    else if (window->property("mouffetteTaskbarFailureHandle").toULongLong() != handle) {
+        window->setProperty("mouffetteTaskbarFailureHandle", handle);
+        qWarning() << "Could not configure Mouffette taskbar relaunch command" << Qt::hex << configured;
+    }
+    store.Reset();
+    if (SUCCEEDED(com)) CoUninitialize();
+}
 
 // Windows exposes no public pin-window API. These shell interfaces implement
 // Task View's "Show this window on all desktops" on Windows 10/11. Keep the
@@ -67,32 +122,45 @@ bool setWindowPinned(HWND hwnd, bool enabled)
         ? pins->PinView(view.Get()) : pins->UnpinView(view.Get()));
 }
 
-void followCurrentDesktop(HWND hwnd)
+bool followCurrentDesktop(HWND hwnd, bool allowReferenceWindow = false)
 {
     ComPtr<IVirtualDesktopManager> desktops;
     if (FAILED(CoCreateInstance(CLSID_VirtualDesktopManager, nullptr, CLSCTX_INPROC_SERVER,
-                                IID_PPV_ARGS(desktops.GetAddressOf())))) return;
+                                IID_PPV_ARGS(desktops.GetAddressOf())))) return false;
     BOOL current = FALSE;
-    if (SUCCEEDED(desktops->IsWindowOnCurrentVirtualDesktop(hwnd, &current)) && current) return;
+    if (SUCCEEDED(desktops->IsWindowOnCurrentVirtualDesktop(hwnd, &current)) && current) return true;
     GUID desktopId{};
     const HWND foreground = GetForegroundWindow();
     if (foreground && foreground != hwnd
         && SUCCEEDED(desktops->IsWindowOnCurrentVirtualDesktop(foreground, &current)) && current) {
         if (FAILED(desktops->GetWindowDesktopId(foreground, &desktopId))) desktopId = GUID_NULL;
     }
-    if (IsEqualGUID(desktopId, GUID_NULL)) {
-        // Newly created top-level windows belong to the current desktop. This
-        // invisible, non-activating reference also handles Task View/Explorer
-        // foreground windows, which need not have a usable desktop identifier.
-        HWND probe = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, L"STATIC", L"",
-                                     WS_POPUP, 0, 0, 0, 0, nullptr, nullptr,
-                                     GetModuleHandleW(nullptr), nullptr);
-        if (probe) {
-            if (FAILED(desktops->GetWindowDesktopId(probe, &desktopId))) desktopId = GUID_NULL;
-            DestroyWindow(probe);
+    const auto moveAndVerify = [&](const GUID& id) {
+        BOOL onCurrent = FALSE;
+        return !IsEqualGUID(id, GUID_NULL)
+            && SUCCEEDED(desktops->MoveWindowToDesktop(hwnd, id))
+            && SUCCEEDED(desktops->IsWindowOnCurrentVirtualDesktop(hwnd, &onCurrent))
+            && onCurrent;
+    };
+    if (moveAndVerify(desktopId)) return true;
+    if (allowReferenceWindow) {
+        // Explorer's taskbar has no desktop ID. A shown ordinary Qt window
+        // receives one, even on an otherwise empty virtual desktop.
+        QWindow reference;
+        reference.setFlags(Qt::Window);
+        reference.setGeometry(-32000, -32000, 1, 1);
+        reference.show();
+        for (int attempt = 0; attempt < 10; ++attempt) {
+            QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents, 20);
+            if (SUCCEEDED(desktops->GetWindowDesktopId(
+                    reinterpret_cast<HWND>(reference.winId()), &desktopId))
+                && !IsEqualGUID(desktopId, GUID_NULL)) break;
+            desktopId = GUID_NULL;
+            Sleep(10);
         }
+        reference.hide();
     }
-    if (!IsEqualGUID(desktopId, GUID_NULL)) desktops->MoveWindowToDesktop(hwnd, desktopId);
+    return moveAndVerify(desktopId);
 }
 }
 
@@ -101,28 +169,29 @@ void WindowsWindowManager::configureControlWindow(QWindow* window, bool alwaysOn
     if (!window || QGuiApplication::platformName() != QLatin1String("windows")) return;
     const HWND hwnd = reinterpret_cast<HWND>(window->winId());
     if (!IsWindow(hwnd)) return;
-    if (alwaysOnTop) {
-        window->setProperty("mouffetteControlPinRequested", true);
-        return;
-    }
+    configureTaskbarRelaunch(window, hwnd);
+    if (alwaysOnTop) return;
     if (GetWindowLongPtr(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST)
         SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0,
                      SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-    if (!window->property("mouffetteControlPinRequested").toBool()) return;
-    const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-    if (SUCCEEDED(com) || com == RPC_E_CHANGED_MODE) {
-        if (setWindowPinned(hwnd, false)) window->setProperty("mouffetteControlPinRequested", false);
-        followCurrentDesktop(hwnd);
-    }
-    if (SUCCEEDED(com)) CoUninitialize();
 }
 
 void WindowsWindowManager::moveToCurrentDesktop(QWindow* window)
 {
     if (!window || QGuiApplication::platformName() != QLatin1String("windows")) return;
     const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-    if (SUCCEEDED(com) || com == RPC_E_CHANGED_MODE)
-        followCurrentDesktop(reinterpret_cast<HWND>(window->winId()));
+    if (SUCCEEDED(com) || com == RPC_E_CHANGED_MODE) {
+        const HWND hwnd = reinterpret_cast<HWND>(window->winId());
+        // View pinning prevents the public move API from selecting one desktop.
+        setWindowPinned(hwnd, false);
+        if (!followCurrentDesktop(hwnd, true) && IsWindowVisible(hwnd)
+            && window->property("mouffetteDesktopMoveFailureHandle").toULongLong()
+                != reinterpret_cast<qulonglong>(hwnd)) {
+            window->setProperty("mouffetteDesktopMoveFailureHandle",
+                                reinterpret_cast<qulonglong>(hwnd));
+            qWarning() << "Could not move Mouffette to the current virtual desktop";
+        }
+    }
     if (SUCCEEDED(com)) CoUninitialize();
 }
 
@@ -142,8 +211,8 @@ bool WindowsWindowManager::isOnCurrentDesktop(QWindow* window)
     return current;
 }
 
-void WindowsWindowManager::keepAboveAndOnAllDesktops(QWindow* window, QWindow* preceding,
-                                                   bool preserveOrderBelow)
+void WindowsWindowManager::keepAbove(QWindow* window, QWindow* preceding,
+                                     bool preserveOrderBelow, bool pinOnAllDesktops)
 {
     if (!window || QGuiApplication::platformName() != QLatin1String("windows")) return;
     const HWND hwnd = reinterpret_cast<HWND>(window->winId());
@@ -153,17 +222,34 @@ void WindowsWindowManager::keepAboveAndOnAllDesktops(QWindow* window, QWindow* p
     const HWND after = preceding ? reinterpret_cast<HWND>(preceding->winId()) : HWND_TOPMOST;
     bool correctlyOrdered = false;
     if (GetWindowLongPtr(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST) {
-        for (HWND candidate = GetWindow(hwnd, GW_HWNDPREV); candidate;
-             candidate = GetWindow(candidate, GW_HWNDPREV)) {
-            if (!IsWindowVisible(candidate)) continue;
-            correctlyOrdered = candidate == after;
-            if (correctlyOrdered || !preserveOrderBelow) break;
-        }
-        if (!preceding) {
+        if (preserveOrderBelow) {
+            // Raising a control window here can put it above its own dialogs.
+            // The scene pass already keeps scenes above this process's UI.
             correctlyOrdered = true;
+        } else if (preceding) {
             for (HWND candidate = GetWindow(hwnd, GW_HWNDPREV); candidate;
                  candidate = GetWindow(candidate, GW_HWNDPREV)) {
-                if (IsWindowVisible(candidate)) { correctlyOrdered = false; break; }
+                if (!IsWindowVisible(candidate)) continue;
+                correctlyOrdered = candidate == after;
+                if (correctlyOrdered || !preserveOrderBelow) break;
+            }
+        } else {
+            // Unrelated topmost windows are allowed to remain above this one.
+            // Otherwise two Mouffette processes promote themselves every tick.
+            correctlyOrdered = true;
+            if (!preserveOrderBelow) {
+                // A scene still belongs above its own control window/dialogs.
+                DWORD processId = 0;
+                GetWindowThreadProcessId(hwnd, &processId);
+                for (HWND candidate = GetWindow(hwnd, GW_HWNDPREV); candidate;
+                     candidate = GetWindow(candidate, GW_HWNDPREV)) {
+                    DWORD candidateProcessId = 0;
+                    GetWindowThreadProcessId(candidate, &candidateProcessId);
+                    if (IsWindowVisible(candidate) && candidateProcessId == processId) {
+                        correctlyOrdered = false;
+                        break;
+                    }
+                }
             }
         }
     }
@@ -179,6 +265,27 @@ void WindowsWindowManager::keepAboveAndOnAllDesktops(QWindow* window, QWindow* p
         }
     }
 
+    if (preserveOrderBelow) {
+        // Qt can leave a transient dialog behind its topmost owner after the
+        // control window is reopened. Repair only this process's owner group.
+        EnumWindows([](HWND candidate, LPARAM value) -> BOOL {
+            const HWND owner = reinterpret_cast<HWND>(value);
+            if (GetWindow(candidate, GW_OWNER) != owner || !IsWindowVisible(candidate)) return TRUE;
+            bool ownerAboveDialog = false;
+            for (HWND above = GetWindow(candidate, GW_HWNDPREV); above;
+                 above = GetWindow(above, GW_HWNDPREV)) {
+                if (above == owner) { ownerAboveDialog = true; break; }
+            }
+            if (ownerAboveDialog) {
+                const HWND previous = GetWindow(owner, GW_HWNDPREV);
+                SetWindowPos(candidate, previous ? previous : HWND_TOPMOST, 0, 0, 0, 0,
+                             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+            }
+            return TRUE;
+        }, reinterpret_cast<LPARAM>(hwnd));
+    }
+
+    if (!pinOnAllDesktops) return;
     const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     if (SUCCEEDED(com) || com == RPC_E_CHANGED_MODE) {
         if (!setWindowPinned(hwnd, true)) {

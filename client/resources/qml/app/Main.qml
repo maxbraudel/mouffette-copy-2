@@ -248,9 +248,7 @@ QtObject {
             function onDialogRequested() { confirmation.open() }
             function onRaiseRequested() {
                 if (!root.controller.ready) {
-                    root.bootstrap.show()
-                    root.bootstrap.raise()
-                    root.bootstrap.requestActivate()
+                    root.bootstrap.presentation.open()
                     return
                 }
                 presentation.open()

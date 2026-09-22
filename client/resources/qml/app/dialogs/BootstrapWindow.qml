@@ -8,6 +8,7 @@ Window {
     id: root
 
     required property var controller
+    readonly property alias presentation: windowPresentation
 
     width: 460
     minimumWidth: 460
@@ -18,6 +19,7 @@ Window {
     color: Theme.windowBackground
 
     WindowPresentation {
+        id: windowPresentation
         window: root
         alwaysOnTop: false
     }

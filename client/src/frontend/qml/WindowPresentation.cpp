@@ -91,24 +91,49 @@ void WindowPresentation::open()
 {
     if (!m_window) return;
     const bool reopening = !m_window->isVisible() || m_window->windowState() == Qt::WindowMinimized;
-    QPointer<QScreen> screen;
+    QPointer<QScreen> screen = QGuiApplication::screenAt(QCursor::pos());
+    if (!screen) screen = QGuiApplication::primaryScreen();
+    if (!screen) screen = m_window->screen();
     if (reopening) {
-        screen = QGuiApplication::screenAt(QCursor::pos());
-        if (!screen) screen = m_window->screen();
-        if (!screen) screen = QGuiApplication::primaryScreen();
         m_window->setWindowState(Qt::WindowNoState);
         m_window->setScreen(screen);
         m_window->create();
         fitToScreen(screen);
     }
+#ifdef Q_OS_WIN
+    else if (screen && m_window->screen() != screen) {
+        // An already open window follows the monitor containing the tray click.
+        const auto state = m_window->windowState();
+        if (state == Qt::WindowMaximized || state == Qt::WindowFullScreen)
+            m_window->setWindowState(Qt::WindowNoState);
+        const QSize previousSize = m_window->size();
+        m_window->setScreen(screen);
+        const QRect available = screen->availableGeometry();
+        const QMargins margins = m_window->frameMargins();
+        const QSize frameSize = (previousSize + QSize(margins.left() + margins.right(),
+                                                     margins.top() + margins.bottom()))
+                                    .boundedTo(available.size());
+        const QPoint framePosition(available.x() + (available.width() - frameSize.width()) / 2,
+                                   available.y() + (available.height() - frameSize.height()) / 2);
+        m_window->setGeometry(QRect(framePosition + QPoint(margins.left(), margins.top()),
+                                    QSize(qMax(1, frameSize.width() - margins.left() - margins.right()),
+                                          qMax(1, frameSize.height() - margins.top() - margins.bottom()))));
+        if (state == Qt::WindowFullScreen) m_window->setWindowState(Qt::WindowFullScreen);
+        else if (state == Qt::WindowMaximized) m_window->setWindowState(Qt::WindowMaximized);
+    }
+#endif
     m_window->create();
     auto& stacking = WindowStackingCoordinator::instance();
     stacking.configureControlWindow(m_window);
 #ifdef Q_OS_WIN
-    WindowsWindowManager::moveToCurrentDesktop(m_window);
+    if (m_window->isVisible()) WindowsWindowManager::moveToCurrentDesktop(m_window);
 #endif
     m_window->show();
     stacking.configureControlWindow(m_window);
+#ifdef Q_OS_WIN
+    // The shell may assign a newly shown HWND its desktop only after show().
+    WindowsWindowManager::moveToCurrentDesktop(m_window);
+#endif
     // Native decoration sizes may only be known once the window is shown.
     if (reopening) fitToScreen(screen);
     m_window->raise();

@@ -179,7 +179,7 @@ void WindowStackingCoordinator::enforce()
 #if defined(Q_OS_MACOS)
         MacWindowManager::setWindowAsGlobalOverlay(entry.window);
 #elif defined(Q_OS_WIN)
-        WindowsWindowManager::keepAboveAndOnAllDesktops(entry.window, lastScene);
+        WindowsWindowManager::keepAbove(entry.window, lastScene);
 #endif
         lastScene = entry.window;
     }
@@ -189,7 +189,7 @@ void WindowStackingCoordinator::enforce()
 #ifdef Q_OS_WIN
         if (!entry.alwaysOnTop || !visible(entry.window)) continue;
         anyVisible = true;
-        WindowsWindowManager::keepAboveAndOnAllDesktops(entry.window, lastScene, true);
+        WindowsWindowManager::keepAbove(entry.window, lastScene, true, false);
 #endif
     }
     if (anyVisible) {
