@@ -64,6 +64,7 @@ class ClientWorkspaceViewModel : public QObject
 public:
     enum class SceneActionState { Unavailable, Ready, Starting, Active, Stopping };
     Q_ENUM(SceneActionState)
+    // Transfer/inventory state; temporary action restrictions are independent.
     enum class UploadState {
         Unavailable,
         Ready,

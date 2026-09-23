@@ -395,23 +395,16 @@ ClientWorkspaceViewModel::UploadState ClientWorkspaceViewModel::uploadState() co
             return UploadState::Preparing;
         }
         if (m_uploadManager->isUploading()) return UploadState::Uploading;
+        if (m_uploadManager->isRemoving()) return UploadState::Removing;
     }
-    if (!remoteCommandsEnabled()) return UploadState::Unavailable;
-    if (m_uploadManager->isRemoving() && activeForSession) {
-        return UploadState::Removing;
-    }
-    if (m_uploadManager->isBusy()) return UploadState::Unavailable;
-    const bool hasRemote = m_remoteFilesPresent && m_remoteFilesPresent();
-    const bool hasUnuploaded = m_hasUnuploadedFiles && m_hasUnuploadedFiles();
     if (!m_canvas || m_canvas->enumerateMediaItems().isEmpty()) {
         return UploadState::Unavailable;
     }
-    if (const ICanvasHost* canvas = m_canvas;
-        canvas && (canvas->remoteSceneLaunched()
-                   || canvas->remoteSceneLaunching()
-                   || canvas->remoteSceneStopping())) {
-        return UploadState::Unavailable;
-    }
+    // Retained media and command availability are independent. A recovery
+    // barrier, another transfer or a scene can inhibit Unload without turning
+    // those media into a new Upload. Terminal cleanup owns inventory removal.
+    const bool hasRemote = m_remoteFilesPresent && m_remoteFilesPresent();
+    const bool hasUnuploaded = m_hasUnuploadedFiles && m_hasUnuploadedFiles();
     if (hasRemote && !hasUnuploaded) return UploadState::Uploaded;
     return UploadState::Ready;
 }
@@ -427,9 +420,7 @@ bool ClientWorkspaceViewModel::uploadBelongsToSession() const
 
 bool ClientWorkspaceViewModel::uploadActionEnabled() const
 {
-    const UploadState state = uploadState();
-    return !m_actionPending && m_uploadAction && (state == UploadState::Ready
-        || state == UploadState::Uploaded || uploadCancelAvailable());
+    return !m_actionPending && uploadUnavailableReason().isEmpty();
 }
 
 bool ClientWorkspaceViewModel::uploadCancelAvailable() const
@@ -445,13 +436,16 @@ QString ClientWorkspaceViewModel::uploadUnavailableReason() const
     const UploadState state = uploadState();
     // Cancellation remains available during upload, even if the last local
     // media was removed after the transfer started.
-    if (m_uploadAction && (state == UploadState::Ready || state == UploadState::Uploaded
-                          || uploadCancelAvailable())) return {};
+    if (uploadCancelAvailable()) return {};
     if (m_canvas->enumerateMediaItems().isEmpty()) {
         return QStringLiteral("Add media to the project first");
     }
     if (!m_uploadManager || !m_uploadAction) return QStringLiteral("Media upload is unavailable");
-    if (!remoteCommandsEnabled()) return QStringLiteral("Launch a remote session first");
+    if (!remoteCommandsEnabled()) {
+        return m_remoteFilesPresent && m_remoteFilesPresent()
+            ? QStringLiteral("Wait for the remote session to become ready")
+            : QStringLiteral("Launch a remote session first");
+    }
     if (m_canvas->remoteSceneLaunching()) return QStringLiteral("The remote scene is starting. Please wait");
     if (m_canvas->remoteSceneStopping()) return QStringLiteral("The remote scene is stopping. Please wait");
     if (m_canvas->remoteSceneLaunched()) return QStringLiteral("Stop the remote scene first");
@@ -464,9 +458,12 @@ QString ClientWorkspaceViewModel::uploadUnavailableReason() const
     case UploadState::LoadingInRam: return QStringLiteral("Media are loading into remote RAM. Please wait");
     case UploadState::Cancelling: return QStringLiteral("The upload cancellation is in progress. Please wait");
     case UploadState::Removing: return QStringLiteral("Remote media are being removed. Please wait");
-    case UploadState::Unavailable: return QStringLiteral("Another media transfer is in progress. Wait for it to finish");
-    default: return {};
+    case UploadState::Unavailable: return QStringLiteral("Media upload is unavailable");
+    default: break;
     }
+    if (m_uploadManager->isBusy())
+        return QStringLiteral("Another media transfer is in progress. Wait for it to finish");
+    return {};
 }
 
 int ClientWorkspaceViewModel::uploadActionTone() const

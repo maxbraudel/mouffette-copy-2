@@ -20,6 +20,18 @@ An upload remains active through remote RAM loading. The overlay shows
 `Uploading (x/n)` followed by `Loading in ram (x/n)`; the RAM counter includes
 both successful and failed attempts. `Unload` is available only when every
 current source is ready remotely. Failed sources can be retried with `Upload`.
+The button's label, icon and tone describe retained media independently of
+command availability. A session can remain `Active`/Connected while waiting for
+both endpoints to acknowledge a new state revision. During this barrier or
+recovery, known uploaded media keep `Unload`; dispatch is inhibited and checked
+again before a queued action runs. A new unuploaded source or authoritative
+inventory loss changes the action to `Upload`; temporary command restrictions
+do not. The same rule applies while a scene or another transfer blocks Unload.
+Generation changes retain authenticated RAM evidence for the same committed
+session assets until a newer report replaces it. Reacquiring a received source
+also recognizes validated paths that share bytes through SHA-256 deduplication;
+an unchanged cache copy must not restart analysis just because it is an alias.
+File-signature changes and expected-hash mismatches still require validation.
 Hovering an active upload shows a red `Cancel` action. Cancellation stops local
 work immediately and removes this batch's staging, validated files and RAM
 residency on the target, including an abort crossing the final transfer ACK.

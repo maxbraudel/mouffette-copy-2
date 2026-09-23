@@ -7,6 +7,7 @@
 #include "backend/network/SceneRunCoordinator.h"
 #include "frontend/rendering/remote/RemoteSceneController.h"
 #include <QFile>
+#include <QFileInfo>
 #include <QCryptographicHash>
 #include "backend/files/FileManager.h"
 #include "backend/network/UploadManager.h"
@@ -21,6 +22,11 @@
 #include "backend/runtime/ApplicationRuntime.h"
 #include "backend/runtime/RuntimeProfile.h"
 #include "backend/domain/project/ProjectManager.h"
+#include "backend/domain/canvas/CanvasDocument.h"
+#include "backend/domain/media/CanvasMedia.h"
+#include "backend/media/MediaResidencyManager.h"
+#include "frontend/rendering/canvas/QuickCanvasHost.h"
+#include "frontend/qml/ClientWorkspaceViewModel.h"
 #include <QScopeGuard>
 #include "../fixtures/MultiInstanceProtocolWorker.h"
 #include <QDir>
@@ -95,6 +101,7 @@ private slots:
     void duplicateOpenAndMetadataRefresh();
     void appliedBarrierRecoversLostAcknowledgement_data();
     void appliedBarrierRecoversLostAcknowledgement();
+    void uploadedActionSurvivesAppliedStateRecovery();
     void localProofExpiryClosesAStillHealthyServerSession();
     void uploadResumesFromDurableOffsetAfterTransportLoss();
     void cleanupReceiptRetainsItsOriginalDispatchedGeneration();
@@ -746,6 +753,177 @@ void RemoteSessionIntegrationTest::appliedBarrierRecoversLostAcknowledgement()
     QCOMPARE(opened.count(), 1);
     owner.disconnect();
     target.disconnect();
+}
+
+void RemoteSessionIntegrationTest::uploadedActionSurvivesAppliedStateRecovery()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const auto previousProfile = RuntimeProfile::context();
+    const auto restoreProfile = qScopeGuard([&] { RuntimeProfile::configure(previousProfile); });
+    MediaResidencyManager::instance().setMemorySnapshotForTesting(
+        {8ULL << 30, 6ULL << 30, 128ULL << 20, false, 0});
+    const auto restoreMemory = qScopeGuard([] {
+        MediaResidencyManager::instance().clearMemorySnapshotForTesting();
+    });
+    RuntimeProfileContext profile;
+    profile.rootPath = directory.filePath("owner");
+    profile.persistent = false;
+    RuntimeProfile::configure(profile);
+    ApplicationRuntime runtime(profile);
+    runtime.getProjectManager()->stopAutomaticTimersForTesting();
+    auto* owner = runtime.getWebSocketClient();
+    auto* ownerConnection = runtime.findChild<ConnectionManager*>();
+    auto* sending = runtime.getUploadManager();
+    QVERIFY(owner);
+    QVERIFY(ownerConnection);
+    QVERIFY(sending);
+
+    WebSocketClient target(directory.filePath("target"), false);
+    FileManager receivedFiles;
+    UploadManager receiving(&receivedFiles, nullptr, directory.filePath("target-cache"));
+    receiving.setWebSocketClient(&target);
+    receiving.setMyClientId(target.endpointId());
+    const auto advertiseTarget = [&] {
+        target.registerClient(QStringLiteral("uploaded-action-target"), QStringLiteral("test"),
+            {ScreenInfo(0, 640, 480, 0, 0, true)}, 50);
+    };
+    connect(&target, &WebSocketClient::connected, &target, advertiseTarget);
+    connect(&target, &WebSocketClient::localDeviceSnapshotRequested, &target, advertiseTarget);
+    QSignalSpy finished(sending, &UploadManager::uploadFinished);
+    QSignalSpy rejected(sending, &UploadManager::uploadRejected);
+    QJsonArray residencyReports;
+    connect(owner, &WebSocketClient::mediaResidencyReceived, this,
+            [&](const QJsonObject& report) {
+        residencyReports.append(QJsonObject{{"generation", report.value("generation")},
+            {"sequence", report.value("sequence")}, {"delta", report.value("delta")},
+            {"assets", report.value("assets")}});
+    });
+    QSignalSpy targetTerminating(&target, &WebSocketClient::remoteSessionTerminating);
+    ownerConnection->connectToServer(m_url);
+    target.connectToServer(m_url);
+    QTRY_COMPARE_WITH_TIMEOUT(runtime.displayClients().size(), 1, 4000);
+    runtime.activateClient(target.endpointId());
+    QTRY_VERIFY_WITH_TIMEOUT(runtime.activeProjectExists(), 4000);
+    const QString sessionId = owner->remoteSessionCoordinator()
+        ->outgoingForPeer(target.endpointId()).remoteSessionId;
+    QVERIFY(!sessionId.isEmpty());
+    QTRY_VERIFY_WITH_TIMEOUT(owner->canIssueSessionCommands(sessionId)
+                            && target.canIssueSessionCommands(sessionId), 3000);
+    auto* host = qobject_cast<QuickCanvasHost*>(runtime.getActiveCanvas());
+    QVERIFY(host);
+    const QString path = directory.filePath("retained.png");
+    QImage pixels(32, 24, QImage::Format_RGBA8888);
+    pixels.fill(Qt::cyan);
+    QVERIFY(pixels.save(path));
+    auto* media = host->document()->addPreparedFile(path, pixels.size(), false, QPointF(10, 10));
+    QVERIFY(media);
+    QTRY_VERIFY_WITH_TIMEOUT(media->residencyReady(), 5000);
+    const QString fileId = media->fileId();
+    QVERIFY(!fileId.isEmpty());
+    const QString targetId = target.endpointId();
+    const auto hasRemoteFiles = [&] {
+        const auto* workspace = runtime.findWorkspace(targetId);
+        return workspace && workspace->upload.remoteFilesPresent;
+    };
+    ClientWorkspaceViewModel workspace(targetId, host,
+        [&] { runtime.onUploadButtonClicked(); }, sending, hasRemoteFiles,
+        [&] { return runtime.hasUnuploadedFilesForTarget(targetId); },
+        [&] { return runtime.getProjectManager()->hasProjectForTarget(targetId); });
+    QTRY_VERIFY_WITH_TIMEOUT(workspace.uploadActionEnabled(), 2000);
+    workspace.triggerUploadAction();
+    QTRY_VERIFY_WITH_TIMEOUT(!finished.isEmpty() || !rejected.isEmpty(), 10000);
+    QVERIFY2(rejected.isEmpty(), rejected.isEmpty() ? "" : qPrintable(rejected.first().at(1).toString()));
+    QCOMPARE(finished.size(), 1);
+    QTRY_COMPARE_WITH_TIMEOUT(workspace.uploadActionText(), QStringLiteral("Unload"), 3000);
+    QVERIFY(workspace.uploadActionEnabled());
+    QVERIFY(hasRemoteFiles());
+    QVERIFY(runtime.getFileManager()->isFileUploadedToClient(fileId, targetId));
+    QVERIFY(!runtime.hasUnuploadedFilesForTarget(targetId));
+    const QUrl unloadIcon = workspace.uploadActionIcon();
+    const auto initialBinding = owner->remoteSessionCoordinator()->byId(sessionId);
+    const QString receivedPath = receivedFiles.getReceivedFilePath(
+        {owner->endpointId(), sessionId, initialBinding.generation}, fileId);
+    QVERIFY(QFileInfo::exists(receivedPath));
+
+    QStringList labelsDuringRecovery;
+    const auto labelConnection = connect(&workspace, &ClientWorkspaceViewModel::actionStateChanged,
+        this, [&] { labelsDuringRecovery.append(workspace.uploadActionText()); });
+    // Only the target transport is interrupted. Its resumed generation has
+    // an applied-state barrier, while the owner's own transport stays healthy.
+    command({{"action", "dropIncoming"}, {"endpoint", targetId},
+             {"type", "remote_session_state_ack"}, {"count", 100},
+             {"minimumRevision", double(initialBinding.stateRevision + 1)}});
+    command({{"action", "drop"}, {"endpoints", QJsonArray{targetId}}});
+    QTRY_VERIFY_WITH_TIMEOUT(!target.isConnected(), 1000);
+    QTRY_VERIFY_WITH_TIMEOUT(!workspace.uploadActionEnabled(), 1000);
+    QCOMPARE(workspace.uploadActionText(), QStringLiteral("Unload"));
+    QCOMPARE(workspace.uploadActionIcon(), unloadIcon);
+    QCOMPARE(ownerConnection->state(), ConnectionManager::State::Connected);
+    QCOMPARE(owner->getConnectionStatus(), QStringLiteral("Connected"));
+    target.connectToServer(m_url);
+    QTRY_VERIFY_WITH_TIMEOUT(target.isConnected()
+        && owner->remoteSessionCoordinator()->byId(sessionId).generation > initialBinding.generation
+        && owner->remoteSessionCoordinator()->byId(sessionId).phase == QLatin1String("Active"), 3000);
+    const auto pending = owner->remoteSessionCoordinator()->byId(sessionId);
+    QVERIFY(pending.stateRevision > initialBinding.stateRevision);
+    QVERIFY(!pending.commandReady);
+    // Real recovery keeps degraded=true until BOTH applied-state receipts.
+    // The upload action still describes retained media throughout that gate.
+    QVERIFY(pending.degraded);
+    QVERIFY(!owner->canIssueSessionCommands(sessionId));
+    QCOMPARE(runtime.findWorkspace(targetId)->remoteSessionState,
+             WorkspaceManager::RemoteSessionState::Grace);
+    QCOMPARE(ownerConnection->state(), ConnectionManager::State::Connected);
+    QCOMPARE(owner->getConnectionStatus(), QStringLiteral("Connected"));
+    QVERIFY(hasRemoteFiles());
+    QVERIFY(runtime.getFileManager()->isFileUploadedToClient(fileId, targetId));
+    QVERIFY(!runtime.hasUnuploadedFilesForTarget(targetId));
+    QCOMPARE(workspace.uploadActionText(), QStringLiteral("Unload"));
+    QCOMPARE(workspace.uploadActionIcon(), unloadIcon);
+    QVERIFY(!workspace.uploadActionEnabled());
+    QVERIFY(!workspace.uploadUnavailableReason().isEmpty());
+    QVERIFY(!labelsDuringRecovery.contains(QStringLiteral("Upload")));
+    QCOMPARE(finished.size(), 1);
+
+    command({{"action", "dropIncoming"}, {"endpoint", targetId},
+             {"type", "remote_session_state_ack"}, {"count", -1}});
+    QTRY_VERIFY_WITH_TIMEOUT(owner->canIssueSessionCommands(sessionId)
+                            && target.canIssueSessionCommands(sessionId), 3000);
+    QTRY_VERIFY_WITH_TIMEOUT(workspace.uploadActionEnabled(), 2000);
+    // Let the resumed full inventory and any throttled publication settle.
+    QTest::qWait(500);
+    QCOMPARE(runtime.findWorkspace(targetId)->remoteSessionState,
+             WorkspaceManager::RemoteSessionState::Active);
+    QVERIFY2(workspace.uploadActionText() == QLatin1String("Unload"),
+             qPrintable(QString::fromUtf8(QJsonDocument(residencyReports).toJson(QJsonDocument::Compact))));
+    QCOMPARE(workspace.uploadActionIcon(), unloadIcon);
+    QVERIFY2(!labelsDuringRecovery.contains(QStringLiteral("Upload")),
+             qPrintable(QString::fromUtf8(QJsonDocument(residencyReports).toJson(QJsonDocument::Compact))));
+    QCOMPARE(finished.size(), 1); // Recovery never starts another upload.
+    QVERIFY(rejected.isEmpty());
+    disconnect(labelConnection);
+
+    // A real terminal teardown, unlike a capability interruption, does retire
+    // the inventory. This receiver has no scene renderer to await.
+    QVERIFY(owner->closeRemoteSession(sessionId));
+    QTRY_VERIFY_WITH_TIMEOUT(!targetTerminating.isEmpty(), 3000);
+    const QJsonObject terminal = targetTerminating.last().first().toJsonObject();
+    const QString teardownId = terminal.value("teardownId").toString();
+    receiving.beginIncomingFileReaderTeardown({sessionId});
+    QTRY_VERIFY_WITH_TIMEOUT(receiving.incomingFileReadersSettled({sessionId}), 3000);
+    RemoteCacheStore::CommitResult cleanupResult;
+    QTRY_VERIFY_WITH_TIMEOUT((cleanupResult = receiving.teardownRemoteSession(owner->endpointId(),
+        sessionId, terminal.value("generation").toInteger(), teardownId)).acknowledgementSafe(), 3000);
+    QVERIFY(target.acknowledgeRemoteSessionTeardown(sessionId, teardownId, true, true, true,
+        receiving.lastTeardownRemovedFileCount(), QString(), cleanupResult.quarantinedBytes));
+    QTRY_VERIFY_WITH_TIMEOUT(owner->remoteSessionCoordinator()->byId(sessionId).remoteSessionId.isEmpty(), 3000);
+    QVERIFY(!hasRemoteFiles());
+    QVERIFY(!runtime.getFileManager()->isFileUploadedToClient(fileId, targetId));
+    QCOMPARE(workspace.uploadActionText(), QStringLiteral("Upload"));
+    QVERIFY(!workspace.uploadActionEnabled());
+    target.disconnect();
+    runtime.handleApplicationAboutToQuit();
 }
 
 void RemoteSessionIntegrationTest::localProofExpiryClosesAStillHealthyServerSession()

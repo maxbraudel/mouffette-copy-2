@@ -865,13 +865,14 @@ QString UploadManager::residencyOwnerId(const QString& sessionId, quint64 genera
 
 bool UploadManager::remoteMediaReady(const QString& target, const QString& sha256) const
 {
-    if (!m_ws) return false;
-    const auto binding = m_ws->sceneRunCoordinator()->sessionForPeer(target);
+    if (!m_ws || !m_ws->remoteSessionCoordinator()) return false;
+    const auto binding = m_ws->remoteSessionCoordinator()->outgoingForPeer(target);
     if (m_uploadScheduler->isSessionTerminal(binding.remoteSessionId)
         || m_cancelledRemoteAssets.value(binding.remoteSessionId).contains(sha256)) return false;
     const auto report = m_remoteResidency.value(binding.remoteSessionId);
-    if ((binding.phase != QLatin1String("Active") && binding.phase != QLatin1String("Grace")) || report.value(QStringLiteral("generation")).toInteger()
-        != binding.generation) return false;
+    const qint64 reportGeneration = report.value(QStringLiteral("generation")).toInteger();
+    if ((binding.phase != QLatin1String("Active") && binding.phase != QLatin1String("Grace"))
+        || reportGeneration < 1 || quint64(reportGeneration) > binding.generation) return false;
     for (const auto& value : report.value(QStringLiteral("assets")).toArray()) {
         const auto asset = value.toObject();
         const auto committed = m_committedAssetsByTarget.value(target).value(
@@ -879,6 +880,15 @@ bool UploadManager::remoteMediaReady(const QString& target, const QString& sha25
         const QString reportedUpload = asset.value(QStringLiteral("uploadId")).toString();
         if (!reportedUpload.isEmpty() && !committed.uploadId.isEmpty()
             && reportedUpload != committed.uploadId) continue;
+        // A resumed transport does not remove the same session's validated
+        // assets or RAM. The binding becomes observable before its RESUME
+        // subscribers run, so preserve that evidence across generations only
+        // for the exact committed asset. Command readiness is a separate gate.
+        if (quint64(reportGeneration) < binding.generation
+            && (committed.remoteSessionId != binding.remoteSessionId
+                || committed.generation == 0 || committed.generation > binding.generation
+                || committed.uploadId != reportedUpload
+                || committed.sha256 != asset.value(QStringLiteral("sha256")).toString())) continue;
         if (asset.value(QStringLiteral("sha256")).toString() == sha256
             && asset.value(QStringLiteral("state")).toString() == QLatin1String("ready")) return true;
     }
@@ -1002,8 +1012,12 @@ void UploadManager::receiveResidency(const QJsonObject& envelope)
     const QString target = envelope.value(QStringLiteral("targetEndpointId")).toString();
     MediaResidencyManager::instance().clearRemoteStates(target);
     QJsonObject merged = envelope;
+    // A generation change preserves this logical session's inventory. A
+    // current, authenticated delta can therefore amend its retained baseline;
+    // only a full report replaces that baseline and may remove omitted assets.
+    const qint64 previousGeneration = previous.value(QStringLiteral("generation")).toInteger();
     if (envelope.value(QStringLiteral("delta")).toBool()
-        && previous.value(QStringLiteral("generation")).toInteger() == generation) {
+        && previousGeneration > 0 && previousGeneration <= generation) {
         QJsonArray assets = previous.value(QStringLiteral("assets")).toArray();
         for (const auto& changed : envelope.value(QStringLiteral("assets")).toArray()) {
             const QString assetId = changed.toObject().value(QStringLiteral("assetId")).toString();
@@ -2837,6 +2851,9 @@ void UploadManager::applyRemoteSessionEnvelope(const QJsonObject& envelope) {
         }
     }
     if (active && generation > 0) {
+        // Rebind transfer/cache ownership, but retain the last RAM report's
+        // generation/sequence as published. remoteMediaReady handles that
+        // surviving evidence until a new authenticated report replaces it.
         for (auto batch = m_outgoingRamByTarget.begin(); batch != m_outgoingRamByTarget.end(); ++batch)
             if (batch->remoteSessionId == remoteSessionId) batch->generation = generation;
         for (const auto& uploadId : m_pendingUploadAborts.keys()) {
@@ -2845,8 +2862,6 @@ void UploadManager::applyRemoteSessionEnvelope(const QJsonObject& envelope) {
                                          QStringLiteral("User cancelled")))
                 m_pendingUploadAborts.remove(uploadId);
         }
-        if (m_remoteResidency.contains(remoteSessionId))
-            m_remoteResidency[remoteSessionId].insert(QStringLiteral("generation"), static_cast<double>(generation));
         const auto owners = m_residentIncoming.keys();
         for (const auto& oldOwner : owners) {
             auto record = m_residentIncoming.value(oldOwner);

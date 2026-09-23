@@ -3,6 +3,7 @@
 #include <QTemporaryDir>
 #include <QSignalSpy>
 #include <QScopeGuard>
+#include <algorithm>
 #include "backend/media/MediaResidencyManager.h"
 #include "backend/media/ResidentVideoPlayer.h"
 #include "backend/media/DecodeScheduler.h"
@@ -417,6 +418,63 @@ private slots:
         QVERIFY(manager.ready("second"));
         manager.release("second");
         QVERIFY(manager.assets().isEmpty());
+    }
+    void reacquiringDeduplicatedAliasPreservesValidatedRam() {
+        QTemporaryDir directory;
+        const QString original = image(directory, "original.png", 32, qRgb(10, 20, 30));
+        const QString cachedCopy = directory.filePath("cached.png");
+        QVERIFY(QFile::copy(original, cachedCopy));
+        MediaResidencyManager manager;
+        manager.setMemorySnapshotForTesting(memory());
+        // Make the original path win deduplication deterministically, just as
+        // two sessions can receive identical media in distinct cache scopes.
+        manager.acquire("original", original);
+        QTRY_VERIFY_WITH_TIMEOUT(manager.ready("original"), 5000);
+        const auto resident = manager.asset("original");
+        const QString digest = manager.sha256("original");
+        manager.acquire("old-generation", cachedCopy, digest);
+        QTRY_VERIFY_WITH_TIMEOUT(manager.ready("old-generation"), 5000);
+        QCOMPARE(manager.asset("old-generation"), resident);
+
+        QStringList replacementStates;
+        connect(&manager, &MediaResidencyManager::ownerChanged, &manager, [&](const QString& id) {
+            if (id == QLatin1String("new-generation")) replacementStates.append(manager.state(id));
+        });
+        manager.acquire("new-generation", cachedCopy, digest);
+        // Readiness must be continuous at acquisition, before any event loop
+        // turn or probe completion could conceal a transient analysing state.
+        QVERIFY(manager.ready("new-generation"));
+        QCOMPARE(manager.asset("new-generation"), resident);
+        manager.release("old-generation");
+        QTRY_VERIFY_WITH_TIMEOUT(!replacementStates.isEmpty(), 1000);
+        QVERIFY(std::all_of(replacementStates.cbegin(), replacementStates.cend(),
+                            [](const QString& state) { return state == QLatin1String("ready"); }));
+        QCOMPARE(manager.assets().size(), 1);
+        manager.release("original");
+        manager.acquire("primary-reopened", original, digest);
+        QVERIFY(manager.ready("primary-reopened"));
+        QCOMPARE(manager.asset("primary-reopened"), resident);
+
+        // Sharing an unchanged path still respects each owner's expected hash.
+        manager.acquire("wrong-digest", cachedCopy, QString(64, QLatin1Char('0')));
+        QVERIFY(!manager.ready("wrong-digest"));
+        QCOMPARE(manager.state("wrong-digest"), QStringLiteral("error"));
+        QVERIFY(!manager.asset("wrong-digest"));
+
+        // A changed alias is new content and must pass validation again.
+        QVERIFY(!image(directory, "cached.png", 17, qRgb(90, 80, 70)).isEmpty());
+        manager.acquire("changed-source", cachedCopy, digest);
+        QVERIFY(!manager.ready("changed-source"));
+        QTRY_COMPARE_WITH_TIMEOUT(manager.state("changed-source"), QStringLiteral("error"), 5000);
+        QVERIFY(manager.sha256("changed-source") != digest);
+        QVERIFY(!manager.asset("changed-source"));
+        // Existing owners retain their immutable bytes; the replacement
+        // owner can use the changed bytes only under their new identity.
+        QCOMPARE(manager.asset("new-generation"), resident);
+        manager.acquire("replacement", cachedCopy);
+        QTRY_VERIFY_WITH_TIMEOUT(manager.ready("replacement"), 5000);
+        QVERIFY(manager.asset("replacement") != resident);
+        QCOMPARE(manager.asset("replacement")->image.pixelColor(0, 0), QColor(90, 80, 70));
     }
     void memoryCategoriesSumWithoutDoubleCountingAndClearOnEviction() {
         QTemporaryDir directory;

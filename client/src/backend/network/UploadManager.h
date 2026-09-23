@@ -117,6 +117,9 @@ public:
     void setWebSocketClient(WebSocketClient* client);
     void setTargetClientId(const QString& id);
     QString targetClientId() const { return m_targetClientId; }
+    // Last authenticated RAM evidence for the retained outgoing session,
+    // independent of command availability. New reports and terminal cleanup
+    // revoke that evidence; replacement sessions never inherit it.
     bool remoteMediaReady(const QString& targetEndpointId, const QString& sha256) const;
     struct SourceUploadStatus {
         enum State { NotUploaded, Uploading, Uploaded } state = NotUploaded;

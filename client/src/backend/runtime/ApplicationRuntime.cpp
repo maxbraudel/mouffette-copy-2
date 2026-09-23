@@ -2351,11 +2351,14 @@ void ApplicationRuntime::handleRemoteSessionReady(const QJsonObject& envelope,
     const QString remoteSessionId =
         envelope.value(QStringLiteral("remoteSessionId")).toString();
     const QString phase = envelope.value(QStringLiteral("phase")).toString();
-    const bool commandActive = phase == QLatin1String("Active");
+    const bool activePhase = phase == QLatin1String("Active");
     const bool resumableGrace = resumed && phase == QLatin1String("Grace");
-    // WebSocketClient validates this too, but keep the presentation boundary
-    // fail-closed: a Ready-like envelope only grants commands in Active.
-    if (!commandActive && !resumableGrace) return;
+    // Active admits the authenticated snapshot, but commands still await both
+    // applied-state receipts and a usable local session proof.
+    if (!activePhase && !resumableGrace) return;
+    const bool commandActive = activePhase && isCommandReadyBinding(
+        m_webSocketClient,
+        m_webSocketClient->remoteSessionCoordinator()->byId(remoteSessionId));
     quint64 generation = 0;
     readSafePositiveJsonInteger(
         envelope.value(QStringLiteral("generation")), &generation);
@@ -2505,7 +2508,8 @@ void ApplicationRuntime::handleRemoteSessionReady(const QJsonObject& envelope,
         return;
     }
 
-    if (commandActive) {
+    if (activePhase) {
+        // The OPEN/RESUME has succeeded even if its command barrier is pending.
         m_sessionRecovery.reset(peerEndpointId);
     }
     const bool hadProject = m_projectManager
@@ -3214,6 +3218,7 @@ void ApplicationRuntime::clearRemoteSessionRuntimeState(
     ClientWorkspace* session = m_workspaceManager
         ? m_workspaceManager->findWorkspace(targetEndpointId) : nullptr;
     if (session) {
+        session->upload.remoteFilesPresent = false;
         if (session->canvas) {
             // Every terminal remote-session path clears only remote playback.
             // Local sources and a running test remain valid after peer loss.
@@ -3824,8 +3829,12 @@ void ApplicationRuntime::updateWorkspaceCapabilities(
     if (!workspace || !workspace->canvas) return;
     const bool hasProject = m_projectManager
         && m_projectManager->hasProjectForTarget(targetEndpointId);
+    const auto binding = m_webSocketClient
+        ? m_webSocketClient->remoteSessionCoordinator()->outgoingForPeer(targetEndpointId)
+        : RemoteSessionCoordinator::Binding();
     const bool remoteActive = workspace->remoteSessionState
-        == WorkspaceManager::RemoteSessionState::Active;
+        == WorkspaceManager::RemoteSessionState::Active
+        && isCommandReadyBinding(m_webSocketClient, binding);
     workspace->canvas->setProjectEditingEnabled(hasProject);
     workspace->canvas->setOverlayActionsEnabled(remoteActive);
     if (m_activeWorkspaceEndpointId == targetEndpointId && m_uploadManager) {

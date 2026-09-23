@@ -362,10 +362,32 @@ void MediaResidencyManager::acquire(const QString& ownerId, const QString& path,
     if (previous != m_owners.cend() && previous->path == canonical
         && previous->signature == stamp && previous->expectedSha256 == expected) return;
     release(ownerId);
-    for (const auto& e : m_entries) {
-        if (e->path != canonical || e->signature != stamp || e->cancelled->load()) continue;
-        e->owners.insert(ownerId);
-        m_owners.insert(ownerId, {e, expected, canonical, stamp});
+    // Hash deduplication can make several validated source paths share one
+    // entry. Its primary path is not an inventory of those aliases: find the
+    // exact unchanged source through its owner so a new session generation
+    // can retain the same RAM instead of probing an already validated copy.
+    EntryPtr shared;
+    for (const auto& candidate : std::as_const(m_owners)) {
+        if (candidate.path == canonical && candidate.signature == stamp
+            && !candidate.entry->cancelled->load()) {
+            shared = candidate.entry;
+            break;
+        }
+    }
+    // The entry also retains its validated primary source after that source's
+    // last owner was released while aliases continue holding its bytes.
+    if (!shared) {
+        for (const auto& candidate : std::as_const(m_entries)) {
+            if (candidate->path == canonical && candidate->signature == stamp
+                && !candidate->cancelled->load()) {
+                shared = candidate;
+                break;
+            }
+        }
+    }
+    if (shared) {
+        shared->owners.insert(ownerId);
+        m_owners.insert(ownerId, {shared, expected, canonical, stamp});
         QTimer::singleShot(0, this, [this, ownerId]() { emit ownerChanged(ownerId); emit changed(); });
         return;
     }

@@ -1681,6 +1681,7 @@ void UploadRemovalSecurityTest::uploadCompletionWaitsForDurableAck_data()
     QTest::addColumn<QString>("outcome");
     QTest::addColumn<int>("assetCount");
     QTest::newRow("one-ready") << QStringLiteral("ready") << 1;
+    QTest::newRow("ready-survives-session-recovery") << QStringLiteral("resumed") << 2;
     QTest::newRow("all-ready") << QStringLiteral("ready") << 2;
     QTest::newRow("mixed-failure") << QStringLiteral("failed") << 2;
     QTest::newRow("insufficient-ram") << QStringLiteral("capacity_insufficient") << 2;
@@ -1782,14 +1783,16 @@ void UploadRemovalSecurityTest::uploadCompletionWaitsForDurableAck()
     const QString targetEndpointId(43, QLatin1Char('B'));
     QString remoteSessionId =
         QStringLiteral("19191919-2222-4333-8444-555566667788");
+    quint64 remoteSessionGeneration = 1;
     auto sendServerMessage = [&](QJsonObject message) {
         message.insert("protocolVersion", 12);
         message.insert("serverBootId", bootId);
         message.insert("messageId",
                        QUuid::createUuid().toString(QUuid::WithoutBraces));
         message.insert("connectionGeneration", 1);
-        message.insert("remoteSessionId", remoteSessionId);
-        message.insert("generation", 1);
+        if (!message.contains("remoteSessionId")) message.insert("remoteSessionId", remoteSessionId);
+        if (!message.contains("generation"))
+            message.insert("generation", static_cast<qint64>(remoteSessionGeneration));
         message.insert("ownerEndpointId", socket.endpointId());
         message.insert("targetEndpointId", targetEndpointId);
         sendUploadTestMessage(peer, message);
@@ -2065,7 +2068,7 @@ void UploadRemovalSecurityTest::uploadCompletionWaitsForDurableAck()
     QVERIFY(!uploads.isBusy());
     QVERIFY(!uploads.isLoadingInRam());
     QVERIFY(uploads.hasActiveUpload());
-    if (assetCount > 1) {
+    if (assetCount > 1 && outcome != QLatin1String("resumed")) {
         for (const auto& source : uploadFiles)
             QVERIFY(files.isFileUploadedToClient(source.fileId, targetEndpointId));
         socket.disconnect();
@@ -2075,6 +2078,143 @@ void UploadRemovalSecurityTest::uploadCompletionWaitsForDurableAck()
     QCOMPARE(uploads.sourceUploadStatus(targetEndpointId, fileId).state,
              UploadManager::SourceUploadStatus::Uploaded);
     QCOMPARE(uploads.sourceUploadStatus(targetEndpointId, fileId).progress, 100);
+
+    if (outcome == QLatin1String("resumed")) {
+        int trackedIndex = -1;
+        for (qsizetype index = 0; index < manifests.size(); ++index)
+            if (manifests.at(index).toObject().value("sha256").toString() == fileId)
+                trackedIndex = static_cast<int>(index);
+        QVERIFY(trackedIndex >= 0);
+        // Observe synchronously at the binding publication edge: the view
+        // model can refresh here before UploadManager receives RESUME.
+        QList<bool> readyAtBindingChanges;
+        QObject bindingObserver;
+        connect(socket.remoteSessionCoordinator(), &RemoteSessionCoordinator::sessionChanged,
+                &bindingObserver, [&](const QString& id, quint64, const QString&) {
+            if (id == remoteSessionId)
+                readyAtBindingChanges.append(uploads.remoteMediaReady(targetEndpointId, fileId));
+        });
+        quint64 targetConnectionGeneration = 1;
+        auto sessionState = [&](const QString& type, const QString& phase, bool commandReady) {
+            sendServerMessage({{"type", type}, {"phase", phase}, {"commandReady", commandReady},
+                {"ownerConnectionGeneration", 1},
+                {"targetConnectionGeneration", static_cast<qint64>(targetConnectionGeneration)},
+                {"resumeToken", "memory_only_durable_barrier_token"}});
+        };
+        auto assertRetained = [&] {
+            QVERIFY(uploads.remoteMediaReady(targetEndpointId, fileId));
+            QVERIFY(files.isFileUploadedToClient(fileId, targetEndpointId));
+            QVERIFY(uploads.hasActiveUpload());
+        };
+        sessionState("remote_session_lease_state", "Active", false);
+        QTRY_VERIFY_WITH_TIMEOUT(!socket.remoteSessionCoordinator()->byId(remoteSessionId).commandReady, 1000);
+        assertRetained();
+        sessionState("remote_session_lease_state", "Grace", false);
+        QTRY_COMPARE_WITH_TIMEOUT(socket.remoteSessionCoordinator()->byId(remoteSessionId).phase,
+                                 QStringLiteral("Grace"), 1000);
+        assertRetained();
+        remoteSessionGeneration = 2;
+        targetConnectionGeneration = 2;
+        sessionState("remote_session_resumed", "Grace", false);
+        QTRY_COMPARE_WITH_TIMEOUT(socket.remoteSessionCoordinator()->byId(remoteSessionId).generation,
+                                 quint64(2), 1000);
+        assertRetained();
+        // Leaving Grace requires another authenticated transport generation;
+        // an Active envelope within the same generation is correctly rejected.
+        remoteSessionGeneration = 3;
+        targetConnectionGeneration = 3;
+        sessionState("remote_session_resumed", "Active", false);
+        QTRY_COMPARE_WITH_TIMEOUT(socket.remoteSessionCoordinator()->byId(remoteSessionId).phase,
+                                 QStringLiteral("Active"), 1000);
+        assertRetained();
+        sessionState("remote_session_lease_state", "Active", true);
+        QTRY_VERIFY_WITH_TIMEOUT(socket.canIssueSessionCommands(remoteSessionId), 1000);
+        assertRetained();
+        QVERIFY(readyAtBindingChanges.size() >= 5);
+        QVERIFY(std::all_of(readyAtBindingChanges.cbegin(), readyAtBindingChanges.cend(),
+                            [](bool ready) { return ready; }));
+
+        // A first report in the new generation may be a delta. Its unchanged
+        // asset must retain the previous generation's validated baseline.
+        QCOMPARE(assetCount, 2);
+        const QString otherFileId = manifests.at(1 - trackedIndex).toObject().value("sha256").toString();
+        QVERIFY(uploads.remoteMediaReady(targetEndpointId, otherFileId));
+        sendServerMessage({{"type", "media_residency"}, {"sequence", 3}, {"delta", true},
+                           {"assets", QJsonArray{residencyRow(trackedIndex, "waiting_for_memory")}}});
+        QTRY_VERIFY_WITH_TIMEOUT(!uploads.remoteMediaReady(targetEndpointId, fileId), 1000);
+        QVERIFY(uploads.remoteMediaReady(targetEndpointId, otherFileId));
+        sendServerMessage({{"type", "media_residency"}, {"sequence", 4},
+                           {"assets", QJsonArray{residencyRow(0, "ready"), residencyRow(1, "ready")}}});
+        QTRY_VERIFY_WITH_TIMEOUT(uploads.remoteMediaReady(targetEndpointId, fileId), 1000);
+
+        // Continuity retains the last evidence, never overrides new evidence:
+        // memory pressure, decode errors and authoritative empty inventories
+        // must revoke readiness while the durable upload stays available.
+        qint64 sequence = 4;
+        for (const QString& state : {QStringLiteral("waiting_for_memory"), QStringLiteral("error"), QString()}) {
+            QJsonArray assets;
+            if (!state.isEmpty()) assets.append(residencyRow(trackedIndex, state));
+            sendServerMessage({{"type", "media_residency"}, {"sequence", ++sequence}, {"assets", assets}});
+            QTRY_VERIFY_WITH_TIMEOUT(!uploads.remoteMediaReady(targetEndpointId, fileId), 1000);
+            QVERIFY(files.isFileUploadedToClient(fileId, targetEndpointId));
+            QVERIFY(uploads.hasActiveUpload());
+            sendServerMessage({{"type", "media_residency"}, {"sequence", ++sequence},
+                               {"assets", QJsonArray{residencyRow(trackedIndex, "ready")}}});
+            QTRY_VERIFY_WITH_TIMEOUT(uploads.remoteMediaReady(targetEndpointId, fileId), 1000);
+        }
+        // The report must still refer to this exact upload attempt.
+        QJsonObject mismatched = residencyRow(trackedIndex, "ready");
+        mismatched.insert("uploadId", QUuid::createUuid().toString(QUuid::WithoutBraces));
+        sendServerMessage({{"type", "media_residency"}, {"sequence", ++sequence},
+                           {"assets", QJsonArray{mismatched}}});
+        QTRY_VERIFY_WITH_TIMEOUT(!uploads.remoteMediaReady(targetEndpointId, fileId), 1000);
+        sendServerMessage({{"type", "media_residency"}, {"sequence", ++sequence},
+                           {"assets", QJsonArray{residencyRow(trackedIndex, "ready")}}});
+        QTRY_VERIFY_WITH_TIMEOUT(uploads.remoteMediaReady(targetEndpointId, fileId), 1000);
+
+        // A packet from the old generation cannot replace current evidence.
+        QSignalSpy reports(&socket, &WebSocketClient::mediaResidencyReceived);
+        sendServerMessage({{"type", "media_residency"}, {"generation", 1},
+                           {"sequence", 999}, {"assets", QJsonArray{}}});
+        QTest::qWait(50);
+        QCOMPARE(reports.count(), 0);
+        assertRetained();
+
+        // Terminal cleanup revokes both projections, even before a delayed
+        // server terminal envelope updates the coordinator's binding.
+        emit socket.remoteSessionRecoveryExpired(remoteSessionId, remoteSessionGeneration);
+        QVERIFY(!uploads.remoteMediaReady(targetEndpointId, fileId));
+        QVERIFY(!files.isFileUploadedToClient(fileId, targetEndpointId));
+        QVERIFY(!uploads.hasActiveUpload());
+        sendServerMessage({{"type", "media_residency"}, {"sequence", ++sequence},
+                           {"assets", QJsonArray{residencyRow(trackedIndex, "ready")}}});
+        QTRY_COMPARE_WITH_TIMEOUT(reports.count(), 1, 1000);
+        QVERIFY(!uploads.remoteMediaReady(targetEndpointId, fileId));
+        QVERIFY(!files.isFileUploadedToClient(fileId, targetEndpointId));
+
+        sendServerMessage({{"type", "remote_session_terminating"}, {"phase", "Terminating"},
+            {"ownerConnectionGeneration", 1},
+            {"targetConnectionGeneration", static_cast<qint64>(targetConnectionGeneration)},
+            {"teardownId", QUuid::createUuid().toString(QUuid::WithoutBraces)}});
+        QTRY_COMPARE_WITH_TIMEOUT(socket.remoteSessionCoordinator()->byId(remoteSessionId).phase,
+                                 QStringLiteral("Terminating"), 1000);
+        const QString retiredSessionId = remoteSessionId;
+        const quint64 retiredSessionGeneration = remoteSessionGeneration;
+        remoteSessionId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+        remoteSessionGeneration = 1;
+        sessionState("remote_session_opened", "Active", true);
+        QTRY_COMPARE_WITH_TIMEOUT(socket.remoteSessionCoordinator()->outgoingForPeer(targetEndpointId).remoteSessionId,
+                                 remoteSessionId, 1000);
+        QVERIFY(!uploads.remoteMediaReady(targetEndpointId, fileId));
+        sendServerMessage({{"type", "media_residency"}, {"remoteSessionId", retiredSessionId},
+                           {"generation", static_cast<qint64>(retiredSessionGeneration)}, {"sequence", ++sequence},
+                           {"assets", QJsonArray{residencyRow(trackedIndex, "ready")}}});
+        QTest::qWait(50);
+        QVERIFY(!uploads.remoteMediaReady(targetEndpointId, fileId));
+        QVERIFY(!uploads.hasActiveUpload());
+        socket.disconnect();
+        return;
+    }
 
     // The explicit Unload action must use the manager's authoritative v4
     // inventory even if the UI-side set is empty, then remain pending until

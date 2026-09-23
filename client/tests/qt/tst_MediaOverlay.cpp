@@ -78,6 +78,7 @@ private slots:
     void sourceAssociationsCommitAtomically();
     void timelineFragmentsPreserveSourceReferences();
     void uploadActionLocksBeforeDispatchAndRecovers();
+    void uploadedMediaKeepsUnloadWhileRemoteCommandsAreUnavailable();
     void uploadCancelHoverTracksBothPhases();
     void unavailableActionsStayClickableAndExplainWhy();
     void toolbarToolsAndGlobalMemoryUsage();
@@ -1879,6 +1880,161 @@ void MediaOverlayTest::uploadActionLocksBeforeDispatchAndRecovers()
     QTRY_VERIFY(!session.actionPending());
     QCOMPARE(calls, 4);
     QVERIFY(!session.uploadActionEnabled());
+}
+
+void MediaOverlayTest::uploadedMediaKeepsUnloadWhileRemoteCommandsAreUnavailable()
+{
+    QTemporaryDir temporary;
+    QVERIFY(temporary.isValid());
+    FileManager files;
+    UploadManager uploads(&files, nullptr, temporary.filePath(QStringLiteral("Uploads")));
+    QString error;
+    std::unique_ptr<QuickCanvasHost> host(QuickCanvasHost::create(&error));
+    QVERIFY2(host, qPrintable(error));
+    host->setFileManager(&files);
+    host->setProjectEditingEnabled(true);
+    host->setOverlayActionsEnabled(true);
+    const QString endpoint = QStringLiteral("retained-upload-workspace");
+    const QString firstPath = temporary.filePath(QStringLiteral("first.png"));
+    QImage image(32, 32, QImage::Format_ARGB32_Premultiplied);
+    image.fill(Qt::darkCyan);
+    QVERIFY(image.save(firstPath));
+    auto* first = host->document()->addPreparedFile(firstPath, image.size(), false, {});
+    QVERIFY(first);
+    QTRY_VERIFY_WITH_TIMEOUT(first->residencyReady() && !first->fileId().isEmpty(), 10000);
+    files.markFileUploadedToClient(first->fileId(), endpoint);
+    bool projectExists = true;
+    int dispatches = 0;
+    const auto hasFiles = [&](bool uploaded) {
+        for (const auto* media : host->document()->media()) {
+            if (!media->isText()
+                && files.isFileUploadedToClient(media->fileId(), endpoint) == uploaded)
+                return true;
+        }
+        return false;
+    };
+    ClientWorkspaceViewModel session(endpoint, host.get(), [&] { ++dispatches; }, &uploads,
+        [&] { return hasFiles(true); }, [&] { return hasFiles(false); }, [&] { return projectExists; });
+    QQmlEngine engine;
+    QQuickWindow window;
+    window.resize(640, 480);
+    std::unique_ptr<QQuickItem> harness(createRealMediaPanelHarness(engine, window, &session, &error));
+    QVERIFY2(harness, qPrintable(error));
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    harness->setSize(window.size());
+    auto* upload = findVisualItem(harness.get(), QStringLiteral("uploadAction"));
+    QVERIFY(upload);
+    auto* sources = qobject_cast<MediaListModel*>(session.mediaModel());
+    QVERIFY(sources);
+    QCOMPARE(sources->rowCount(), 1);
+    QTRY_VERIFY(findVisualItem(harness.get(), QStringLiteral("mediaStatus_0")));
+    const auto verifyRetainedUpload = [&] {
+        QCOMPARE(session.uploadState(), ClientWorkspaceViewModel::UploadState::Uploaded);
+        QCOMPARE(session.uploadActionText(), QStringLiteral("Unload"));
+        QCOMPARE(session.uploadActionIcon(), QUrl(QStringLiteral("qrc:/icons/icons/delete.svg")));
+        QCOMPARE(session.uploadActionTone(), 2);
+        QCOMPARE(upload->property("text").toString(), QStringLiteral("Unload"));
+        QCOMPARE(upload->property("iconSource").toUrl(), session.uploadActionIcon());
+        QCOMPARE(upload->property("tone").toInt(), 2);
+        QVERIFY(upload->isVisible());
+        QVERIFY(upload->isEnabled()); // Unavailable actions remain clickable to explain why.
+        QCOMPARE(sources->data(sources->index(0), MediaListModel::UploadStateRole).toString(),
+                 QStringLiteral("uploaded"));
+        auto* status = findVisualItem(harness.get(), QStringLiteral("mediaStatus_0"));
+        QVERIFY(status);
+        QCOMPARE(status->property("text").toString(), QStringLiteral("Uploaded"));
+        QVERIFY(files.isFileUploadedToClient(first->fileId(), endpoint));
+    };
+    verifyRetainedUpload();
+    QVERIFY(session.uploadActionEnabled());
+    const auto clickUpload = [&] {
+        QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier,
+            upload->mapToScene({upload->width() / 2, upload->height() / 2}).toPoint());
+    };
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        host->setOverlayActionsEnabled(false);
+        verifyRetainedUpload();
+        QVERIFY(!session.uploadActionEnabled());
+        QCOMPARE(session.uploadUnavailableReason(), QStringLiteral("Wait for the remote session to become ready"));
+        QCOMPARE(upload->property("unavailableReason").toString(), session.uploadUnavailableReason());
+        clickUpload();
+        session.triggerUploadAction();
+        QVERIFY(!session.actionPending());
+        QCOMPARE(dispatches, 0);
+        host->setOverlayActionsEnabled(true);
+        verifyRetainedUpload();
+        QVERIFY(session.uploadActionEnabled());
+        QVERIFY(session.uploadUnavailableReason().isEmpty());
+    }
+
+    // Losing command readiness after accepting a click must prevent the queued
+    // unload, while its semantic state and visible affordance stay unchanged.
+    session.triggerUploadAction();
+    QVERIFY(session.actionPending());
+    QCOMPARE(dispatches, 0);
+    host->setOverlayActionsEnabled(false);
+    verifyRetainedUpload();
+    QTRY_VERIFY(!session.actionPending());
+    QCOMPARE(dispatches, 0);
+    verifyRetainedUpload();
+    host->setOverlayActionsEnabled(true);
+    clickUpload();
+    QTRY_COMPARE(dispatches, 1);
+    QTRY_VERIFY(!session.actionPending());
+    verifyRetainedUpload();
+
+    // Real inventory loss changes the action even while remote commands are
+    // unavailable; reconnecting alone never creates an uploaded inventory.
+    host->setOverlayActionsEnabled(false);
+    files.unmarkFileUploadedToClient(first->fileId(), endpoint);
+    emit uploads.uiStateChanged();
+    QCOMPARE(session.uploadState(), ClientWorkspaceViewModel::UploadState::Ready);
+    QCOMPARE(upload->property("text").toString(), QStringLiteral("Upload"));
+    QCOMPARE(upload->property("iconSource").toUrl(), QUrl(QStringLiteral("qrc:/icons/icons/upload.svg")));
+    QCOMPARE(upload->property("tone").toInt(), 0);
+    QCOMPARE(sources->data(sources->index(0), MediaListModel::UploadStateRole).toString(),
+             QStringLiteral("not_uploaded"));
+    QCOMPARE(findVisualItem(harness.get(), QStringLiteral("mediaStatus_0"))->property("text").toString(),
+             QStringLiteral("Not uploaded"));
+    host->setOverlayActionsEnabled(true);
+    QCOMPARE(session.uploadState(), ClientWorkspaceViewModel::UploadState::Ready);
+    QVERIFY(session.uploadActionEnabled());
+    files.markFileUploadedToClient(first->fileId(), endpoint);
+    emit uploads.uiStateChanged();
+    verifyRetainedUpload();
+
+    // Adding an unsent source legitimately changes Unload to Upload while the
+    // already uploaded row retains its endpoint-specific source status.
+    const QString secondPath = temporary.filePath(QStringLiteral("second.png"));
+    image.fill(Qt::darkRed);
+    QVERIFY(image.save(secondPath));
+    auto* second = host->document()->addPreparedFile(secondPath, image.size(), false, {});
+    QVERIFY(second);
+    QTRY_VERIFY_WITH_TIMEOUT(second->residencyReady() && !second->fileId().isEmpty(), 10000);
+    QTRY_COMPARE(sources->rowCount(), 2);
+    QCOMPARE(session.uploadState(), ClientWorkspaceViewModel::UploadState::Ready);
+    QCOMPARE(upload->property("text").toString(), QStringLiteral("Upload"));
+    QCOMPARE(upload->property("tone").toInt(), 0);
+    QCOMPARE(sources->data(sources->index(0), MediaListModel::UploadStateRole).toString(),
+             QStringLiteral("uploaded"));
+    QCOMPARE(sources->data(sources->index(1), MediaListModel::UploadStateRole).toString(),
+             QStringLiteral("not_uploaded"));
+    files.markFileUploadedToClient(second->fileId(), endpoint);
+    emit uploads.uiStateChanged();
+    verifyRetainedUpload();
+
+    projectExists = false;
+    session.refreshCapabilities();
+    QCOMPARE(session.uploadState(), ClientWorkspaceViewModel::UploadState::Unavailable);
+    QVERIFY(!session.uploadActionEnabled());
+    QCOMPARE(session.uploadUnavailableReason(), QStringLiteral("Create a project first"));
+    session.triggerUploadAction();
+    QVERIFY(!session.actionPending());
+    QCOMPARE(dispatches, 1);
+    projectExists = true;
+    session.refreshCapabilities();
+    verifyRetainedUpload();
 }
 
 void MediaOverlayTest::overlayButtonHoverIsImmediate()
