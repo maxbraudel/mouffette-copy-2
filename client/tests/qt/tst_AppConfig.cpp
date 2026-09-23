@@ -618,7 +618,7 @@ void AppConfigTest::loadsEmbeddedDefaults() {
     QVERIFY(config.provenance(AppConfig::Key::MediaRamReserveMinMiB)
                 .startsWith(QStringLiteral("embedded-env:")));
     QCOMPARE(config.remoteSessionHiddenTimeoutMs(), qint64(120000));
-    QCOMPARE(config.projectMediaHiddenTimeoutMs(), qint64(0));
+    QCOMPARE(config.projectMediaHiddenTimeoutMs(), qint64(180000));
     QCOMPARE(config.projectHiddenRetentionMs(), qint64(240000));
     QCOMPARE(config.incomingSessionOrphanTimeoutMs(), qint64(5000));
     QCOMPARE(config.connectionAttemptTimeoutMs(), 10000);
