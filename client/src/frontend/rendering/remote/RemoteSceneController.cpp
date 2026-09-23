@@ -1325,12 +1325,17 @@ void RemoteSceneController::onRemoteSceneActivate(const QString& senderClientId,
         absoluteRemainingMs >= -maximumClockSkewMs
         && absoluteRemainingMs <= maximumDelayMs
         && qAbs(absoluteRemainingMs - fallbackDelayMs) <= maximumClockSkewMs;
-    const qint64 remainingMs = absoluteDeadlinePlausible
+    // Protocol COMMIT already mapped the shared server monotonic deadline to
+    // activationDelayMs. A plausible wall clock can still differ by the full
+    // allowed uncertainty; preferring it here would shift only the target's
+    // start away from the owner's. Keep wall-clock scheduling solely for
+    // legacy activation calls which have no synchronized commitment.
+    const qint64 remainingMs = !m_sceneCommitReceived && absoluteDeadlinePlausible
         ? std::max<qint64>(0, absoluteRemainingMs)
         : fallbackDelayMs;
     m_activationClockPlausible = absoluteDeadlinePlausible;
 
-    if (!absoluteDeadlinePlausible) {
+    if (!m_sceneCommitReceived && !absoluteDeadlinePlausible) {
         qWarning() << "RemoteSceneController: activation clocks diverge; using bounded relative delay"
                    << "absoluteRemainingMs=" << absoluteRemainingMs
                    << "fallbackDelayMs=" << fallbackDelayMs;

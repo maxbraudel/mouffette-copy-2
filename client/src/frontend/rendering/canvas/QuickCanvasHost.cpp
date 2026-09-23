@@ -133,6 +133,7 @@ QuickCanvasHost::QuickCanvasHost(CanvasDocument* document,
             stopScenePresentation();
             m_sceneStopping = false;
             m_sceneLaunched = false;
+            m_sceneStartConfirmed = false;
             m_sceneAccepted = false;
             m_localPreparedReported = false;
             m_sceneAllPrepared = false;
@@ -146,7 +147,7 @@ QuickCanvasHost::QuickCanvasHost(CanvasDocument* document,
             sceneToast(NotificationSeverity::Warning,
                        QStringLiteral("Remote stop acknowledgement timed out; scene stopped locally"),
                        runId, AppConfig::instance().toastWarningDurationMs());
-        } else if (m_sceneLaunching) {
+        } else if (m_sceneLaunching || (m_sceneLaunched && !m_sceneStartConfirmed)) {
             if (deferSceneTimeoutDuringRecovery()) return;
             const QString message = !m_sceneAccepted
                 ? QStringLiteral("The server did not accept the remote scene request in time")
@@ -258,10 +259,10 @@ void QuickCanvasHost::connectWebSocketSignals()
     connect(m_webSocket, &WebSocketClient::sceneStartedReceived, this,
             [this](const QJsonObject& envelope) {
         if (!matchesScene(envelope)
-            || !envelope.value(QStringLiteral("allStarted")).toBool(false)) return;
+            || !envelope.value(QStringLiteral("allStarted")).toBool(false)
+            || !m_sceneLaunched || m_sceneStopping || m_sceneStartConfirmed) return;
         m_sceneTimeout.stop();
-        m_sceneLaunching = false;
-        m_sceneLaunched = true;
+        m_sceneStartConfirmed = true;
         m_sceneCommitScheduled = false;
         m_localPrepareChecklist = {};
         m_videoSnapshotTimer.start();
@@ -276,6 +277,7 @@ void QuickCanvasHost::connectWebSocketSignals()
         stopScenePresentation();
         m_sceneLaunching = false;
         m_sceneLaunched = false;
+        m_sceneStartConfirmed = false;
         m_sceneStopping = true;
         m_webSocket->sendSceneStopped(m_sceneRunId, true);
         m_sceneTimeout.start(m_webSocket->serverPolicy()
@@ -290,6 +292,7 @@ void QuickCanvasHost::connectWebSocketSignals()
         stopScenePresentation();
         m_sceneLaunching = false;
         m_sceneLaunched = false;
+        m_sceneStartConfirmed = false;
         m_sceneStopping = false;
         m_sceneAccepted = false;
         m_localPreparedReported = false;
@@ -386,7 +389,7 @@ void QuickCanvasHost::applyRemoteSceneCommit(const QJsonObject& envelope)
     // authoritative, replace it with a deadline scoped to presentation.
     m_sceneTimeout.start(int(boundedDelay + startedTimeout
         + AppConfig::instance().sceneLaunchTimeoutMarginMs()));
-    QTimer::singleShot(int(boundedDelay), this,
+    QTimer::singleShot(int(boundedDelay), Qt::PreciseTimer, this,
                        [this, scheduledRunId, scheduledDigest,
                         localDeadline = MouffetteClock::nowMs() + boundedDelay,
                         maximumClockSkew]() {
@@ -407,7 +410,8 @@ void QuickCanvasHost::applyRemoteSceneCommit(const QJsonObject& envelope)
         const QString reason = mediaReadinessReason(true);
         if (!reason.isEmpty()) { failScene(reason, true); return; }
         beginScenePresentation(true);
-        startPresentationBarrier();
+        if (m_sceneRunId == scheduledRunId && m_sceneLaunched
+            && m_timelinePlaying && !m_sceneStopping) startPresentationBarrier();
     });
 }
 
@@ -898,6 +902,7 @@ void QuickCanvasHost::tryArmRemoteScene()
 
 void QuickCanvasHost::triggerRemoteSceneAction()
 {
+    if (m_sceneStopping) return;
     if (m_sceneLaunched) {
         if (!m_webSocket || m_sceneRunId.isEmpty()) {
             handleRemoteConnectionLost();
@@ -954,6 +959,7 @@ void QuickCanvasHost::triggerRemoteSceneAction()
     }
     m_runningSceneDefinition = scene;
     m_sceneLaunching = true;
+    m_sceneStartConfirmed = false;
     m_sceneAccepted = false;
     m_localPreparedReported = false;
     m_sceneAllPrepared = false;
@@ -1401,6 +1407,19 @@ void QuickCanvasHost::startTimelineClock()
     }
     m_timelineClock.start();
     m_timelinePlaying = true;
+    if (m_timelineRemote && m_sceneLaunching && m_sceneCommitScheduled) {
+        // STARTED proves presentation and necessarily arrives after playback.
+        // Publish the actionable UI state at COMMIT's deadline, before media
+        // start, while keeping the confirmation timeout and retries active.
+        const QPointer<QObject> context(m_sceneContext);
+        const QString runId = m_sceneRunId;
+        m_sceneLaunching = false;
+        m_sceneLaunched = true;
+        publishActionState();
+        // An action-state observer may synchronously stop or discard this run.
+        if (!context || context != m_sceneContext || runId != m_sceneRunId
+            || !m_sceneLaunched || m_sceneStopping || !m_timelinePlaying) return;
+    }
     const qreal now = timelineNowMs();
     applyTimeline(std::min(now, timelineStopMs()), now < timelineStopMs(), true);
     m_timelineTimer.start();
@@ -1448,11 +1467,16 @@ void QuickCanvasHost::stopScenePresentation()
 void QuickCanvasHost::startPresentationBarrier()
 {
     cancelPresentationBarrier();
-    QQuickWindow* window = m_controller ? m_controller->renderWindow() : nullptr;
+    const QPointer<QQuickWindow> window = m_controller ? m_controller->renderWindow() : nullptr;
     if (!window || !window->isVisible() || !window->isExposed()) return;
+    const QPointer<QObject> context(m_sceneContext);
+    const QString runId = m_sceneRunId;
     m_framesRemaining = 2;
     m_frameConnection = connect(window, &QQuickWindow::afterFrameEnd, this,
-                                [this, window]() {
+                                [this, window, context, runId]() {
+        // Disconnecting cannot retract already queued frame notifications.
+        if (!context || context != m_sceneContext || runId != m_sceneRunId
+            || !m_sceneLaunched || m_sceneStopping || !m_timelinePlaying) return;
         if (!window || !window->isVisible() || !window->isExposed()
             || --m_framesRemaining > 0) {
             if (window) window->update();
@@ -1468,7 +1492,8 @@ void QuickCanvasHost::startPresentationBarrier()
 
 void QuickCanvasHost::reportFirstFramePresented()
 {
-    if (m_sceneLaunched || m_firstFramePresentedLocalMs < 0
+    if (!m_sceneLaunched || m_sceneStopping || m_sceneStartConfirmed
+        || m_firstFramePresentedLocalMs < 0
         || !m_webSocket || m_sceneRunId.isEmpty()) return;
     const qint64 now = MouffetteClock::nowMs();
     if (m_lastStartedAckAttemptMs >= 0
@@ -1526,6 +1551,7 @@ void QuickCanvasHost::failScene(const QString& message, bool notifyServer, const
     m_sceneLaunching = false;
     m_sceneStopping = false;
     m_sceneLaunched = false;
+    m_sceneStartConfirmed = false;
     m_sceneAccepted = false;
     m_localPreparedReported = false;
     m_sceneAllPrepared = false;
@@ -1552,6 +1578,7 @@ void QuickCanvasHost::handleRemoteConnectionLost()
     m_sceneLaunching = false;
     m_sceneStopping = false;
     m_sceneLaunched = false;
+    m_sceneStartConfirmed = false;
     m_sceneAccepted = false;
     m_localPreparedReported = false;
     m_sceneAllPrepared = false;
@@ -1584,7 +1611,8 @@ void QuickCanvasHost::publishActionState()
 
 void QuickCanvasHost::sendVideoSnapshot()
 {
-    if (!m_sceneLaunched || !m_webSocket || m_sceneRunId.isEmpty()) return;
+    if (!m_sceneLaunched || !m_sceneStartConfirmed || m_sceneStopping
+        || !m_webSocket || m_sceneRunId.isEmpty()) return;
     static quint64 sequence = 0;
     m_webSocket->sendSceneStateSnapshot(m_sceneRunId, ++sequence,
         m_webSocket->estimatedServerMonotonicMs(),

@@ -405,20 +405,37 @@ private slots:
         QVERIFY(!host->m_localPreparedReported);
         QVERIFY(host->remoteSceneLaunching());
         QVERIFY(host->document()->editsLocked());
+        // Presentation has already started, but the transport failed before
+        // its retained first-frame proof could receive a server confirmation.
+        host->m_sceneLaunching = false;
+        host->m_sceneLaunched = true;
+        host->m_sceneCommitScheduled = true;
+        QVERIFY(!host->m_sceneStartConfirmed);
         host->m_firstFramePresentedServerMs = 1234;
         host->m_firstFramePresentedLocalMs = 5678;
+        QCOMPARE(host->m_lastStartedAckAttemptMs, qint64(-1));
         host->reportFirstFramePresented();
+        QVERIFY(host->m_lastStartedAckAttemptMs >= 0);
         QVERIFY(!host->m_firstFrameReported);
-        QVERIFY(host->remoteSceneLaunching());
+        QVERIFY(host->remoteSceneLaunched());
+        QVERIFY(!host->remoteSceneLaunching());
+        QVERIFY(!host->m_sceneStartConfirmed);
         QCOMPARE(host->m_firstFramePresentedServerMs, qint64(1234));
+        host->m_lastStartedAckAttemptMs = -1;
         emit socket.reconciliationCompleted();
-        QVERIFY(host->remoteSceneLaunching());
+        QVERIFY(host->m_lastStartedAckAttemptMs >= 0);
+        QVERIFY(!host->m_firstFrameReported);
+        QVERIFY(host->remoteSceneLaunched());
+        QVERIFY(!host->remoteSceneLaunching());
+        QVERIFY(!host->m_sceneStartConfirmed);
         QCOMPARE(host->m_firstFramePresentedServerMs, qint64(1234));
         QCOMPARE(host->m_firstFramePresentedLocalMs, qint64(5678));
         emit socket.sceneErrorReceived({{"sceneRunId", host->m_sceneRunId},
             {"digest", host->m_sceneDigest}, {"code", "channel_unavailable"},
             {"errorClass", "temporary"}});
-        QVERIFY(host->remoteSceneLaunching());
+        QVERIFY(host->remoteSceneLaunched());
+        QVERIFY(!host->remoteSceneLaunching());
+        QVERIFY(!host->m_sceneStartConfirmed);
         QVERIFY(host->document()->editsLocked());
         session.insert("type", "remote_session_resumed");
         session.insert("generation", 2);
@@ -428,9 +445,12 @@ private slots:
         emit socket.sceneErrorReceived({{"sceneRunId", run.sceneRunId}, {"digest", run.digest},
             {"remoteSessionId", run.remoteSessionId}, {"generation", 1},
             {"code", "scene_prepare_failed"}, {"message", "Delayed terminal error from old generation"}});
-        QVERIFY(host->remoteSceneLaunching());
+        QVERIFY(host->remoteSceneLaunched());
+        QVERIFY(!host->remoteSceneLaunching());
+        QVERIFY(!host->m_sceneStartConfirmed);
         QVERIFY(host->document()->editsLocked());
         host->handleRemoteConnectionLost();
+        QVERIFY(!host->remoteSceneLaunched());
         QVERIFY(!host->remoteSceneLaunching());
         QVERIFY(!host->document()->editsLocked());
     }
@@ -877,10 +897,20 @@ private slots:
         host->setScreens({});
         QVERIFY(host->document()->screens().isEmpty());
         QCOMPARE(host->document()->media().first()->sceneRect(), mediaRect);
+        // This fixture exercises immutable geometry and snapshot contents.
+        // STARTED is post-presentation evidence, so stage the local activation
+        // before injecting the two-endpoint acknowledgement below.
+        host->m_sceneCommitScheduled = true;
+        host->m_remoteStartServerMs = client.estimatedServerMonotonicMs();
+        host->beginScenePresentation(true);
+        QVERIFY(host->remoteSceneLaunched());
+        QVERIFY(!host->remoteSceneLaunching());
+        QVERIFY(!host->m_sceneStartConfirmed);
         client.sceneStartedReceived({{"sceneRunId", scenePrepare.value("sceneRunId")},
                                      {"digest", scenePrepare.value("digest")},
                                      {"allStarted", true}});
         QVERIFY(host->remoteSceneLaunched());
+        QVERIFY(host->m_sceneStartConfirmed);
         const ScreenInfo replacement(0, 1280, 720, -1280, -720, true);
         host->setScreens({replacement});
         QCOMPARE(host->document()->screens(), QList<ScreenInfo>{replacement});
@@ -1069,8 +1099,17 @@ private slots:
         client.disconnect();
     }
 
+    void ownerWaitsForAClockSampleAfterAllPrepared_data()
+    {
+        QTest::addColumn<QString>("completion");
+        for (const char* completion : {"delayed-confirmation", "missing-confirmation",
+                                      "stop-before-confirmation", "stop-on-state-change"})
+            QTest::newRow(completion) << QString::fromLatin1(completion);
+    }
+
     void ownerWaitsForAClockSampleAfterAllPrepared()
     {
+        QFETCH(QString, completion);
         QTemporaryDir directory;
         QVERIFY(directory.isValid());
         QWebSocketServer server(QStringLiteral("scene-clock-retry-test"),
@@ -1085,6 +1124,10 @@ private slots:
         int clockRepliesAfterBarrier = 0;
         int armedCount = 0;
         int stopCount = 0;
+        int snapshotCount = 0;
+        QPointer<QWebSocket> serverPeer;
+        QJsonObject correlation;
+        QList<qint64> presentedTimestamps;
         QJsonObject fixtureSessionState;
         auto send = [&](QWebSocket* peer, QJsonObject message) {
             message.insert(QStringLiteral("protocolVersion"), WebSocketClient::ProtocolVersion);
@@ -1111,6 +1154,7 @@ private slots:
         connect(&server, &QWebSocketServer::newConnection, this, [&]() {
             QWebSocket* peer = server.nextPendingConnection();
             QVERIFY(peer);
+            serverPeer = peer;
             peer->setParent(&server);
             send(peer, {{"type", "auth_challenge"}, {"issuedAt", 1},
                         {"nonce", QString::fromLatin1(QByteArray(32, 'n').toBase64(
@@ -1165,6 +1209,14 @@ private slots:
                                 {"serverMonotonicMs", message.value("clientMonotonicMs")},
                                 {"serverEpochMs", 1}});
                 } else if (type == QLatin1String("scene_prepare")) {
+                    correlation = {
+                        {"remoteSessionId", message.value("remoteSessionId")},
+                        {"generation", message.value("generation")},
+                        {"sceneRunId", message.value("sceneRunId")},
+                        {"revision", message.value("revision")},
+                        {"digest", message.value("digest")},
+                        {"ownerEndpointId", ownerId}, {"targetEndpointId", targetId}
+                    };
                     send(peer, {
                         {"type", "prepare_progress"},
                         {"remoteSessionId", message.value("remoteSessionId")},
@@ -1197,15 +1249,18 @@ private slots:
                     ++armedCount;
                 } else if (type == QLatin1String("stop")) {
                     ++stopCount;
+                } else if (type == QLatin1String("started")) {
+                    QVERIFY(message.value("firstFramePresented").toBool());
+                    presentedTimestamps.append(
+                        message.value("presentedServerMonotonicMs").toInteger(-1));
+                } else if (type == QLatin1String("state_snapshot")) {
+                    ++snapshotCount;
                 }
             });
         });
 
         WebSocketClient client(directory.path(), false);
         QSignalSpy sessionOpened(&client, &WebSocketClient::remoteSessionOpened);
-        client.connectToServer(QStringLiteral("ws://127.0.0.1:%1").arg(server.serverPort()));
-        QTRY_COMPARE_WITH_TIMEOUT(sessionOpened.count(), 1, 3000);
-
         FileManager files;
         QQuickWindow window;
         std::unique_ptr<QuickCanvasHost> host(QuickCanvasHost::create());
@@ -1218,7 +1273,17 @@ private slots:
         host->setProjectEditingEnabled(true);
         host->setOverlayActionsEnabled(true);
         QVERIFY(host->document()->addText(QPointF(40, 60), QStringLiteral("Scene title")));
+        ClientWorkspaceViewModel workspace(targetId, host.get(), [] {}, nullptr,
+            [] { return true; }, [] { return false; }, [] { return true; });
+        window.resize(640, 480);
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
 
+        // Initial native window/render setup may exceed the deliberately
+        // short suspect timeout. Start the connection only once that setup
+        // is complete so withholding clock replies tests PREPARED itself.
+        client.connectToServer(QStringLiteral("ws://127.0.0.1:%1").arg(server.serverPort()));
+        QTRY_COMPARE_WITH_TIMEOUT(sessionOpened.count(), 1, 3000);
         host->triggerRemoteSceneAction();
         QTRY_VERIFY_WITH_TIMEOUT(allPreparedSent, 3000);
         QVERIFY(preparedAttempts >= 2);
@@ -1227,6 +1292,170 @@ private slots:
         QVERIFY(clockRepliesAfterBarrier > 0);
         QCOMPARE(stopCount, 0);
         QVERIFY(host->remoteSceneLaunching());
+        QVERIFY(!host->remoteSceneLaunched());
+        QVERIFY(!host->timelinePlaying());
+        QCOMPARE(workspace.remoteSceneActionText(), QStringLiteral("Launching Remote Scene"));
+
+        const QString runId = correlation.value("sceneRunId").toString();
+        QVERIFY(!runId.isEmpty());
+        QJsonObject armed = correlation;
+        armed.insert("type", "armed");
+        send(serverPeer, armed);
+        QTRY_COMPARE(client.sceneRunCoordinator()->run(runId).phase,
+                     SceneRunCoordinator::Phase::Armed);
+
+        constexpr int activationDelayMs = 350;
+        const qint64 startServerMs = client.estimatedServerMonotonicMs() + activationDelayMs;
+        QElapsedTimer activationClock;
+        activationClock.start();
+        qint64 observedActivationMs = -1;
+        int localPresentationCount = 0;
+        bool playbackStateWasPublished = false;
+        connect(host.get(), &ICanvasHost::localScenePresentationRequested, this,
+                [&](quint64) {
+            ++localPresentationCount;
+            observedActivationMs = activationClock.elapsed();
+            playbackStateWasPublished = host->remoteSceneLaunched()
+                && !host->remoteSceneLaunching()
+                && workspace.remoteSceneActionState() == ClientWorkspaceViewModel::SceneActionState::Active
+                && workspace.remoteSceneActionText() == QStringLiteral("Stop Remote Scene")
+                && workspace.remoteSceneActionEnabled();
+        });
+        bool stoppedSynchronously = false;
+        if (completion == QLatin1String("stop-on-state-change")) {
+            connect(host.get(), &ICanvasHost::actionStateChanged, this, [&] {
+                if (!stoppedSynchronously && host->remoteSceneLaunched()
+                    && !host->remoteSceneStopping()) {
+                    stoppedSynchronously = true;
+                    // Simulate a synchronous action consumer. A presentation
+                    // must not start after this STOP cancels its activation.
+                    host->triggerRemoteSceneAction();
+                }
+            });
+        }
+
+        QJsonObject commit = correlation;
+        commit.insert("type", "commit");
+        commit.insert("startServerMonotonicMs", double(startServerMs));
+        commit.insert("startEpochMs", double(QDateTime::currentMSecsSinceEpoch() + activationDelayMs));
+        commit.insert("activationLeadMs", 1000);
+        commit.insert("maximumClockUncertaintyMs", 50);
+        send(serverPeer, commit);
+        QTRY_VERIFY_WITH_TIMEOUT(host->m_sceneCommitScheduled, 200);
+        QVERIFY(!host->timelinePlaying());
+        QCOMPARE(localPresentationCount, 0);
+        QCOMPARE(workspace.remoteSceneActionState(), ClientWorkspaceViewModel::SceneActionState::Starting);
+
+        // Two ready endpoints authorize a future shared deadline, not an
+        // immediate local preview. A replay cannot move that deadline either.
+        send(serverPeer, commit);
+        QTest::qWait(100);
+        QVERIFY(!host->timelinePlaying());
+        QCOMPARE(localPresentationCount, 0);
+        QVERIFY(presentedTimestamps.isEmpty());
+
+        if (completion == QLatin1String("stop-on-state-change")) {
+            QTRY_VERIFY_WITH_TIMEOUT(stoppedSynchronously, 1500);
+            QVERIFY(host->remoteSceneStopping());
+            QVERIFY(!host->timelinePlaying());
+            QCOMPARE(localPresentationCount, 0);
+        } else {
+            QTRY_COMPARE_WITH_TIMEOUT(localPresentationCount, 1, 1500);
+            QVERIFY(playbackStateWasPublished);
+            QVERIFY2(observedActivationMs >= activationDelayMs - 5,
+                     "Local playback began before the committed presentation deadline");
+            QVERIFY(host->timelinePlaying());
+            QVERIFY(host->remoteSceneLaunched());
+            QVERIFY(!host->remoteSceneLaunching());
+            QVERIFY(!host->m_sceneStartConfirmed);
+            QVERIFY(host->m_sceneTimeout.isActive());
+            QVERIFY(!host->m_videoSnapshotTimer.isActive());
+            QCOMPARE(client.sceneRunCoordinator()->run(runId).phase,
+                     SceneRunCoordinator::Phase::Scheduled);
+            // Direct requests and session-recovery requests must also remain
+            // silent until the authoritative two-endpoint confirmation.
+            host->sendVideoSnapshot();
+            QJsonObject resumed{{"remoteSessionId", "clock-retry-session"},
+                                {"requestStateSnapshot", true}};
+            client.remoteSessionResumed(resumed);
+            QTRY_VERIFY_WITH_TIMEOUT(!presentedTimestamps.isEmpty(), 1500);
+            QCOMPARE(snapshotCount, 0);
+            QVERIFY(presentedTimestamps.first() >= startServerMs - 50);
+        }
+
+        QJsonObject started = correlation;
+        started.insert("type", "started");
+        started.insert("allStarted", true);
+        if (completion == QLatin1String("delayed-confirmation")) {
+            // A one-endpoint receipt is not confirmation. Playback and the
+            // Stop button already run, but STARTED retries retain their first
+            // timestamp and timeline snapshots are still withheld.
+            auto partial = started;
+            partial.insert("allStarted", false);
+            const auto receiptsBeforePartial = presentedTimestamps.size();
+            send(serverPeer, partial);
+            QTRY_VERIFY_WITH_TIMEOUT(presentedTimestamps.size() > receiptsBeforePartial, 2500);
+            QVERIFY(!host->m_sceneStartConfirmed);
+            QVERIFY(host->m_sceneTimeout.isActive());
+            QCOMPARE(snapshotCount, 0);
+            for (qint64 timestamp : presentedTimestamps)
+                QCOMPARE(timestamp, presentedTimestamps.first());
+            send(serverPeer, commit);
+            send(serverPeer, started);
+            QTRY_VERIFY_WITH_TIMEOUT(host->m_sceneStartConfirmed, 1000);
+            QVERIFY(!host->m_sceneTimeout.isActive());
+            QVERIFY(host->m_videoSnapshotTimer.isActive());
+            QCOMPARE(localPresentationCount, 1);
+            const auto confirmedPosition = host->timelinePositionMs();
+            send(serverPeer, commit);
+            send(serverPeer, started);
+            QTest::qWait(100);
+            QCOMPARE(localPresentationCount, 1);
+            QVERIFY(host->timelinePositionMs() >= confirmedPosition);
+            host->sendVideoSnapshot();
+            QTRY_VERIFY_WITH_TIMEOUT(snapshotCount > 0, 1000);
+            const auto confirmedReceipts = presentedTimestamps.size();
+            host->retrySceneAcknowledgements(true);
+            QTest::qWait(100);
+            QCOMPARE(presentedTimestamps.size(), confirmedReceipts);
+            host->triggerRemoteSceneAction();
+        } else if (completion == QLatin1String("missing-confirmation")) {
+            QTRY_VERIFY_WITH_TIMEOUT(!host->remoteSceneLaunched(), 7000);
+            QVERIFY(!host->timelinePlaying());
+            QVERIFY(!host->remoteSceneLaunching());
+            QVERIFY(!host->m_sceneStartConfirmed);
+            QCOMPARE(snapshotCount, 0);
+            QVERIFY(presentedTimestamps.size() >= 2);
+            send(serverPeer, started);
+            send(serverPeer, commit);
+            QTest::qWait(100);
+            QVERIFY(!host->remoteSceneLaunched());
+            QVERIFY(!host->timelinePlaying());
+            QCOMPARE(localPresentationCount, 1);
+            QCOMPARE(snapshotCount, 0);
+        } else {
+            if (!stoppedSynchronously) host->triggerRemoteSceneAction();
+            QVERIFY(host->remoteSceneStopping());
+            QVERIFY(!host->timelinePlaying());
+            QCOMPARE(workspace.remoteSceneActionText(), QStringLiteral("Stopping Remote Scene"));
+            const auto stoppedReceipts = presentedTimestamps.size();
+            // Model a STARTED response already in transit while the user
+            // presses Stop; a duplicate COMMIT must also remain inert.
+            send(serverPeer, started);
+            send(serverPeer, commit);
+            QTest::qWait(100);
+            QVERIFY(host->remoteSceneStopping());
+            QVERIFY(!host->timelinePlaying());
+            QVERIFY(!host->m_sceneStartConfirmed);
+            QVERIFY(!host->m_videoSnapshotTimer.isActive());
+            host->retrySceneAcknowledgements(true);
+            host->sendVideoSnapshot();
+            QTest::qWait(100);
+            QCOMPARE(presentedTimestamps.size(), stoppedReceipts);
+            QCOMPARE(snapshotCount, 0);
+            QCOMPARE(localPresentationCount, stoppedSynchronously ? 0 : 1);
+        }
+        QTRY_COMPARE_WITH_TIMEOUT(stopCount, 1, 1000);
 
         host->handleRemoteConnectionLost();
         client.disconnect();

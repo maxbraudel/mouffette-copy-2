@@ -147,7 +147,9 @@ private:
     bool m_contentAvailable = true;
     bool m_sceneLaunching = false;
     bool m_sceneStopping = false;
+    // Playback starts at COMMIT; the server confirms both first frames later.
     bool m_sceneLaunched = false;
+    bool m_sceneStartConfirmed = false;
     QJsonObject m_runningSceneDefinition;
     bool m_testSceneLaunched = false;
     bool m_sceneAccepted = false;

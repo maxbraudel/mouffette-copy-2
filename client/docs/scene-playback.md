@@ -302,6 +302,19 @@ Remote launch preserves preparation, first-image verification, a synchronized
 activation barrier and an immutable revision. Every media is prepared, including
 media initially outside screens or clips. Initially absent videos prepare their
 clip entry frame without displaying it. Screen intersections follow evaluated geometry.
+
+The owner and target remain paused until the server has received both PREPARED
+and ARMED acknowledgements and issued COMMIT with a shared monotonic deadline.
+Both start at that deadline; a target's wall-clock offset cannot replace it.
+The owner's button changes from **Launching Remote Scene** to **Stop Remote Scene**
+when its committed playback begins, before starting media and audio. STARTED is
+sent after actual first-frame presentation, so the server's **allStarted**
+confirmation necessarily arrives later. This confirmation retains its timeout
+and acknowledgement retries; only then does the run become authoritative `Live`
+and begin periodic snapshots. Stop is available during this confirmation interval.
+Missing confirmation still stops the run, and a late confirmation or duplicate
+COMMIT cannot restart a stopped run.
+
 Periodic snapshots carry only the continuous timeline time (including fractional
 milliseconds and the position within a slot), never presentation
 properties, and cannot overwrite animated states. Display loss hides the affected

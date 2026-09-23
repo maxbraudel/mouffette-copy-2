@@ -2,12 +2,14 @@
 #include "backend/media/ResidentVideoPlayer.h"
 #include "backend/network/UploadManager.h"
 #include "backend/network/WebSocketClient.h"
+#include "backend/security/DeviceIdentityStore.h"
 #include <QApplication>
 #include <QAudioOutput>
 #include <QDateTime>
 #include <QFile>
 #include <QFontDatabase>
 #include <QJsonArray>
+#include <QJsonDocument>
 #include <QJsonObject>
 #include <QMediaPlayer>
 #include <QPointer>
@@ -20,8 +22,10 @@
 #include <QTextDocument>
 #include <QTextLayout>
 #include <QTimer>
+#include <QUuid>
 #include <QVariantAnimation>
 #include <QVideoSink>
+#include <QWebSocketServer>
 #include <QtTest>
 #include <qpa/qplatformscreen.h>
 #include <qpa/qwindowsysteminterface.h>
@@ -383,6 +387,129 @@ private slots:
         QVERIFY(controller.m_firstFramePresentedLocalSteadyMs >= 0);
         controller.onRemoteSceneStop(QStringLiteral("first-frame-hotplug"), scene["sceneInstanceId"].toString());
         QTRY_VERIFY_WITH_TIMEOUT(!findRemoteWindow(), 2000);
+    }
+
+    void committedActivationIgnoresPlausibleWallClockSkew_data()
+    {
+        QTest::addColumn<int>("wallClockSkewMs");
+        QTest::newRow("wall-deadline-earlier") << -150;
+        QTest::newRow("wall-deadline-later") << 150;
+    }
+
+    void committedActivationIgnoresPlausibleWallClockSkew()
+    {
+        QFETCH(int, wallClockSkewMs);
+        QTemporaryDir identity;
+        QWebSocketServer server(QStringLiteral("target-activation-clock"), QWebSocketServer::NonSecureMode);
+        QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+        const QString bootId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+        auto send = [&](QWebSocket* peer, QJsonObject message) {
+            message.insert("protocolVersion", WebSocketClient::ProtocolVersion);
+            message.insert("serverBootId", bootId);
+            message.insert("messageId", QUuid::createUuid().toString(QUuid::WithoutBraces));
+            peer->sendTextMessage(QString::fromUtf8(QJsonDocument(message).toJson(QJsonDocument::Compact)));
+        };
+        connect(&server, &QWebSocketServer::newConnection, &server, [&] {
+            QWebSocket* peer = server.nextPendingConnection();
+            QVERIFY(peer);
+            peer->setParent(&server);
+            send(peer, {{"type", "auth_challenge"}, {"issuedAt", 1},
+                {"nonce", QString::fromLatin1(QByteArray(32, 'n').toBase64(
+                    QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals))}});
+            connect(peer, &QWebSocket::textMessageReceived, &server, [&, peer](const QString& encoded) {
+                const auto message = QJsonDocument::fromJson(encoded.toUtf8()).object();
+                if (message.value("type") == QLatin1String("auth_response")) {
+                    const auto endpoint = DeviceIdentityStore::endpointIdForInstallation(
+                        message.value("installationId").toString(), message.value("instanceId").toString());
+                    send(peer, {{"type", "welcome"},
+                        {"connectionId", QUuid::createUuid().toString(QUuid::WithoutBraces)},
+                        {"installationId", message.value("installationId")}, {"endpointId", endpoint},
+                        {"instanceId", message.value("instanceId")},
+                        {"instanceOrdinal", message.value("instanceOrdinal")}, {"runtimeId", message.value("runtimeId")},
+                        {"connectionGeneration", 1}, {"serverMonotonicMs", 0},
+                        {"policy", QJsonObject{{"policyVersion", 5}, {"transportTimeoutMs", 5000},
+                            {"heartbeatIntervalMs", 250}, {"leaseTimeoutMs", 500}, {"transportSuspectAfterMs", 500},
+                            {"sessionRecoveryTimeoutMs", 15000}, {"scenePrepareTimeoutMs", 15000},
+                            {"sceneActivationLeadMs", 1000}, {"sceneMaxClockSkewMs", 250},
+                            {"sceneStartedAckTimeoutMs", 5000}, {"sceneMaxStartSkewMs", 750},
+                            {"sceneStopTimeoutMs", 5000}, {"uploadIdleTimeoutMs", 45000},
+                            {"uploadTargetAckTimeoutMs", 30000}, {"removalAckTimeoutMs", 30000}}}});
+                } else if (message.value("type") == QLatin1String("heartbeat")) {
+                    send(peer, {{"type", "heartbeat_ack"}, {"connectionGeneration", 1},
+                        {"sequence", message.value("sequence")}, {"clientMonotonicMs", message.value("clientMonotonicMs")},
+                        {"serverMonotonicMs", message.value("clientMonotonicMs")}});
+                }
+            });
+        });
+        WebSocketClient socket(identity.path(), false);
+        socket.connectToServer(QStringLiteral("ws://127.0.0.1:%1").arg(server.serverPort()));
+        QTRY_VERIFY_WITH_TIMEOUT(socket.sceneClockUncertaintyMs() <= 250, 5000);
+
+        RemoteSceneController controller(nullptr, nullptr);
+        controller.onRemoteSceneStart(QStringLiteral("clock-owner"), textScene());
+        QTRY_VERIFY_WITH_TIMEOUT(controller.m_sceneActivationRequested, 5000);
+        controller.m_ws = &socket;
+        controller.m_pendingSessionGeneration = 1;
+        controller.m_pendingSceneDigest = QString(64, QLatin1Char('a'));
+        const qint64 serverBefore = socket.estimatedServerMonotonicMs();
+        QVERIFY(serverBefore >= 0);
+        const qint64 startMonotonic = serverBefore + 600;
+        const QJsonObject commit{{"generation", 1}, {"sceneRunId", controller.m_pendingSceneInstanceId},
+            {"digest", controller.m_pendingSceneDigest}, {"remoteSessionId", controller.m_pendingRemoteSessionId},
+            {"startServerMonotonicMs", startMonotonic},
+            {"startEpochMs", QDateTime::currentMSecsSinceEpoch() + 600 + wallClockSkewMs},
+            {"maximumClockUncertaintyMs", 250}, {"activationLeadMs", 1000}};
+        controller.onSceneCommitEnvelope(commit);
+        const qint64 serverAfter = socket.estimatedServerMonotonicMs();
+        QVERIFY(controller.m_sceneCommitReceived);
+        QVERIFY(controller.m_activationTimer && controller.m_activationTimer->isActive());
+        QCOMPARE(controller.m_activationTimer->timerType(), Qt::PreciseTimer);
+        QVERIFY(controller.m_activationClockPlausible);
+        // The original wall-clock preference scheduled 450/750 ms here even
+        // though both clients were committed to the same 600 ms deadline.
+        const int scheduledDelay = controller.m_activationTimer->interval();
+        QVERIFY(scheduledDelay >= startMonotonic - serverAfter);
+        QVERIFY(scheduledDelay <= startMonotonic - serverBefore);
+        QVERIFY(!controller.m_sceneActivated);
+        QVERIFY(!controller.m_screenWindows[0].window->isVisible());
+        QVERIFY(!controller.m_timelineTimer.isActive());
+    }
+
+    void preparedVideoWaitsForActivationBeforePlayback()
+    {
+        const QString fileId = QStringLiteral("prepared-video-activation");
+        const QString owner = UploadManager::residencyOwnerId({}, 0, fileId);
+        FileManager files;
+        const QString path = QString::fromUtf8(TEST_VIDEO_FILE);
+        files.registerReceivedFilePath(fileId, path);
+        auto& residency = MediaResidencyManager::instance();
+        residency.acquire(owner, path);
+        const auto cleanup = qScopeGuard([&] {
+            files.removeReceivedFileMapping(fileId);
+            residency.release(owner);
+        });
+        QTRY_VERIFY_WITH_TIMEOUT(residency.ready(owner), 60000);
+        RemoteSceneController controller(&files, nullptr);
+        auto scene = videoScene(fileId);
+        auto media = scene["media"].toArray().first().toObject();
+        media["muted"] = false;
+        scene["media"] = QJsonArray{media};
+        controller.onRemoteSceneStart(QStringLiteral("prepared-video-owner"), scene);
+        QTRY_VERIFY_WITH_TIMEOUT(controller.m_sceneActivationRequested, 5000);
+        const auto item = controller.m_mediaItems.first();
+        QVERIFY(item->player->preparedAt(item->timelineRequestedSourceMs));
+        QTest::qWait(100);
+        QVERIFY(!controller.m_sceneActivated);
+        QVERIFY(!controller.m_screenWindows[0].window->isVisible());
+        QVERIFY(!controller.m_timelineTimer.isActive());
+        QCOMPARE(controller.m_timelinePositionMs, 0);
+        QVERIFY(!item->player->isPlaying());
+        QVERIFY(item->audio->isMuted());
+        controller.activateScene();
+        QVERIFY(controller.m_sceneActivated);
+        QVERIFY(controller.m_screenWindows[0].window->isVisible());
+        QVERIFY(item->player->isPlaying());
+        QVERIFY(!item->audio->isMuted());
     }
 
     void reportedDelayedVideoPreparesAtStartAndAudioTail()
