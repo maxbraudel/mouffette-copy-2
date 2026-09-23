@@ -409,6 +409,16 @@ void RemoteSessionCoordinator::suspend(const QString& remoteSessionId)
     emit sessionChanged(remoteSessionId, it->generation, it->phase);
 }
 
+bool RemoteSessionCoordinator::isTerminal(const QString& remoteSessionId) const
+{
+    if (m_closedSessionIds.contains(remoteSessionId)) return true;
+    const auto binding = m_byId.constFind(remoteSessionId);
+    return binding != m_byId.cend()
+        && (binding->phase == QLatin1String("Terminating")
+            || binding->phase == QLatin1String("CleanupPending")
+            || binding->phase == QLatin1String("Closed"));
+}
+
 bool RemoteSessionCoordinator::isClosedDuplicate(const QJsonObject& envelope) const
 {
     const auto found = m_closedBindings.constFind(envelope.value(QStringLiteral("remoteSessionId")).toString());

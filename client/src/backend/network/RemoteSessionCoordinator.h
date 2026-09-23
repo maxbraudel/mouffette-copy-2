@@ -47,6 +47,7 @@ public:
         return m_latestSnapshotBySession.value(remoteSessionId);
     }
     static bool validateSnapshot(const QJsonObject& snapshot);
+    bool isTerminal(const QString& remoteSessionId) const;
     bool isClosedDuplicate(const QJsonObject& envelope) const;
     void suspend(const QString& remoteSessionId);
     bool canClose(const QJsonObject& envelope,

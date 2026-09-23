@@ -2482,6 +2482,12 @@ bool WebSocketClient::canIssueSessionCommands(const QString& remoteSessionId) co
         || sessionRecoveryRemainingMs(remoteSessionId) <= 0 || !m_sceneRuns) return false;
     const auto binding = m_sceneRuns->sessionById(remoteSessionId);
     if (!binding.active || !binding.commandReady) return false;
+    // A locally requested close is irreversible intent. Do not enqueue cursor,
+    // snapshot or media work behind CLOSE while its terminal reply is in flight.
+    for (const auto& pending : m_pendingControl) {
+        if (pending.message.value(QStringLiteral("type")) == QLatin1String("remote_session_close")
+            && pending.message.value(QStringLiteral("remoteSessionId")) == remoteSessionId) return false;
+    }
     const quint64 localGeneration = binding.ownerEndpointId == m_endpointId
         ? binding.ownerConnectionGeneration : binding.targetConnectionGeneration;
     return localGeneration == m_connectionGeneration;
@@ -3710,6 +3716,19 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
         if (message.value(QStringLiteral("scope")).toString()
                 == QLatin1String("remote_session")
             || isRemoteSessionBusinessError(code)) {
+            // Disposable updates can cross a remote close on the network. The
+            // authenticated terminal envelope has already settled their fate;
+            // their delayed rejection is not a new project/connection failure.
+            // Keep real request failures and active/unknown-session errors visible.
+            if (code == QLatin1String("remote_session_not_active")
+                && message.value(QStringLiteral("requestId")).toString().isEmpty()
+                && remoteSessionCoordinator()->isTerminal(
+                    message.value(QStringLiteral("remoteSessionId")).toString())) {
+                NetworkDiagnostics::record(QStringLiteral("terminal_session_update_discarded"), {
+                    {QStringLiteral("remoteSessionId"), message.value(QStringLiteral("remoteSessionId"))},
+                    {QStringLiteral("reason"), code}});
+                return;
+            }
             qWarning() << "RemoteSession command rejected:" << code;
             QJsonObject remoteError = message;
             remoteError.remove(QStringLiteral("identityValid"));

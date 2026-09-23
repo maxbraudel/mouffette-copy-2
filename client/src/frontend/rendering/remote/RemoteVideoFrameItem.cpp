@@ -42,12 +42,14 @@ void RemoteVideoFrameItem::setFrameSource(QObject* source) {
 
     QObject::disconnect(m_frameConnection);
     QObject::disconnect(m_destroyedConnection);
+    m_resetNode = true;
     m_source = typedSource;
     if (m_source) {
         m_frameConnection = connect(m_source, &RemoteVideoFrameSource::frameChanged,
                                     this, &RemoteVideoFrameItem::refreshFrame);
         m_destroyedConnection = connect(m_source, &QObject::destroyed, this, [this]() {
             m_source = nullptr;
+            m_resetNode = true;
             refreshFrame();
             emit frameSourceChanged();
         });
@@ -63,6 +65,8 @@ bool RemoteVideoFrameItem::hasFrame() const {
 void RemoteVideoFrameItem::refreshFrame() {
     update();
     const bool ready = hasFrame();
+    // An explicit clear must survive a new frame arriving before render sync.
+    if (!ready) m_resetNode = true;
     if (m_hasFrame != ready) {
         m_hasFrame = ready;
         emit hasFrameChanged();
@@ -76,21 +80,37 @@ void RemoteVideoFrameItem::geometryChange(const QRectF& newGeometry, const QRect
 }
 
 QSGNode* RemoteVideoFrameItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData*) {
+    if (m_resetNode) {
+        delete oldNode;
+        oldNode = nullptr;
+        m_resetNode = false;
+    }
+    if (!window() || !hasFrame() || width() <= 0 || height() <= 0) {
+        delete oldNode;
+        return nullptr;
+    }
     const QVideoFrame video = m_source ? m_source->videoFrame() : m_sink.videoFrame();
-    if (video.isValid() && window() && window()->rhi()) {
+    if (video.isValid() && window()->rhi()) {
+        // A valid frame handle is not a ready GPU image. Prepare every plane
+        // before releasing the retained snapshot/previous video textures. The
+        // upload batch joins this draw, so switching formats never exposes an
+        // empty material while the stream is recovering.
+        auto planes = SharedVideoRendering::planesFor(video, window()->rhi());
+        if (!planes) {
+            if (auto* retained = dynamic_cast<SharedVideoNode*>(oldNode))
+                retained->updateRect(boundingRect());
+            else if (auto* retained = dynamic_cast<FrameNode*>(oldNode))
+                retained->image->setRect(boundingRect());
+            return oldNode;
+        }
         auto* node = dynamic_cast<SharedVideoNode*>(oldNode);
         if (!node || node->pixelFormat() != video.pixelFormat()) {
-            delete oldNode; node = new SharedVideoNode(video, window()->rhi());
+            delete oldNode; node = new SharedVideoNode(video, window()->rhi(), planes);
         }
-        node->update(video, boundingRect());
+        node->update(video, boundingRect(), std::move(planes));
         return node;
     }
     auto* node = dynamic_cast<FrameNode*>(oldNode);
-    if (oldNode && !node) delete oldNode;
-    if (!window() || !hasFrame() || width() <= 0 || height() <= 0) {
-        delete node;
-        return nullptr;
-    }
 
     // The GUI thread is blocked during synchronization; the shared immutable
     // frame can be read here without copying or retaining it on the item.
@@ -99,12 +119,11 @@ QSGNode* RemoteVideoFrameItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNode
     const QImage frame = video.isValid() ? ResidentVideoPlayer::presentationFrame(video).toImage() : m_source->frame();
     if (!node || node->frameKey != frame.cacheKey()) {
         auto texture = sharedImageTexture(window(), frame);
-        if (!texture) {
-            delete node;
-            return nullptr;
-        }
-        if (!node)
+        if (!texture) return oldNode;
+        if (!node) {
+            delete oldNode;
             node = new FrameNode(window()->createImageNode());
+        }
         node->image->setTexture(texture.get());
         // The default empty source rect means the entire texture, including
         // when Qt limits an oversized source to the GPU's maximum dimensions.

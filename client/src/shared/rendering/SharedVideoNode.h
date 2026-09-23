@@ -25,8 +25,16 @@ public:
 struct Planes {
     QVideoFrameTexturesUPtr owner;
     std::array<PlaneTexture, 3> textures;
+    QRhiResourceUpdateBatch* pendingUpdates = nullptr;
+    ~Planes() { if (pendingUpdates) pendingUpdates->release(); }
+    void commitUpdates(QRhiResourceUpdateBatch* updates) {
+        if (!pendingUpdates) return;
+        updates->merge(pendingUpdates);
+        pendingUpdates->release();
+        pendingUpdates = nullptr;
+    }
 };
-inline std::shared_ptr<Planes> planesFor(const QVideoFrame& frame, QRhi* rhi, QRhiResourceUpdateBatch* updates) {
+inline std::shared_ptr<Planes> planesFor(const QVideoFrame& frame, QRhi* rhi) {
     using Frames = QHash<QString, std::weak_ptr<Planes>>;
     thread_local QHash<QRhi*, Frames> contexts;
     const QString key = QString::number(ResidentVideoPlayer::frameIdentity(frame)) + QLatin1Char(':') + QString::number(frame.startTime());
@@ -34,12 +42,15 @@ inline std::shared_ptr<Planes> planesFor(const QVideoFrame& frame, QRhi* rhi, QR
     auto planes = entries.value(key).lock();
     if (!planes) {
         planes = std::make_shared<Planes>();
+        planes->pendingUpdates = rhi->nextResourceUpdateBatch();
         QVideoFrameTexturesUPtr old;
-        planes->owner = QVideoTextureHelper::createTextures(frame, *rhi, *updates, old);
+        planes->owner = QVideoTextureHelper::createTextures(frame, *rhi, *planes->pendingUpdates, old);
         if (!planes->owner) return {};
         const int count = QVideoTextureHelper::textureDescription(frame.pixelFormat())->nplanes;
+        if (count <= 0 || count > 3) return {};
         for (int i = 0; i < count && i < 3; ++i) {
             planes->textures[i].plane = planes->owner->texture(i);
+            if (!planes->textures[i].plane) return {};
             planes->textures[i].setFiltering(QSGTexture::Linear);
         }
         entries.insert(key, planes);
@@ -67,7 +78,8 @@ public:
     QVideoFrame frame;
     QRhi* rhi;
     std::shared_ptr<Planes> planes;
-    explicit Material(QVideoFrame value, QRhi* context) : frame(std::move(value)), rhi(context) { setFlag(Blending); }
+    Material(QVideoFrame value, QRhi* context, std::shared_ptr<Planes> prepared)
+        : frame(std::move(value)), rhi(context), planes(std::move(prepared)) { setFlag(Blending); }
     QSGMaterialType* type() const override {
         thread_local QHash<QString, std::shared_ptr<QSGMaterialType>> types;
         const QString shader = QVideoTextureHelper::fragmentShaderFileName(frame.surfaceFormat(), rhi);
@@ -85,30 +97,35 @@ public:
 };
 inline bool Shader::updateUniformData(RenderState& state, QSGMaterial* value, QSGMaterial*) {
     auto* material = static_cast<Material*>(value);
+    material->planes->commitUpdates(state.resourceUpdateBatch());
     QVideoTextureHelper::updateUniformData(state.uniformData(), state.rhi(), material->frame.surfaceFormat(),
         material->frame, state.combinedMatrix(), state.opacity());
     return true;
 }
-inline void Shader::updateSampledImage(RenderState& state, int binding, QSGTexture** texture, QSGMaterial* value, QSGMaterial*) {
+inline void Shader::updateSampledImage(RenderState&, int binding, QSGTexture** texture, QSGMaterial* value, QSGMaterial*) {
     auto* material = static_cast<Material*>(value);
-    if (!material->planes) material->planes = planesFor(material->frame, state.rhi(), state.resourceUpdateBatch());
     if (material->planes && binding >= 1 && binding <= 3) *texture = &material->planes->textures[size_t(binding-1)];
 }
 }
 class SharedVideoNode final : public QSGGeometryNode {
 public:
-    SharedVideoNode(const QVideoFrame& frame, QRhi* rhi) {
+    SharedVideoNode(const QVideoFrame& frame, QRhi* rhi, std::shared_ptr<SharedVideoRendering::Planes> planes) {
         auto* geometry = new QSGGeometry(QSGGeometry::defaultAttributes_TexturedPoint2D(), 4);
         geometry->setDrawingMode(QSGGeometry::DrawTriangleStrip);
         setGeometry(geometry); setFlag(OwnsGeometry);
-        setMaterial(new SharedVideoRendering::Material(frame, rhi)); setFlag(OwnsMaterial);
+        setMaterial(new SharedVideoRendering::Material(frame, rhi, std::move(planes))); setFlag(OwnsMaterial);
     }
-    void update(const QVideoFrame& frame, const QRectF& rect) {
+    void update(const QVideoFrame& frame, const QRectF& rect, std::shared_ptr<SharedVideoRendering::Planes> planes) {
         auto* value = static_cast<SharedVideoRendering::Material*>(material());
         if (ResidentVideoPlayer::frameIdentity(frame) != ResidentVideoPlayer::frameIdentity(value->frame)
             || frame.startTime() != value->frame.startTime()) {
-            value->frame = frame; value->planes.reset(); markDirty(DirtyMaterial);
+            value->frame = frame; value->planes = std::move(planes); markDirty(DirtyMaterial);
         }
+        value->frame = frame;
+        updateRect(rect);
+    }
+    void updateRect(const QRectF& rect) {
+        const auto& frame = static_cast<SharedVideoRendering::Material*>(material())->frame;
         QSGGeometry::updateTexturedRectGeometry(geometry(), rect, QRectF(0, 0, 1, 1));
         auto* vertices = geometry()->vertexDataAsTexturedPoint2D();
         for (int i = 0; i < 4; ++i) {

@@ -109,6 +109,7 @@ private slots:
     void concurrentProcessesShareInstallationAndKeepStableSlots();
     void retainedServerPresenceDoesNotKeepProjectlessRows();
     void profilesPropagateWithoutChangingIdentity();
+    void closingFencesCommandsAndDiscardsOnlyObsoleteUpdateErrors();
 private:
     void startRelay(quint16 port = 0);
     void configure(WebSocketClient& peer, const QString& name);
@@ -306,6 +307,64 @@ void RemoteSessionIntegrationTest::configure(WebSocketClient& peer, const QStrin
             peer.acknowledgeRemoteSessionTeardown(event.value("remoteSessionId").toString(),
                 event.value("teardownId").toString(), true, true, true, 0, QString(), 0);
     });
+}
+
+void RemoteSessionIntegrationTest::closingFencesCommandsAndDiscardsOnlyObsoleteUpdateErrors()
+{
+    QTemporaryDir identities;
+    WebSocketClient owner(identities.filePath("owner"), false);
+    WebSocketClient target(identities.filePath("target"), false);
+    configure(owner, QStringLiteral("owner"));
+    configure(target, QStringLiteral("target"));
+    QSignalSpy registered(&target, &WebSocketClient::registrationConfirmed);
+    QSignalSpy opened(&owner, &WebSocketClient::remoteSessionOpened);
+    QSignalSpy errors(&target, &WebSocketClient::remoteSessionError);
+    owner.connectToServer(m_url);
+    target.connectToServer(m_url);
+    QTRY_VERIFY_WITH_TIMEOUT(owner.isConnected() && !registered.isEmpty(), 5000);
+    QVERIFY(owner.openRemoteSession(target.endpointId()));
+    QTRY_VERIFY_WITH_TIMEOUT(!opened.isEmpty(), 5000);
+    const QString session = opened.first().first().toJsonObject().value("remoteSessionId").toString();
+    QTRY_VERIFY_WITH_TIMEOUT(owner.canIssueSessionCommands(session)
+        && target.canIssueSessionCommands(session), 5000);
+    const auto deliverRejection = [&](const QString& id, const QString& requestId = QString()) {
+        QJsonObject packet{
+            {"type", "error"}, {"scope", "remote_session"}, {"code", "remote_session_not_active"},
+            {"protocolVersion", WebSocketClient::ProtocolVersion}, {"serverBootId", target.serverBootId()},
+            {"connectionGeneration", double(target.connectionGeneration())},
+            {"messageId", QUuid::createUuid().toString(QUuid::WithoutBraces)}, {"remoteSessionId", id}
+        };
+        if (!requestId.isEmpty()) packet.insert("requestId", requestId);
+        return QMetaObject::invokeMethod(&target, "onTextMessageReceived", Qt::DirectConnection,
+            Q_ARG(QString, QString::fromUtf8(QJsonDocument(packet).toJson(QJsonDocument::Compact))));
+    };
+    // An unexpected rejection on an active session must still reach the caller.
+    QTest::ignoreMessage(QtWarningMsg, "RemoteSession command rejected: \"remote_session_not_active\"");
+    QVERIFY(deliverRejection(session));
+    QCOMPARE(errors.size(), 1);
+    errors.clear();
+    bool terminalReplyHandled = false;
+    connect(&target, &WebSocketClient::remoteSessionTerminating, &target, [&](const QJsonObject&) {
+        terminalReplyHandled = deliverRejection(session) && errors.isEmpty();
+    });
+    const auto binding = target.remoteSessionCoordinator()->byId(session);
+    QVERIFY(target.closeRemoteSession(session));
+    // No event-loop turn / server reply is necessary to fence local commands.
+    QVERIFY(!target.canIssueSessionCommands(session));
+    QVERIFY(!target.sendMediaResidency(session, binding.generation, 1, {}));
+    QVERIFY(owner.canIssueSessionCommands(session));
+    QTRY_VERIFY_WITH_TIMEOUT(target.remoteSessionCoordinator()->byId(session).remoteSessionId.isEmpty(), 5000);
+    QVERIFY(terminalReplyHandled);
+    QVERIFY(deliverRejection(session));
+    QCOMPARE(errors.size(), 0);
+    QVERIFY(target.isConnected());
+
+    // Do not swallow a failure of an explicit request or an unrelated session.
+    QTest::ignoreMessage(QtWarningMsg, "RemoteSession command rejected: \"remote_session_not_active\"");
+    QVERIFY(deliverRejection(session, QUuid::createUuid().toString(QUuid::WithoutBraces)));
+    QTest::ignoreMessage(QtWarningMsg, "RemoteSession command rejected: \"remote_session_not_active\"");
+    QVERIFY(deliverRejection(QStringLiteral("unknown-session")));
+    QCOMPARE(errors.size(), 2);
 }
 
 void RemoteSessionIntegrationTest::profilesPropagateWithoutChangingIdentity()

@@ -192,7 +192,10 @@ timeout. Legacy servers retain the original per-viewer-copy mode.
   mirroring are normalized. Scaling and encoder cadence follow the same profile;
   the Windows capture backend itself can still produce samples more frequently.
 - H.264 prefers VideoToolbox on macOS and NVENC, Quick Sync or AMF on Windows,
-  with libx264 or OpenH264 as software fallback. The current profile supplies
+  with libx264 or OpenH264 as software fallback. A complete Windows DXGI adapter
+  inventory skips manufacturers absent from the machine; an unavailable inventory
+  preserves codec probing. It refreshes every minute to allow GPU/driver recovery.
+  The current profile supplies
   bitrate, dimensions and FPS. There are no B frames. Output dimensions are even
   and aspect preserving; self-contained IDR frames include SPS/PPS.
 - The software x264 preset defaults to `veryfast` and is configurable. Profile
@@ -219,7 +222,11 @@ timeout. Legacy servers retain the original per-viewer-copy mode.
   stream authorizes reception again; an old keyframe cannot revive it.
 - Decoded FFmpeg YUV planes remain in QVideoFrame and use the existing
   SharedVideoNode/Qt Quick graphics path. Video frame delivery does not rebuild
-  the screen model or invalidate document/project state.
+  the screen model or invalidate document/project state. Replacement planes are
+  prepared before releasing the displayed image; an import failure preserves
+  the last renderable pixels. Saved-image/live-video format changes commit the
+  texture uploads in the same draw, without an empty intermediate material.
+  A genuinely black captured image remains valid screen content.
 
 ## Adaptive policy and network use
 

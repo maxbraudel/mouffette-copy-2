@@ -39,4 +39,5 @@ private:
     QMetaObject::Connection m_frameConnection;
     QMetaObject::Connection m_destroyedConnection;
     bool m_hasFrame = false;
+    bool m_resetNode = false;
 };

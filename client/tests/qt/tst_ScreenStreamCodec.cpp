@@ -1,5 +1,6 @@
 #include "backend/screensharing/ScreenStreamCodec.h"
 #include "backend/screensharing/ScreenEncoderProbeCache.h"
+#include "backend/screensharing/ScreenEncoderAdapterInventory.h"
 
 #include <QColor>
 #include <QElapsedTimer>
@@ -148,6 +149,36 @@ private:
     }
 
 private slots:
+    void windowsHardwareCandidatesMatchPresentAdapters() {
+        ScreenEncoderAdapterInventory inventory;
+        inventory.complete = true;
+        QVERIFY(inventory.windowsHardwareCandidates().isEmpty()); // software-only system
+        inventory.hardwareVendors = {ScreenEncoderAdapterInventory::Amd};
+        QCOMPARE(inventory.windowsHardwareCandidates(), QList<QByteArray>{"h264_amf"});
+        inventory.hardwareVendors = {ScreenEncoderAdapterInventory::Intel};
+        QCOMPARE(inventory.windowsHardwareCandidates(), QList<QByteArray>{"h264_qsv"});
+        inventory.hardwareVendors = {ScreenEncoderAdapterInventory::Nvidia};
+        QCOMPARE(inventory.windowsHardwareCandidates(), QList<QByteArray>{"h264_nvenc"});
+        // All adapters count, including an integrated GPU alongside a discrete
+        // one. Do not filter using only the primary monitor's adapter.
+        inventory.hardwareVendors.insert(ScreenEncoderAdapterInventory::Intel);
+        QCOMPARE(inventory.windowsHardwareCandidates(), (QList<QByteArray>{"h264_nvenc", "h264_qsv"}));
+        inventory.hardwareVendors = {0x5143}; // a different vendor has no matching encoder
+        QVERIFY(inventory.windowsHardwareCandidates().isEmpty());
+    }
+
+    void incompleteWindowsAdapterInventoryPreservesEncoderFallbacks() {
+        ScreenEncoderAdapterInventory inventory;
+        const QList<QByteArray> all{"h264_nvenc", "h264_qsv", "h264_amf"};
+        QCOMPARE(inventory.windowsHardwareCandidates(), all);
+        inventory.hardwareVendors.insert(ScreenEncoderAdapterInventory::Amd);
+        QCOMPARE(inventory.windowsHardwareCandidates(), all); // enumeration failed part way
+        inventory.complete = true;
+        QCOMPARE(inventory.windowsHardwareCandidates(), QList<QByteArray>{"h264_amf"});
+        inventory.hardwareVendors.insert(ScreenEncoderAdapterInventory::Nvidia);
+        QCOMPARE(inventory.windowsHardwareCandidates(), (QList<QByteArray>{"h264_nvenc", "h264_amf"}));
+    }
+
     void unavailableHardwareIsNotReprobedForEveryEncoder() {
         ScreenEncoderProbeCache probes;
         const ScreenEncoderProbeCache::Configuration nvenc{"h264_nvenc", QSize(1920, 1080), 0};

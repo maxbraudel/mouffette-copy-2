@@ -1,6 +1,7 @@
 #include "backend/screensharing/ScreenStreamCodec.h"
 #include "backend/screensharing/ScreenCaptureVideoBuffer.h"
 #include "backend/screensharing/ScreenEncoderProbeCache.h"
+#include "backend/screensharing/ScreenEncoderAdapterInventory.h"
 
 #include <QAbstractVideoBuffer>
 #include <QVideoFrameFormat>
@@ -8,6 +9,15 @@
 #include <array>
 #include <chrono>
 #include <limits>
+#ifdef Q_OS_WIN
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <QScopeGuard>
+#include <windows.h>
+#include <dxgi.h>
+#include <wrl/client.h>
+#endif
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -29,15 +39,64 @@ using Frame = std::unique_ptr<AVFrame, FrameDelete>;
 using Packet = std::unique_ptr<AVPacket, PacketDelete>;
 using Filter = std::unique_ptr<AVBSFContext, FilterDelete>;
 
+qint64 monotonicMilliseconds() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+#ifdef Q_OS_WIN
+ScreenEncoderAdapterInventory windowsAdapterInventory() {
+    ScreenEncoderAdapterInventory result;
+    // Resolve the system DXGI entry point locally: standalone codec users do
+    // not depend on the capture backend or need to link against its libraries.
+    const HMODULE library = LoadLibraryExW(L"dxgi.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    if (!library) return result;
+    const auto unload = qScopeGuard([library] { FreeLibrary(library); });
+    using CreateFactory = HRESULT (WINAPI*)(REFIID, void**);
+    const auto createFactory = reinterpret_cast<CreateFactory>(GetProcAddress(library, "CreateDXGIFactory1"));
+    if (!createFactory) return result;
+    Microsoft::WRL::ComPtr<IDXGIFactory1> factory;
+    if (FAILED(createFactory(IID_PPV_ARGS(factory.GetAddressOf())))) return result;
+    bool unknownVendor = false;
+    for (UINT index = 0; ; ++index) {
+        Microsoft::WRL::ComPtr<IDXGIAdapter1> adapter;
+        const HRESULT status = factory->EnumAdapters1(index, adapter.GetAddressOf());
+        if (status == DXGI_ERROR_NOT_FOUND) {
+            result.complete = !unknownVendor;
+            return result;
+        }
+        if (FAILED(status)) return result;
+        DXGI_ADAPTER_DESC1 description{};
+        if (FAILED(adapter->GetDesc1(&description))) return result;
+        if (description.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) continue;
+        if (!description.VendorId) unknownVendor = true;
+        else result.hardwareVendors.insert(description.VendorId);
+    }
+}
+
+QList<QByteArray> windowsHardwareCandidates() {
+    static QMutex mutex;
+    static ScreenEncoderAdapterInventory inventory;
+    static qint64 refreshAtMs = -1;
+    QMutexLocker lock(&mutex);
+    const qint64 now = monotonicMilliseconds();
+    if (now >= refreshAtMs) {
+        inventory = windowsAdapterInventory();
+        // Recheck periodically so a newly attached GPU or recovered driver
+        // is eligible without restarting the application.
+        refreshAtMs = now + ScreenEncoderProbeCache::RetryIntervalMs;
+    }
+    return inventory.windowsHardwareCandidates();
+}
+#endif
+
 int openScreenEncoder(AVCodecContext* context, const AVCodec* codec, AVDictionary** options) {
     const QByteArray name(codec->name);
     if (!name.startsWith("h264_")) return avcodec_open2(context, codec, options);
     static ScreenEncoderProbeCache hardwareProbes;
-    const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now().time_since_epoch()).count();
     // A format/resolution rejected by a driver must not disable a different
     // screen or native-input path. Rate-control reconfigurations share probes.
-    return hardwareProbes.open({name, QSize(context->width, context->height), context->pix_fmt}, now,
+    return hardwareProbes.open({name, QSize(context->width, context->height), context->pix_fmt}, monotonicMilliseconds(),
         [&] { return avcodec_open2(context, codec, options); });
 }
 
@@ -189,9 +248,7 @@ struct ScreenStreamEncoder::Private {
 #if defined(Q_OS_MACOS)
             candidates.append("h264_videotoolbox");
 #elif defined(Q_OS_WIN)
-            candidates.append("h264_nvenc");
-            candidates.append("h264_qsv");
-            candidates.append("h264_amf");
+            candidates.append(windowsHardwareCandidates());
 #endif
         }
         candidates.append("libx264");

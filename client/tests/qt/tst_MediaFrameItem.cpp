@@ -7,6 +7,7 @@
 #include "../fixtures/ThumbnailVideoFixture.h"
 
 #include <QGuiApplication>
+#include <QAbstractVideoBuffer>
 #include <QQuickRenderControl>
 #include <QQuickRenderTarget>
 #include <QQuickWindow>
@@ -21,6 +22,30 @@
 #include <memory>
 
 namespace {
+
+// A valid incoming frame whose pixels cannot be imported yet. This models a
+// recovery/texture preparation failure without accepting black placeholder pixels.
+class DelayedFrameBuffer final : public QAbstractVideoBuffer
+{
+public:
+    DelayedFrameBuffer(QImage image, std::shared_ptr<bool> ready)
+        : m_image(std::move(image)), m_ready(std::move(ready)) {}
+    QVideoFrameFormat format() const override {
+        return {m_image.size(), QVideoFrameFormat::Format_RGBA8888};
+    }
+    MapData map(QVideoFrame::MapMode mode) override {
+        if (!*m_ready || mode != QVideoFrame::ReadOnly) return {};
+        MapData data;
+        data.planeCount = 1;
+        data.data[0] = const_cast<uchar*>(m_image.constBits());
+        data.bytesPerLine[0] = m_image.bytesPerLine();
+        data.dataSize[0] = m_image.sizeInBytes();
+        return data;
+    }
+private:
+    QImage m_image;
+    std::shared_ptr<bool> m_ready;
+};
 
 class ObservedFrameItem final : public RemoteVideoFrameItem
 {
@@ -244,6 +269,77 @@ class MediaFrameItemTest final : public QObject
     Q_OBJECT
 
 private slots:
+    void recoveryKeepsLastPixelsUntilTheReplacementCanRender_data() {
+        QTest::addColumn<bool>("savedImage");
+        QTest::newRow("saved-project-image-to-live") << true;
+        QTest::newRow("retained-live-frame-to-live") << false;
+    }
+
+    void recoveryKeepsLastPixelsUntilTheReplacementCanRender() {
+        QFETCH(bool, savedImage);
+        RemoteVideoFrameSource source;
+        QImage retained(32, 24, QImage::Format_RGBA8888);
+        retained.fill(Qt::cyan);
+        if (savedImage) source.setFrame(retained);
+        else source.setVideoFrame(QVideoFrame(retained));
+        Scene scene;
+        scene.item->setFrameSource(&source);
+        QVERIFY(scene.initialize());
+        verifyPixel(scene.render(), {32, 24}, Qt::cyan);
+
+        QImage next(48, 32, QImage::Format_RGBA8888);
+        next.fill(Qt::magenta);
+        auto ready = std::make_shared<bool>(false);
+        QVideoFrame incoming(std::make_unique<DelayedFrameBuffer>(next, ready));
+        QVERIFY(incoming.isValid());
+        source.setVideoFrame(incoming);
+        for (int i = 0; i < 3; ++i) {
+            scene.item->update();
+            verifyPixel(scene.render(), {32, 24}, Qt::cyan);
+        }
+        scene.item->setSize({256, 192});
+        verifyPixel(scene.render(), {200, 140}, Qt::cyan);
+        *ready = true;
+        source.setVideoFrame(incoming);
+        verifyPixel(scene.render(), {32, 24}, Qt::magenta);
+        // Genuine black screen content is valid and must not be filtered out.
+        next.fill(Qt::black);
+        source.setVideoFrame(QVideoFrame(next));
+        verifyPixel(scene.render(), {32, 24}, Qt::black);
+        source.clear();
+        verifyPixel(scene.render(), {32, 24}, QColor(16, 32, 48));
+    }
+
+    void recoveryCannotReviveClearedOrUnrelatedPixels_data() {
+        QTest::addColumn<bool>("replaceSource");
+        QTest::newRow("clear-then-new-frame-before-render") << false;
+        QTest::newRow("different-project-source") << true;
+    }
+
+    void recoveryCannotReviveClearedOrUnrelatedPixels() {
+        QFETCH(bool, replaceSource);
+        RemoteVideoFrameSource source;
+        RemoteVideoFrameSource replacement;
+        QImage pixels(32, 24, QImage::Format_RGBA8888);
+        pixels.fill(Qt::cyan);
+        source.setFrame(pixels);
+        Scene scene;
+        scene.item->setFrameSource(&source);
+        QVERIFY(scene.initialize());
+        verifyPixel(scene.render(), {32, 24}, Qt::cyan);
+        auto ready = std::make_shared<bool>(false);
+        pixels.fill(Qt::magenta);
+        QVideoFrame incoming(std::make_unique<DelayedFrameBuffer>(pixels, ready));
+        auto* nextSource = replaceSource ? &replacement : &source;
+        if (replaceSource) scene.item->setFrameSource(nextSource);
+        else source.clear();
+        nextSource->setVideoFrame(incoming);
+        verifyPixel(scene.render(), {32, 24}, QColor(16, 32, 48));
+        *ready = true;
+        nextSource->setVideoFrame(incoming);
+        verifyPixel(scene.render(), {32, 24}, Qt::magenta);
+    }
+
     void nativeVideoPlanesPreserveAlphaAndOrientation() {
         RemoteVideoFrameSource source;
         QVideoFrame video(quadrantImage());
