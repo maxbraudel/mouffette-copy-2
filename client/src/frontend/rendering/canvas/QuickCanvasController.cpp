@@ -242,9 +242,8 @@ QuickCanvasController::QuickCanvasController(CanvasDocument* document,
         publishSelection();
     });
     connect(document, &CanvasDocument::screensChanged, this, [this] {
-        // Screen IDs follow the remote enumeration and can be reassigned when
-        // a monitor is unplugged. Never reuse its last pixels for a new layout.
-        clearRemoteScreenFrames();
+        // Keep the last pixels on surviving screens, including dock/geometry
+        // updates. publishScreens detaches monitors absent from the new layout.
         publishScreens();
         ensureInitialFit(m_initialFitMargin);
     });
@@ -504,9 +503,6 @@ void QuickCanvasController::selectMedia(const QString& mediaId, bool additive)
 
 void QuickCanvasController::setShellActive(bool active)
 {
-    if (!active) {
-        clearRemoteScreenFrames();
-    }
     if (m_shellActive == active) return;
     m_shellActive = active;
     emit presentationChanged();
@@ -525,7 +521,21 @@ void QuickCanvasController::hideRemoteCursor()
 void QuickCanvasController::setRemoteScreenFrame(int screenId, const QVideoFrame& frame)
 {
     // Topology is authoritative: stale frames cannot create phantom monitors.
-    if (auto* source = m_screenFrameSources.value(screenId)) source->setVideoFrame(frame);
+    if (frame.isValid())
+        if (auto* source = m_screenFrameSources.value(screenId)) source->setVideoFrame(frame);
+}
+
+void QuickCanvasController::restoreRemoteScreenFrame(int screenId, const QImage& image)
+{
+    // Disk reads may finish after fresh live frames; never replace newer pixels.
+    if (auto* source = m_screenFrameSources.value(screenId); source && !source->hasFrame())
+        if (!image.isNull()) source->setFrame(image);
+}
+
+bool QuickCanvasController::hasRemoteScreenFrame(int screenId) const
+{
+    const auto* source = m_screenFrameSources.value(screenId);
+    return source && source->hasFrame();
 }
 
 void QuickCanvasController::clearRemoteScreenFrame(int screenId)

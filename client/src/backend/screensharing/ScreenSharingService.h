@@ -8,8 +8,9 @@
 class SystemMonitor;
 class WebSocketClient;
 
-// Ephemeral screen streams; no pixels, grants or decoder state enter projects
-// or received-media storage. All network and UI calls stay on the GUI thread.
+// Ephemeral screen streams; grants and decoder state never enter project storage.
+// The runtime retains the last presented pixels separately for offline projects.
+// All network and UI calls stay on the GUI thread.
 class ScreenSharingService final : public QObject {
     Q_OBJECT
 public:

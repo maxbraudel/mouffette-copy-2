@@ -34,6 +34,7 @@ class CanvasMedia;
 class SceneActivityModel;
 class ScreenEventHandler;
 class ScreenSharingService;
+class ProjectScreenPreviewStore;
 class AudioSharingService;
 class ScreenNavigationManager;
 class SettingsManager;
@@ -216,6 +217,7 @@ private slots:
 
 private:
     void refreshMediaSharing();
+    void restoreProjectScreenPreviews(const QString& targetEndpointId);
     void refreshRemoteCursorStreaming();
     void publishLocalCursor();
     void expireStaleRemoteCursors();
@@ -320,6 +322,8 @@ private:
     ConnectionManager* m_connectionManager = nullptr;
     SettingsManager* m_settingsManager = nullptr;
     ScreenSharingService* m_screenSharing = nullptr;
+    ProjectScreenPreviewStore* m_screenPreviewStore = nullptr;
+    bool m_screenPreviewClearPending = false;
     AudioSharingService* m_audioSharing = nullptr;
     ClientProfileCache* m_profileCache = nullptr;
     WebSocketMessageHandler* m_webSocketMessageHandler = nullptr;

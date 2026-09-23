@@ -50,6 +50,8 @@ public:
     void updateRemoteCursor(int screenId, const QPointF& screenPosition) override;
     void hideRemoteCursor() override;
     void setRemoteScreenFrame(int screenId, const QVideoFrame& frame) override;
+    void restoreRemoteScreenFrame(int screenId, const QImage& image) override;
+    bool hasRemoteScreenFrame(int screenId) const override;
     void clearRemoteScreenFrame(int screenId) override;
     void clearRemoteScreenFrames() override;
     QJsonValue screenPreviewDemand() const override;

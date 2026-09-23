@@ -3,6 +3,7 @@
 #include "backend/audiosharing/MediaCaptureClock.h"
 #include "backend/config/AppConfig.h"
 #include "backend/domain/project/ProjectManager.h"
+#include "backend/domain/project/ProjectScreenPreviewStore.h"
 #include "backend/managers/app/SettingsManager.h"
 #include "backend/managers/network/ConnectionManager.h"
 #include "backend/managers/system/SystemMonitor.h"
@@ -11,12 +12,14 @@
 #include "backend/network/WebSocketClient.h"
 #include "backend/notifications/NotificationCenter.h"
 #include "backend/runtime/ApplicationRuntime.h"
+#include "backend/runtime/SuspendInclusiveClock.h"
 #include "frontend/rendering/canvas/QuickCanvasController.h"
 #include "frontend/rendering/canvas/QuickCanvasHost.h"
 #include "shared/rendering/MediaFrameSource.h"
 
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QFutureWatcher>
 #include <QImage>
 #include <QJsonDocument>
@@ -975,6 +978,7 @@ private slots:
         QVERIFY(target.sendScreenFrame(header(grant, packet, 1), packet.annexB));
         QTRY_VERIFY_WITH_TIMEOUT(source->hasFrame(), 4000);
         QCOMPARE(source->videoFrame().size(), image.size());
+        const QColor firstColor = source->videoFrame().toImage().pixelColor(100, 100);
         QVERIFY(runtime.remoteScreenAvailable());
         QVERIFY(!runtime.remoteScreenLoading());
         QCOMPARE(screenToasts(), 0);
@@ -1004,7 +1008,8 @@ private slots:
         QCOMPARE(runtime.remoteScreenState(), QStringLiteral("error"));
         QCOMPARE(runtime.remoteAudioState(), QStringLiteral("loading"));
         QVERIFY(audioPublisher.isPublishing());
-        QVERIFY(!source->hasFrame());
+        QVERIFY(source->hasFrame());
+        QCOMPARE(source->videoFrame().toImage().pixelColor(100, 100), firstColor);
         QVERIFY(!runtime.remoteScreenAvailable());
         QVERIFY(!runtime.remoteScreenLoading());
         owner->screenShareStateReceived(states.last().first().toJsonObject());
@@ -1015,10 +1020,36 @@ private slots:
                                 == QLatin1String("starting"), 4000);
         QVERIFY(runtime.remoteScreenLoading());
         QCOMPARE(screenToasts(), 1); // Loading never generates a toast.
-        QVERIFY(target.sendScreenFrame(header(grant, packet, 2), packet.annexB));
-        QTRY_VERIFY_WITH_TIMEOUT(source->hasFrame(), 4000);
+        image.fill(Qt::blue);
+        const auto recoveryPackets = encoder.encode(QVideoFrame(image), true, error);
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QCOMPARE(recoveryPackets.size(), 1);
+        const auto recoveryPacket = recoveryPackets.first();
+        QVERIFY(target.sendScreenFrame(header(grant, recoveryPacket, 2), recoveryPacket.annexB));
+        QTRY_VERIFY_WITH_TIMEOUT(source->hasFrame()
+            && source->videoFrame().toImage().pixelColor(100, 100) != firstColor, 4000);
+        const QColor latestColor = source->videoFrame().toImage().pixelColor(100, 100);
         QVERIFY(runtime.remoteScreenAvailable());
         QCOMPARE(screenToasts(), 1); // Recovery never generates a success toast.
+
+        runtime.navigateToClients();
+        QVERIFY(source->hasFrame());
+        QCOMPARE(source->videoFrame().toImage().pixelColor(100, 100), latestColor);
+        runtime.activateClient(target.endpointId());
+        QTRY_COMPARE_WITH_TIMEOUT(runtime.getActiveCanvas(), canvas, 4000);
+        QVERIFY(source->hasFrame());
+        QCOMPARE(source->videoFrame().toImage().pixelColor(100, 100), latestColor);
+
+        auto* previews = runtime.findChild<ProjectScreenPreviewStore*>();
+        QVERIFY(previews);
+        const auto* project = runtime.getProjectManager()->projectForTarget(target.endpointId());
+        QVERIFY(project);
+        QSignalSpy restoredPreview(previews, &ProjectScreenPreviewStore::frameRestored);
+        previews->flush();
+        previews->waitForDone();
+        previews->restore(project->projectId, {0});
+        QTRY_VERIFY_WITH_TIMEOUT(!restoredPreview.isEmpty(), 4000);
+        QCOMPARE(qvariant_cast<QImage>(restoredPreview.last().at(2)).pixelColor(100, 100), latestColor);
 
         QVERIFY2(settings->setScreenContentVisible(false, &error), qPrintable(error));
         QVERIFY(!source->hasFrame());
@@ -1048,15 +1079,308 @@ private slots:
         QVERIFY(nextGrant.value("streamId") != grant.value("streamId"));
         QTRY_VERIFY_WITH_TIMEOUT(states.last().first().toJsonObject().value("streamId")
                                 == nextGrant.value("streamId"), 4000);
+        QVERIFY(!source->hasFrame());
+        // A late completion from the previous subscription must not revive
+        // pixels erased by the viewer's explicit visibility preference.
+        owner->screenFrameReceived(header(grant, recoveryPacket, 3), recoveryPacket.annexB);
+        QTest::qWait(100);
+        QVERIFY(!source->hasFrame());
         QVERIFY(target.sendScreenFrame(header(nextGrant, packet, 1), packet.annexB));
         QTRY_VERIFY_WITH_TIMEOUT(source->hasFrame(), 4000);
         QVERIFY(!settings->getScreenSharingEnabled());
         QVERIFY(publishingChanges.isEmpty());
         QVERIFY(runtime.remoteScreenAvailable());
         QCOMPARE(screenToasts(), 1);
-        runtime.handleApplicationAboutToQuit();
+        const QColor reenabledColor = source->videoFrame().toImage().pixelColor(100, 100);
         target.disconnect();
+        QTRY_VERIFY_WITH_TIMEOUT(!runtime.remoteScreenAvailable(), 4000);
+        QVERIFY(source->hasFrame());
+        QCOMPARE(source->videoFrame().toImage().pixelColor(100, 100), reenabledColor);
+        runtime.handleApplicationAboutToQuit();
     }
+
+    void savedProjectScreenPreviewsRestoreOfflineAndVisibilityClearsEveryProject() {
+        const AppConfig savedConfig = AppConfig::instance();
+        const auto restoreConfig = qScopeGuard([savedConfig] { AppConfig::instance() = savedConfig; });
+        AppConfig::LoadOptions options;
+        options.arguments = {QStringLiteral("tst_ScreenSharingService"),
+                             QStringLiteral("--project-media-hidden-timeout-ms=1000"),
+                             QStringLiteral("--server-url=ws://127.0.0.1:1")};
+        options.defaultEnvFilePath = QString();
+        QString error;
+        QVERIFY2(AppConfig::instance().load(options, &error), qPrintable(error));
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        const auto previousProfile = RuntimeProfile::context();
+        const auto restoreProfile = qScopeGuard([previousProfile] {
+            RuntimeProfile::configure(previousProfile);
+        });
+        RuntimeProfileContext profile;
+        profile.rootPath = directory.filePath(QStringLiteral("saved-screen-previews"));
+        profile.persistent = false;
+        QVERIFY(QDir().mkpath(profile.rootPath));
+        QVERIFY(QFile::setPermissions(profile.rootPath,
+            QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+        RuntimeProfile::configure(profile);
+        SettingsManager savedSettings;
+        QVERIFY2(savedSettings.setScreenContentVisible(true, &error), qPrintable(error));
+
+        const QString firstEndpoint = QStringLiteral("saved-preview-first");
+        const QString secondEndpoint = QStringLiteral("saved-preview-second");
+        QString firstProject;
+        QString secondProject;
+        {
+            ApplicationRuntime runtime(profile);
+            auto* projects = runtime.getProjectManager();
+            projects->stopAutomaticTimersForTesting();
+            auto* previews = runtime.findChild<ProjectScreenPreviewStore*>();
+            QVERIFY(previews);
+            ProjectTargetReference firstTarget;
+            firstTarget.endpointId = firstEndpoint;
+            firstTarget.machineName = QStringLiteral("First saved screen");
+            firstTarget.platform = QStringLiteral("test");
+            ProjectTargetReference secondTarget = firstTarget;
+            secondTarget.endpointId = secondEndpoint;
+            secondTarget.machineName = QStringLiteral("Second saved screen");
+            const QList<ScreenInfo> screens{ScreenInfo(0, 640, 360, 0, 0, true)};
+            firstProject = projects->createProjectFromSnapshot(firstTarget, screens, 50, 1, 1);
+            secondProject = projects->createProjectFromSnapshot(secondTarget, screens, 50, 1, 1);
+            QVERIFY(!firstProject.isEmpty());
+            QVERIFY(!secondProject.isEmpty());
+            QImage pixels(64, 36, QImage::Format_RGBA8888);
+            pixels.fill(Qt::green);
+            previews->retain(firstProject, 0, QVideoFrame(pixels));
+            pixels.fill(Qt::magenta);
+            previews->retain(firstProject, 0, QVideoFrame(pixels));
+            pixels.fill(Qt::blue);
+            previews->retain(secondProject, 0, QVideoFrame(pixels));
+            previews->flush();
+            previews->waitForDone();
+            QVERIFY(projects->flush());
+            runtime.handleApplicationAboutToQuit();
+        }
+
+        const auto sourceForActiveProject = [](ApplicationRuntime& runtime) {
+            auto* canvas = qobject_cast<QuickCanvasHost*>(runtime.getActiveCanvas());
+            if (!canvas || !canvas->controller() || canvas->controller()->screensModel().isEmpty())
+                return static_cast<RemoteVideoFrameSource*>(nullptr);
+            return qobject_cast<RemoteVideoFrameSource*>(canvas->controller()->screensModel()
+                .first().toMap().value(QStringLiteral("frameSource")).value<QObject*>());
+        };
+        {
+            qint64 now = MouffetteClock::anchoredEpochMs();
+            ApplicationRuntime runtime(profile);
+            auto* projects = runtime.getProjectManager();
+            projects->stopAutomaticTimersForTesting();
+            projects->setNowProviderForTesting([&now] { return now; });
+            QCOMPARE(projects->timingPolicy().projectMediaHiddenTimeoutMs, 1000);
+            runtime.setQmlWindowVisible(true);
+            runtime.setPointerInsideControlWindow(true);
+            QVERIFY(runtime.getProjectManager()->hasProjectForTarget(firstEndpoint));
+            QVERIFY(runtime.getProjectManager()->hasProjectForTarget(secondEndpoint));
+            runtime.activateClient(firstEndpoint);
+            auto* firstSource = sourceForActiveProject(runtime);
+            QVERIFY(firstSource);
+            QTRY_VERIFY_WITH_TIMEOUT(firstSource->hasFrame(), 4000);
+            QCOMPARE(firstSource->frame().pixelColor(0, 0), QColor(Qt::magenta));
+            QVERIFY(!runtime.remoteScreenAvailable());
+
+            auto* previews = runtime.findChild<ProjectScreenPreviewStore*>();
+            QVERIFY(previews);
+            QVERIFY(projects->setHidden(firstEndpoint, now));
+            const qint64 releaseAt = projects->projectMediaReleaseAtMs(firstEndpoint);
+            QCOMPARE(releaseAt, now + 1000);
+            projects->processDeadlines(releaseAt - 1);
+            QVERIFY(firstSource->hasFrame());
+            now = releaseAt;
+            projects->processDeadlines(now);
+            QVERIFY(projects->projectMediaReleaseExpired(firstEndpoint));
+            QVERIFY(!firstSource->hasFrame());
+            QVERIFY(projects->hasProjectForTarget(firstEndpoint));
+            // RAM expiry releases the displayed frame but keeps its durable
+            // preview, and an asynchronous read cannot undo the expiry.
+            QSignalSpy retainedPreview(previews, &ProjectScreenPreviewStore::frameRestored);
+            previews->restore(firstProject, {0});
+            QTRY_VERIFY_WITH_TIMEOUT(!retainedPreview.isEmpty(), 4000);
+            QCOMPARE(qvariant_cast<QImage>(retainedPreview.last().at(2)).pixelColor(0, 0), QColor(Qt::magenta));
+            QVERIFY(!firstSource->hasFrame());
+            QVERIFY(projects->setVisible(firstEndpoint, now));
+            QVERIFY(!projects->projectMediaReleaseExpired(firstEndpoint));
+            QTRY_VERIFY_WITH_TIMEOUT(firstSource->hasFrame(), 4000);
+            QCOMPARE(firstSource->frame().pixelColor(0, 0), QColor(Qt::magenta));
+            QVERIFY(!runtime.remoteScreenAvailable());
+
+            runtime.navigateToClients();
+            QVERIFY(firstSource->hasFrame());
+            runtime.activateClient(secondEndpoint);
+            auto* secondSource = sourceForActiveProject(runtime);
+            QVERIFY(secondSource);
+            QVERIFY(firstSource != secondSource);
+            QTRY_VERIFY_WITH_TIMEOUT(secondSource->hasFrame(), 4000);
+            QCOMPARE(secondSource->frame().pixelColor(0, 0), QColor(Qt::blue));
+
+            // Hide applies to every project, including inactive canvases and
+            // a disk restore whose completion is still queued.
+            previews->restore(firstProject, {0});
+            QVERIFY2(runtime.getSettingsManager()->setScreenContentVisible(false, &error), qPrintable(error));
+            QVERIFY(!firstSource->hasFrame());
+            QVERIFY(!secondSource->hasFrame());
+            previews->waitForDone();
+            QCoreApplication::processEvents();
+            QVERIFY(!firstSource->hasFrame());
+            QVERIFY(!secondSource->hasFrame());
+            QVERIFY2(runtime.getSettingsManager()->setScreenContentVisible(true, &error), qPrintable(error));
+            runtime.activateClient(firstEndpoint);
+            QCOMPARE(sourceForActiveProject(runtime), firstSource);
+            previews->waitForDone();
+            QCoreApplication::processEvents();
+            QVERIFY(!firstSource->hasFrame());
+            QVERIFY(!secondSource->hasFrame());
+            runtime.handleApplicationAboutToQuit();
+        }
+
+        // Clearing previews is durable: showing screens again and restarting
+        // offline cannot recover any image erased by that explicit action.
+        {
+            ApplicationRuntime runtime(profile);
+            runtime.getProjectManager()->stopAutomaticTimersForTesting();
+            runtime.setQmlWindowVisible(true);
+            runtime.setPointerInsideControlWindow(true);
+            QVERIFY(runtime.getSettingsManager()->getScreenContentVisible());
+            auto* previews = runtime.findChild<ProjectScreenPreviewStore*>();
+            QVERIFY(previews);
+            for (const auto& endpoint : {firstEndpoint, secondEndpoint}) {
+                runtime.activateClient(endpoint);
+                auto* source = sourceForActiveProject(runtime);
+                QVERIFY(source);
+                previews->waitForDone();
+                QCoreApplication::processEvents();
+                QVERIFY(!source->hasFrame());
+            }
+            runtime.handleApplicationAboutToQuit();
+        }
+    }
+
+    void failedPreviewClearKeepsScreensHiddenUntilShowCanRetryDurably() {
+        const AppConfig savedConfig = AppConfig::instance();
+        const auto restoreConfig = qScopeGuard([savedConfig] { AppConfig::instance() = savedConfig; });
+        AppConfig::LoadOptions options;
+        options.arguments = {QStringLiteral("tst_ScreenSharingService"),
+                             QStringLiteral("--server-url=ws://127.0.0.1:1")};
+        options.defaultEnvFilePath = QString();
+        QString error;
+        QVERIFY2(AppConfig::instance().load(options, &error), qPrintable(error));
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        const auto previousProfile = RuntimeProfile::context();
+        const auto restoreProfile = qScopeGuard([previousProfile] {
+            RuntimeProfile::configure(previousProfile);
+        });
+        RuntimeProfileContext profile;
+        profile.rootPath = directory.filePath(QStringLiteral("failed-preview-clear"));
+        profile.persistent = false;
+        QVERIFY(QDir().mkpath(profile.rootPath));
+        QVERIFY(QFile::setPermissions(profile.rootPath,
+            QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+        RuntimeProfile::configure(profile);
+        const QString endpoint = QStringLiteral("failed-clear-preview-target");
+        const QString manifest = QFileInfo(RuntimeProfile::projectsFilePath()).dir()
+            .filePath(QStringLiteral("screen-previews-v1/current.json"));
+        const auto sourceForActiveProject = [](ApplicationRuntime& runtime) {
+            auto* canvas = qobject_cast<QuickCanvasHost*>(runtime.getActiveCanvas());
+            if (!canvas || !canvas->controller() || canvas->controller()->screensModel().isEmpty())
+                return static_cast<RemoteVideoFrameSource*>(nullptr);
+            return qobject_cast<RemoteVideoFrameSource*>(canvas->controller()->screensModel()
+                .first().toMap().value(QStringLiteral("frameSource")).value<QObject*>());
+        };
+        QString projectId;
+        {
+            ApplicationRuntime runtime(profile);
+            auto* projects = runtime.getProjectManager();
+            projects->stopAutomaticTimersForTesting();
+            runtime.setQmlWindowVisible(true);
+            runtime.setPointerInsideControlWindow(true);
+            auto* previews = runtime.findChild<ProjectScreenPreviewStore*>();
+            QVERIFY(previews);
+            auto* settings = runtime.getSettingsManager();
+            QVERIFY2(settings->setScreenContentVisible(true, &error), qPrintable(error));
+            ProjectTargetReference target;
+            target.endpointId = endpoint;
+            target.machineName = QStringLiteral("Saved screen with blocked storage");
+            projectId = projects->createProjectFromSnapshot(target,
+                {ScreenInfo(0, 640, 360, 0, 0, true)}, 50, 1, 1);
+            QVERIFY(!projectId.isEmpty());
+            QImage pixels(64, 36, QImage::Format_RGBA8888);
+            pixels.fill(Qt::red);
+            previews->retain(projectId, 0, QVideoFrame(pixels));
+            previews->waitForDone();
+            runtime.activateClient(endpoint);
+            auto* source = sourceForActiveProject(runtime);
+            QVERIFY(source);
+            QTRY_VERIFY_WITH_TIMEOUT(source->hasFrame(), 4000);
+            QCOMPARE(source->frame().pixelColor(0, 0), QColor(Qt::red));
+
+            // A directory at the manifest path makes its atomic replacement
+            // fail without depending on the test process's filesystem rights.
+            QVERIFY(QFile::remove(manifest));
+            QVERIFY(QDir().mkpath(manifest));
+            QSignalSpy failures(previews, &ProjectScreenPreviewStore::persistenceError);
+            QSignalSpy visibility(settings, &SettingsManager::screenContentVisibleChanged);
+            QVERIFY2(settings->setScreenContentVisible(false, &error), qPrintable(error));
+            QVERIFY(!failures.isEmpty());
+            QVERIFY(!settings->getScreenContentVisible());
+            QVERIFY(!source->hasFrame());
+            QCOMPARE(RuntimeProfile::readSettings().value(QStringLiteral("screenContentVisible")).toBool(), false);
+            QCOMPARE(visibility.count(), 1);
+
+            error.clear();
+            QVERIFY(!settings->setScreenContentVisible(true, &error));
+            QVERIFY(!error.isEmpty());
+            QVERIFY(!settings->getScreenContentVisible());
+            QCOMPARE(RuntimeProfile::readSettings().value(QStringLiteral("screenContentVisible")).toBool(), false);
+            QCOMPARE(visibility.count(), 1);
+            QSignalSpy restored(previews, &ProjectScreenPreviewStore::frameRestored);
+            previews->restore(projectId, {0});
+            previews->waitForDone();
+            QCoreApplication::processEvents();
+            QVERIFY(restored.isEmpty());
+            QVERIFY(!source->hasFrame());
+
+            QVERIFY(QDir(manifest).removeRecursively());
+            error.clear();
+            QVERIFY2(settings->setScreenContentVisible(true, &error), qPrintable(error));
+            QVERIFY(settings->getScreenContentVisible());
+            QCOMPARE(visibility.count(), 2);
+            QCOMPARE(RuntimeProfile::readSettings().value(QStringLiteral("screenContentVisible")).toBool(), true);
+            previews->restore(projectId, {0});
+            previews->waitForDone();
+            QCoreApplication::processEvents();
+            QVERIFY(restored.isEmpty());
+            QVERIFY(!source->hasFrame());
+            runtime.handleApplicationAboutToQuit();
+        }
+        {
+            ApplicationRuntime runtime(profile);
+            runtime.getProjectManager()->stopAutomaticTimersForTesting();
+            runtime.setQmlWindowVisible(true);
+            runtime.setPointerInsideControlWindow(true);
+            QVERIFY(runtime.getSettingsManager()->getScreenContentVisible());
+            QVERIFY(runtime.getProjectManager()->hasProjectForTarget(endpoint));
+            runtime.activateClient(endpoint);
+            auto* source = sourceForActiveProject(runtime);
+            QVERIFY(source);
+            auto* previews = runtime.findChild<ProjectScreenPreviewStore*>();
+            QVERIFY(previews);
+            QSignalSpy restored(previews, &ProjectScreenPreviewStore::frameRestored);
+            previews->restore(projectId, {0});
+            previews->waitForDone();
+            QCoreApplication::processEvents();
+            QVERIFY(restored.isEmpty());
+            QVERIFY(!source->hasFrame());
+            runtime.handleApplicationAboutToQuit();
+        }
+    }
+
     void captureFailureIsIsolatedToOneScreenAndRecoversIndependently() {
         QTemporaryDir identities;
         WebSocketClient owner(identities.filePath(QStringLiteral("owner")), false);

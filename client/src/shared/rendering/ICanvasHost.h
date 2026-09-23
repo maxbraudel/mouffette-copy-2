@@ -15,6 +15,7 @@ class FileManager;
 class UploadManager;
 class WebSocketClient;
 class QVideoFrame;
+class QImage;
 
 // Non-visual session contract. The Qt Quick item is attached separately by the
 // presentation view model; business services only see this document host.
@@ -53,6 +54,8 @@ public:
     virtual void hideRemoteCursor() = 0;
     // Immutable decoded frames stay in C++ and are uploaded by the scene graph.
     virtual void setRemoteScreenFrame(int, const QVideoFrame&) {}
+    virtual void restoreRemoteScreenFrame(int, const QImage&) {}
+    virtual bool hasRemoteScreenFrame(int) const { return false; }
     virtual void clearRemoteScreenFrame(int) {}
     virtual void clearRemoteScreenFrames() {}
     // Undefined means this host cannot report a viewport; [] means no screen is visible.

@@ -17,6 +17,13 @@ legacy `-v1`/`-v2` suffixes are not compatibility versions.
 | `history` | `HistoryStore` | `notification-history-v1.json`, `schemaVersion` | 2 | Version 1: migrate 1 → 2, preserving entries and replay state |
 | `cache` | `RemoteCacheStore` | `cache/storage.json`, `schemaVersion` | 2 | Legacy/unreliable manifests reset; current primary-profile cache preserved for bounded retention |
 
+The projects component also owns optional last-screen PNG snapshots in
+`projects/screen-previews-v1`, managed by `ProjectScreenPreviewStore`. This is a
+compatible sidecar addition to schema 8, with its own generation manifest for
+durable explicit clearing. Startup prunes snapshots with no surviving project,
+including after project schema reset; corrupt/missing snapshots do not prevent
+project restoration.
+
 The settings INI also owns the optional local `username` and base64
 `profilePictureJpeg` keys. These are compatible additions to settings schema 1.
 Remote usernames and pictures are transient and never enter profile storage.

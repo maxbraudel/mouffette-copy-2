@@ -5,6 +5,7 @@
 #include <QJsonArray>
 #include <QMimeData>
 #include <QMouseEvent>
+#include <QPointer>
 #include "backend/files/FileManager.h"
 #include "backend/media/MediaResidencyManager.h"
 #include "backend/media/MediaDecoder.h"
@@ -684,6 +685,9 @@ private slots:
         QImage pixels(16, 16, QImage::Format_RGBA8888);
         pixels.fill(Qt::cyan);
         QVideoFrame frame(pixels);
+        QImage replacementPixels(16, 16, QImage::Format_RGBA8888);
+        replacementPixels.fill(Qt::magenta);
+        const QVideoFrame replacementFrame(replacementPixels);
         QVERIFY(frame.isValid());
         QSignalSpy presentations(&controller, &QuickCanvasController::presentationChanged);
         QSignalSpy edits(&document, &CanvasDocument::documentChanged);
@@ -702,17 +706,32 @@ private slots:
         QVERIFY(!first->hasFrame());
         QVERIFY(second->hasFrame());
         host.hideContentPreservingState();
-        QVERIFY(!second->hasFrame());
-        host.setRemoteScreenFrame(2, frame);
-        QVERIFY(!second->hasFrame());
-        host.showContentAfterReconnect();
-        host.setRemoteScreenFrame(2, frame);
         QVERIFY(second->hasFrame());
+        QCOMPARE(second->videoFrame().toImage().pixelColor(0, 0), QColor(Qt::cyan));
+        // A callback from the detached subscription cannot overwrite the
+        // retained image while its project is hidden.
+        host.setRemoteScreenFrame(2, replacementFrame);
+        QCOMPARE(second->videoFrame().toImage().pixelColor(0, 0), QColor(Qt::cyan));
+        host.showContentAfterReconnect();
+        host.setRemoteScreenFrame(2, replacementFrame);
+        QVERIFY(second->hasFrame());
+        QCOMPARE(second->videoFrame().toImage().pixelColor(0, 0), QColor(Qt::magenta));
         host.setRemoteScreenFrame(1, frame);
-        host.setScreens({ScreenInfo(1, 1920, 1080, 0, 0, true)});
-        QVERIFY(!first->hasFrame());
+        controller.setShellActive(false);
+        QVERIFY(first->hasFrame());
+        QVERIFY(second->hasFrame());
+        controller.setShellActive(true);
+        QPointer<RemoteVideoFrameSource> removedSource(second);
+        host.setScreens({ScreenInfo(1, 1280, 720, 100, 50, true)});
+        QCOMPARE(sourceFor(1), first);
+        QVERIFY(first->hasFrame());
+        QCOMPARE(first->videoFrame().toImage().pixelColor(0, 0), QColor(Qt::cyan));
         QVERIFY(!second->hasFrame());
         QVERIFY(!sourceFor(2));
+        QTRY_VERIFY(removedSource.isNull());
+        host.setRemoteScreenFrame(2, replacementFrame);
+        QVERIFY(!sourceFor(2));
+        QCOMPARE(controller.screensModel().size(), 1);
         host.setScreens({ScreenInfo(1, 1920, 1080, 0, 0, true),
                          ScreenInfo(2, 1280, 720, 1920, 0, false)});
         QVERIFY(!sourceFor(2)->hasFrame());
@@ -721,7 +740,11 @@ private slots:
         QVERIFY(!first->hasFrame());
         host.setRemoteScreenFrame(1, frame);
         host.handleRemoteConnectionLost();
+        QVERIFY(first->hasFrame());
+        QCOMPARE(first->videoFrame().toImage().pixelColor(0, 0), QColor(Qt::cyan));
+        host.clearRemoteScreenFrames();
         QVERIFY(!first->hasFrame());
+        QVERIFY(!sourceFor(2)->hasFrame());
     }
 
     void remoteScreenVideoRendersInsideTheScreenUnderMedia()

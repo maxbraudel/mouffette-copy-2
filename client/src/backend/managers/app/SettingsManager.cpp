@@ -7,6 +7,7 @@
 #include <QSettings>
 #include <QDebug>
 #include <algorithm>
+#include <utility>
 
 SettingsManager::SettingsManager(QObject* parent)
     : QObject(parent)
@@ -152,6 +153,7 @@ void SettingsManager::setAppAlwaysOnTop(bool enabled) {
 bool SettingsManager::setScreenContentVisible(bool visible, QString* error)
 {
     if (m_screenContentVisible == visible) return true;
+    if (visible && m_screenContentEnableGuard && !m_screenContentEnableGuard(error)) return false;
     const auto previous = RuntimeStorage::readSettings(RuntimeProfile::profileRoot(),
                                                        RuntimeProfile::settingsFilePath());
     if (previous.inspection.state != RuntimeStorage::State::Current
@@ -181,6 +183,11 @@ bool SettingsManager::setScreenContentVisible(bool visible, QString* error)
     emit screenContentVisibleChanged(visible);
     emit settingsChanged();
     return true;
+}
+
+void SettingsManager::setScreenContentEnableGuard(std::function<bool(QString*)> guard)
+{
+    m_screenContentEnableGuard = std::move(guard);
 }
 
 bool SettingsManager::setSystemAudioEnabled(bool enabled, QString* error)

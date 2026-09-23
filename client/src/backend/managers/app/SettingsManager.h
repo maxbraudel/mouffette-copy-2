@@ -4,6 +4,7 @@
 #include <QObject>
 #include <QString>
 #include <QByteArray>
+#include <functional>
 
 /** Non-visual application settings and persistence service. */
 class SettingsManager : public QObject {
@@ -42,6 +43,8 @@ public:
     void setAutoUploadImportedMedia(bool enabled);
     void setAppAlwaysOnTop(bool enabled);
     bool setScreenContentVisible(bool visible, QString* error = nullptr);
+    // Runtime may need to finish erasing saved previews before re-enabling them.
+    void setScreenContentEnableGuard(std::function<bool(QString*)> guard);
     bool setSystemAudioEnabled(bool enabled, QString* error = nullptr);
 
 signals:
@@ -61,6 +64,7 @@ private:
     bool m_screenSharingEnabled = false;
     // Viewer preference shared by all projects in this client profile.
     bool m_screenContentVisible = true;
+    std::function<bool(QString*)> m_screenContentEnableGuard;
     bool m_audioSharingEnabled = false;
     bool m_systemAudioEnabled = true;
     QString m_username;

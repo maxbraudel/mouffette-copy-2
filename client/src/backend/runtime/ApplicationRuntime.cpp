@@ -17,6 +17,7 @@
 #include "backend/domain/workspace/WorkspaceManager.h"
 #include "backend/domain/session/IncomingSessionOrphanWatchdog.h"
 #include "backend/domain/project/ProjectManager.h"
+#include "backend/domain/project/ProjectScreenPreviewStore.h"
 #include "backend/domain/project/ProjectModel.h"
 #include "backend/domain/canvas/CanvasDocument.h"
 #include "backend/domain/scene/SceneActivityModel.h"
@@ -422,6 +423,32 @@ ApplicationRuntime::ApplicationRuntime(const RuntimeProfileContext& runtimeProfi
     });
 
     m_settingsManager->loadSettings();
+    m_screenPreviewStore = new ProjectScreenPreviewStore(
+        QFileInfo(RuntimeProfile::projectsFilePath()).dir().filePath(
+            QStringLiteral("screen-previews-v1")), this);
+    connect(m_screenPreviewStore, &ProjectScreenPreviewStore::persistenceError,
+            this, [](const QString& error) {
+        qWarning().noquote() << "Screen preview persistence error:" << error;
+    });
+    connect(m_screenPreviewStore, &ProjectScreenPreviewStore::frameRestored, this,
+            [this](const QString& projectId, int screenId, const QImage& image) {
+        if (m_cleanShutdownPrepared || !m_settingsManager->getScreenContentVisible()) return;
+        const auto* project = m_projectManager->projectById(projectId);
+        if (!project) return;
+        if (auto* canvas = canvasForEndpointId(project->targetEndpointId);
+            canvas && canvas->document() && !canvas->document()->mediaResidencySuspended())
+            canvas->restoreRemoteScreenFrame(screenId, image);
+    });
+    // A previous Hide is durable even if the process stopped during cleanup.
+    if (!m_settingsManager->getScreenContentVisible())
+        m_screenPreviewClearPending = !m_screenPreviewStore->clearAll();
+    m_settingsManager->setScreenContentEnableGuard([this](QString* error) {
+        if (!m_screenPreviewClearPending) return true;
+        m_screenPreviewClearPending = !m_screenPreviewStore->clearAll();
+        if (m_screenPreviewClearPending && error)
+            *error = tr("The saved screen images could not be erased. Please try again.");
+        return !m_screenPreviewClearPending;
+    });
     m_screenSharing = new ScreenSharingService(m_webSocketClient, m_systemMonitor, this);
     m_audioSharing = new AudioSharingService(m_webSocketClient, this);
     connect(m_audioSharing, &AudioSharingService::statusChanged,
@@ -466,20 +493,37 @@ ApplicationRuntime::ApplicationRuntime(const RuntimeProfileContext& runtimeProfi
             this, &ApplicationRuntime::screenSharingStatusChanged);
     connect(m_settingsManager, &SettingsManager::screenSharingEnabledChanged,
             m_screenSharing, &ScreenSharingService::setSharingEnabled);
-    connect(m_settingsManager, &SettingsManager::screenContentVisibleChanged,
-            this, &ApplicationRuntime::refreshMediaSharing);
+    connect(m_settingsManager, &SettingsManager::screenContentVisibleChanged, this,
+            [this](bool visible) {
+        if (!visible) {
+            // This preference is global: forget every project's last screen image.
+            // Invalidate disk/queued reads before the stream is unsubscribed.
+            m_screenPreviewClearPending = !m_screenPreviewStore->clearAll();
+            for (auto* workspace : m_workspaceManager->allWorkspaces())
+                if (workspace && workspace->canvas) workspace->canvas->clearRemoteScreenFrames();
+        }
+        refreshMediaSharing();
+    });
     connect(m_screenSharing, &ScreenSharingService::frameReady, this,
             [this](const QString& endpoint, int screenId, const QVideoFrame& frame) {
-        if (auto* canvas = canvasForEndpointId(endpoint)) canvas->setRemoteScreenFrame(screenId, frame);
+        if (m_cleanShutdownPrepared || !frame.isValid()
+            || !m_settingsManager->getScreenContentVisible()) return;
+        const auto* project = m_projectManager->projectForTarget(endpoint);
+        auto* canvas = canvasForEndpointId(endpoint);
+        if (!project || !canvas || !canvas->document()
+            || canvas->document()->mediaResidencySuspended()) return;
+        const auto screens = canvas->document()->screens();
+        if (std::none_of(screens.cbegin(), screens.cend(),
+            [screenId](const ScreenInfo& screen) { return screen.id == screenId; })) return;
+        canvas->setRemoteScreenFrame(screenId, frame);
+        m_screenPreviewStore->retain(project->projectId, screenId, frame);
     });
+    // These signals revoke decoder/stream state. Last project pixels remain
+    // visible while the live status still reports the interruption truthfully.
     connect(m_screenSharing, &ScreenSharingService::frameCleared, this,
-            [this](const QString& endpoint, int screenId) {
-        if (auto* canvas = canvasForEndpointId(endpoint)) canvas->clearRemoteScreenFrame(screenId);
-    });
+            [this](const QString&, int) { m_screenPreviewStore->flush(); });
     connect(m_screenSharing, &ScreenSharingService::framesCleared, this,
-            [this](const QString& endpoint) {
-        if (auto* canvas = canvasForEndpointId(endpoint)) canvas->clearRemoteScreenFrames();
-    });
+            [this](const QString&) { m_screenPreviewStore->flush(); });
     connect(m_screenSharing, &ScreenSharingService::remoteStateChanged,
             this, &ApplicationRuntime::presentationStateChanged);
     connect(m_screenSharing, &ScreenSharingService::remoteIssue, this,
@@ -529,8 +573,9 @@ ApplicationRuntime::ApplicationRuntime(const RuntimeProfileContext& runtimeProfi
             reconcileProjectMediaResidency(targetEndpointId);
         });
         connect(m_projectManager, &ProjectManager::projectRemoved,
-                this, [this](const QString&, const QString& targetEndpointId,
+                this, [this](const QString& projectId, const QString& targetEndpointId,
                              ProjectManager::RemovalReason reason) {
+            m_screenPreviewStore->removeProject(projectId);
             const bool displayed = m_applicationPage == 1 && m_navigationManager
                 && m_navigationManager->isOnScreenView()
                 && m_navigationManager->currentClientId() == targetEndpointId;
@@ -1083,6 +1128,9 @@ ApplicationRuntime::ApplicationRuntime(const RuntimeProfileContext& runtimeProfi
                         .arg(m_projectManager->lastError()),
                     AppConfig::instance().toastErrorDurationMs());
     } else {
+        QStringList projectIds;
+        for (const auto& project : m_projectManager->projects()) projectIds.append(project.projectId);
+        m_screenPreviewStore->pruneProjects(projectIds);
         validateAllProjectSources();
         refreshProjectClientList();
     }
@@ -1397,7 +1445,27 @@ void ApplicationRuntime::reconcileProjectMediaResidency(const QString& targetEnd
     // restores its draft and unlocks the document, then apply the expired
     // deadline immediately. Returning to the application cancels the request.
     if (expired && document->editsLocked()) return;
+    const bool wasSuspended = document->mediaResidencySuspended();
     document->setMediaResidencySuspended(expired);
+    if (expired) {
+        m_screenPreviewStore->flush();
+        workspace->canvas->clearRemoteScreenFrames(); // Unload RAM; the durable image remains.
+    } else if (wasSuspended) {
+        restoreProjectScreenPreviews(targetEndpointId);
+    }
+}
+
+void ApplicationRuntime::restoreProjectScreenPreviews(const QString& targetEndpointId)
+{
+    if (!m_screenPreviewStore || !m_settingsManager->getScreenContentVisible()) return;
+    const auto* project = m_projectManager->projectForTarget(targetEndpointId);
+    auto* canvas = canvasForEndpointId(targetEndpointId);
+    if (!project || !canvas || !canvas->document()
+        || canvas->document()->mediaResidencySuspended()) return;
+    QList<int> missingScreens;
+    for (const auto& screen : canvas->document()->screens())
+        if (!canvas->hasRemoteScreenFrame(screen.id)) missingScreens.append(screen.id);
+    if (!missingScreens.isEmpty()) m_screenPreviewStore->restore(project->projectId, missingScreens);
 }
 
 void ApplicationRuntime::restoreProjectCanvas(ClientWorkspace& session) {
@@ -1453,6 +1521,7 @@ void ApplicationRuntime::restoreProjectCanvas(ClientWorkspace& session) {
         invalidMediaIds.insert(mediaId);
     }
     m_restoredProjectIds.insert(session.targetEndpointId);
+    restoreProjectScreenPreviews(session.targetEndpointId);
 
     if (!invalidMediaIds.isEmpty() || !skipped.isEmpty()) {
         QJsonArray finalMedia;
@@ -4031,6 +4100,7 @@ void ApplicationRuntime::prepareCleanShutdown()
     if (m_cleanShutdownPrepared) return;
     m_cleanShutdownPrepared = true;
     if (m_screenSharing) m_screenSharing->stop();
+    if (m_screenPreviewStore) m_screenPreviewStore->waitForDone();
     if (m_audioSharing) m_audioSharing->stop();
 
     if (m_webSocketClient && m_webSocketMessageHandler) {

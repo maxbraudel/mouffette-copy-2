@@ -310,6 +310,7 @@ set(SOURCES
     src/backend/domain/project/ProjectModel.cpp
     src/backend/domain/project/ProjectStore.cpp
     src/backend/domain/project/ProjectManager.cpp
+    src/backend/domain/project/ProjectScreenPreviewStore.cpp
 
     # Domain - Live scene activity
     src/backend/domain/scene/SceneActivityModel.cpp
@@ -467,6 +468,7 @@ set(HEADERS
     src/backend/domain/project/ProjectModel.h
     src/backend/domain/project/ProjectStore.h
     src/backend/domain/project/ProjectManager.h
+    src/backend/domain/project/ProjectScreenPreviewStore.h
 
     # Domain - Live scene activity
     src/backend/domain/scene/SceneActivityModel.h
@@ -1379,6 +1381,15 @@ if(BUILD_TESTING)
     target_include_directories(tst_LocalFileRepository PRIVATE src)
     target_link_libraries(tst_LocalFileRepository PRIVATE Qt6::Core Qt6::Test)
     add_test(NAME LocalFileRepository COMMAND tst_LocalFileRepository)
+
+    add_executable(tst_ProjectScreenPreviewStore
+        tests/qt/tst_ProjectScreenPreviewStore.cpp
+        src/backend/domain/project/ProjectScreenPreviewStore.cpp
+        src/backend/domain/project/ProjectScreenPreviewStore.h)
+    target_include_directories(tst_ProjectScreenPreviewStore PRIVATE src)
+    target_link_libraries(tst_ProjectScreenPreviewStore PRIVATE
+        Qt6::Gui Qt6::Multimedia Qt6::Test)
+    add_test(NAME ProjectScreenPreviewStore COMMAND tst_ProjectScreenPreviewStore)
 
     add_executable(tst_ProjectManager
         tests/qt/tst_ProjectManager.cpp

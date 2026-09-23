@@ -487,7 +487,6 @@ void QuickCanvasHost::recenterWithMargin(int marginPx)
 
 void QuickCanvasHost::hideContentPreservingState()
 {
-    clearRemoteScreenFrames();
     m_contentAvailable = false;
     m_document->setContentAvailable(false);
 }
@@ -516,6 +515,16 @@ void QuickCanvasHost::hideRemoteCursor()
 void QuickCanvasHost::setRemoteScreenFrame(int screenId, const QVideoFrame& frame)
 {
     if (m_controller && m_contentAvailable) m_controller->setRemoteScreenFrame(screenId, frame);
+}
+
+void QuickCanvasHost::restoreRemoteScreenFrame(int screenId, const QImage& image)
+{
+    if (m_controller) m_controller->restoreRemoteScreenFrame(screenId, image);
+}
+
+bool QuickCanvasHost::hasRemoteScreenFrame(int screenId) const
+{
+    return m_controller && m_controller->hasRemoteScreenFrame(screenId);
 }
 
 void QuickCanvasHost::clearRemoteScreenFrame(int screenId)
@@ -1574,7 +1583,6 @@ void QuickCanvasHost::failScene(const QString& message, bool notifyServer, const
 
 void QuickCanvasHost::handleRemoteConnectionLost()
 {
-    clearRemoteScreenFrames();
     if (m_webSocket && !m_sceneRunId.isEmpty())
         m_webSocket->sceneRunCoordinator()->finishRun(m_sceneRunId, true);
     // The presentation/priming context can belong to a wholly local test.

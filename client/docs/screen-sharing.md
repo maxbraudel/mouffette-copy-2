@@ -2,8 +2,9 @@
 
 The connected client's desktop appears inside each existing canvas screen,
 under the editable scene media. Pan, zoom, monitor layout and the existing
-remote cursor keep their normal canvas coordinates. Screen pixels are ephemeral:
-they are never saved in a project, recorded, or written to the media cache.
+remote cursor keep their normal canvas coordinates. Each project retains the last
+presented frame of each screen as a PNG snapshot. These are still images, not a
+recording or received-media upload; live grants and decoder state remain transient.
 
 Desktop publication with complete Mouffette exclusion is supported on macOS
 and Windows. Linux and other platforms can receive remote desktops and render
@@ -29,13 +30,19 @@ The top-bar **Hide screen content / Show screen content** button controls the
 viewer's desktop preview. Viewing is on by default. The choice is saved in the
 viewer's runtime profile and applies to all projects and remote clients. The
 primary instance remembers it across restarts; temporary instances keep it for
-their session. Hiding immediately clears the screen frames and unsubscribes from the
-stream; showing subscribes again to the visible canvas. Monitor outlines, scene
+their session. Hiding immediately clears screen images across all projects,
+durably invalidates their saved previews, and unsubscribes from the stream.
+Showing subscribes again to the visible canvas and waits for fresh frames;
+old queued writes or reads cannot resurrect an image cleared by Hide. Monitor outlines, scene
 media and the remote cursor remain available. This preference does not change
 either client's permission to share its own screens. The adjacent **Play system
 audio / Stop system audio** button controls a separate listening subscription;
 showing or hiding screen content does not change it. The former canvas mute button
 has been removed, and its saved choice migrates to the new listening preference.
+
+If disk failure prevents durable preview invalidation, Hide still removes the
+displayed images and remains saved. Show retries that invalidation before saving
+its preference; if it fails again, viewing stays hidden and reports an error.
 
 The remote connection card shows **Screen disabled** when the viewer turns off
 screen content locally. With viewing enabled, it shows **Screen loading** while
@@ -43,7 +50,7 @@ connecting and waiting for the first frame, then **Screen available** once frame
 arrive. Disabled remote sharing shows **Screen not shared**; a capture, decode or
 transport failure leaving no healthy displayed monitor shows **Screen error**.
 Other unavailable states show **Screen not available**. A capture, decode or stale-frame failure
-on one monitor clears only that monitor; another healthy monitor keeps the
+on one monitor freezes its last frame; another healthy monitor keeps the
 connection card **Screen available**. A separate **Audio disabled / loading /
 available / not shared / error / not available** indicator reports audio's own
 state, and hovering either indicator exposes its detail. These
@@ -100,11 +107,26 @@ Capture continues when the publisher's control window is hidden; native system
 lock/sleep suspends sharing.
 
 Only the visible canvas with screen content enabled subscribes. Leaving it,
-hiding screen content, hiding the viewer window, disabling consent, losing the
-session, or disconnecting removes its frames. Within that canvas, only monitors
-intersecting the viewport are requested. An offscreen monitor is unsubscribed,
-its decoded image is cleared and its pending decode work is fenced. Capture
-exists only while at least one permitted viewer requests that monitor.
+hiding the viewer window, disabling publisher consent, losing the session or
+network degradation stops live updates while preserving the last project image.
+Within that canvas, only monitors intersecting the viewport are requested.
+An offscreen monitor is unsubscribed and its pending decode work is fenced,
+while its last image remains available when it returns to view. Capture exists
+only while at least one permitted viewer requests that monitor.
+
+`ProjectScreenPreviewStore` coalesces snapshots and converts/encodes/writes them
+on a serial background worker, independently of project authoring autosave.
+Interruptions flush the latest presented frames, and clean shutdown drains them.
+The versioned sidecar directory lives under the profile's projects directory,
+keyed by project identity and screen ID. Restoring a project loads its images
+offline, without opening a stream or granting permission to publish. A late disk
+read cannot replace newer live pixels. Explicit Hide commits a new store
+generation before cleanup, so a rapid Hide/Show or restart cannot expose old
+snapshots. Deleting/expiring a project removes its snapshots; startup prunes
+orphans left by a crash or project reset. The media inactivity deadline can unload
+screen RAM without erasing disk snapshots; returning activity reloads them.
+Removed monitors are not rendered, and existing IDs keep their last pixels
+through layout changes until a new frame replaces them.
 
 The viewport adapter requests the full monitor image at a useful resolution
 from its displayed size, zoom, effective device pixel ratio and the configured
@@ -191,8 +213,8 @@ timeout. Legacy servers retain the original per-viewer-copy mode.
   work and overload abandon dependent P frames and request an IDR. Stopped
   streams discard in-flight results. Slow decoding is reported to the relay;
   in legacy mode it is forwarded to the source.
-  Decode errors and stale frames clear and recover the affected screen without
-  clearing other screens. A screen explicitly reported as capture-failed rejects
+  Decode errors and stale frames reset and recover the affected decoder while
+  the canvas retains its last image. A screen explicitly reported as capture-failed rejects
   delayed video packets until a matching `starting`/`streaming` state or a new
   stream authorizes reception again; an old keyframe cannot revive it.
 - Decoded FFmpeg YUV planes remain in QVideoFrame and use the existing
@@ -405,9 +427,10 @@ its timings and test counts do not benchmark the adaptive release:
   only after a successful Save. Cancel discards the checkbox change; invalid
   settings or a failed disk write leave the saved consent unchanged. A malformed
   persisted consent value remains disabled.
-- Screen frame delivery leaves the canvas model and project serialization
-  unchanged. Monitor removal, layout replacement, switching peers, hiding
-  content and disconnecting clear retained frames.
+- Screen frame delivery leaves the canvas authoring model unchanged; snapshots
+  use project-owned sidecars. Disconnects and surviving-monitor layout changes
+  retain pixels. Explicit Hide clears displayed and durable snapshots, switching
+  peers clears that host, and monitor removal detaches its display source.
 - A synthetic `QVideoFrame` renders inside the screen rectangle, follows
   canvas zoom, and disappears when cleared. This test passed with both the
   offscreen renderer and the native Metal scene graph
@@ -465,14 +488,16 @@ displays, scaling/rotation, exclusion, reconnect and lock/unlock.
    combinations, maps to its canvas rectangle.
 3. Move windows and play a video; verify canvas pan/zoom and editing remain
    responsive. Test while simultaneously uploading a large file.
-4. Disable screen sharing during motion: the viewer must clear immediately while
-   authorized audio continues. Disable audio sharing with screen sharing enabled:
+4. Disable screen sharing during motion: the viewer must freeze the last image
+   while authorized audio continues. Hide screen content on the viewer: all last
+   images must disappear and stay absent after Show until fresh frames arrive. Disable audio sharing with screen sharing enabled:
    healthy screens must remain visible. Repeat using the two viewer controls and
    independently denied/failed captures; verify each status and warning identifies
    only the affected medium. Re-enable, disconnect/reconnect, hide/reopen the viewer,
    and lock/unlock the target.
-5. Unplug/reorder/rotate a monitor during streaming and verify no old monitor
-   image is retained under a reassigned ID.
+5. Unplug/reorder/rotate a monitor during streaming: removed monitor rectangles
+   disappear, surviving screen IDs retain their last pixels until fresh frames
+   arrive. Restore the project offline and verify its saved layout and images.
 6. Constrain uplink and downlink independently, add latency/loss, then restore
    them. Verify profile reduction/recovery, bounded memory and current frames.
    Measure command RTT and file progress alongside displayed video FPS.

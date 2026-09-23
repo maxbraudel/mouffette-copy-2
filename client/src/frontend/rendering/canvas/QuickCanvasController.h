@@ -122,6 +122,8 @@ public:
     void updateRemoteCursor(int screenId, const QPointF& screenPosition);
     void hideRemoteCursor();
     void setRemoteScreenFrame(int screenId, const QVideoFrame& frame);
+    void restoreRemoteScreenFrame(int screenId, const QImage& image);
+    bool hasRemoteScreenFrame(int screenId) const;
     void clearRemoteScreenFrame(int screenId);
     void clearRemoteScreenFrames();
     QJsonValue screenPreviewDemand() const { return m_screenPreviewDemand; }

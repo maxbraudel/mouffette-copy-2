@@ -156,6 +156,10 @@ void ClientWorkspaceController::configureWorkspace(ClientWorkspace* workspace) {
             m_runtime->reconcileRemoteFilesForWorkspace(*current, sources);
         });
         if (workspace->canvas->document()) {
+            connect(workspace->canvas->document(), &CanvasDocument::screensChanged, m_runtime,
+                    [this, targetEndpointId=workspace->targetEndpointId] {
+                if (m_runtime) m_runtime->restoreProjectScreenPreviews(targetEndpointId);
+            });
             connect(workspace->canvas->document(), &CanvasDocument::documentChanged,
                     sourceReconcileTimer, qOverload<>(&QTimer::start));
             connect(workspace->canvas->document(), &CanvasDocument::editsLockedChanged,
