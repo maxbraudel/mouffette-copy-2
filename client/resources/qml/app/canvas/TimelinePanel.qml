@@ -998,6 +998,23 @@ FocusScope {
                     width: Math.max(0, timelineContent.width - x); height: timelineContent.height - y
                     color: "#44000000"
                 }
+                Shape {
+                    id: playbackStartMarker
+                    objectName: "timelinePlaybackStartMarker"
+                    visible: !!root.timeline && root.timeline.playing && !root.timeline.remoteActive
+                    x: 12 + (root.timeline ? root.timeline.playbackStartMs : 0) * root.pixelsPerMs
+                    width: 1; height: timelineContent.height
+                    preferredRendererType: Shape.CurveRenderer
+                    ShapePath {
+                        strokeColor: Theme.accent
+                        strokeWidth: 1
+                        strokeStyle: ShapePath.DashLine
+                        dashPattern: [4, 4]
+                        fillColor: "transparent"
+                        startX: 0.5; startY: 0
+                        PathLine { x: 0.5; y: playbackStartMarker.height }
+                    }
+                }
                 Rectangle {
                     id: playhead
                     objectName: "timelinePlayhead"

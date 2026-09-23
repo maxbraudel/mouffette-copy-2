@@ -15,6 +15,9 @@ Maximum duration and slot cadence are copied to each new project. Existing proje
 | `MOUFFETTE_TIMELINE_SLOTS_PER_SECOND` | 30 | integer 1–240 |
 | `MOUFFETTE_TIMELINE_DEFAULT_CLIP_DURATION_SLOTS` | 30 | integer 1–145152000 |
 | `MOUFFETTE_TIMELINE_HEIGHT_PX` | 240 | 120–1200 |
+| `MOUFFETTE_CANVAS_MIN_HEIGHT_PERCENT` | 20 | integer 1–98 |
+| `MOUFFETTE_TIMELINE_MIN_HEIGHT_PERCENT` | 20 | integer 1–98 |
+| `MOUFFETTE_TIMELINE_SPLITTER_HIT_HEIGHT_PX` | 12 | integer 4–48 |
 | `MOUFFETTE_TIMELINE_RULER_HEIGHT_PX` | 28 | 16–160 |
 | `MOUFFETTE_TIMELINE_CLIP_TRACK_HEIGHT_PX` | 48 | 24–600 |
 | `MOUFFETTE_TIMELINE_CLIP_RESIZE_HANDLE_WIDTH_PX` | 8 | integer 1–100 |
@@ -28,6 +31,11 @@ Maximum duration and slot cadence are copied to each new project. Existing proje
 | `MOUFFETTE_TIMELINE_SNAP_DISTANCE_PX` | 10 | 0–100 |
 | `MOUFFETTE_TIMELINE_AUTO_SCROLL_SPEED_PX_PER_SECOND` | 96 | integer 0–2000 |
 | `MOUFFETTE_TIMELINE_INITIAL_VIEW_DURATION_MS` | 15000 | 1–604800000 |
+
+The two minimum height percentages must sum to less than 100. They constrain the
+expanded canvas/timeline split; collapsing the timeline retains only its transport
+row. The draggable split begins at 50/50, clamped to these limits. Its grab area
+is centered on the separator and measured in logical pixels.
 
 Production inherits these values unless explicitly overridden in `.env.production`. Shift snapping uses screen pixels, so its tolerance stays consistent at every zoom level.
 

@@ -1032,6 +1032,7 @@ void QuickCanvasHost::timelineSeek(qreal positionMs)
     if (m_sceneLaunching || m_sceneLaunched || m_sceneStopping || m_timelineRemote) return;
     const auto& grid = m_document->timelineSettings();
     const qreal target = grid.timeMs(grid.nearestSlot(positionMs));
+    m_timelinePlaybackStartMs = target;
     if (m_timelineScrubbing) {
         applyTimeline(target, false, true);
         return;
@@ -1430,7 +1431,12 @@ void QuickCanvasHost::startTimelineClock()
 
 void QuickCanvasHost::stopScenePresentation()
 {
-    const qreal stoppedAt = std::min(timelineNowMs(), timelineStopMs());
+    // Local preview returns to the last manually placed cue, including at
+    // natural completion. Remote presentation retains its authoritative time.
+    const qreal stoppedAt = m_testSceneLaunched && !m_timelineRemote
+        ? m_document->timelineSettings().timeMs(
+            m_document->timelineSettings().nearestSlot(m_timelinePlaybackStartMs))
+        : std::min(timelineNowMs(), timelineStopMs());
     m_timelineScrubbing = false;
     m_timelinePlaying = false;
     m_timelineTimer.stop();

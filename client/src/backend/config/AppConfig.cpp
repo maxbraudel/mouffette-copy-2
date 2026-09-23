@@ -26,7 +26,7 @@ struct SettingSpec {
     bool sensitive = false;
 };
 
-constexpr std::array<SettingSpec, 130> kSpecs{{
+constexpr std::array<SettingSpec, 133> kSpecs{{
     {Key::ServerUrl, "MOUFFETTE_SERVER_URL", "server-url", "serverUrl", "ws://localhost:8080", false},
     {Key::ProxyType, "MOUFFETTE_PROXY_TYPE", "proxy-type", nullptr, "system", false},
     {Key::ProxyHost, "MOUFFETTE_PROXY_HOST", "proxy-host", nullptr, "", false},
@@ -120,6 +120,9 @@ constexpr std::array<SettingSpec, 130> kSpecs{{
     {Key::TimelineMaxDurationMs, "MOUFFETTE_TIMELINE_MAX_DURATION_MS", "timeline-max-duration-ms", nullptr, "180000", false},
     {Key::TimelineSlotsPerSecond, "MOUFFETTE_TIMELINE_SLOTS_PER_SECOND", "timeline-slots-per-second", nullptr, "30", false},
     {Key::TimelineDefaultClipDurationSlots, "MOUFFETTE_TIMELINE_DEFAULT_CLIP_DURATION_SLOTS", "timeline-default-clip-duration-slots", nullptr, "30", false},
+    {Key::CanvasMinHeightPercent, "MOUFFETTE_CANVAS_MIN_HEIGHT_PERCENT", "canvas-min-height-percent", nullptr, "20", false},
+    {Key::TimelineMinHeightPercent, "MOUFFETTE_TIMELINE_MIN_HEIGHT_PERCENT", "timeline-min-height-percent", nullptr, "20", false},
+    {Key::TimelineSplitterHitHeightPx, "MOUFFETTE_TIMELINE_SPLITTER_HIT_HEIGHT_PX", "timeline-splitter-hit-height-px", nullptr, "12", false},
     {Key::TimelineHeightPx, "MOUFFETTE_TIMELINE_HEIGHT_PX", "timeline-height-px", nullptr, "240", false},
     {Key::TimelineRulerHeightPx, "MOUFFETTE_TIMELINE_RULER_HEIGHT_PX", "timeline-ruler-height-px", nullptr, "28", false},
     {Key::TimelineClipTrackHeightPx, "MOUFFETTE_TIMELINE_CLIP_TRACK_HEIGHT_PX", "timeline-clip-track-height-px", nullptr, "48", false},
@@ -538,6 +541,9 @@ void AppConfig::resetToCompiledDefaults() {
     m_timelineSlotsPerSecond = 30;
     m_timelineDefaultClipDurationSlots = 30;
     m_timelineHeightPx = 240;
+    m_timelineSplitterHitHeightPx = 12;
+    m_timelineMinHeightPercent = 20;
+    m_canvasMinHeightPercent = 20;
     m_timelineRulerHeightPx = 28;
     m_timelineClipTrackHeightPx = 48;
     m_timelineClipResizeHandleWidthPx = 8;
@@ -826,6 +832,9 @@ bool AppConfig::load(const LoadOptions& options, QString* errorMessage) {
         || !parseIntSetting(Key::TimelineMaxDurationMs, 1, 604800000, &candidate.m_timelineMaxDurationMs)
         || !parseIntSetting(Key::TimelineSlotsPerSecond, 1, 240, &candidate.m_timelineSlotsPerSecond)
         || !parseIntSetting(Key::TimelineDefaultClipDurationSlots, 1, 145152000, &candidate.m_timelineDefaultClipDurationSlots)
+        || !parseIntSetting(Key::CanvasMinHeightPercent, 1, 98, &candidate.m_canvasMinHeightPercent)
+        || !parseIntSetting(Key::TimelineMinHeightPercent, 1, 98, &candidate.m_timelineMinHeightPercent)
+        || !parseIntSetting(Key::TimelineSplitterHitHeightPx, 4, 48, &candidate.m_timelineSplitterHitHeightPx)
         || !parseIntSetting(Key::TimelineHeightPx, 120, 1200, &candidate.m_timelineHeightPx)
         || !parseIntSetting(Key::TimelineRulerHeightPx, 16, 160, &candidate.m_timelineRulerHeightPx)
         || !parseIntSetting(Key::TimelineClipTrackHeightPx, 24, 600, &candidate.m_timelineClipTrackHeightPx)
@@ -976,6 +985,10 @@ bool AppConfig::load(const LoadOptions& options, QString* errorMessage) {
         || !parseIntSetting(Key::ToastAnimationDurationMs, 0, 5000,
                             &candidate.m_toastAnimationDurationMs)) {
         return false;
+    }
+    if (candidate.m_canvasMinHeightPercent + candidate.m_timelineMinHeightPercent >= 100) {
+        return setError(errorMessage, QStringLiteral("MOUFFETTE_CANVAS_MIN_HEIGHT_PERCENT + "
+            "MOUFFETTE_TIMELINE_MIN_HEIGHT_PERCENT must be < 100"));
     }
     if (candidate.m_screenLowMaxEdge % 2 != 0) {
         return setError(errorMessage, QStringLiteral("MOUFFETTE_SCREEN_LOW_MAX_EDGE must be even"));

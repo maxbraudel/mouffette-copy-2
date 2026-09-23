@@ -42,6 +42,7 @@ private slots:
     void screenPreviewValidatesRelatedSettings();
     void validatesRetentionAndDiagnostics();
     void configuresTimeline();
+    void configuresTimelineSplit();
     void configuresTimelineClipResizeZones();
     void configuresMinimumTimelineTracks();
     void appAlwaysOnTopIsOptionalAndPersistent();
@@ -435,6 +436,41 @@ void AppConfigTest::configuresMinimumTimelineTracks() {
             QVERIFY(error.contains(key));
         }
         options.processEnvironment.remove(key);
+    }
+}
+
+void AppConfigTest::configuresTimelineSplit() {
+    AppConfig config;
+    auto options = isolatedOptions(QString());
+    QString error;
+    QVERIFY2(config.load(options, &error), qPrintable(error));
+    QCOMPARE(config.canvasMinHeightPercent(), 20);
+    QCOMPARE(config.timelineMinHeightPercent(), 20);
+    QCOMPARE(config.timelineSplitterHitHeightPx(), 12);
+    options.processEnvironment.insert("MOUFFETTE_CANVAS_MIN_HEIGHT_PERCENT", "30");
+    options.processEnvironment.insert("MOUFFETTE_TIMELINE_MIN_HEIGHT_PERCENT", "25");
+    options.processEnvironment.insert("MOUFFETTE_TIMELINE_SPLITTER_HIT_HEIGHT_PX", "16");
+    QVERIFY2(config.load(options, &error), qPrintable(error));
+    QCOMPARE(config.canvasMinHeightPercent(), 30);
+    QCOMPARE(config.timelineMinHeightPercent(), 25);
+    QCOMPARE(config.timelineSplitterHitHeightPx(), 16);
+    for (const QString value : {"0", "99", "70", "80", "not-a-number"}) {
+        options.processEnvironment.insert("MOUFFETTE_TIMELINE_MIN_HEIGHT_PERCENT", value);
+        QVERIFY(!config.load(options, &error));
+        QVERIFY(error.contains("MOUFFETTE_TIMELINE_MIN_HEIGHT_PERCENT"));
+        QCOMPARE(config.timelineMinHeightPercent(), 25); // Failed reload is atomic.
+    }
+    options.processEnvironment.insert("MOUFFETTE_TIMELINE_MIN_HEIGHT_PERCENT", "25");
+    for (const QString value : {"0", "99"}) {
+        options.processEnvironment.insert("MOUFFETTE_CANVAS_MIN_HEIGHT_PERCENT", value);
+        QVERIFY(!config.load(options, &error));
+        QVERIFY(error.contains("MOUFFETTE_CANVAS_MIN_HEIGHT_PERCENT"));
+    }
+    options.processEnvironment.insert("MOUFFETTE_CANVAS_MIN_HEIGHT_PERCENT", "30");
+    for (const QString value : {"3", "49"}) {
+        options.processEnvironment.insert("MOUFFETTE_TIMELINE_SPLITTER_HIT_HEIGHT_PX", value);
+        QVERIFY(!config.load(options, &error));
+        QVERIFY(error.contains("MOUFFETTE_TIMELINE_SPLITTER_HIT_HEIGHT_PX"));
     }
 }
 

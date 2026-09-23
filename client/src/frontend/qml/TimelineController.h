@@ -19,6 +19,7 @@ class TimelineController final : public QObject
 {
     Q_OBJECT
     Q_PROPERTY(qreal positionMs READ positionMs NOTIFY transportChanged)
+    Q_PROPERTY(qreal playbackStartMs READ playbackStartMs NOTIFY transportChanged)
     Q_PROPERTY(qreal maxDurationMs READ maxDurationMs NOTIFY changed)
     Q_PROPERTY(qreal stopTimeMs READ stopTimeMs NOTIFY changed)
     Q_PROPERTY(qreal effectiveEndMs READ effectiveEndMs NOTIFY changed)
@@ -46,6 +47,9 @@ class TimelineController final : public QObject
     Q_PROPERTY(bool canPaste READ canPaste NOTIFY transportChanged)
     Q_PROPERTY(bool hasKeyframeAtPosition READ hasKeyframeAtPosition NOTIFY transportChanged)
     Q_PROPERTY(QString errorText READ errorText NOTIFY changed)
+    Q_PROPERTY(int canvasMinHeightPercent READ canvasMinHeightPercent CONSTANT)
+    Q_PROPERTY(int timelineMinHeightPercent READ timelineMinHeightPercent CONSTANT)
+    Q_PROPERTY(int timelineSplitterHitHeightPx READ timelineSplitterHitHeightPx CONSTANT)
     Q_PROPERTY(int timelineHeightPx READ timelineHeightPx CONSTANT)
     Q_PROPERTY(int rulerHeightPx READ rulerHeightPx CONSTANT)
     Q_PROPERTY(int clipTrackHeightPx READ clipTrackHeightPx CONSTANT)
@@ -64,6 +68,7 @@ public:
     ~TimelineController() override;
     void setHost(QuickCanvasHost* host);
     qreal positionMs() const;
+    qreal playbackStartMs() const;
     qreal maxDurationMs() const;
     qreal stopTimeMs() const;
     qreal effectiveEndMs() const;
@@ -94,6 +99,9 @@ public:
     bool canPaste() const;
     bool hasKeyframeAtPosition() const;
     QString errorText() const { return m_error; }
+    int canvasMinHeightPercent() const;
+    int timelineMinHeightPercent() const;
+    int timelineSplitterHitHeightPx() const;
     int timelineHeightPx() const;
     int rulerHeightPx() const;
     int clipTrackHeightPx() const;

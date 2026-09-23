@@ -144,8 +144,11 @@ Each instance owns an independent `ResidentVideoPlayer` over the shared source.
 Both renderers evaluate its source sample from the common scene clock and prepare
 the clip entry frame before activation. Paused, absent and held samples stay silent.
 
-Play resumes at the head; at or past the effective end it restarts at zero. Pause
-returns to the beginning of the started slot, silently reseeks video and unlocks authoring.
+Play starts at the manually placed head; at or past the effective end it restarts
+at zero. This start position remains visible as a dashed vertical cue while
+local preview runs. Pause and natural completion return to that cue, silently
+reseek video and unlock authoring. Manual seeking, including ruler scrubbing
+during playback, moves the cue; automatic playback ticks never move it.
 Local Play starts immediately even with pending metadata or unready images and
 videos. A pending media has no content or skeleton in the playing canvas; its
 timeline clip keeps a pulsating background. When ready, a video joins at the
@@ -166,7 +169,7 @@ Local preview also runs on an empty project. Space toggles Play/Pause from the
 canvas or timeline, except while entering text.
 Manual placement chooses the nearest slot (ties go forward). An optional Stop marker defines the
 playback end; without it the project maximum is the end. Editing past Stop remains
-possible. At Stop, local preview holds the final evaluated state silently. Remote
+possible. At Stop, local preview returns to its cue and evaluates that state silently. Remote
 playback closes through the existing scene/resource release lifecycle.
 
 ## Editor and synchronization
@@ -186,8 +189,15 @@ The gap between them shrinks as the window narrows. If the full labels no longer
 fit, all buttons in the row switch to icons with tooltips. If the icons still do
 not fit, the entire row scrolls together. Its side padding belongs to the scrollable content;
 overflow adds neither a scrollbar nor extra height.
-The canvas and timeline each occupy half of the available page height. The
-Timeline toggle beside Settings hides everything below the transport row and
+The canvas and timeline initially each occupy half of the available page height.
+Dragging their horizontal separator changes that proportion, preserving it when
+the window resizes or the timeline is collapsed and reopened. Its vertical-resize
+cursor appears throughout a centered 12 px grab area.
+`MOUFFETTE_CANVAS_MIN_HEIGHT_PERCENT` and `MOUFFETTE_TIMELINE_MIN_HEIGHT_PERCENT`
+define minimum expanded shares (20% each by default, positive integers with sum
+less than 100); `MOUFFETTE_TIMELINE_SPLITTER_HIT_HEIGHT_PX` controls the grab area.
+The Timeline toggle beside Settings, or Tab from the canvas/timeline outside text
+fields, hides everything below the transport row and
 returns that space to the canvas; timing readouts and Start/Play/End remain visible.
 The Timeline toggle stays visible and usable during local and remote playback;
 Settings, Selection and Text controls are unloaded while editing is locked.

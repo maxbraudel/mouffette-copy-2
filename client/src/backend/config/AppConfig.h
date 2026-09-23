@@ -117,6 +117,9 @@ public:
         TimelineSlotsPerSecond,
         TimelineDefaultClipDurationSlots,
         TimelineHeightPx,
+        TimelineSplitterHitHeightPx,
+        TimelineMinHeightPercent,
+        CanvasMinHeightPercent,
         TimelineRulerHeightPx,
         TimelineClipTrackHeightPx,
         TimelineClipResizeHandleWidthPx,
@@ -299,6 +302,9 @@ public:
     int timelineMaxDurationMs() const { return m_timelineMaxDurationMs; }
     int timelineSlotsPerSecond() const { return m_timelineSlotsPerSecond; }
     int timelineDefaultClipDurationSlots() const { return m_timelineDefaultClipDurationSlots; }
+    int canvasMinHeightPercent() const { return m_canvasMinHeightPercent; }
+    int timelineMinHeightPercent() const { return m_timelineMinHeightPercent; }
+    int timelineSplitterHitHeightPx() const { return m_timelineSplitterHitHeightPx; }
     int timelineHeightPx() const { return m_timelineHeightPx; }
     int timelineRulerHeightPx() const { return m_timelineRulerHeightPx; }
     int timelineClipTrackHeightPx() const { return m_timelineClipTrackHeightPx; }
@@ -444,6 +450,9 @@ private:
     int m_timelineSlotsPerSecond = 30;
     int m_timelineDefaultClipDurationSlots = 30;
     int m_timelineHeightPx = 240;
+    int m_timelineSplitterHitHeightPx = 12;
+    int m_timelineMinHeightPercent = 20;
+    int m_canvasMinHeightPercent = 20;
     int m_timelineRulerHeightPx = 28;
     int m_timelineClipTrackHeightPx = 48;
     int m_timelineClipResizeHandleWidthPx = 8;

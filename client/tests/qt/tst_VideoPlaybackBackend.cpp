@@ -502,7 +502,7 @@ private slots:
         QTRY_VERIFY_WITH_TIMEOUT(video->isPlaying(),5000);
         QTRY_VERIFY_WITH_TIMEOUT(!video->isPlaying(),3000);
         QTRY_VERIFY_WITH_TIMEOUT(!host->timelinePlaying(),3000);
-        QCOMPARE(host->timelinePositionMs(),qint64(1200));
+        QCOMPARE(host->timelinePositionMs(),qint64(0)); // Return to the playback cue.
         QVERIFY(!video->clipActive());
         QVERIFY(video->audioOutput()->isMuted());
     }

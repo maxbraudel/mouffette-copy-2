@@ -5,6 +5,7 @@
 #include <QJsonDocument>
 #include <QMimeData>
 #include <QQuickItem>
+#include <QQmlComponent>
 #include <QQuickStyle>
 #include <QQuickView>
 #include <QStyleHints>
@@ -587,6 +588,7 @@ private slots:
         clickPlay();
         QCOMPARE(clicks.count(), 2);
         QTRY_VERIFY(!timeline->playing());
+        QCOMPARE(timeline->positionMs(), 0.0);
         const auto pausedAt = timeline->positionMs();
         QTest::qWait(80);
         QCOMPARE(timeline->positionMs(), pausedAt);
@@ -641,6 +643,94 @@ private slots:
             QTest::keyClick(&view, Qt::Key_Space);
             QTRY_VERIFY(!timeline->playing());
         }
+    }
+
+    void fullPageTimelineResizeAndTab()
+    {
+        const auto previous = AppConfig::instance();
+        const auto restore = qScopeGuard([&] { AppConfig::instance() = previous; });
+        AppConfig::LoadOptions options;
+        options.defaultEnvFilePath.clear();
+        options.processEnvironment = QProcessEnvironment();
+        options.arguments = {"tst_TimelineController", "--canvas-min-height-percent=30",
+                             "--timeline-min-height-percent=25", "--timeline-splitter-hit-height-px=16"};
+        QString error;
+        QVERIFY2(AppConfig::instance().load(options, &error), qPrintable(error));
+        std::unique_ptr<QuickCanvasHost> host(QuickCanvasHost::create());
+        QVERIFY(host); host->setProjectEditingEnabled(true);
+        ClientWorkspaceViewModel session("split-test", host.get(), [] {}, nullptr,
+            [] { return false; }, [] { return false; }, [] { return true; });
+        session.setLoading(false);
+        QQuickView view;
+        view.setResizeMode(QQuickView::SizeRootObjectToView);
+        view.resize(1100, 800);
+        view.setInitialProperties({{"controller", QVariantMap{
+            {"activeWorkspace", QVariant::fromValue<QObject*>(&session)}, {"remoteStatusText", "CONNECTED"}}}});
+        view.setSource(QUrl("qrc:/qt/qml/Mouffette/App/resources/qml/app/pages/CanvasPage.qml"));
+        QVERIFY2(view.status() == QQuickView::Ready, qPrintable(view.errors().isEmpty() ? QString() : view.errors().first().toString()));
+        view.show(); QVERIFY(QTest::qWaitForWindowExposed(&view));
+        view.requestActivate(); QVERIFY(QTest::qWaitForWindowActive(&view));
+        auto* page = view.rootObject();
+        auto* panel = timelineItems(page, "sceneTimeline").value(0);
+        auto* splitter = timelineItems(page, "canvasTimelineSplitter").value(0);
+        auto* loader = timelineItems(page, "activeCanvasLoader").value(0);
+        QVERIFY(panel && splitter && loader);
+        auto* canvas = qvariant_cast<QQuickItem*>(loader->property("item")); QVERIFY(canvas);
+        QCOMPARE(splitter->height(), 16.0);
+        QCOMPARE(panel->height(), loader->height());
+        const auto dragTo = [&](qreal targetY) {
+            // Grab four pixels away from the visible line, not on its single pixel.
+            const auto from = splitter->mapToScene({splitter->width()/2, splitter->height()/2 + 4}).toPoint();
+            QTest::mouseMove(&view, from);
+            QCOMPARE(splitter->property("cursorShape").toInt(), int(Qt::SizeVerCursor));
+            QTest::mousePress(&view, Qt::LeftButton, Qt::NoModifier, from);
+            QVERIFY(splitter->property("pressed").toBool());
+            const QPoint to(from.x(), qRound(targetY));
+            QMouseEvent move(QEvent::MouseMove, to, view.mapToGlobal(to), Qt::NoButton, Qt::LeftButton, Qt::NoModifier);
+            QCoreApplication::sendEvent(&view, &move);
+            QTest::mouseRelease(&view, Qt::LeftButton, Qt::NoModifier, to);
+        };
+        dragTo(5);
+        QTRY_VERIFY(qAbs(page->property("timelineHeightRatio").toReal() - 0.7) < 0.001);
+        QVERIFY(qAbs(loader->height()/page->property("splitHeight").toReal() - 0.3) < 0.001);
+        dragTo(view.height() - 5);
+        QTRY_VERIFY(qAbs(page->property("timelineHeightRatio").toReal() - 0.25) < 0.001);
+        dragTo(450);
+        const auto ratio = page->property("timelineHeightRatio").toReal();
+        QVERIFY(ratio > 0.25 && ratio < 0.7);
+        view.resize(1100, 1000);
+        QTRY_VERIFY(qAbs(panel->height()/page->property("splitHeight").toReal() - ratio) < 0.001);
+        for (auto* focusTarget : {canvas, panel}) {
+            focusTarget->forceActiveFocus();
+            QTRY_VERIFY(focusTarget->hasActiveFocus());
+            QTest::keyClick(&view, Qt::Key_Tab);
+            QTRY_VERIFY(!page->property("timelineExpanded").toBool());
+            QVERIFY(!splitter->isVisible());
+            QCOMPARE(panel->height(), panel->property("transportHeight").toReal());
+            QTest::keyClick(&view, Qt::Key_Tab);
+            QTRY_VERIFY(page->property("timelineExpanded").toBool());
+            QVERIFY(splitter->isVisible());
+            QTRY_VERIFY(qAbs(panel->height()/page->property("splitHeight").toReal() - ratio) < 0.001);
+        }
+        // Text editing retains Tab; it must not collapse the timeline.
+        QQmlComponent component(view.engine());
+        component.setData("import QtQuick; TextInput { width: 100; height: 30 }", QUrl());
+        std::unique_ptr<QObject> input(component.create());
+        auto* text = qobject_cast<QQuickItem*>(input.get()); QVERIFY(text);
+        text->setParentItem(page); text->forceActiveFocus();
+        QTRY_VERIFY(text->hasActiveFocus());
+        QTest::keyClick(&view, Qt::Key_Tab);
+        QVERIFY(page->property("timelineExpanded").toBool());
+        auto* timeline = qobject_cast<TimelineController*>(session.timeline()); QVERIFY(timeline);
+        timeline->togglePlayback();
+        QTRY_VERIFY(timeline->playing());
+        canvas->forceActiveFocus();
+        QTest::keyClick(&view, Qt::Key_Tab);
+        QTRY_VERIFY(!page->property("timelineExpanded").toBool());
+        QVERIFY(timeline->playing());
+        QTest::keyClick(&view, Qt::Key_Tab);
+        QTRY_VERIFY(page->property("timelineExpanded").toBool());
+        timeline->togglePlayback();
     }
 
     void rulerDragScrubsAndBothWheelAxesScroll()
@@ -2780,6 +2870,59 @@ private slots:
         QVERIFY(media->uppercase());
         QCOMPARE(writes.count(), 0);
         QCOMPARE(document->serializeProjectState(), saved);
+    }
+
+    void localPlaybackReturnsToManualCue_data()
+    {
+        QTest::addColumn<bool>("finishNaturally");
+        QTest::newRow("pause") << false;
+        QTest::newRow("natural-end") << true;
+    }
+
+    void localPlaybackReturnsToManualCue()
+    {
+        QFETCH(bool, finishNaturally);
+        TimelineFixture f; QVERIFY(f.initialize());
+        auto* doc = f.host->document();
+        auto* media = doc->addText({}, "Cue"); QVERIFY(media);
+        auto settings = doc->timelineSettings();
+        settings.stopSlot = settings.nearestSlot(1000);
+        QVERIFY(doc->setTimelineSettings(settings));
+        f.timeline.seek(200);
+        const auto saved = doc->serializeProjectState();
+        auto* marker = f.item("timelinePlaybackStartMarker"); QVERIFY(marker);
+        QVERIFY(!marker->isVisible());
+        for (int run = 0; run < 2; ++run) {
+            f.timeline.togglePlayback();
+            QTRY_VERIFY(f.timeline.playing());
+            QVERIFY(marker->isVisible());
+            QCOMPARE(f.timeline.playbackStartMs(), 200.0);
+            const auto markerX = marker->x();
+            QTRY_VERIFY(f.timeline.positionMs() > 300);
+            QCOMPARE(marker->x(), markerX);
+            if (!finishNaturally) f.timeline.togglePlayback();
+            QTRY_VERIFY(!f.timeline.playing());
+            QCOMPARE(f.timeline.positionMs(), 200.0);
+            QCOMPARE(doc->timelinePositionMs(), 200.0);
+            QVERIFY(!marker->isVisible());
+            QVERIFY(!doc->editsLocked());
+            QCOMPARE(doc->serializeProjectState(), saved);
+        }
+        // Manual repositioning during a run establishes the next return cue.
+        f.timeline.togglePlayback();
+        f.timeline.beginScrub();
+        f.timeline.seek(500);
+        QCOMPARE(f.timeline.playbackStartMs(), 500.0);
+        f.timeline.endScrub();
+        QTRY_VERIFY(f.timeline.positionMs() > 600);
+        f.timeline.togglePlayback();
+        QCOMPARE(f.timeline.positionMs(), 500.0);
+        // Play at the end wraps to zero and uses that actual start as the cue.
+        f.timeline.goToEnd();
+        f.timeline.togglePlayback();
+        QCOMPARE(f.timeline.playbackStartMs(), 0.0);
+        f.timeline.togglePlayback();
+        QCOMPARE(f.timeline.positionMs(), 0.0);
     }
 
     void playbackKeepsSelectionOnStandby_data()

@@ -79,6 +79,7 @@ public:
     void timelineBeginScrub();
     void timelineEndScrub(bool resume = true);
     qreal timelinePositionMs() const;
+    qreal timelinePlaybackStartMs() const { return m_timelinePlaybackStartMs; }
     bool timelinePlaying() const { return m_timelinePlaying; }
 
 signals:
@@ -179,6 +180,7 @@ private:
     QTimer m_timelineTimer;
     QElapsedTimer m_timelineClock;
     qreal m_timelineAnchorPositionMs = 0;
+    qreal m_timelinePlaybackStartMs = 0; // Manual cue, independent of the running clock.
     qint64 m_remoteStartServerMs = -1;
     bool m_timelinePlaying = false;
     bool m_timelineScrubbing = false;

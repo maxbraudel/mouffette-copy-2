@@ -164,6 +164,8 @@ SceneTimeline::SceneSettings TimelineController::grid() const
 qint64 TimelineController::positionSlot() const
 { return grid().slotAt(m_document ? m_document->timelinePositionMs() : 0); }
 int TimelineController::slotsPerSecond() const { return grid().slotsPerSecond; }
+qreal TimelineController::playbackStartMs() const
+{ return m_host ? m_host->timelinePlaybackStartMs() : 0; }
 qreal TimelineController::positionMs() const { return grid().timeMs(positionSlot()); }
 qreal TimelineController::maxDurationMs() const { return grid().timeMs(grid().maxSlot()); }
 qreal TimelineController::stopTimeMs() const
@@ -284,6 +286,9 @@ bool TimelineController::canPaste() const
         && value.value("mediaId").toString() == primaryMediaId();
 }
 
+int TimelineController::canvasMinHeightPercent() const { return AppConfig::instance().canvasMinHeightPercent(); }
+int TimelineController::timelineMinHeightPercent() const { return AppConfig::instance().timelineMinHeightPercent(); }
+int TimelineController::timelineSplitterHitHeightPx() const { return AppConfig::instance().timelineSplitterHitHeightPx(); }
 int TimelineController::timelineHeightPx() const { return AppConfig::instance().timelineHeightPx(); }
 int TimelineController::rulerHeightPx() const { return AppConfig::instance().timelineRulerHeightPx(); }
 int TimelineController::clipTrackHeightPx() const { return AppConfig::instance().timelineClipTrackHeightPx(); }

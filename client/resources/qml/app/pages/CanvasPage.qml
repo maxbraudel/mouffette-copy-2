@@ -11,6 +11,20 @@ AppPanel {
     readonly property var session: controller.activeWorkspace
     readonly property real overlaySpacing: 10
     property bool timelineExpanded: true
+    property real timelineHeightRatio: 0.5
+    readonly property var timeline: session ? session.timeline : null
+    readonly property real minimumTimelineRatio: timeline ? timeline.timelineMinHeightPercent / 100 : 0.2
+    readonly property real maximumTimelineRatio: 1 - (timeline ? timeline.canvasMinHeightPercent / 100 : 0.2)
+    readonly property real splitHeight: Math.max(0, height - border.width * 2 - canvasTimelineSeparator.height)
+    readonly property bool shortcutsAvailable: visible && !!session && session.hasProject && (function() {
+        var item = root.Window.window ? root.Window.window.activeFocusItem : null
+        while (item) {
+            if (item instanceof TextInput || item instanceof TextEdit) return false
+            if (item === root) return true
+            item = item.parent
+        }
+        return false
+    })()
     color: Theme.canvasBackground
 
     Loader {
@@ -106,13 +120,41 @@ AppPanel {
         color: Theme.border
     }
 
+    MouseArea {
+        id: timelineSplitter
+        objectName: "canvasTimelineSplitter"
+        anchors.left: canvasTimelineSeparator.left
+        anchors.right: canvasTimelineSeparator.right
+        anchors.verticalCenter: canvasTimelineSeparator.verticalCenter
+        height: root.timeline ? root.timeline.timelineSplitterHitHeightPx : 12
+        z: 100002
+        enabled: timelinePanel.visible && root.timelineExpanded
+        visible: enabled
+        hoverEnabled: true
+        cursorShape: Qt.SizeVerCursor
+        preventStealing: true
+        property real pressY: 0
+        property real initialTimelineHeight: 0
+        onPressed: mouse => {
+            pressY = mapToItem(root, mouse.x, mouse.y).y
+            initialTimelineHeight = timelinePanel.height
+        }
+        onPositionChanged: mouse => {
+            if (!pressed || root.splitHeight <= 0) return
+            var delta = mapToItem(root, mouse.x, mouse.y).y - pressY
+            root.timelineHeightRatio = Math.max(root.minimumTimelineRatio,
+                Math.min(root.maximumTimelineRatio, (initialTimelineHeight - delta) / root.splitHeight))
+        }
+    }
+
     TimelinePanel {
         id: timelinePanel
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.bottom: parent.bottom
         anchors.margins: root.border.width
-        height: visible ? (expanded ? Math.max(0, (root.height - root.border.width * 2 - canvasTimelineSeparator.height) / 2)
+        height: visible ? (expanded ? root.splitHeight * Math.max(root.minimumTimelineRatio,
+                                       Math.min(root.maximumTimelineRatio, root.timelineHeightRatio))
                                    : transportHeight) : 0
         expanded: root.timelineExpanded
         bottomCornerRadius: Math.max(0, root.radius - root.border.width)
@@ -121,19 +163,18 @@ AppPanel {
     }
 
     Shortcut {
+        sequence: "Tab"
+        context: Qt.WindowShortcut
+        autoRepeat: false
+        enabled: root.shortcutsAvailable && !timelineSplitter.pressed
+        onActivated: root.timelineExpanded = !root.timelineExpanded
+    }
+
+    Shortcut {
         sequence: "Space"
         context: Qt.WindowShortcut
         autoRepeat: false
-        enabled: !!root.session && !!root.session.timeline && !root.session.timeline.remoteActive
-            && root.visible && (function() {
-                var item = root.Window.window ? root.Window.window.activeFocusItem : null
-                while (item) {
-                    if (item instanceof TextInput || item instanceof TextEdit) return false
-                    if (item === root) return true
-                    item = item.parent
-                }
-                return false
-            })()
+        enabled: root.shortcutsAvailable && !!root.timeline && !root.timeline.remoteActive
         onActivated: root.session.timeline.togglePlayback()
     }
 }
