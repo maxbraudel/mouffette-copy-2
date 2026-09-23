@@ -167,7 +167,6 @@ add_library(MouffetteResidentMedia STATIC
     src/backend/audiosharing/AudioEngine.cpp
     src/backend/audiosharing/AudioEngine.h
     src/backend/audiosharing/AudioCaptureResampler.cpp
-    src/backend/audiosharing/SceneAudioTap.cpp
     src/backend/audiosharing/AudioStreamCodec.cpp
     src/backend/audiosharing/AudioStreamCodec.h
     src/backend/media/MediaBackendBootstrap.h
@@ -845,8 +844,7 @@ if(BUILD_TESTING)
         # Compile the native implementation inside this test to exercise its
         # asynchronous lifecycle with a fake stream, without desktop access.
         add_executable(tst_MacScreenCaptureLifecycle
-            tests/qt/tst_MacScreenCaptureLifecycle.mm
-            src/backend/platform/WindowCaptureExclusion.cpp)
+            tests/qt/tst_MacScreenCaptureLifecycle.mm)
         set_source_files_properties(tests/qt/tst_MacScreenCaptureLifecycle.mm
             PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
         target_include_directories(tst_MacScreenCaptureLifecycle PRIVATE src)

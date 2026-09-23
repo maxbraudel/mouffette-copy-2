@@ -5,6 +5,20 @@ is a separate action and always starts at zero. Keys, clip positions and lengths
 The project cadence defaults to 30 slots/s; boundary `n` is exactly `n / cadence` seconds. The renderer advances from a monotonic
 clock independently of video position notifications.
 
+Remote desktop and system-audio capture exclude the entire publishing Mouffette
+instance, including the scene output. During a remote run, the authoring Canvas
+keeps rendering its evaluated scene above the remote screen frames and plays its
+scene audio locally. Showing or hiding remote screens, starting or stopping remote
+system audio, and failures of either capture do not change scene visibility,
+media mute/volume or its playback clock. Per-media visibility and audio settings
+still apply. The desktop stream is a background for this local reconstruction;
+it is not an exact recording of the target's scene presentation.
+
+Update both the viewer and publisher together for this capture contract. Older
+publishers include scene media in their streams; older viewers suppress the
+local scene during capture. Mixing these behaviors can duplicate or omit scene
+media. The transport format and saved projects are unchanged.
+
 ## State and evaluation
 
 `SceneTimeline` defines element states, keyframes, shared presence clips and scene

@@ -51,58 +51,49 @@ Audio consent, subscription, transport and capture failures do not revoke screen
 sharing, and screen failures do not revoke audio. The paths retain their shared
 bandwidth accounting and bounded A/V timing observations when both are active.
 
-## Control interface and received scenes
+## Application exclusion and scene playback
 
-Native screen capture excludes the Mouffette control interface and dialogs, but
-keeps explicitly registered received-scene windows. macOS uses an application
-exclusion with scene-window exceptions; Windows applies WDA_EXCLUDEFROMCAPTURE
-before showing control windows. Native filter failures stop the affected capture.
-Windows display affinity also affects other tools using native capture APIs.
+Screen and system audio capture exclude the entire Mouffette application,
+including its control interface, dialogs, received-scene windows and every audio
+output. macOS excludes the application from ScreenCaptureKit video and enables
+`excludesCurrentProcessAudio` for system sound. Windows applies
+`WDA_EXCLUDEFROMCAPTURE` to all Mouffette windows before showing them and uses
+WASAPI process-tree audio exclusion. Native filter failures stop the affected
+capture. Windows display affinity also affects other native capture tools.
 
-Audio runs entirely in the Mouffette process. Native capture excludes all audio
-from this application (ScreenCaptureKit app exclusion on macOS, WASAPI process-tree
-exclusion on Windows). `AudioEngine` adds only the rendered `ReceivedScene` output
-to the publication. `ControlPreview` is the default role; the received-scene
-controller explicitly opts its media into the scene bus. Canvas previews and
-incoming remote monitoring remain audible locally but never enter that bus.
-There is no helper executable, local socket, shared-memory registration or second
-macOS recording authorization. Only Mouffette needs the native capture permission.
+The remote canvas combines the captured desktop with its own scene media above
+it. Showing remote screen content does not hide these media, and listening to
+remote system sound does not mute their playback. A received scene can therefore
+play on the destination computer while its image and sound are rendered locally
+in the controller's canvas, without entering the remote capture a second time.
+The listening button controls only the other applications' remote audio.
 
-The scene tap copies samples after media volume/mute has been applied, before
-any physical mono averaging. Internal playback retains at least two channels;
-existing native surround output keeps its full layout and the tap separately
-downmixes it to stereo off the device callback. A publisher's mono speaker
-therefore cannot collapse the shared scene to mono.
-Pause, seeks and device replacement follow actual playback. Each output mixer
-has a bounded, lock-free single-producer queue; its callback never allocates,
-encodes or waits for the network. Conversion from its sample rate to 48 kHz and
-capture-clock correction happen on the application thread.
+Audio capture and playback run entirely in the Mouffette process. `AudioEngine`
+publishes only the native system capture. Local playback has no capture role,
+scene tap or reinjection bus; received scenes, canvas previews and incoming remote
+monitoring all stay excluded. There is no helper executable, local socket or
+second macOS recording authorization. Only Mouffette needs capture permission.
+Local playback retains supported surround layouts and uses stereo until final
+mono output routing, independently of the shared stream's stereo format.
 
-Native samples and each scene tap retain timestamps in `MediaCaptureClock`'s
-epoch. Their separate `AudioCaptureResampler` instances preserve contiguous PCM,
-filter small timestamp jitter, and correct sustained clock drift with FFmpeg's
-soft resampling compensation, bounded to 1000 ppm. Each first sample is anchored
-once on the common 48 kHz grid; later callback timestamps cannot create sample
-holes or overlaps. Duplicate buffers are rejected, partial overlaps are trimmed,
-and real gaps or restarts begin a marked segment.
+Native samples retain timestamps in `MediaCaptureClock`'s epoch.
+`AudioCaptureResampler` preserves contiguous PCM, filters small timestamp jitter,
+and corrects sustained clock drift with FFmpeg's soft resampling compensation,
+bounded to 1000 ppm. The first sample is anchored once on the common 48 kHz grid;
+later callback timestamps cannot create sample holes or overlaps. Duplicate
+buffers are rejected, partial overlaps are trimmed, and real gaps or restarts
+begin a marked segment.
 
-A 60 ms collection window combines these sources before encoding 20 ms Opus
-packets. Raw native callbacks enter the mixer without waiting for another packet
-boundary. The wire timestamp still names the original samples, including Opus
-lookahead compensation. Missing input and segment transitions use a 5 ms fade;
-stateful soft clipping handles the combined level without hard sample clipping.
-Silence from either input does not block the other, so a scene is shared even
-when native capture emits no samples. Native capture must report success before
-either input can be published. Failure or revoked
-consent stops both, with no unfiltered fallback. Stopping/restarting capture clears
-the mix and changes the tap generation so queued samples cannot leak across
-publications. A stalled consumer drops obsolete history and resumes live.
-
-Qt's public output callback does not expose an exact hardware DAC timestamp.
-The scene tap uses the existing continuous playback clock; native device latency
-and acoustic A/V offset still require physical-device qualification. As with
-native system capture, OS output-device volume/mute is not applied a second time;
-media-level volume and mute are preserved.
+`AudioCaptureBuffer` preserves the 60 ms collection deadline before encoding
+20 ms Opus packets. Raw native callbacks enter this single-source buffer without
+waiting for another packet boundary. Wire timestamps still name the original
+samples, including Opus lookahead compensation. Missing input and segment
+transitions use a 5 ms fade; stateful soft clipping handles levels above unity.
+A silent native capture publishes silence even when Mouffette is playing a scene.
+Native capture must report success before publication begins. Failure or revoked
+consent stops publication without an unfiltered fallback. Stopping or restarting
+capture clears queued native samples, and a stalled consumer drops obsolete
+history and resumes live.
 
 macOS uses ScreenCaptureKit system audio (macOS 13+ API, subject to the application's
 actual Qt/deployment minimum). Its minimal reference video output is discarded,
@@ -211,7 +202,7 @@ does not normalize media or undo individual applications' own mix levels.
 
 ## Validation
 
-Automated checks cover codec/framing, timing bounds, scene tap generations,
+Automated checks cover codec/framing, timing bounds, application audio exclusion,
 native-window policy/lifecycle, relay authorization and congestion, independent
 sharing/listening preferences and their migration, and existing media/scene/video
 behavior. Relay regressions cover audio without screen consent or displays,
@@ -219,13 +210,14 @@ independent consent revocation, capture-error isolation and recovery, and listen
 capacity status. Tests use synthetic audio
 and do not implicitly request screen-recording permission.
 
-`AudioEngine` checks timestamp-aligned system/scene mixing, scene-only output,
-bounded queues and backlog recovery, capture permission/failure/restart, device
-format conversion, and the real resident-decoder/output path. Distinct synthetic
-frequencies verify that scene sound is included exactly once while canvas and
-remote-monitoring sounds are absent. Live media volume, mute, pause, replay and
-monitoring toggles are checked independently. Headless tests retain the mixer and
-capture lifecycle coverage; tests needing an output device skip explicitly.
+`AudioEngine` checks native audio buffering, silence, bounded queues and backlog
+recovery, capture permission/failure/restart, stereo publication at both bitrates,
+and the real resident-decoder/output path. Distinct synthetic frequencies verify
+that received scenes, canvas previews and remote monitoring are absent while
+native system audio remains present. Live media volume, mute, pause, replay and
+monitoring toggles cannot affect publication. Headless tests retain buffer,
+stereo and capture lifecycle coverage; tests needing an output device skip
+explicitly.
 
 `AudioCaptureStability` exercises variable native block sizes, timestamp jitter,
 positive and negative 200 ppm clock drift, absolute sample-grid alignment,
@@ -237,10 +229,11 @@ native device tests; they do not establish Windows runtime behavior.
 `WindowsAudioActivation` exercises late completion after cancellation, agile
 marshaling, HRESULT propagation and a malformed successful activation without
 opening an audio device. Native capture is an explicit opt-in in
-`AudioEngine::sceneRoutingAndLiveVolume:native-capture-opt-in` (`MOUFFETTE_TEST_SYSTEM_AUDIO_CAPTURE=1`).
+`AudioEngine::applicationPlaybackIsExcluded:native-capture-opt-in` (`MOUFFETTE_TEST_SYSTEM_AUDIO_CAPTURE=1`).
 
 Native release qualification must additionally exercise two physical computers:
-an animated desktop behind control windows, received scenes, three monitors,
+an animated desktop behind control windows and received scenes (both excluded),
+three monitors,
 mutual listening without echo, system volume/mute and balance, device hotplug,
 permission denial, sleep/reconnect, concurrent upload and weak-link recovery.
 Changing the publisher's output-device volume or mute must not change the shared
@@ -259,17 +252,20 @@ the Opus dynamic library is present and includes its redistribution notice.
 The audio engine is linked into Mouffette; packaging contains no audio helper.
 
 Native API references: [Windows capture exclusion](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setwindowdisplayaffinity),
+[Windows process-tree audio exclusion](https://learn.microsoft.com/en-us/windows/win32/api/audioclientactivationparams/ne-audioclientactivationparams-process_loopback_mode),
 [OBS process audio compatibility](https://obsproject.com/kb/application-audio-capture-guide),
 [ScreenCaptureKit process audio exclusion](https://developer.apple.com/documentation/screencapturekit/scstreamconfiguration/excludescurrentprocessaudio).
 
 ### Native routing regression probe
 
 With native recording permission granted, run
-`tst_AudioEngine sceneRoutingAndLiveVolume:native-capture-opt-in` with
+`tst_AudioEngine applicationPlaybackIsExcluded:native-capture-opt-in` with
 `MOUFFETTE_TEST_SYSTEM_AUDIO_CAPTURE=1` (and `QT_QPA_PLATFORM=cocoa` on macOS).
+On macOS, the probe skips unless recording access is already granted; it never
+requests permission.
 This briefly plays quiet tones through actual received-scene, canvas and monitoring
-outputs in the same process. It checks the outgoing Opus stream for the scene
-frequency and the absence of preview/monitoring frequencies, then checks live mute,
-volume and pause/resume. It logs amplitudes, never records system audio to disk.
+outputs in the same process. It checks that all three frequencies are absent
+from the outgoing Opus stream, including after changes to volume, mute, playback
+and monitoring. It logs amplitudes, never records system audio to disk.
 A second application playing sound is still required for native end-to-end
 qualification of the other-application capture path.

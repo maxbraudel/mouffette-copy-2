@@ -1261,36 +1261,6 @@ void QuickCanvasHost::applyLocalVideo(CanvasMedia* media, qreal time, bool force
         failLocalMedia(media, QStringLiteral("The video did not prepare its current playback position in time"));
 }
 
-void QuickCanvasHost::setRemoteFeedbackEnabled(bool screen, bool audio)
-{
-    if (m_remoteScreenFeedbackEnabled == screen && m_remoteAudioFeedbackEnabled == audio) return;
-    m_remoteScreenFeedbackEnabled = screen;
-    m_remoteAudioFeedbackEnabled = audio;
-    refreshRemoteFeedback();
-}
-
-bool QuickCanvasHost::remoteFeedbackAudioSuppressed() const
-{
-    return m_sceneContext && m_timelineRemote && m_timelinePlaying && m_remoteAudioFeedbackEnabled;
-}
-
-void QuickCanvasHost::refreshRemoteFeedback()
-{
-    m_controller->setRemoteFeedbackMediaHidden(
-        m_sceneContext && m_timelineRemote && m_timelinePlaying && m_remoteScreenFeedbackEnabled);
-    // Re-evaluate only the output gain, without seeking or restarting playback.
-    for (auto* media : m_document->media()) {
-        auto* player = media->player();
-        if (!player || !player->audioOutput()) continue;
-        const auto sample = SceneTimeline::evaluateVideo(
-            m_document->timelinePresentationTrack(media), timelinePositionMs(),
-            player->duration(), m_document->timelineSettings());
-        player->audioOutput()->setMuted(remoteFeedbackAudioSuppressed()
-            || !m_timelinePlaying || !sample.clipActive || !sample.playing || media->muted()
-            || media->localPlaybackHidden());
-    }
-}
-
 void QuickCanvasHost::applyTimeline(qreal positionMs, bool playing, bool forceSeek)
 {
     m_document->setTimelinePosition(positionMs);
@@ -1372,7 +1342,7 @@ void QuickCanvasHost::applyTimeline(qreal positionMs, bool playing, bool forceSe
             player->play();
         if (auto* audio = player->audioOutput()) {
             audio->setVolume(media->volume());
-            audio->setMuted(!shouldPlay || media->muted() || remoteFeedbackAudioSuppressed());
+            audio->setMuted(!shouldPlay || media->muted());
         }
     }
     emit timelineTransportChanged();
@@ -1386,7 +1356,6 @@ void QuickCanvasHost::advanceTimeline()
     applyTimeline(time, time < stop);
     if (time < stop) return;
     m_timelinePlaying = false;
-    refreshRemoteFeedback();
     m_timelineTimer.stop();
     if (m_timelineRemote && m_webSocket && !m_sceneRunId.isEmpty()) {
         m_sceneStopping = true;
@@ -1432,7 +1401,6 @@ void QuickCanvasHost::startTimelineClock()
     }
     m_timelineClock.start();
     m_timelinePlaying = true;
-    refreshRemoteFeedback();
     const qreal now = timelineNowMs();
     applyTimeline(std::min(now, timelineStopMs()), now < timelineStopMs(), true);
     m_timelineTimer.start();
@@ -1465,7 +1433,6 @@ void QuickCanvasHost::stopScenePresentation()
     }
     applyTimeline(stoppedAt, false, true);
     m_timelineRemote = false;
-    refreshRemoteFeedback();
     m_remoteStartServerMs = -1;
     m_timelineClipIds.clear();
     m_timelineVideoPlaying.clear();

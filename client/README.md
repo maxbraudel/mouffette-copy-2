@@ -155,20 +155,24 @@ The canvas shows the target's live mouse position through the active session.
 See [remote cursor](docs/remote-cursor.md) for coordinate mapping, freshness,
 regression coverage and the required client/server update.
 
-Clients can opt in independently through **Share my screen** and **Share my system
-audio** in Settings. Their desktop then
+macOS and Windows clients can opt in independently through **Share my screen**
+and **Share my system audio** in Settings. Linux clients can receive these
+streams but cannot publish them with application exclusion. The shared desktop then
 appears inside the remote canvas's monitor rectangles, using bounded H.264
 streams and the Qt Quick video renderer. Sharing is off by default. See
 [screen sharing](docs/screen-sharing.md) for platform permissions, architecture,
-transport limits and validation. The control interface and its audio stay local;
-received scenes remain visible and audible. The top-bar **Play system audio / Stop
+transport limits and validation. Capture excludes the entire publishing Mouffette
+instance, including its control windows, received scenes and all of its audio.
+The viewer's Canvas renders scene media over the captured desktop and plays scene
+audio locally, independently of the screen and system-audio controls. The top-bar **Play system audio / Stop
 system audio** button sits beside **Show screen content / Hide screen content**
 and replaces the canvas mute button. Separate screen and audio indicators and
 warnings distinguish local disabling, remote consent denial and failures. Either
 medium can run while the other is disabled or failing; A/V synchronization remains
 active when both are available. Existing combined consent and listening preferences
 are preserved when migrating to the separate settings. See
-[system audio sharing](docs/system-audio-sharing.md).
+[system audio sharing](docs/system-audio-sharing.md) and the
+[capture exclusion validation](docs/capture-exclusion-validation.md).
 
 The primary selected media shows a transparency checkerboard in the authoring
 canvas, including when hidden, fully transparent or outside its timeline clip.

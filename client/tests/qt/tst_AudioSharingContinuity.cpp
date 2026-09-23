@@ -1,5 +1,5 @@
 #include "backend/audiosharing/AudioCaptureResampler.h"
-#include "backend/audiosharing/AudioCaptureMix.h"
+#include "backend/audiosharing/AudioCaptureBuffer.h"
 #include "backend/audiosharing/AudioStreamCodec.h"
 #include "backend/audiosharing/AudioPlaybackBuffer.h"
 #include <QtTest>
@@ -8,7 +8,7 @@
 #include <deque>
 #include <vector>
 
-// Exercise the actual capture clock, mixing, Opus and output resampling together.
+// Exercise the actual capture clock, buffering, Opus and output resampling together.
 // Independent native/codec/output tests cannot detect clicks introduced at their
 // boundaries. No sound device or wall-clock scheduling is needed for this test.
 class AudioSharingContinuityTest : public QObject {
@@ -29,7 +29,7 @@ private slots:
         constexpr double tau = 6.283185307179586;
         constexpr std::array<int, 2> frequencies{400, 1000};
         AudioCaptureResampler capture;
-        AudioCaptureMix mix; mix.reset(epoch);
+        AudioCaptureBuffer buffer; buffer.reset(epoch);
         AudioStreamEncoder encoder; AudioStreamDecoder decoder; QString error;
         QVERIFY2(encoder.initialize(bitrate, error), qPrintable(error));
         AudioPlaybackBuffer queue; AudioPlaybackRenderer renderer(rate);
@@ -44,7 +44,7 @@ private slots:
         for (int tick = 0; tick < 600; ++tick) {
             const qint64 now = epoch + tick * 10000;
             // Complete 10 ms native blocks become available at their end. The
-            // timestamp wobble must never become zero holes in the mixed PCM.
+            // timestamp wobble must never become zero holes in the buffered PCM.
             if (tick && !(loss && tick >= 200 && tick < 210)) {
                 QByteArray pcm(480 * 2 * sizeof(float), Qt::Uninitialized);
                 auto* input = reinterpret_cast<float*>(pcm.data());
@@ -54,10 +54,10 @@ private slots:
                             * ((tick - 1) * 480 + frame) / 48000));
                 auto block = capture.append(pcm, now - 10000 + (tick % 3 - 1) * 500);
                 QVERIFY2(capture.errorString().isEmpty(), qPrintable(capture.errorString()));
-                if (block) mix.appendSystem(reinterpret_cast<const float*>(block->pcm.constData()),
+                if (block) buffer.append(reinterpret_cast<const float*>(block->pcm.constData()),
                     block->pcm.size() / (2 * sizeof(float)), block->timestampUs, block->discontinuity);
             }
-            while (auto packet = mix.take(now)) {
+            while (auto packet = buffer.take(now)) {
                 const auto compressed = encoder.encode(reinterpret_cast<const float*>(packet->pcm.constData()), error);
                 QVERIFY2(!compressed.isEmpty(), qPrintable(error));
                 ++sequence;

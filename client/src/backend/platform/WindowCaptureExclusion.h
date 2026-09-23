@@ -1,24 +1,18 @@
 #pragma once
 
-#include <QAbstractNativeEventFilter>
-#include <QList>
 #include <QObject>
-#include <QPointer>
 #include <QString>
 
 class QWindow;
 
-// Control windows stay local; only explicitly registered scene surfaces may
-// appear in a desktop capture. The native capture applies this policy before
-// encoding, so excluding the shell does not add a per-frame pixel operation.
-class WindowCaptureExclusion final : public QObject, public QAbstractNativeEventFilter
+// Every window owned by this process stays out of desktop capture, including
+// received scenes. Native Windows affinity applies before a surface is shown;
+// macOS uses ScreenCaptureKit's application exclusion directly.
+class WindowCaptureExclusion final : public QObject
 {
     Q_OBJECT
 public:
     static WindowCaptureExclusion& instance();
-    void setSceneWindow(QWindow* window, bool scene);
-    QList<QWindow*> sceneWindows() const;
-
     // Windows capture must call this before starting, and stop on an unsafe
     // transition. A failed affinity is never silently treated as protection.
     bool prepareForCapture(QString* error = nullptr);
@@ -26,12 +20,10 @@ public:
     QString captureError() const { return m_captureError; }
 
 signals:
-    void sceneWindowsChanged();
     void captureSafetyChanged(bool allowed, const QString& reason);
 
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override;
-    bool nativeEventFilter(const QByteArray& type, void* message, qintptr* result) override;
 
 private:
     explicit WindowCaptureExclusion(QObject* parent);
@@ -39,9 +31,10 @@ private:
     void failCapture(const QString& reason);
     void applyWindow(QWindow* window);
 #ifdef Q_OS_WIN
+    bool installNativeWindowHook();
     bool applyNativeWindow(quintptr handle);
+    void* m_nativeWindowHook = nullptr;
 #endif
-    QList<QPointer<QWindow>> m_sceneWindows;
     QString m_captureError;
     bool m_applying = false;
 };

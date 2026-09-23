@@ -1,11 +1,9 @@
 #include "backend/media/PlaybackAudio.h"
 #include "backend/media/IndexedMediaDecoder.h"
-#include "backend/audiosharing/SceneAudioTap.h"
 #include "backend/audiosharing/AudioOutputRouting.h"
 #include <opus.h>
 #include "backend/audiosharing/MediaCaptureClock.h"
 #include <QAudioDevice>
-#include <QCoreApplication>
 #include <QAudioOutput>
 #include <QAudioSink>
 #include <QFutureWatcher>
@@ -25,6 +23,7 @@ std::atomic<quint64> decodeRequests{0};
 static_assert(std::atomic<qint64>::is_always_lock_free && std::atomic<float>::is_always_lock_free
               && std::atomic<void*>::is_always_lock_free, "Audio callback requires lock-free atomics");
 constexpr int BlockCount = 4, MaximumVoices = 256;
+constexpr int MixBlockFrames = 1024, MaximumChannels = 8;
 struct Block {
     // 0 empty, 1 producer owns it, 2 immutable and published to the callback.
     std::atomic<int> state{0};
@@ -40,9 +39,8 @@ struct Voice {
     std::atomic<bool> presented{false};
     std::atomic<float> gain{1};
     std::atomic<qint64> clockOffsetUs{0};
-    const bool receivedScene;
-    Voice(int sampleRate, int channelCount, bool scene)
-        : rate(sampleRate), channels(channelCount), blockFrames(sampleRate / 20), receivedScene(scene) {
+    Voice(int sampleRate, int channelCount)
+        : rate(sampleRate), channels(channelCount), blockFrames(sampleRate / 20) {
         for (auto& block : blocks) block.samples.resize(size_t(blockFrames) * channels);
         pcmBytes.fetch_add(quint64(BlockCount) * blockFrames * channels * sizeof(float));
     }
@@ -61,24 +59,22 @@ public:
     QAudioFormat format;
     AudioStereoOutputMapping routing;
     int mixChannels = 2;
-    std::array<float, SceneAudioTap::MaximumChannels> softClip{};
+    std::array<float, MaximumChannels> softClip{};
     std::unique_ptr<QAudioSink> sink;
     std::array<std::atomic<Voice*>, MaximumVoices> voices{};
     std::atomic<int> readers{0};
     std::vector<std::shared_ptr<Voice>> retired;
     QTimer retirement;
-    std::shared_ptr<SceneAudioTap> sceneTap = SceneAudioBus::instance().createTap();
     qint64 clockAnchorUs = 0;
     quint64 presentedFrames = 0;
     explicit Mixer(const QAudioDevice& device) {
         auto native = device.preferredFormat();
         native.setSampleFormat(QAudioFormat::Float);
-        // Local scene playback keeps a supported surround device's full layout.
-        // Only the capture tap downmixes that bus to the stereo wire format.
-        if (native.channelCount() > 2 && native.channelCount() <= SceneAudioTap::MaximumChannels
+        // Local playback keeps a supported surround device's full layout.
+        if (native.channelCount() > 2 && native.channelCount() <= MaximumChannels
             && device.isFormatSupported(native)) format = native;
         else format = chooseStereoOutputFormat(device);
-        if (!format.isValid() || format.channelCount() > SceneAudioTap::MaximumChannels
+        if (!format.isValid() || format.channelCount() > MaximumChannels
             || format.sampleRate() < 8000) return;
         mixChannels = std::max(2, format.channelCount());
         if (format.channelCount() <= 2) {
@@ -103,12 +99,11 @@ public:
             // without following callback jitter or moving the scene/video clock.
             if (std::abs(wall - clock) > 2000) clockAnchorUs += wall > clock ? 1 : -1;
             presentedFrames += frames;
-            for (int offset = 0; offset < frames; offset += SceneAudioTap::BlockFrames) {
-                const int chunkFrames = std::min(SceneAudioTap::BlockFrames, frames - offset);
+            for (int offset = 0; offset < frames; offset += MixBlockFrames) {
+                const int chunkFrames = std::min(MixBlockFrames, frames - offset);
                 const qint64 chunkClock = clock + qint64(offset) * 1000000 / rate;
                 auto chunk = output.subspan(offset * channels, chunkFrames * channels);
-                std::array<float, SceneAudioTap::BlockFrames * SceneAudioTap::MaximumChannels> scene{}, mixed{};
-                bool hasScene = false;
+                std::array<float, MixBlockFrames * MaximumChannels> mixed{};
                 for (auto& slot : voices) {
                     Voice* voice = slot.load();
                     if (!voice) continue;
@@ -129,19 +124,11 @@ public:
                             for (int channel = 0; channel < mixChannels; ++channel) {
                                 const auto value = block.samples[size_t(source+channel)] * gain;
                                 mixed[size_t(destination+channel)] += value;
-                                if (voice->receivedScene) {
-                                    scene[size_t(destination+channel)] += value;
-                                    hasScene = true;
-                                }
                             }
                         }
                         if (start + voice->blockFrames <= chunkFrames) block.state.store(0, std::memory_order_release);
                     }
                 }
-                // The bus always retains at least stereo until after tapping.
-                // Native surround channels stay intact locally; the tap performs
-                // its own stereo conversion off the device callback.
-                if (hasScene) sceneTap->push(scene.data(), chunkFrames, mixChannels, rate, chunkClock);
                 for (int sample = 0; sample < chunkFrames * mixChannels; ++sample)
                     if (!std::isfinite(mixed[size_t(sample)])) mixed[size_t(sample)] = 0;
                 opus_pcm_soft_clip(mixed.data(), chunkFrames, mixChannels, softClip.data());
@@ -181,7 +168,6 @@ struct PlaybackAudio::Impl {
     bool busy = false;
     bool requestedValid = false;
     bool seeking = false;
-    PlaybackAudio::Role role = PlaybackAudio::Role::ControlPreview;
     QTimer timer;
     void detach() {
         if (voice) voice->playing.store(false, std::memory_order_release);
@@ -195,10 +181,6 @@ PlaybackAudio::PlaybackAudio(QObject* parent) : QObject(parent), d(std::make_uni
     connect(&d->timer, &QTimer::timeout, this, &PlaybackAudio::refill);
 }
 PlaybackAudio::~PlaybackAudio() { d->timer.stop(); d->detach(); }
-void PlaybackAudio::setRole(Role role) {
-    if (d->role == role) return;
-    d->role = role; rebuildOutput();
-}
 void PlaybackAudio::setAsset(std::shared_ptr<const ResidentMediaAsset> asset) {
     if (d->asset == asset) return;
     pause(); d->detach(); d->asset = std::move(asset); rebuildOutput();
@@ -229,8 +211,7 @@ void PlaybackAudio::rebuildOutput() {
     d->mixer = shared.lock();
     if (!d->mixer) { d->mixer = std::make_shared<Mixer>(device); shared = d->mixer; }
     if (!d->mixer->sink) { d->mixer.reset(); emit failed(QStringLiteral("No supported floating-point audio output format")); return; }
-    d->voice = std::make_shared<Voice>(d->mixer->format.sampleRate(), d->mixer->mixChannels,
-        d->role == Role::ReceivedScene);
+    d->voice = std::make_shared<Voice>(d->mixer->format.sampleRate(), d->mixer->mixChannels);
     d->slot = d->mixer->add(d->voice);
     if (d->slot < 0) { d->detach(); emit failed(QStringLiteral("Too many simultaneous audio cursors")); return; }
     d->voice->gain.store(d->output->isMuted() ? 0.0f : float(d->output->volume()));

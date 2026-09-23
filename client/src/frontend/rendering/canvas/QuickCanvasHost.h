@@ -73,7 +73,6 @@ public:
     bool remoteMediaCached(const QString& mediaId) const;
     void triggerRemoteSceneAction() override;
     void triggerTestSceneAction() override;
-    void setRemoteFeedbackEnabled(bool screen, bool audio);
     void timelinePlay();
     void timelinePause();
     void timelineSeek(qreal positionMs);
@@ -123,8 +122,6 @@ private:
     void connectWebSocketSignals();
     void sendVideoSnapshot();
     void advanceTimeline();
-    void refreshRemoteFeedback();
-    bool remoteFeedbackAudioSuppressed() const;
     void applyTimeline(qreal positionMs, bool playing, bool forceSeek = false);
     void observeMedia(CanvasMedia* media);
     bool pinLocalMedia(CanvasMedia* media);
@@ -148,8 +145,6 @@ private:
     bool m_actionsEnabled = false;
     bool m_projectEditingEnabled = false;
     bool m_contentAvailable = true;
-    bool m_remoteScreenFeedbackEnabled = false;
-    bool m_remoteAudioFeedbackEnabled = false;
     bool m_sceneLaunching = false;
     bool m_sceneStopping = false;
     bool m_sceneLaunched = false;

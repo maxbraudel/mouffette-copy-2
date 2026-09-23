@@ -182,8 +182,8 @@ public:
                         auto* config = [[SCStreamConfiguration alloc] init];
                         config.width = 2; config.height = 2; config.minimumFrameInterval = CMTimeMake(1, 1);
                         config.queueDepth = 3; config.showsCursor = NO;
-                        // Exclude every Mouffette output. AudioEngine adds only
-                        // the rendered ReceivedScene bus to the publication.
+                        // Exclude every Mouffette output, including received
+                        // scenes, canvas previews and remote monitoring.
                         config.capturesAudio = YES; config.excludesCurrentProcessAudio = YES;
                         config.sampleRate = 48000; config.channelCount = 2;
                         if (@available(macOS 15.0, *)) config.captureMicrophone = NO;

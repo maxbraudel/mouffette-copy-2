@@ -445,6 +445,13 @@ bool ScreenCaptureSource::start(QScreen* screen) {
     if (isActive() && d->screen == screen) return true;
     stop();
     if (!screen) { emit errorOccurred(ScreenCaptureError::CaptureFailed, QStringLiteral("No screen was selected for sharing")); return false; }
+#if !defined(Q_OS_MACOS) && !defined(Q_OS_WIN)
+    // The generic Qt capture backend cannot exclude an entire application.
+    // Never publish a desktop that also contains Mouffette's scene surfaces.
+    emit errorOccurred(ScreenCaptureError::CaptureFailed,
+        QStringLiteral("Screen sharing is not supported on this platform because it cannot exclude Mouffette from capture."));
+    return false;
+#endif
 #ifdef Q_OS_WIN
     QString exclusionError;
     if (!WindowCaptureExclusion::instance().prepareForCapture(&exclusionError)) {

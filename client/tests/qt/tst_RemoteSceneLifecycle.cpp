@@ -13,6 +13,7 @@
 #include <QElapsedTimer>
 #include <QTemporaryDir>
 #include <QUuid>
+#include <QVideoFrame>
 #include <QWebSocketServer>
 #include <QtTest>
 
@@ -23,6 +24,9 @@
 #include "backend/network/RemoteSessionCoordinator.h"
 #include "backend/network/WebSocketClient.h"
 #include "backend/managers/network/ConnectionManager.h"
+#include "backend/managers/app/SettingsManager.h"
+#include "backend/runtime/ApplicationRuntime.h"
+#include "backend/runtime/RuntimeProfile.h"
 #include "backend/security/DeviceIdentityStore.h"
 #include "frontend/rendering/canvas/QuickCanvasController.h"
 #include "frontend/rendering/canvas/QuickCanvasHost.h"
@@ -45,7 +49,7 @@ private slots:
     {
         MediaResidencyManager::instance().clearMemorySnapshotForTesting();
     }
-    void remoteFeedbackFollowsButtons_data()
+    void remoteScenePlaybackSurvivesCaptureToggles_data()
     {
         QTest::addColumn<bool>("screen");
         QTest::addColumn<bool>("audio");
@@ -54,10 +58,125 @@ private slots:
                 QTest::newRow(qPrintable(QString("screen-%1-audio-%2").arg(screen).arg(audio))) << screen << audio;
     }
 
-    void remoteFeedbackFollowsButtons()
+    void remoteScenePlaybackSurvivesCaptureToggles()
     {
         QFETCH(bool, screen);
         QFETCH(bool, audio);
+        QTemporaryDir root;
+        QVERIFY(root.isValid());
+        const auto previousProfile = RuntimeProfile::context();
+        const auto restoreProfile = qScopeGuard([&] { RuntimeProfile::configure(previousProfile); });
+        RuntimeProfileContext context;
+        context.ordinal = 2;
+        context.instanceId = QStringLiteral("capture-toggle-scene");
+        context.profileId = context.instanceId;
+        context.rootPath = root.path();
+        context.persistent = false;
+        RuntimeProfile::configure(context);
+        ApplicationRuntime runtime(context);
+        runtime.setConnectionEnabled(false);
+        auto* settings = runtime.getSettingsManager();
+        QVERIFY(settings->setScreenContentVisible(screen));
+        QVERIFY(settings->setSystemAudioEnabled(audio));
+        ClientInfo client(QStringLiteral("capture-toggle-peer"), QStringLiteral("Remote"), QStringLiteral("test"));
+        client.setEndpointId(QStringLiteral("capture-toggle-peer"));
+        auto* workspace = runtime.ensureWorkspace(client);
+        QVERIFY(workspace);
+        auto* host = qobject_cast<QuickCanvasHost*>(workspace->canvas);
+        QVERIFY(host);
+        const auto cleanup = qScopeGuard([&] {
+            delete host;
+            workspace->canvas = nullptr;
+        });
+        host->setScreens({ScreenInfo(0, 640, 480, 0, 0, true)});
+        auto* media = host->document()->addPreparedFile(QString::fromUtf8(TEST_VIDEO_FILE),
+                                                       QSize(160, 90), true, {});
+        QVERIFY(media);
+        QTRY_VERIFY_WITH_TIMEOUT(media->residencyReady(), 5000);
+        media->setMuted(false);
+        media->setVolume(0.4);
+        QQuickView canvas;
+        canvas.setResizeMode(QQuickView::SizeRootObjectToView);
+        canvas.resize(640, 480);
+        canvas.setInitialProperties({{"sessionViewModel", QVariantMap{
+            {"canvasController", QVariant::fromValue<QObject*>(host->controller())}, {"loading", false}}}});
+        canvas.setSource(QUrl("qrc:/qt/qml/Mouffette/App/resources/qml/CanvasRoot.qml"));
+        QCOMPARE(canvas.status(), QQuickView::Ready);
+        canvas.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&canvas));
+        std::function<QQuickItem*(QQuickItem*)> findMediaVisual = [&](QQuickItem* item) -> QQuickItem* {
+            if (item->objectName() == QStringLiteral("canvasMediaContent")) return item;
+            for (auto* child : item->childItems())
+                if (auto* found = findMediaVisual(child)) return found;
+            return nullptr;
+        };
+        auto* visual = findMediaVisual(canvas.rootObject());
+        QVERIFY(visual);
+        QVERIFY(visual->isVisible());
+        const auto saved = host->serializeProjectState();
+        // Use a runtime-created workspace so the real settings wiring is
+        // exercised. Capture subscriptions must never alter scene playback.
+        host->beginScenePresentation(true);
+        QVERIFY(!media->localPlaybackHidden());
+        QVERIFY(visual->isVisible());
+        QVERIFY(!media->player()->audioOutput()->isMuted());
+        QCOMPARE(media->player()->audioOutput()->volume(), 0.4f);
+        host->m_timelineTimer.stop();
+        const qreal position = host->timelinePositionMs();
+        for (bool enabled : {!screen, screen}) {
+            QVERIFY(settings->setScreenContentVisible(enabled));
+            QCOMPARE(host->timelinePositionMs(), position);
+            QVERIFY(host->timelinePlaying());
+            QVERIFY(!media->localPlaybackHidden());
+            QVERIFY(visual->isVisible());
+            QVERIFY(!media->player()->audioOutput()->isMuted());
+        }
+        for (bool enabled : {!audio, audio}) {
+            QVERIFY(settings->setSystemAudioEnabled(enabled));
+            QCOMPARE(host->timelinePositionMs(), position);
+            QVERIFY(!media->player()->audioOutput()->isMuted());
+            QCOMPARE(media->player()->audioOutput()->volume(), 0.4f);
+        }
+        QImage desktop(640, 480, QImage::Format_RGBA8888);
+        desktop.fill(Qt::blue);
+        host->setRemoteScreenFrame(0, QVideoFrame(desktop));
+        QVERIFY(!media->localPlaybackHidden());
+        QVERIFY(visual->isVisible());
+        QVERIFY(!media->player()->audioOutput()->isMuted());
+        host->clearRemoteScreenFrames();
+        QVERIFY(!media->localPlaybackHidden());
+        QVERIFY(visual->isVisible());
+        host->applyTimeline(100, true);
+        QVERIFY(!media->player()->audioOutput()->isMuted());
+        QVERIFY(!media->muted());
+        media->setMuted(true);
+        host->applyTimeline(100, true);
+        QVERIFY(settings->setSystemAudioEnabled(!audio));
+        QVERIFY(media->player()->audioOutput()->isMuted());
+        media->setMuted(false);
+        host->applyTimeline(100, true);
+        QVERIFY(!media->player()->audioOutput()->isMuted());
+        host->stopScenePresentation();
+        QVERIFY(media->player()->audioOutput()->isMuted());
+        QCOMPARE(host->serializeProjectState(), saved);
+        QVERIFY(settings->setScreenContentVisible(true));
+        QVERIFY(settings->setSystemAudioEnabled(true));
+        host->beginScenePresentation(false);
+        QVERIFY(!media->localPlaybackHidden());
+        QVERIFY(!media->player()->audioOutput()->isMuted());
+        host->stopScenePresentation();
+    }
+
+    void remoteSceneAudioStopsAtTermination_data()
+    {
+        QTest::addColumn<QString>("reason");
+        for (const auto* reason : {"stop", "finish", "failure", "disconnect"})
+            QTest::newRow(reason) << QString::fromLatin1(reason);
+    }
+
+    void remoteSceneAudioStopsAtTermination()
+    {
+        QFETCH(QString, reason);
         std::unique_ptr<QuickCanvasHost> host(QuickCanvasHost::create());
         QVERIFY(host);
         auto* media = host->document()->addPreparedFile(QString::fromUtf8(TEST_VIDEO_FILE),
@@ -65,67 +184,22 @@ private slots:
         QVERIFY(media);
         QTRY_VERIFY_WITH_TIMEOUT(media->residencyReady(), 5000);
         media->setMuted(false);
-        media->setVolume(0.4);
-        const auto saved = host->serializeProjectState();
-        host->setRemoteFeedbackEnabled(screen, audio);
-        QVERIFY(!host->controller()->remoteFeedbackMediaHidden());
-        QVERIFY(!host->remoteFeedbackAudioSuppressed());
-        // No received frame, audio stream or network connection is required:
-        // the buttons alone determine suppression during the presentation.
         host->beginScenePresentation(true);
-        QCOMPARE(host->controller()->remoteFeedbackMediaHidden(), screen);
-        QCOMPARE(media->player()->audioOutput()->isMuted(), audio);
-        QCOMPARE(media->player()->audioOutput()->volume(), 0.4f);
-        host->setRemoteFeedbackEnabled(!screen, !audio);
-        QCOMPARE(host->controller()->remoteFeedbackMediaHidden(), !screen);
-        QCOMPARE(media->player()->audioOutput()->isMuted(), !audio);
-        host->applyTimeline(100, true);
-        QCOMPARE(media->player()->audioOutput()->isMuted(), !audio);
-        QVERIFY(!media->muted());
-        media->setMuted(true);
-        host->setRemoteFeedbackEnabled(false, false);
-        QVERIFY(media->player()->audioOutput()->isMuted());
-        media->setMuted(false);
-        host->stopScenePresentation();
-        QVERIFY(!host->controller()->remoteFeedbackMediaHidden());
-        QVERIFY(!host->remoteFeedbackAudioSuppressed());
-        QCOMPARE(host->serializeProjectState(), saved);
-        host->setRemoteFeedbackEnabled(true, true);
-        host->beginScenePresentation(false);
-        QVERIFY(!host->controller()->remoteFeedbackMediaHidden());
+        QVERIFY(!media->localPlaybackHidden());
         QVERIFY(!media->player()->audioOutput()->isMuted());
-        host->stopScenePresentation();
-    }
-
-    void remoteFeedbackClearedAtTermination_data()
-    {
-        QTest::addColumn<QString>("reason");
-        for (const auto* reason : {"stop", "finish", "failure", "disconnect"})
-            QTest::newRow(reason) << QString::fromLatin1(reason);
-    }
-
-    void remoteFeedbackClearedAtTermination()
-    {
-        QFETCH(QString, reason);
-        std::unique_ptr<QuickCanvasHost> host(QuickCanvasHost::create());
-        QVERIFY(host);
-        host->document()->addText({}, "Remote");
-        host->setRemoteFeedbackEnabled(true, true);
-        host->beginScenePresentation(true);
-        QVERIFY(host->controller()->remoteFeedbackMediaHidden());
-        QVERIFY(host->remoteFeedbackAudioSuppressed());
         if (reason == "failure") host->failScene("test", false);
         else if (reason == "disconnect") host->handleRemoteConnectionLost();
         else if (reason == "finish") {
             host->m_timelineAnchorPositionMs = host->timelineStopMs();
             host->advanceTimeline();
         } else host->stopScenePresentation();
-        QVERIFY(!host->controller()->remoteFeedbackMediaHidden());
-        QVERIFY(!host->remoteFeedbackAudioSuppressed());
-        // Cleanup is idempotent; the preferences remain for the next run.
+        QVERIFY(!host->timelinePlaying());
+        QVERIFY(media->player()->audioOutput()->isMuted());
+        QVERIFY(!media->localPlaybackHidden());
+        // Cleanup is idempotent and playback is audible on the next run.
         host->stopScenePresentation();
         host->beginScenePresentation(true);
-        QVERIFY(host->controller()->remoteFeedbackMediaHidden());
+        QVERIFY(!media->player()->audioOutput()->isMuted());
         host->stopScenePresentation();
     }
 
@@ -1435,7 +1509,9 @@ private slots:
             QTRY_VERIFY_WITH_TIMEOUT(player->preparedAt(qRound64(SceneTimeline::SceneSettings{}.timeMs(SceneTimeline::SceneSettings{}.nearestSlot(startMs)))), 3000);
             QCOMPARE(player->playbackState(), QMediaPlayer::PausedState);
         }
-        QTRY_COMPARE_WITH_TIMEOUT(successfulPreparedCount, 1, 3000);
+        // PREPARED may be replayed during reconciliation or retried before
+        // this poll observes the first acknowledgement.
+        QTRY_VERIFY_WITH_TIMEOUT(successfulPreparedCount >= 1, 3000);
         qInfo() << "Cached scene prepared in" << preparationTime.elapsed() << "ms";
         QCOMPARE(failedPreparedCount, 0);
         QVERIFY(!preparedChecklist.isEmpty());

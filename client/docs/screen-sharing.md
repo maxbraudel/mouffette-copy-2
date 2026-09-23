@@ -5,6 +5,12 @@ under the editable scene media. Pan, zoom, monitor layout and the existing
 remote cursor keep their normal canvas coordinates. Screen pixels are ephemeral:
 they are never saved in a project, recorded, or written to the media cache.
 
+Desktop publication with complete Mouffette exclusion is supported on macOS
+and Windows. Linux and other platforms can receive remote desktops and render
+their scene media, but cannot publish a desktop until their capture backend can
+exclude the application. An unsupported publisher reports a capture error
+instead of starting unfiltered Qt screen capture.
+
 ## Consent and lifecycle
 
 In **Settings**, enable **Share my screen** and save.
@@ -13,8 +19,11 @@ does not change it. It authorizes all screens for owners of an authenticated
 active remote session. **Share my system audio** separately authorizes the audio
 stream; neither option permits microphone capture or remote input. Existing
 combined consent initializes both permissions, which are then saved independently.
-The control interface, its dialogs and local preview audio are excluded; received
-scene windows and their sound remain shared. See [system audio sharing](system-audio-sharing.md).
+All windows and audio owned by the publishing Mouffette process are excluded,
+including its main interface, dialogs, previews and received scenes. The viewer
+renders scene media over the captured desktop and plays their audio separately;
+enabling either remote stream does not hide or mute those local scene media.
+See [system audio sharing](system-audio-sharing.md).
 
 The top-bar **Hide screen content / Show screen content** button controls the
 viewer's desktop preview. Viewing is on by default. The choice is saved in the
@@ -125,7 +134,12 @@ timeout. Legacy servers retain the original per-viewer-copy mode.
 
 ## Capture and video path
 
-- macOS uses ScreenCaptureKit with native display IDs and SDR NV12. Capture
+- macOS uses ScreenCaptureKit with native display IDs and SDR NV12. A process
+  exclusion filter has no window exceptions: all of Mouffette's windows,
+  including scenes created after streaming starts, stay out of the capture.
+  There is no scene window inventory or scene-triggered filter refresh. Missing
+  application discovery fails capture instead of sharing an unfiltered display.
+  Capture
   dimensions and requested FPS follow the largest active encoding profile, up to
   the configured 3,840-pixel edge and 30 FPS defaults. Cursor and audio are not
   captured by these per-monitor streams. A separate audio capture serves the
@@ -136,6 +150,12 @@ timeout. Legacy servers retain the original per-viewer-copy mode.
   is coalesced and stale surfaces are rejected. The native queue has three
   surfaces.
 - Windows uses Qt's FFmpeg-backed QScreenCapture and DXGI Desktop Duplication.
+  Every top-level Mouffette window receives `WDA_EXCLUDEFROMCAPTURE`, including
+  transparent scenes and dialogs, before showing and after native recreation.
+  A GUI-thread native hook also protects dialogs and menus running their own
+  modal event loops. Hidden infrastructure windows are excluded when shown.
+  Scene stacking registration never removes this affinity. This requires
+  Windows 10 version 2004 or later; an exclusion failure stops screen sharing.
   If DXGI fails (including `DuplicateOutput` returning `0x8000ffff`), the same
   publication switches once to Windows Graphics Capture's monitor API. The
   fallback keeps the window-exclusion policy, uses a two-surface native pool
@@ -461,9 +481,17 @@ displays, scaling/rotation, exclusion, reconnect and lock/unlock.
 8. Test WSS through the actual HTTP/SOCKS5 proxy, authentication and enterprise
    trust configuration. A WSS-blocked network is an expected unsupported path
    until the HTTPS session fallback has been implemented.
+9. With sharing active, open the target's main interface, dialogs and a received
+   scene. None of these windows should appear in the desktop stream. Repeat
+   after closing/recreating scenes and switching between monitors. The viewer's
+   scene media must remain visible over the desktop and their audio must keep
+   playing as screen sharing and system-audio listening are toggled independently.
+   Verify on both DXGI and WGC on Windows, including transparent scene surfaces.
 
 API references: [Qt QScreenCapture](https://doc.qt.io/qt-6/qscreencapture.html),
 [Windows monitor capture](https://learn.microsoft.com/en-us/windows/win32/api/windows.graphics.capture.interop/nf-windows-graphics-capture-interop-igraphicscaptureiteminterop-createformonitor),
+[Windows capture exclusion](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setwindowdisplayaffinity),
 [Qt QVideoSink](https://doc.qt.io/qt-6/qvideosink.html),
 [Apple ScreenCaptureKit](https://developer.apple.com/documentation/screencapturekit),
+[Apple application exclusion](https://developer.apple.com/videos/play/wwdc2022/10155/),
 [FFmpeg codec options](https://ffmpeg.org/ffmpeg-codecs.html).

@@ -76,19 +76,41 @@ class WindowPresentationTest : public QObject
 {
     Q_OBJECT
 private slots:
-    void stackingClassificationAlsoControlsCaptureExceptions()
+    void stackingClassificationKeepsEveryWindowExcludedFromCapture()
     {
+#ifdef Q_OS_WIN
+        if (QGuiApplication::platformName() != QLatin1String("windows"))
+            QSKIP("Requires native Windows window affinity");
         QWindow control;
         QWindow scene;
+        control.setOpacity(0.95);
+        scene.setOpacity(0.95);
         auto& stacking = WindowStackingCoordinator::instance();
         auto& capture = WindowCaptureExclusion::instance();
         stacking.registerControlWindow(&control);
         stacking.registerSceneWindow(&scene);
-        QVERIFY(!capture.sceneWindows().contains(&control));
-        QVERIFY(capture.sceneWindows().contains(&scene));
+        const auto cleanup = qScopeGuard([&] {
+            stacking.unregisterWindow(&scene);
+            stacking.unregisterWindow(&control);
+        });
+        control.create();
+        scene.create();
+        QString error;
+        QVERIFY2(capture.prepareForCapture(&error), qPrintable(error));
+        DWORD affinity = WDA_NONE;
+        QVERIFY(GetWindowDisplayAffinity(reinterpret_cast<HWND>(control.winId()), &affinity));
+        QCOMPARE(affinity, DWORD(0x11));
+        QVERIFY(GetWindowDisplayAffinity(reinterpret_cast<HWND>(scene.winId()), &affinity));
+        QCOMPARE(affinity, DWORD(0x11));
         stacking.unregisterWindow(&scene);
-        QVERIFY(!capture.sceneWindows().contains(&scene));
-        stacking.unregisterWindow(&control);
+        QVERIFY(GetWindowDisplayAffinity(reinterpret_cast<HWND>(scene.winId()), &affinity));
+        QCOMPARE(affinity, DWORD(0x11));
+        stacking.registerControlWindow(&scene);
+        QVERIFY(GetWindowDisplayAffinity(reinterpret_cast<HWND>(scene.winId()), &affinity));
+        QCOMPARE(affinity, DWORD(0x11));
+#else
+        QSKIP("Requires Windows; macOS excludes the process directly in ScreenCaptureKit");
+#endif
     }
 
     void geometry_data()

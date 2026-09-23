@@ -46,8 +46,6 @@ Rectangle {
     }
     readonly property var liveTransforms: canvasController ? canvasController.liveTransforms : ({})
     readonly property var hostingWindow: root.Window.window
-    property bool remoteFeedbackMediaHidden: canvasController
-                                             ? canvasController.remoteFeedbackMediaHidden : false
     property bool remoteActive: canvasController
                                 ? canvasController.remoteActive : false
     property var screensModel: canvasController
@@ -855,8 +853,8 @@ Rectangle {
 
             MediaLayer {
                 id: mediaLayer
-                // Playback keeps advancing while the remote screen return is shown.
-                visible: !root.remoteFeedbackMediaHidden
+                // Remote screens exclude Mouffette, so scene media always
+                // compose above them, including during remote playback.
                 // Interactive ancestors cover the viewport, not a viewport-sized
                 // rectangle in scene coordinates. Qt can otherwise prune visible
                 // children from pointer delivery after zoom/pan (effective clipping).

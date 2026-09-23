@@ -1,7 +1,6 @@
 #include "backend/handlers/UploadEventHandler.h"
 #include "ClientWorkspaceController.h"
 #include "backend/config/AppConfig.h"
-#include "backend/managers/app/SettingsManager.h"
 #include "backend/runtime/ApplicationRuntime.h"
 #include "backend/domain/models/ClientInfo.h"
 #include "shared/rendering/ICanvasHost.h"
@@ -126,19 +125,6 @@ void ClientWorkspaceController::configureWorkspace(ClientWorkspace* workspace) {
     connect(workspace->canvas, &ICanvasHost::remoteSceneLaunchStateChanged, m_runtime,
             &ApplicationRuntime::onRemoteSceneLaunchStateChanged,
             Qt::UniqueConnection);
-
-    if (auto* host = qobject_cast<QuickCanvasHost*>(workspace->canvas)) {
-        auto* settings = m_runtime->getSettingsManager();
-        const auto refreshFeedback = [host, settings] {
-            host->setRemoteFeedbackEnabled(settings->getScreenContentVisible(),
-                                           settings->getSystemAudioEnabled());
-        };
-        refreshFeedback();
-        if (!workspace->connectionsInitialized) {
-            connect(settings, &SettingsManager::screenContentVisibleChanged, host, refreshFeedback);
-            connect(settings, &SettingsManager::systemAudioEnabledChanged, host, refreshFeedback);
-        }
-    }
 
     if (!workspace->connectionsInitialized) {
         auto* projectAutosaveTimer = new QTimer(workspace->canvas);

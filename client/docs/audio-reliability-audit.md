@@ -1,18 +1,23 @@
 # Remote audio reliability audit
 
-This audit concerns live system audio, received-scene inclusion and remote screen
+This audit records the reliability work on live system audio and remote screen
 preview. Capture and playback share the same processing policy on macOS and
-Windows; their native device paths still need separate qualification. Screen
-capture permissions and the exclusion of control-preview audio remain unchanged.
+Windows; their native device paths still need separate qualification.
+
+The subsequent capture simplification excludes the entire publishing Mouffette
+instance, including received scenes. Scene taps, audio roles and their publication
+mixing have been removed. Historical scene-inclusion measurements below describe
+the earlier implementation, not the current capture contract. See
+[system audio sharing](system-audio-sharing.md) for the current behavior and tests.
 
 ## Defects found and corrected
 
 | Boundary | Defect | Correction |
 | --- | --- | --- |
-| Stereo routing | A device's preferred mono format could collapse the scene before capture. | Keep at least stereo through scene mixing and tap before mono averaging; retain native surround locally, downmix it separately for capture, and route monitoring as stereo. |
+| Stereo routing | A device's preferred mono format could collapse stereo playback prematurely. | Keep at least stereo through local mixing, retain supported native surround locally, and route monitoring as stereo. System capture has its own stereo path, independent of local playback. |
 | Stereo encoding | Automatic Opus classification with FEC could collapse SILK/hybrid stereo width at 32 kbit/s even with a two-channel packet header. Four seconds of silence or mono noise followed by quiet 650/1350 Hz stereo reproduced the half-volume mono sum. | Set both forced two-channel encoding and the public music signal policy. Regression tests measure actual channel separation after both histories at 32/96 kbit/s, not just the packet header. |
-| Capture → mixer | Tolerated timestamp jitter still positioned blocks independently in the absolute mixer, creating zero holes or overlap overwrites in continuous sound. | One stateful `AudioCaptureResampler` per native source/scene tap maintains contiguous PCM and uses bounded FFmpeg soft compensation for drift. Its epoch is quantized once onto the shared sample grid. |
-| Capture discontinuities | Missing blocks, native overlap and restarted capture could splice unrelated samples; hard clipping distorted the combined system/scene peak. | Reject duplicates, trim repeated prefixes and mark real gaps/restarts. Apply 5 ms transition fades and stateful soft clipping after the buses are summed. |
+| Capture → buffer | Tolerated timestamp jitter still positioned blocks independently, creating zero holes or overlap overwrites in continuous sound. | A stateful `AudioCaptureResampler` maintains contiguous native PCM and uses bounded FFmpeg soft compensation for drift. Its epoch is quantized once onto the sample grid. |
+| Capture discontinuities | Missing blocks, native overlap and restarted capture could splice unrelated samples; hard clipping distorted peaks. | Reject duplicates, trim repeated prefixes and mark real gaps/restarts. Apply 5 ms transition fades and stateful soft clipping to the captured audio. |
 | Native timestamps | A missing WASAPI/SCK timestamp became callback arrival time, including the duration of the already captured block. | Track the expected first sample, and use arrival minus block duration only when the native timeline cannot be continued. |
 | Capture scheduling | Native audio work could compete at normal priority during UI/GPU load. Unsupported SCK formats could leave an apparently running silent capture. | macOS audio queue QoS and Windows MMCSS Audio scheduling; fail explicitly on unsupported native formats. |
 | Codec | System audio used voice inactivity suppression; loss recovery and codec lookahead compensation were missing. Invalid float input could poison codec state. | Continuous Opus encoding, finite normalized input, checked initialization, PLC/FEC support, and timestamps corrected using Opus-reported lookahead. |
@@ -30,8 +35,8 @@ The implementation stays within the negotiated audio v1 wire format. New clients
 retain interoperability with older peers, but both publisher and relay need the
 updated sequence behavior for all losses to remain visible. The audio engine runs
 inside the sole Mouffette process; there is no audio worker or local audio IPC.
-Native capture excludes this process, and only rendered received-scene samples
-are added back. Canvas and incoming monitoring audio remain excluded.
+Native capture excludes this entire process. No scene, Canvas preview or incoming
+monitoring audio is added back; scene playback remains local to each Canvas.
 
 ## Timing and resource policy
 
@@ -41,12 +46,12 @@ arrival does not directly reposition the sample cursor. Actual PCM storage and
 socket queues remain bounded; receipt credit is a separate accounting window,
 not a queue of audio waiting for playback.
 
-Each source clock is corrected independently with a stateful FFmpeg resampler.
+The native source clock is corrected with a stateful FFmpeg resampler.
 Small timestamp errors are filtered; compensation changes the sample rate by at
 most 1000 ppm instead of inserting zeros or dropping individual samples. Native
 blocks do not wait for packetization before entering the fixed 60 ms collection
-window. Both capture buses use a 5 ms transition envelope, and the final combined
-level uses stateful soft clipping. The codec state remains continuous within its
+window. The capture buffer uses a 5 ms transition envelope and stateful soft
+clipping. The codec state remains continuous within its
 publication epoch, including after a local backlog drop.
 
 For callbacks up to 20 ms, the transport target starts at 120 ms and adapts within

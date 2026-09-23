@@ -93,6 +93,24 @@ struct Harness {
 class ScreenCaptureLayersTest final : public QObject {
     Q_OBJECT
 private slots:
+#if !defined(Q_OS_MACOS) && !defined(Q_OS_WIN)
+    void unsupportedPlatformNeverStartsUnfilteredCapture() {
+        ScreenCaptureSource source;
+        QSignalSpy errors(&source, &ScreenCaptureSource::errorOccurred);
+        QSignalSpy packets(&source, &ScreenCaptureSource::packetReady);
+        auto* screen = QGuiApplication::primaryScreen();
+        QVERIFY(screen);
+        QVERIFY(!source.start(screen));
+        QVERIFY(!source.isActive());
+        QCOMPARE(errors.size(), 1);
+        QCOMPARE(qvariant_cast<ScreenCaptureError>(errors.first().first()), ScreenCaptureError::CaptureFailed);
+        QVERIFY(errors.first().at(1).toString().contains(QStringLiteral("cannot exclude Mouffette")));
+        QCoreApplication::processEvents();
+        QVERIFY(!source.isActive());
+        QCOMPARE(packets.size(), 0);
+    }
+#endif
+
     void sameRawSurfaceProducesTwoIndependentlyDecodableLayers() {
         Harness harness;
         harness.profiles({{"main", profile(640)}, {"low", profile(320)}, {"untrusted-third", profile(160)}});

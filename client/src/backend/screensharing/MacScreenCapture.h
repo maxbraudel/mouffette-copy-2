@@ -12,8 +12,8 @@ class QScreen;
 
 // Main-thread lifecycle; native callbacks deliver directly to the encoder's
 // bounded mailbox. No screen pixels cross the Qt GUI event queue.
-// Display filters omit this process's control windows and explicitly retain
-// WindowCaptureExclusion's scene surfaces. Audio uses an independent capture.
+// Display filters exclude this entire process, including its scene surfaces.
+// Audio uses an independent capture with the same process exclusion policy.
 class MacScreenCapture final {
 public:
     using FrameCallback = std::function<void(const QVideoFrame&)>;

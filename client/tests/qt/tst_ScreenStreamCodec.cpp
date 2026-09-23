@@ -8,13 +8,17 @@
 #include <QtTest>
 #include <cstring>
 #ifdef Q_OS_MACOS
-#include "backend/platform/WindowCaptureExclusion.h"
 #include "backend/platform/macos/MacWindowManager.h"
 #include "backend/screensharing/MacScreenCapture.h"
 #include <QBackingStore>
 #include <QColorSpace>
 #include <QExposeEvent>
 #include <QPainter>
+#include <QProcess>
+#include <QProcessEnvironment>
+#include <QScopeGuard>
+#include <QTimer>
+#include <cstdio>
 #include <QScreen>
 #include <QSurfaceFormat>
 #include <QWindow>
@@ -57,6 +61,33 @@ private:
     QBackingStore m_backingStore;
     QColor m_color;
 };
+
+QColor captureBackgroundColor() { return QColor(30, 100, 220); }
+
+QRect captureFixtureGeometry(QScreen* screen) {
+    QRect geometry(QPoint(), QSize(240, 180));
+    geometry.moveCenter(screen->availableGeometry().center());
+    return geometry;
+}
+
+int runCaptureBackgroundFixture(QGuiApplication& app) {
+    auto* screen = QGuiApplication::primaryScreen();
+    if (!screen) return 1;
+    CaptureTestSurface background(captureBackgroundColor());
+    background.setTitle(QStringLiteral("External capture fixture"));
+    background.setScreen(screen);
+    background.setGeometry(captureFixtureGeometry(screen));
+    background.setFlag(Qt::WindowStaysOnTopHint);
+    MacWindowManager::configureGlobalOverlay(&background, false);
+    background.show();
+    MacWindowManager::setWindowAsGlobalOverlay(&background, false);
+    if (!QTest::qWaitForWindowExposed(&background)) return 2;
+    std::fputs("ready\n", stdout);
+    std::fflush(stdout);
+    // Also self-terminate if a failed parent cannot perform normal cleanup.
+    QTimer::singleShot(20000, &app, &QCoreApplication::quit);
+    return app.exec();
+}
 
 struct CaptureMailbox {
     QMutex mutex;
@@ -580,13 +611,27 @@ private slots:
         // Captured samples are never converted to screenshots or persisted.
     }
 
-    void nativeControlExclusionPreservesScenePixelsWhenExplicitlyEnabled() {
+    void nativeProcessExclusionOmitsScenesAndControlsWhenExplicitlyEnabled() {
         if (qEnvironmentVariableIntValue("MOUFFETTE_TEST_SCREEN_CAPTURE") != 1)
             QSKIP("Desktop capture smoke requires explicit MOUFFETTE_TEST_SCREEN_CAPTURE=1");
         if (QGuiApplication::platformName() != QStringLiteral("cocoa")) QSKIP("Requires native Cocoa platform");
         if (!CGPreflightScreenCaptureAccess()) QSKIP("Screen recording access is not already granted; no permission prompt requested");
         auto* screen = QGuiApplication::primaryScreen();
         QVERIFY(screen);
+        // A distinct process provides deterministic pixels behind Mouffette.
+        // It only paints a fixture and never requests recording permission.
+        QProcess background;
+        auto environment = QProcessEnvironment::systemEnvironment();
+        environment.insert(QStringLiteral("MOUFFETTE_TEST_CAPTURE_BACKGROUND"), QStringLiteral("1"));
+        background.setProcessEnvironment(environment);
+        background.start(QCoreApplication::applicationFilePath(), QStringList{});
+        const auto stopBackground = qScopeGuard([&] {
+            background.kill();
+            background.waitForFinished(3000);
+        });
+        QVERIFY2(background.waitForStarted(3000), qPrintable(background.errorString()));
+        QVERIFY2(background.waitForReadyRead(3000), qPrintable(background.errorString()));
+        QCOMPARE(background.readAllStandardOutput(), QByteArray("ready\n"));
         const QColor sceneColor(30, 210, 60);
         const QColor controlColor(220, 30, 30);
         CaptureTestSurface scene(sceneColor);
@@ -595,18 +640,13 @@ private slots:
         control.setTitle(QStringLiteral("Mouffette capture test excluded control"));
         scene.setScreen(screen);
         control.setScreen(screen);
-        QRect geometry(QPoint(), QSize(240, 180));
-        geometry.moveCenter(screen->availableGeometry().center());
+        const QRect geometry = captureFixtureGeometry(screen);
         scene.setGeometry(geometry);
         control.setGeometry(geometry);
-        // Deliberately cover the scene locally. Successful exclusion must
-        // reveal its green pixels, including behind the opaque red control.
-        // Both fixture windows need the production scene policy (including
-        // fullscreen Spaces), so another active app cannot cover the sample.
+        // Opaque green/red Mouffette surfaces cover the external blue window
+        // locally. Both must disappear from capture, exposing the blue pixels.
         scene.setFlag(Qt::WindowStaysOnTopHint);
         control.setFlag(Qt::WindowStaysOnTopHint);
-        auto& exclusions = WindowCaptureExclusion::instance();
-        exclusions.setSceneWindow(&scene, true);
         MacWindowManager::configureGlobalOverlay(&scene, false);
         MacWindowManager::configureGlobalOverlay(&control, false);
         scene.show();
@@ -661,11 +701,21 @@ private slots:
         };
         // Directly inspect a few NV12 samples in memory; never write captured
         // desktops, screenshots, encoded frames, or pixel dumps to disk.
-        QVERIFY2(waitForColor(sceneColor), qPrintable(diagnostic()));
-        exclusions.setSceneWindow(&control, true);
-        QVERIFY2(waitForColor(controlColor), qPrintable(diagnostic()));
-        exclusions.setSceneWindow(&control, false);
-        QVERIFY2(waitForColor(sceneColor), qPrintable(diagnostic()));
+        QVERIFY2(waitForColor(captureBackgroundColor()), qPrintable(diagnostic()));
+        control.hide();
+        scene.hide();
+        scene.destroy();
+        scene.show();
+        MacWindowManager::setWindowAsGlobalOverlay(&scene, false);
+        QVERIFY(QTest::qWaitForWindowExposed(&scene));
+        QVERIFY2(waitForColor(captureBackgroundColor()), qPrintable(diagnostic()));
+        CaptureTestSurface dialog(controlColor);
+        dialog.setGeometry(geometry);
+        MacWindowManager::configureGlobalOverlay(&dialog, false);
+        dialog.show();
+        MacWindowManager::setWindowAsGlobalOverlay(&dialog, false);
+        QVERIFY(QTest::qWaitForWindowExposed(&dialog));
+        QVERIFY2(waitForColor(captureBackgroundColor()), qPrintable(diagnostic()));
         capture.stop();
     }
 
@@ -739,5 +789,15 @@ private slots:
 #endif
 };
 
-QTEST_MAIN(ScreenStreamCodecTest)
+int main(int argc, char** argv) {
+    QGuiApplication app(argc, argv);
+    app.setAttribute(Qt::AA_Use96Dpi, true);
+#ifdef Q_OS_MACOS
+    if (qEnvironmentVariableIntValue("MOUFFETTE_TEST_CAPTURE_BACKGROUND") == 1)
+        return runCaptureBackgroundFixture(app);
+#endif
+    ScreenStreamCodecTest test;
+    QTEST_SET_MAIN_SOURCE_PATH
+    return QTest::qExec(&test, argc, argv);
+}
 #include "tst_ScreenStreamCodec.moc"

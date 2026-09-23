@@ -4,8 +4,8 @@
 #include <QObject>
 
 // Capture, encoding and remote monitoring live in the Mouffette process.
-// Native capture excludes this application; only the ReceivedScene output bus
-// is added back. Canvas previews and received monitoring never enter that bus.
+// Native capture excludes all application output, including received scenes,
+// canvas previews and remote monitoring. Only other applications are published.
 class AudioEngine final : public QObject {
     Q_OBJECT
 public:

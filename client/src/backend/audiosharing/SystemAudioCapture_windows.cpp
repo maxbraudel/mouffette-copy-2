@@ -72,6 +72,8 @@ public:
     Completion() {
         marshalerResult = CoCreateFreeThreadedMarshaler(this, marshaler.put());
         parameters.ActivationType = AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK;
+        // Exclude every Mouffette output, including scene playback and any
+        // child processes; only other applications enter the shared stream.
         parameters.ProcessLoopbackParams.TargetProcessId = GetCurrentProcessId();
         parameters.ProcessLoopbackParams.ProcessLoopbackMode = PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE;
         activation.vt = VT_BLOB;

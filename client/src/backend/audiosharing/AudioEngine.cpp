@@ -1,9 +1,8 @@
 #include "AudioEngine.h"
-#include "AudioCaptureMix.h"
+#include "AudioCaptureBuffer.h"
 #include "AudioCaptureResampler.h"
 #include "AudioOutputRouting.h"
 #include "AudioOutputTiming.h"
-#include "SceneAudioTap.h"
 #include "backend/audiosharing/AudioStreamCodec.h"
 #include "backend/audiosharing/AudioPlaybackTimeline.h"
 #include "backend/audiosharing/AudioPlaybackBuffer.h"
@@ -97,7 +96,7 @@ struct AudioEngine::Private : public QObject {
     CaptureFactory factory;
     bool closing = false, capturing = false;
     QTimer captureTimer;
-    AudioCaptureMix captureMix;
+    AudioCaptureBuffer captureBuffer;
     AudioCaptureResampler nativeSamples;
     QMediaDevices devices;
     QTimer reports;
@@ -150,8 +149,7 @@ struct AudioEngine::Private : public QObject {
     }
     void stopCapture() {
         captureTimer.stop(); capturing = false;
-        if (captureMailbox) SceneAudioBus::instance().setEnabled(false);
-        captureMix.clear(); nativeSamples.reset();
+        captureBuffer.clear(); nativeSamples.reset();
         if (captureMailbox) { QMutexLocker lock(&captureMailbox->mutex); captureMailbox->closed = true; captureMailbox->blocks.clear(); }
         captureMailbox.reset();
         if (capture) capture->stop();
@@ -200,12 +198,10 @@ struct AudioEngine::Private : public QObject {
                 if (captureMailbox != mailbox) return;
                 captureFailed = !active;
                 if (active && !capturing) {
-                    captureMix.reset(MediaCaptureClock::nowUs());
-                    SceneAudioBus::instance().setEnabled(true);
+                    captureBuffer.reset(MediaCaptureClock::nowUs());
                     capturing = true; captureTimer.start();
                 } else if (!active) {
-                    capturing = false; captureTimer.stop(); captureMix.clear();
-                    SceneAudioBus::instance().setEnabled(false);
+                    capturing = false; captureTimer.stop(); captureBuffer.clear();
                 }
                 state(active, failure);
             }, Qt::QueuedConnection);
@@ -225,7 +221,7 @@ struct AudioEngine::Private : public QObject {
             auto samples = nativeSamples.append(block.pcm, block.timestampUs, block.discontinuity);
             const auto failure = nativeSamples.errorString();
             if (!failure.isEmpty()) { stopCapture(); state(false, failure); return; }
-            if (samples) captureMix.appendSystem(reinterpret_cast<const float*>(samples->pcm.constData()),
+            if (samples) captureBuffer.append(reinterpret_cast<const float*>(samples->pcm.constData()),
                 int(samples->pcm.size() / (2 * sizeof(float))), samples->timestampUs, samples->discontinuity);
         }
     }
@@ -236,15 +232,8 @@ struct AudioEngine::Private : public QObject {
         // before an already queued native notification after a GUI stall.
         drainCapture(captureMailbox);
         if (!capturing || captureEpoch != activeEpoch) return;
-        for (const auto& tap : SceneAudioBus::instance().sources()) {
-            QByteArray pcm; qint64 timestamp = 0; bool transition = false; QString failure;
-            while (tap->takeForCapture(pcm, timestamp, transition, failure))
-                captureMix.appendScene(reinterpret_cast<const float*>(pcm.constData()),
-                    int(pcm.size() / (2 * sizeof(float))), timestamp, transition);
-            if (!failure.isEmpty()) { stopCapture(); state(false, failure); return; }
-        }
         const auto now = MediaCaptureClock::nowUs();
-        while (auto chunk = captureMix.take(now)) {
+        while (auto chunk = captureBuffer.take(now)) {
             // Codec prediction stays continuous within a wire epoch. A local
             // backlog drop is a PCM fade/gap, not an unannounced encoder reset.
             QString failure;

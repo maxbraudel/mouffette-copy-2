@@ -1,11 +1,9 @@
 #include "backend/platform/WindowCaptureExclusion.h"
 
 #include <QGuiApplication>
-#include <QSignalSpy>
 #include <QScopeGuard>
 #include <QWindow>
 #include <QtTest>
-#include <memory>
 
 #ifdef Q_OS_WIN
 #ifndef NOMINMAX
@@ -18,54 +16,14 @@ class WindowCaptureExclusionTest final : public QObject
 {
     Q_OBJECT
 private slots:
-    void onlyExplicitScenesAreCaptureExceptions()
+    void capturePreparationDoesNotCreateHiddenSurfaces()
     {
-        auto& policy = WindowCaptureExclusion::instance();
         QWindow control;
         QWindow scene;
-        QVERIFY(!policy.sceneWindows().contains(&control));
-        QVERIFY(!policy.sceneWindows().contains(&scene));
-        QSignalSpy changes(&policy, &WindowCaptureExclusion::sceneWindowsChanged);
-        policy.setSceneWindow(&scene, true);
-        QVERIFY(policy.sceneWindows().contains(&scene));
-        QVERIFY(!policy.sceneWindows().contains(&control));
-        QCOMPARE(changes.size(), 1);
-        policy.setSceneWindow(&scene, true);
-        QCOMPARE(changes.size(), 1);
-        policy.setSceneWindow(&scene, false);
-        QVERIFY(!policy.sceneWindows().contains(&scene));
-        QCOMPARE(changes.size(), 2);
-    }
-
-    void destroyedAndRecreatedSceneSurfacesInvalidateExceptions()
-    {
-        auto& policy = WindowCaptureExclusion::instance();
-        auto scene = std::make_unique<QWindow>();
-        policy.setSceneWindow(scene.get(), true);
-        QSignalSpy changes(&policy, &WindowCaptureExclusion::sceneWindowsChanged);
-        scene->create();
-        QVERIFY(!changes.isEmpty());
-        changes.clear();
-        scene->destroy();
-        QVERIFY(!changes.isEmpty());
-        QVERIFY(policy.sceneWindows().contains(scene.get()));
-        changes.clear();
-        scene->create();
-        QVERIFY(!changes.isEmpty());
-        scene.reset();
-        QVERIFY(policy.sceneWindows().isEmpty());
-    }
-
-    void controlSurfaceDoesNotChangeMacSceneFilter()
-    {
-        auto& policy = WindowCaptureExclusion::instance();
-        QSignalSpy changes(&policy, &WindowCaptureExclusion::sceneWindowsChanged);
-        QWindow control;
-        control.create();
-        control.show();
-        control.hide();
-        control.destroy();
-        QCOMPARE(changes.size(), 0);
+        QString error;
+        QVERIFY2(WindowCaptureExclusion::instance().prepareForCapture(&error), qPrintable(error));
+        QVERIFY(!control.handle());
+        QVERIFY(!scene.handle());
     }
 
     void windowsAffinityIsAppliedBeforeShowAndAfterRecreation()
@@ -80,7 +38,6 @@ private slots:
         // works on ordinary opaque control windows through the setter.
         control.setOpacity(0.95);
         scene.setOpacity(0.95);
-        policy.setSceneWindow(&scene, true);
         for (int generation = 0; generation < 2; ++generation) {
             control.create();
             scene.create();
@@ -91,11 +48,65 @@ private slots:
             QVERIFY(GetWindowDisplayAffinity(reinterpret_cast<HWND>(control.winId()), &affinity));
             QCOMPARE(affinity, DWORD(0x11));
             QVERIFY(GetWindowDisplayAffinity(reinterpret_cast<HWND>(scene.winId()), &affinity));
-            QCOMPARE(affinity, DWORD(WDA_NONE));
+            QCOMPARE(affinity, DWORD(0x11));
             QVERIFY(!control.isVisible());
             control.destroy();
             scene.destroy();
         }
+#else
+        QSKIP("Requires Windows");
+#endif
+    }
+
+    void windowsCreatedDuringCaptureAreExcludedBeforeShow()
+    {
+#ifdef Q_OS_WIN
+        if (QGuiApplication::platformName() != QLatin1String("windows"))
+            QSKIP("Requires native Windows window affinity");
+        QString error;
+        QVERIFY2(WindowCaptureExclusion::instance().prepareForCapture(&error), qPrintable(error));
+        QWindow scene;
+        scene.setFlags(Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint);
+        scene.setOpacity(0.95);
+        scene.create();
+        DWORD affinity = WDA_NONE;
+        QVERIFY(GetWindowDisplayAffinity(reinterpret_cast<HWND>(scene.winId()), &affinity));
+        QCOMPARE(affinity, DWORD(0x11));
+        QVERIFY(!scene.isVisible());
+        // A dialog created by a scene has the same process exclusion policy.
+        QWindow dialog;
+        dialog.setTransientParent(&scene);
+        dialog.setOpacity(0.95);
+        dialog.create();
+        QVERIFY(GetWindowDisplayAffinity(reinterpret_cast<HWND>(dialog.winId()), &affinity));
+        QCOMPARE(affinity, DWORD(0x11));
+        QVERIFY(WindowCaptureExclusion::instance().captureAllowed());
+#else
+        QSKIP("Requires Windows");
+#endif
+    }
+
+    void nativeWindowIsExcludedWithoutQtEventDispatch()
+    {
+#ifdef Q_OS_WIN
+        if (QGuiApplication::platformName() != QLatin1String("windows"))
+            QSKIP("Requires native Windows window affinity");
+        QString error;
+        QVERIFY2(WindowCaptureExclusion::instance().prepareForCapture(&error), qPrintable(error));
+        const HWND window = CreateWindowExW(WS_EX_LAYERED, L"STATIC", L"Native dialog",
+            WS_POPUP, 0, 0, 100, 100, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+        QVERIFY(window);
+        const auto cleanup = qScopeGuard([&] { DestroyWindow(window); });
+        DWORD affinity = WDA_NONE;
+        QVERIFY(GetWindowDisplayAffinity(window, &affinity));
+        QCOMPARE(affinity, DWORD(WDA_NONE));
+        // Simulate a native modal loop: ShowWindow dispatches directly to its
+        // native window procedure, without pumping the Qt event dispatcher.
+        ShowWindow(window, SW_SHOWNOACTIVATE);
+        QVERIFY(IsWindowVisible(window));
+        QVERIFY(GetWindowDisplayAffinity(window, &affinity));
+        QCOMPARE(affinity, DWORD(0x11));
+        QVERIFY(WindowCaptureExclusion::instance().captureAllowed());
 #else
         QSKIP("Requires Windows");
 #endif

@@ -41,7 +41,7 @@ struct AudioCaptureResampler::Private {
         anchorUs = timestampUs;
         // Quantize only the initial epoch onto the common 48 kHz grid. Adding
         // separately rounded microsecond durations to an arbitrary epoch could
-        // otherwise alternate between adjacent frames in the absolute mixer.
+        // otherwise alternate between adjacent frames in the capture buffer.
         anchorFrame = (timestampUs / 1000) * 48 + ((timestampUs % 1000) * 48 + 500) / 1000;
         return true;
     }
@@ -104,7 +104,7 @@ std::optional<AudioCaptureResampler::Result> AudioCaptureResampler::append(
     d->lastStartUs = timestampUs;
     d->lastEndUs = timestampUs + qint64(frames) * 1000000 / Rate;
     // Sanitize before the persistent filter: one NaN or near-FLT_MAX value
-    // would contaminate later blocks. Keep ample headroom for the mix limiter,
+    // would contaminate later blocks. Keep ample headroom for the capture limiter,
     // while preventing arithmetic overflow on malformed native samples.
     auto* samples = reinterpret_cast<float*>(pcm.data());
     for (int sample = 0; sample < frames * Channels; ++sample)

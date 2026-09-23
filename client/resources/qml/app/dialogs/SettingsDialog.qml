@@ -161,7 +161,7 @@ Dialog {
                 }
                 Text {
                     Layout.fillWidth: true
-                    text: "Connected clients can see your screens, including received scenes. Mouffette controls and local previews are excluded. Changes apply when you save."
+                    text: "Connected clients can see your screens. All windows from this Mouffette instance, including scenes, are excluded. Changes apply when you save."
                     color: Theme.mutedText
                     font.pixelSize: 12
                     wrapMode: Text.Wrap
@@ -183,7 +183,7 @@ Dialog {
                 }
                 Text {
                     Layout.fillWidth: true
-                    text: "Connected clients can hear your system audio, including received scenes. Mouffette local previews are excluded. Changes apply when you save."
+                    text: "Connected clients can hear your system audio. All audio from this Mouffette instance, including scenes, is excluded. Changes apply when you save."
                     color: Theme.mutedText
                     font.pixelSize: 12
                     wrapMode: Text.Wrap
